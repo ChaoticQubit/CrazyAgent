@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) mod account_profile;
 pub(crate) mod accounts;
-mod harness_groups;
+pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
 #[cfg(unix)]
@@ -28,21 +28,29 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
+pub(crate) mod agent_text;
 mod native_auth;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
+pub(crate) mod trash;
+#[cfg(unix)]
+pub(crate) use native_auth::CUSTODIAN_CODES;
+pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
+pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
+#[cfg(all(test, unix))]
+mod projects_home_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
@@ -96,6 +104,7 @@ pub(crate) enum Job {
     ),
     NativeAuthCustodyReleased(
         Arc<NativeAuthDispatch>,
+        Option<String>,
         oneshot::Sender<Result<Option<NativeAuthFact>, EngineError>>,
     ),
     NativeAuth(
@@ -152,6 +161,7 @@ pub(crate) enum Job {
         Cursor,
         String,
         crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
         oneshot::Sender<Result<crate::projects_home::AddPlan, EngineError>>,
     ),
     HomeMovePlan(
@@ -169,6 +179,35 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
+    HomeProjectMovePlan(
+        Admission,
+        Cursor,
+        ProjectId,
+        crate::projects_home::AddMode,
+        Vec<crate::projects_home::AddOverride>,
+        RequestId,
+        u64,
+        oneshot::Sender<Result<crate::projects_home::ProjectMove, EngineError>>,
+    ),
+    HomeProjectMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
+    HomeMoveRecheck(
+        u64,
+        oneshot::Sender<Result<Result<(), String>, EngineError>>,
+    ),
+    DeletePlan(
+        Admission,
+        Box<OwnerRequest>,
+        u64,
+        oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
+    ),
+    DeleteSettle(u64, oneshot::Sender<Result<(), EngineError>>),
+    DeleteFilesClear(Vec<String>, oneshot::Sender<Result<(), EngineError>>),
+    DeleteRecord(
+        Admission,
+        Box<OwnerRequest>,
+        Result<Vec<crate::projects_home::RecordedFile>, String>,
+        oneshot::Sender<Result<OwnerApplied, EngineError>>,
+    ),
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
@@ -251,6 +290,8 @@ impl Storage {
         mut sources: Option<settings::SettingsSources>,
     ) -> Result<(Self, EffectiveConfig), EngineError> {
         let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
+        let delete_files_jobs = (!readonly).then(|| sender.clone());
+        let forgotten_jobs = delete_files_jobs.as_ref().map(mpsc::Sender::downgrade);
         let path = path.to_path_buf();
         let (ready_send, ready_receive) = oneshot::channel();
         std::thread::Builder::new()
@@ -270,10 +311,20 @@ impl Storage {
                 };
                 let mut custody = Some(custody);
                 let mut config = config;
-                if !readonly
-                    && let Err(e) =
-                        settings::recover(&mut connection, &mut config, sources.as_ref())
-                {
+                let recovered = if readonly {
+                    Ok(())
+                } else {
+                    settings::recover(&mut connection, &mut config, sources.as_ref()).and_then(
+                        |()| {
+                            trash::sweep_at_start(
+                                &connection,
+                                config.settings.model_access.as_ref(),
+                            )
+                        },
+                    )
+                    .and_then(|()| store_config(&connection, &config))
+                };
+                if let Err(e) = recovered {
                     drop(connection);
                     drop(custody.take());
                     drop(lock);
@@ -284,11 +335,24 @@ impl Storage {
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
                 let mut ended_custody: Option<NativeAuthFact> = None;
+                let mut ended_failure: Option<String> = None;
                 let mut model_access_snapshot = None;
                 let mut home_watch = projects_home::WatchSlot::default();
                 if !readonly {
                     if let Err(e) = projects_home::settle_pending(&mut connection, &path, None, true) {
                         eprintln!("projects_home_move_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::project_move_settle(&mut connection, None, true) {
+                        eprintln!("project_move_not_settled cause={}", e.0);
+                    }
+                    if let Err(e) = projects_home::delete_settle(&connection, None) {
+                        eprintln!("project_delete_not_settled cause={}", e.0);
+                    }
+                    if let Some(jobs) = delete_files_jobs
+                        && let Err(e) =
+                            projects_home::delete_files_finish(&connection, &path, jobs, "")
+                    {
+                        eprintln!("project_delete_files_not_cleared cause={}", e.0);
                     }
                     home_watch.restart(&connection);
                 }
@@ -373,16 +437,18 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::NativeAuthCustodyReleased(dispatch, reply) => {
+                        Job::NativeAuthCustodyReleased(dispatch, named, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
                             } else {
                                 ended_custody = Some(dispatch.fact().clone());
+                                ended_failure = named;
                                 native_auth::recover_native_auth(
                                     &mut connection,
                                     custody.as_mut().unwrap(),
                                     &native_auth::dispatch_host(&dispatch),
                                     Some(dispatch.fact()),
+                                    ended_failure.as_deref(),
                                 )
                             };
                             let _ = reply.send(result);
@@ -397,6 +463,7 @@ impl Storage {
                                     sources.as_ref(),
                                     custody.as_mut().unwrap(),
                                     ended_custody.as_ref(),
+                                    ended_failure.as_deref(),
                                     &admission,
                                     command,
                                 )
@@ -514,6 +581,7 @@ impl Storage {
                                     custody.as_mut().unwrap(),
                                     &started.host,
                                     None,
+                                    None,
                                 ) {
                                     eprintln!("native_auth_recovery_deferred cause={}", error.0);
                                 }
@@ -537,11 +605,11 @@ impl Storage {
                                 &control,
                             ));
                         }
-                        Job::HomeAddPlan(admission, expected, source, mode, reply) => {
+                        Job::HomeAddPlan(admission, expected, source, mode, overrides, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode)
+                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &source, mode, &overrides)
                             };
                             let _ = reply.send(result);
                         }
@@ -550,6 +618,14 @@ impl Storage {
                                 Err(error("projects_home_readonly"))
                             } else {
                                 projects_home::move_plan(&mut connection, &path, &admission, &expected, &picked, &request, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeMoveRecheck(exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::recheck(&mut connection, exchange)
                             };
                             let _ = reply.send(result);
                         }
@@ -564,6 +640,22 @@ impl Storage {
                             if restart {
                                 home_watch.restart(&connection);
                             }
+                        }
+                        Job::HomeProjectMovePlan(admission, expected, project, mode, overrides, request, exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_plan(&mut connection, &path, &admission, &expected, &project, mode, &overrides, &request, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeProjectMoveSettle(exchange, ran, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::project_move_settle(&mut connection, Some(exchange), ran)
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::HomeRecord(admission, request, effect, reply) => {
                             let moved_home = matches!(
@@ -580,6 +672,36 @@ impl Storage {
                             if restart {
                                 home_watch.restart(&connection);
                             }
+                        }
+                        Job::DeletePlan(admission, request, exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_plan(&mut connection, &path, &admission, &request, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteSettle(exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_settle(&connection, Some(exchange))
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteFilesClear(names, reply) => {
+                            let result = if readonly {
+                                Err(error("project_setup_readonly"))
+                            } else {
+                                projects_home::delete_files_clear(&connection, &names)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::DeleteRecord(admission, request, outcome, reply) => {
+                            let result = settings::ensure_clear(&connection).and_then(|()| {
+                                owner_apply_with(&mut connection, &config, &path, &admission, &request, Some(Effect::Delete(&outcome)))
+                            });
+                            let _ = reply.send(result);
                         }
                         Job::SetupPlan(admission, request, reply) => {
                             let result = if readonly {
@@ -666,12 +788,34 @@ impl Storage {
                                         | OwnerMutation::MoveProjectsHome { .. }
                                 }
                             );
+                            let forgetting = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::RemoveProject { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
                             let restart = set_home && result.is_ok();
+                            let forgotten = forgetting
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied);
                             let _ = reply.send(result);
                             if restart {
                                 home_watch.restart(&connection);
+                            }
+                            if forgotten
+                                && let Some(jobs) =
+                                    forgotten_jobs.as_ref().and_then(mpsc::WeakSender::upgrade)
+                                && let Err(e) = projects_home::delete_files_finish(
+                                    &connection,
+                                    &path,
+                                    jobs,
+                                    crate::projects_home::TOOL_CACHE_PREFIX,
+                                )
+                            {
+                                eprintln!("project_tool_cache_not_removed cause={}", e.0);
                             }
                         }
                         Job::OwnerRead(admission, query, reply) => {
@@ -680,6 +824,7 @@ impl Storage {
                                 OwnerRead::ProjectMaster { .. }
                                     | OwnerRead::ProjectMasterTurns { .. }
                                     | OwnerRead::ProjectMasterSessions { .. }
+                                    | OwnerRead::ProjectMasterMessages { .. }
                                     | OwnerRead::ProjectMasterInputs { .. }
                             ) {
                                 let _ = reply.send(master_session::read(
@@ -891,7 +1036,8 @@ fn open_actor_database(
     } else {
         OpenFlags::SQLITE_OPEN_READ_WRITE
     };
-    let canonical_path = std::fs::canonicalize(parent).map_err(error)?.join(
+    let canonical_root = std::fs::canonicalize(parent).map_err(error)?;
+    let canonical_path = canonical_root.join(
         path.file_name()
             .ok_or_else(|| error("database name missing"))?,
     );
@@ -930,10 +1076,23 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
+    crate::sandbox_settings::initialize(connection)?;
+    crate::cleanup_settings::initialize(connection)?;
+    crate::quit_settings::initialize(connection)?;
+    crate::master_step_limit::initialize(connection)?;
+    crate::master_time_limit::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::team::log_status_changes(connection)?;
+    crate::ide::bridge::memory::initialize(connection)?;
+    crate::coord::ensure(connection)?;
+    crate::activity::initialize(connection)?;
+    crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
+    crate::roadmap_status::initialize(connection)?;
     plugins::initialize(connection)?;
+    accounts::initialize(connection)?;
+    trash::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
@@ -1151,7 +1310,9 @@ fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
 
 /// Says whether no engine holds the database lock of a data folder, so a new engine can
 /// open its database. Input: the data folder. Output: true when the lock file is missing or
-/// free, false while an engine holds it or when it cannot be opened.
+/// free, false while an engine holds it or when it cannot be opened. The probe's own shared
+/// lock is unlocked, not just closed, so a child another thread is starting cannot keep the
+/// new engine out.
 #[cfg(unix)]
 pub fn engine_lock_released(root: &Path) -> bool {
     let lock = std::fs::OpenOptions::new()
@@ -1159,9 +1320,11 @@ pub fn engine_lock_released(root: &Path) -> bool {
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(root.join("engine.db").with_extension("engine-lock"));
     match lock {
-        Ok(lock) => {
-            rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockShared).is_ok()
-        }
+        Ok(lock) => crate::file_lock::HeldLock::take(
+            lock,
+            rustix::fs::FlockOperation::NonBlockingLockShared,
+        )
+        .is_ok(),
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
@@ -1262,6 +1425,11 @@ fn apply(
         Command::OwnerConversation { .. }
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
+            | Command::OwnerSandbox { .. }
+            | Command::OwnerAgentCleanup { .. }
+            | Command::OwnerAgentQuit { .. }
+            | Command::OwnerMasterSteps { .. }
+            | Command::OwnerMasterTime { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1446,6 +1614,11 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
+        Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
+        Command::OwnerAgentCleanup { settings } => crate::cleanup_settings::save(tx, settings),
+        Command::OwnerAgentQuit { settings } => crate::quit_settings::save(tx, settings),
+        Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
+        Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -1457,10 +1630,20 @@ fn execute(
         Command::CreateProject { project_id, spec } => create_project(tx, project_id, spec),
         Command::OwnerSetup { action } => setup::apply_owner(tx, path, action),
         Command::ProjectSetup { action } => {
-            crate::project_setup::execute(tx, config, action, revision)
+            let caches = match action {
+                crate::project_setup::SetupAction::Remove { project_id } => {
+                    projects_home::forgotten_caches(tx, path, project_id)?
+                }
+                _ => Vec::new(),
+            };
+            let outcome = crate::project_setup::execute(tx, config, action, revision)?;
+            if outcome == Outcome::Applied {
+                projects_home::record_files(tx, &caches)?;
+            }
+            Ok(outcome)
         }
         Command::ProjectsHome { action } => projects_home::execute(tx, path, action),
-        Command::AccountSchedule { change } => crate::scheduling::apply(
+        Command::AccountSchedule { change, version } => crate::scheduling::apply(
             tx,
             config
                 .settings
@@ -1468,6 +1651,7 @@ fn execute(
                 .as_ref()
                 .unwrap_or(&crate::config::ModelAccess::default()),
             change,
+            *version,
         ),
         Command::Team { action } => crate::team::execute(
             tx,
@@ -1540,11 +1724,34 @@ fn execute(
     }
 }
 
+/// Records a new project and clears any plugin rows a prior project of the same id left
+/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
+/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
+/// project's plugins untouched. The reused id's old skill store folder is removed at once,
+/// not left for the next start's trash sweep, so the new project starts with a clean skill
+/// store and a same-name skill import is not refused by a stale folder. Creation is refused
+/// before any clearing when an existing project id equals the new one ignoring ASCII case,
+/// so a case-insensitive filesystem never lets one project's skill store delete another's.
+/// Inputs: the transaction, the id and the spec. Output: Applied, or Rejected when the id is
+/// already in use or clashes with one only by ASCII case.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
 ) -> Result<Outcome, EngineError> {
+    let case_clash: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE lower(id)=lower(?1) AND id<>?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if case_clash {
+        return Ok(Outcome::Rejected {
+            code: "project_id_case_conflict".into(),
+        });
+    }
     let stored = StoredProject {
         project_id: project_id.clone(),
         spec: spec.clone(),
@@ -1565,8 +1772,21 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    crate::activity::note_created(tx, project_id, &spec.name, created_ms());
+    plugins::remove_project(tx, project_id)?;
+    if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
+        plugins::remove_skill_project_folder(root, project_id.as_str())?;
+    }
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
+}
+
+fn created_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn snapshot(tx: &Transaction<'_>) -> Result<Outcome, EngineError> {
@@ -2078,6 +2298,30 @@ fn owner_apply(
 enum Effect<'a> {
     Home(&'a crate::projects_home::HomeEffect),
     NewProject(&'a Result<crate::project_setup::Staged, String>),
+    Delete(&'a Result<Vec<crate::projects_home::RecordedFile>, String>),
+}
+
+/// Checks what a Delete everything of a project would take and whether it may go, for the
+/// remove preview. Inputs: the engine store and the project. Output: None for an unknown
+/// project, else its name, its stored folders and the planned folders or the refusal.
+pub(crate) fn delete_check(
+    db: &mut Connection,
+    project: &ProjectId,
+) -> Result<Option<projects_home::DeleteChecked>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    projects_home::delete_check(&tx, project)
+}
+
+/// Checks again, after a Delete everything's agent wait, what can change while it waits.
+/// Inputs: the engine store, read-only is enough, the project and the folders it would
+/// move. Output: the refusal code, or None.
+pub(crate) fn delete_recheck(
+    db: &mut Connection,
+    project: &ProjectId,
+    moved: &[std::path::PathBuf],
+) -> Result<Option<String>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    projects_home::delete_recheck(&tx, project, moved)
 }
 
 /// Plans a New Project before the owner transport builds its folder.
@@ -2155,6 +2399,10 @@ fn owner_apply_with(
             crate::project_setup::record_new(&tx, config, action, staged)?
         }
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
+        (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
+            crate::project_setup::record_delete(&tx, action, outcome, revision)?
+        }
+        (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
         (None, _) if request.expected_revision.value() != revision => Outcome::Rejected {
             code: "stale_revision".into(),
         },
@@ -2403,7 +2651,33 @@ fn owner_read(
                 .into_iter()
                 .map(|path| path.display().to_string())
                 .collect(),
+            version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
+        OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::hidden_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
+        OwnerRead::ProjectAgentPolicy { project_id } => {
+            let Some(setup) = crate::project_setup::load_setup(&tx, project_id)? else {
+                return Err(error(no_setup_code(&tx, project_id)?));
+            };
+            let homes = crate::sandbox::toolchains::ToolHomes::owner()
+                .map_err(|_| error("agent_policy_unreadable"))?;
+            OwnerData::ProjectAgentPolicy {
+                project_id: project_id.clone(),
+                policy: crate::sandbox::policy::load(&tx, project_id.as_str())
+                    .map_err(error)?
+                    .view(
+                        &setup.project_folder(),
+                        &homes,
+                        versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    ),
+            }
+        }
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?
@@ -2411,24 +2685,66 @@ fn owner_read(
             ),
         },
         OwnerRead::TeamStatus { project_id } => OwnerData::TeamStatus {
-            status: Box::new(crate::team::status(&tx, &stored_setup(&tx, project_id)?)?),
+            status: Box::new(crate::team::owner_status(
+                &tx,
+                &stored_setup(&tx, project_id)?,
+                config.settings.model_access.as_ref(),
+            )?),
         },
+        OwnerRead::IdeAsks { project_id } => OwnerData::IdeAsks {
+            asks: crate::ide::bridge::memory::asks(&tx, project_id, crate::team::now_ms())?,
+        },
+        OwnerRead::TeamAgentMessages {
+            project_id,
+            agent,
+            before,
+            limit,
+        } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::TeamAgentMessages {
+                messages: Box::new(crate::team::agent_messages::owner_read(
+                    &tx, project_id, *agent, *before, *limit,
+                )?),
+            }
+        }
         OwnerRead::TeamEvents => OwnerData::TeamEvents {
             events: Box::new(crate::team::events::app(&tx)?),
         },
         OwnerRead::TeamGraph { project_id } => OwnerData::TeamGraph {
-            graph: Box::new(crate::team::graph(&crate::team::status(
+            graph: Box::new(crate::team::owner_graph(
                 &tx,
                 &stored_setup(&tx, project_id)?,
-            )?)),
+                config.settings.model_access.as_ref(),
+            )?),
         },
+        OwnerRead::CoordQuestions { project_id } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::CoordQuestions {
+                inbox: Box::new(crate::team::questions::inbox(&tx, project_id)?),
+            }
+        }
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,
         },
-        OwnerRead::ProjectContext { project_id } => OwnerData::ProjectContext {
-            context: crate::project_setup::list_context(&stored_setup(&tx, project_id)?)?,
-        },
+        OwnerRead::ProjectActivity { project_id, limit } => {
+            stored_setup(&tx, project_id)?;
+            let listed = crate::activity::listed(&tx, project_id, *limit)?;
+            OwnerData::ProjectActivity {
+                project_id: project_id.clone(),
+                items: listed.items,
+                more: listed.more,
+            }
+        }
+        OwnerRead::ProjectContext { project_id } => {
+            let links = crate::project_setup::links::list(&tx, project_id)?;
+            OwnerData::ProjectContext {
+                context: crate::project_setup::list_context_with_links(
+                    &stored_setup(&tx, project_id)?,
+                    &links,
+                )?,
+            }
+        }
         OwnerRead::ResearchLog { project_id, job } => {
             crate::project_setup::project_job(&tx, project_id, *job)?
                 .ok_or_else(|| error("research_job_missing"))?;
@@ -2442,14 +2758,27 @@ fn owner_read(
             project_id,
             path,
             offset,
-        } => OwnerData::ProjectContextItem {
-            chunk: crate::project_setup::read_context(
-                &stored_setup(&tx, project_id)?,
-                path,
-                *offset,
-            )?,
-        },
+        } => {
+            let links = if path.starts_with(crate::project_setup::LINKED_PREFIX) {
+                crate::project_setup::links::list(&tx, project_id)?
+            } else {
+                Vec::new()
+            };
+            OwnerData::ProjectContextItem {
+                chunk: crate::project_setup::read_context_with_links(
+                    &stored_setup(&tx, project_id)?,
+                    &links,
+                    path,
+                    *offset,
+                )?,
+            }
+        }
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
+        OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
+        OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
+        OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
+        OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },
@@ -2466,9 +2795,10 @@ fn owner_read(
             memories: crate::memory::library::approved_for_project(&tx, project_id)?,
         },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
-        OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
-            schedule: crate::scheduling::load(&tx)?,
-        },
+        OwnerRead::AccountSchedule { after } => {
+            let (schedule, next) = crate::scheduling::load_page(&tx, after.as_ref())?;
+            OwnerData::AccountSchedule { schedule, next }
+        }
         OwnerRead::AccountRanking => OwnerData::AccountRanking {
             pools: crate::scheduling::ranking(
                 &tx,
@@ -2521,6 +2851,60 @@ fn stored_setup(
     crate::project_setup::load_setup(tx, project_id)?.ok_or_else(|| error("project_setup_missing"))
 }
 
+/// Names why a project has no setup to read. Takes the transaction and the project. Returns
+/// `project_setup_missing` for a project the store holds, made before project setup, and
+/// `invalid_project` for one it does not hold.
+fn no_setup_code(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+) -> Result<&'static str, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(if exists {
+        "project_setup_missing"
+    } else {
+        "invalid_project"
+    })
+}
+
+/// Whether a native managed connection's latest sign-in ended authenticated. Takes the store
+/// and the connection. Returns false for any other connection or a latest operation that did
+/// not end so; a stored fact past its bound is a `native_auth_fact_bounds` failure.
+pub(crate) fn latest_sign_in_authenticated(
+    connection: &Connection,
+    model: &crate::config::ModelConnection,
+) -> Result<bool, EngineError> {
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
+        return Ok(false);
+    };
+    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let fact: Option<Option<Vec<u8>>> = connection
+        .query_row(
+            "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+            [&key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(bytes) = fact else {
+        return Ok(false);
+    };
+    let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
+    let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
+    Ok(
+        fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
+            && matches!(
+                fact.action,
+                crate::engine::owner::NativeAuthAction::SignIn { .. }
+            ),
+    )
+}
+
 /// Reads one page of the plain pool list with each member's sign-in status.
 /// Input: the read transaction, current config and the index of the first pool.
 /// Output: pools from that index while the reply stays within 30000 bytes, and
@@ -2533,30 +2917,8 @@ fn pool_summaries(
     let catalog = config.settings.model_access.clone().unwrap_or_default();
     let mut signed_in = std::collections::BTreeSet::new();
     for connection in &catalog.connections {
-        let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth
-        else {
-            continue;
-        };
-        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
-        let fact: Option<Option<Vec<u8>>> = tx
-            .query_row(
-                "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-                [&key],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(error)?;
-        if let Some(bytes) = fact {
-            let bytes = bytes.ok_or_else(|| error("native_auth_fact_bounds"))?;
-            let fact = crate::engine::owner::native_auth::decode_fact(&bytes)?;
-            if fact.phase == crate::engine::owner::NativeAuthPhase::AuthenticatedObserved
-                && matches!(
-                    fact.action,
-                    crate::engine::owner::NativeAuthAction::SignIn { .. }
-                )
-            {
-                signed_in.insert(connection.id.clone());
-            }
+        if latest_sign_in_authenticated(tx, connection)? {
+            signed_in.insert(connection.id.clone());
         }
     }
     let all = crate::pools::summarize(&catalog, |connection| signed_in.contains(&connection.id));
@@ -3220,6 +3582,155 @@ mod owner_actor_tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// An engine database an earlier b19 build wrote keeps its `team_settings_revision` table,
+    /// which no code of this engine reads or writes: it opens again, the owner starts on it,
+    /// and removing a project works and leaves that table as it was (I3).
+    /// Input: a fresh engine database given the b19 table. Output: none.
+    #[test]
+    fn a_database_with_the_b19_team_settings_revision_table_opens_and_removes_projects() {
+        let (_root, path, cfg) = fixture();
+        {
+            let (db, _lock) = open_database(&path, false).unwrap();
+            db.execute_batch(
+                "CREATE TABLE team_settings_revision (
+                     project TEXT PRIMARY KEY,
+                     revision INTEGER NOT NULL CHECK(revision > 0)
+                 );
+                 INSERT INTO team_settings_revision VALUES ('old', 4);",
+            )
+            .unwrap();
+        }
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        db.execute("INSERT INTO projects(id, body) VALUES ('old', '{}')", [])
+            .unwrap();
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            crate::project_setup::execute(
+                &tx,
+                &cfg,
+                &crate::project_setup::SetupAction::Remove {
+                    project_id: crate::protocol::ProjectId::new("old").unwrap(),
+                },
+                2,
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+        let kept = db
+            .prepare("SELECT project, revision FROM team_settings_revision")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            kept,
+            [("old".to_owned(), 4)],
+            "the engine leaves the old table as it was"
+        );
+    }
+
+    /// A project's change sets stay when the project is removed, so their numbers stay too:
+    /// sets A and B keep 1 and 2 through the removal, and a set D the project adds once it is
+    /// added again under the same id gets 3 (AL17, rv-code M1).
+    /// Input: a fresh engine database. Output: none.
+    #[test]
+    fn removing_a_project_keeps_its_change_set_numbers() {
+        let (_root, path, cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        let add_project = |db: &Connection| {
+            db.execute("INSERT INTO projects(id, body) VALUES ('kept', '{}')", [])
+                .unwrap();
+        };
+        let add_set = |db: &Connection, digit: char, created_ms: i64| {
+            db.execute(
+                "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,\
+                 worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,\
+                 removed,conflicts,created_ms,updated_ms) VALUES (?1,'kept','sub','agent-1',\
+                 'Agent 1','/r','/w','/g','b','h','discarded','succeeded','t','Fix',1,1,0,'[]',?2,?2)",
+                params![digit.to_string().repeat(32), created_ms],
+            )
+            .unwrap();
+            crate::landing::number_change_sets(db).unwrap();
+        };
+        let numbers = |db: &Connection| -> Vec<(char, i64)> {
+            db.prepare("SELECT change_set, number FROM landing_change_set_numbers ORDER BY number")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .map(|row| {
+                    let (id, number) = row.unwrap();
+                    (id.chars().next().unwrap(), number)
+                })
+                .collect()
+        };
+        add_project(&db);
+        crate::landing::number_change_sets(&db).unwrap();
+        add_set(&db, 'a', 1);
+        add_set(&db, 'b', 2);
+        assert_eq!(numbers(&db), [('a', 1), ('b', 2)]);
+
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            crate::project_setup::execute(
+                &tx,
+                &cfg,
+                &crate::project_setup::SetupAction::Remove {
+                    project_id: crate::protocol::ProjectId::new("kept").unwrap(),
+                },
+                2,
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(
+            numbers(&db),
+            [('a', 1), ('b', 2)],
+            "the removal keeps the sets, so it keeps their numbers"
+        );
+
+        add_project(&db);
+        add_set(&db, 'd', 3);
+        assert_eq!(
+            numbers(&db),
+            [('a', 1), ('b', 2), ('d', 3)],
+            "a set the project adds once it is back gets the next number"
+        );
+    }
+
+    /// The owner's questions log keeps out of the names the owner schema check reserves, so
+    /// an engine whose committed questions write made the log starts again ready.
+    /// Input: a fresh engine database. Output: none; the second owner start succeeds.
+    #[test]
+    fn an_engine_that_created_the_questions_log_restarts_ready() {
+        let (_root, path, _cfg) = fixture();
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        let objects = |db: &Connection| -> i64 {
+            db.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get(0))
+                .unwrap()
+        };
+        let before = objects(&db);
+        let tx = db.transaction().unwrap();
+        crate::questions::forget_project(&tx, &crate::protocol::ProjectId::new("asked").unwrap())
+            .unwrap();
+        tx.commit().unwrap();
+        assert!(objects(&db) > before, "the questions log is made and kept");
+        let restarted = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &restarted.host).unwrap();
     }
 
     #[test]

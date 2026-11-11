@@ -8,6 +8,8 @@ import "./load-source.mjs";
 const wake = await import("../src/screens/team/wake.ts");
 const panel = await import("../src/screens/team/wake-rules.tsx");
 const alerts = await import("../src/screens/settings/team-alerts.tsx");
+const router = await import("../src/ui/router.ts");
+const shared = await import("../src/screens/project/shared.tsx");
 
 const SHIPPED = { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 };
 const note = (id, project, seen = null) => ({ id, project_id: project, kind: "escalation", text: `note ${id}`, created_ms: id, seen_ms: seen });
@@ -74,14 +76,14 @@ test("a project's sidebar count comes from the engine, not from the newest notif
   assert.deepEqual([...wake.unseenByProject({ projects: [] })], []);
 });
 
-test("the Agents tab shows the paused notice, waiting agents, events and the project and agent rules", () => {
+test("the questions drawer shows the paused notice, waiting agents and events, and the Agents and tasks fold the project and agent rules", () => {
   const status = {
     project_id: "chores", keep_warm: false, paused: false, min_agents: 1, max_agents: 3, harnesses: [], tasks: [], messages: [], plan: [],
     agents: [agent(1, "master"), agent(7, "sub")],
     events: {
       recent: [event(9, "question", "queued", "Proceed?")], waiting: [{ agent: 7, text: "Proceed? | 1. Yes" }],
       notifications: [note(2, "chores")], paused: true, questions: [{ agent: 7, count: 1 }],
-      wake: { app: null, project: { ...SHIPPED, hourly_cap: 5 }, agents: [], effective: { ...SHIPPED, hourly_cap: 5 }, level: "project" },
+      wake: { app: null, app_version: 0, project: { ...SHIPPED, hourly_cap: 5 }, project_version: 2, agents: [], cleared: [], effective: { ...SHIPPED, hourly_cap: 5 }, level: "project" },
     },
   };
   const markup = renderToStaticMarkup(createElement(panel.TeamEventsPanel, { projectId: "chores", status, reload: () => {} }));
@@ -89,10 +91,14 @@ test("the Agents tab shows the paused notice, waiting agents, events and the pro
   assert.match(markup, /Sub-agent 7<\/strong><span>Proceed\? \| 1\. Yes/);
   assert.match(markup, /claude-7 asks: Proceed\?/);
   assert.match(markup, /Mark 1 as seen/);
-  assert.match(markup, /Set here\. Reset to use the rule above it\./);
-  assert.match(markup, /value="5"/);
-  assert.match(markup, /<option value="7">Sub-agent 7<\/option>/);
-  assert.doesNotMatch(markup, /<option value="1">/);
+  assert.doesNotMatch(markup, /Wake the master for this project/, "the rules are in the fold, not the drawer");
+  const rules = renderToStaticMarkup(createElement(panel.WakeRulesPanel, { projectId: "chores", status, reload: () => {} }));
+  assert.match(rules, /<section class="tg-events" aria-label="Wake rules"><h3>Wake rules<\/h3><h4>Wake the master for this project<\/h4>/);
+  assert.match(rules, /Set here\. Reset to use the rule above it\./);
+  assert.match(rules, /value="5"/);
+  assert.match(rules, /<option value="7">Sub-agent 7<\/option>/);
+  assert.doesNotMatch(rules, /<option value="1">/);
+  assert.doesNotMatch(rules, /Auto-wake of the master is paused/, "the events are in the drawer, not the fold");
 });
 
 test("Settings groups the notifications by project, newest project first", () => {
@@ -102,12 +108,12 @@ test("Settings groups the notifications by project, newest project first", () =>
 
 test("the wake rule, seen and attention commands send the argument names their Rust commands take", () => {
   const client = readFileSync(new URL("../src/api-projects.ts", import.meta.url), "utf8");
-  for (const call of ['("desktop_team_events", {})', '("desktop_team_wake_rule", { target, rule, generation })', '("desktop_team_seen", { id, upto, generation })', '("desktop_team_attention", { unseen, alert })']) {
+  for (const call of ['("desktop_team_events", {})', '("desktop_team_wake_rule", { target, rule, version, generation })', '("desktop_team_seen", { id, upto, generation })', '("desktop_team_attention", { unseen, alert })']) {
     assert.ok(client.includes(call), call);
   }
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   for (const [command, params] of [
-    ["desktop_team_wake_rule", ["target: crazyagent::team::events::RuleTarget", "rule: Option<crazyagent::team::events::WakeRule>", "generation: u64"]],
+    ["desktop_team_wake_rule", ["target: crazyagent::team::events::RuleTarget", "rule: Option<crazyagent::team::events::WakeRule>", "version: u64", "generation: u64"]],
     ["desktop_team_seen", ["id: String", "upto: i64", "generation: u64"]],
     ["desktop_team_attention", ["unseen: u32", "alert: bool"]],
   ]) {
@@ -126,4 +132,31 @@ test("each notification shows when it came and opens the project's conversation"
   assert.match(markup, /Seen<\/span>.*note 6.*2 h ago/s);
   assert.equal(markup.match(/href="#\/projects\/p%202\/conversation"/g)?.length, 2);
   assert.match(markup, /Mark 1 as seen/);
+});
+
+test("an agent level the owner reset sends the version its Reset left, so the next change is taken", () => {
+  const wakeView = { agents: [{ agent: 3, rule: SHIPPED, version: 5 }], cleared: [{ agent: 7, version: 2 }] };
+  assert.equal(wake.agentRuleVersion(wakeView, 3), 5, "an agent with its own rule sends that rule's version");
+  assert.equal(wake.agentRuleVersion(wakeView, 7), 2, "a cleared agent level sends the version the clear left, never 0");
+  assert.equal(wake.agentRuleVersion(wakeView, 9), 0, "a level never set is at version 0");
+  const source = readFileSync(new URL("../src/screens/team/wake-rules.tsx", import.meta.url), "utf8");
+  assert.match(source, /version=\{agentRuleVersion\(events\.wake, chosen\.id\)\}/);
+  const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  assert.match(client, /cleared: \{ agent: number; version: number \}\[\];/);
+  const rust = readFileSync(new URL("../../../crates/crazyagent/src/team/events.rs", import.meta.url), "utf8");
+  assert.match(rust, /pub cleared: Vec<ClearedRule>,/);
+});
+
+test("an urgent question's toast opens the project's Agents tab at its questions, an agent waiting in its terminal at Waiting on you, and other alerts open nothing", () => {
+  const urgent = wake.alertRoute({ kind: "urgent_question", project_id: "p 1" });
+  assert.deepEqual(urgent, { name: "project", id: "p 1", tab: "agents", section: "questions" });
+  assert.equal(router.formatRoute(urgent), "#/projects/p%201/agents?section=questions");
+  assert.equal(shared.routeSection(router.formatRoute(urgent)), "questions", "the project page reads the section the toast wrote");
+  const waiting = wake.alertRoute({ kind: "waiting_on_you", project_id: "p1" });
+  assert.deepEqual(waiting, { name: "project", id: "p1", tab: "agents", section: "waiting" });
+  assert.equal(router.formatRoute(waiting), "#/projects/p1/agents?section=waiting");
+  for (const kind of ["escalation", "wake_paused", "queue_full", "budget_stopped", "question"]) {
+    assert.equal(wake.alertRoute({ kind, project_id: "p1" }), undefined, kind);
+  }
+  assert.equal(router.formatRoute({ name: "project", id: "p1", tab: "agents" }), "#/projects/p1/agents", "a route without a section writes none");
 });

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
@@ -138,11 +138,17 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         if (graphify.state.state !== "checking") break;
         assert.ok(Date.now() < deadline, "the engine never finished checking Graphify");
       }
-      const settled = await me.waitFor("both setup steps settled", (text) => !/Running|Waiting|Starting/.test(text.split("Overview")[0] ?? text), SETTLE_MS);
+      const settled = await me.waitFor("both setup steps settled and the form drawn", (text) => !/Working|Waiting/.test(text.split("Overview")[0] ?? text) && text.includes("What is it about?"), SETTLE_MS);
       await me.capture("setup-settled");
       const steps = settled.split("Overview")[0];
       if (graphify.state.state === "found") {
         assert.match(steps, /Build the code graph\s*Done/, "the Graphify skill is on and the engine found its command, so the graph step is done");
+        const published = join(repo, ".crazyagent", "graph");
+        const record = readFileSync(join(published, "current"), "utf8");
+        const [, tip, built] = record.match(/^v2 ([0-9a-f]{40}|[0-9a-f]{64}) (\d+) [0-9a-f]{64}\n$/) ?? [];
+        assert.ok(tip, `the engine published the graph it built for agents to copy, with the tip it was built at (DEC-123): ${record}`);
+        assert.ok(statSync(join(published, `g-${built}`, "graph.json")).isFile(), "the published copy holds the graph as a plain file");
+        assert.match(readFileSync(join(repo, ".git", "info", "exclude"), "utf8"), /^graphify-out\/$/m, "the project's git keeps every agent's graph copy out of its changes");
       } else {
         assert.doesNotMatch(steps, /Build the code graph\s*Done/, "the engine reports the Graphify command missing, so the graph step cannot claim done");
       }
@@ -187,27 +193,24 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.click("Conversation", "a, button, [role=tab]");
       const master = log.answers.get("desktop_project_setup")?.value?.team?.master;
       assert.ok(["codex", "claude-code"].includes(master), `the setup gave the project a master that runs live in its terminal: ${master}`);
+      const head = log.answers.get("desktop_harness_catalog")?.value?.find((entry) => entry.id === master)?.name;
+      assert.ok(head, `the engine's harness catalog names the master: ${master}`);
       const waiting = "Waiting for the master's terminal. It opens once the master signs in and starts.";
-      const live = await me.waitFor("the live master waiting for its sign-in", (text) => /Master: [^\n,]+, live/.test(text) && text.includes(waiting), STEP_MS);
+      const live = await me.waitFor("the live master waiting for its sign-in", (text) => text.includes(`${head}\nOpening\n`) && text.includes(waiting), STEP_MS);
       await me.capture("live-master");
-      assert.match(live, /Live master starts when you open this tab\./, "the header says when the live master starts");
-      assert.match(live, /Stop live master/, "the header can stop the live master");
+      for (const gone of ["Stop live master", "Start live master", "Earlier conversation"]) {
+        assert.ok(!live.includes(gone), `the master area offers no ${gone}`);
+      }
+      assert.match(live, /New session/, "the master area offers New session");
       assert.doesNotMatch(live, /couldn't start/i, "the engine took the live master switch");
       const switches = () => log.trail.filter((entry) => entry.cmd === "desktop_team_live_master").map((entry) => [entry.args?.on, entry.answer?.value?.outcome]);
       assert.deepEqual(switches(), [[true, "applied"]], "the first open turned the live master on once and the engine applied it");
 
-      await me.click("Earlier conversation");
-      const earlier = await me.waitFor("the earlier conversation, read only", (text) => text.includes("Read-only: the master runs live in its terminal now."));
-      await me.capture("earlier-conversation");
-      assert.match(earlier, /No earlier conversation\. Messages sent to the master before it ran live stay here to read\./, "a fresh project has no earlier conversation");
-      await me.click("Back to the live master");
+      await me.click("Agents", "a, button, [role=tab]");
+      await me.waitFor("the team graph again", (text) => /Master/.test(text));
+      await me.click("Conversation", "a, button, [role=tab]");
       await me.waitFor("the live master again", (text) => text.includes(waiting), STEP_MS);
-
-      await me.click("Stop live master");
-      const stopped = await me.waitFor("the live master stopped", (text) => /Master: [^\n,]+, stopped/.test(text) && text.includes("The live master is stopped. Its terminal opens again once you start it."), STEP_MS);
-      await me.capture("live-master-stopped");
-      assert.match(stopped, /Start live master/, "a stopped live master can be started again");
-      assert.deepEqual(switches(), [[true, "applied"], [false, "applied"]], "Stop live master turned it off once and the engine applied it");
+      assert.deepEqual(switches(), [[true, "applied"]], "leaving the tab and opening it again neither stops nor starts a live master that is on");
 
       const remove = async () => {
         await me.follow("#tab-settings");

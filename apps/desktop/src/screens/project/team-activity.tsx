@@ -45,7 +45,7 @@ export function lastChange(node: GraphNode, status: TeamStatus | null): number |
  * Inputs: the team graph and the team status, when read. Output: the rows. */
 export function activityRows(graph: TeamGraph, status: TeamStatus | null): ActivityRow[] {
   const edges = graph.edges.map((edge) => ({ ...edge, text: displayText(edge.text) }));
-  return graph.nodes.filter((node) => node.kind === "agent").map((node) => {
+  return graph.nodes.filter((node) => node.kind !== "master" && (node.kind !== "teammate" || typeof node.agent === "number")).map((node) => {
     const task = cardTask(node, edges);
     return {
       node,

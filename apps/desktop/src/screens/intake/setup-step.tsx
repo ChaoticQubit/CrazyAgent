@@ -5,12 +5,12 @@ import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Icon, Skeleton, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { NotReady } from "../project/shared";
-import { SETUP_POLL_MS, approvalLine, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, packTicks, setupBusy, setupProgress, toolsChecking } from "./intake";
+import { SETUP_READS, approvalLine, dependencyView, entryIcon, entryName, foldSetupRead, installed, packGroups, packStateView, packTicks, setupBusy, setupPollMs, setupProgress, toolsChecking } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
 function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: boolean; onTick: (id: string, on: boolean) => void; locked: boolean }) {
-  const state = packStateView(entry.state);
+  const state = packStateView(entry.state, entry.hooks_refused);
   const name = <span className="row"><Icon name={entryIcon(entry)} size={14} />{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}</span>;
   return <li className="in-row">
     <span className="in-row-main">
@@ -26,14 +26,16 @@ function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: 
 /** The desktop setup screen as a view of its state: tmux, uv and graphify with their state and
  * version, the default pack as ticks grouped like the manifest, the sentence naming the ticked MCP
  * servers that continuing approves, and progress while setup installs. Inputs: the setup read, the
- * ticked ids and their handler, flags, the last problem and the Run and Continue handlers. */
-export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, onRun, onContinue }: {
+ * ticked ids and their handler, flags, the last problem, the failed refresh line (empty when the
+ * last read worked) and the Run and Continue handlers. */
+export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, stale = "", onRun, onContinue }: {
   status: Loaded<SetupStatus>;
   ticks: string[];
   onTick: (id: string, on: boolean) => void;
   busy: boolean;
   started: boolean;
   problem: string;
+  stale?: string;
   onRun: () => void;
   onContinue: () => void;
 }) {
@@ -46,7 +48,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
     <p className="pj-error" role="alert">{status.message}</p>
     <span><Button onClick={onContinue}>Continue</Button></span>
   </div>;
-  const { dependencies, pack } = status.value;
+  const { dependencies, pack, notes } = status.value;
   const running = setupBusy(status.value);
   const locked = started || running;
   const approval = approvalLine(pack, ticks);
@@ -62,6 +64,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
           <StatusBadge word={row.word} tone={row.tone} />
         </li>;
       })}</ul>
+      {notes?.map((note) => <p className="pj-small pj-error" key={note}>{displayText(note)}</p>)}
     </section>
     <section className="pj-stack-s" aria-label="Default pack">
       <h2>Default pack</h2>
@@ -77,6 +80,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
       {running ? `Installing: ${progress.done} of ${progress.total} done. You can continue; setup keeps going.`
         : `Setup finished: ${progress.done} of ${progress.total} done${progress.failed ? `, ${progress.failed} failed. Each failure shows its reason above` : ""}.`}
     </p>}
+    {stale && <p className="pj-error" role="alert">{stale}</p>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <span className="pj-row">
       {started || running ? <Button variant="primary" icon="arrow-right" onClick={onContinue}>Continue</Button>
@@ -87,21 +91,22 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
 }
 
 /** The desktop setup screen: reads setup, installs missing tools and the ticked pack, and reads
- * again every few seconds while setup runs. Input: what to do on Continue. */
+ * again every few seconds while setup runs, waiting longer and saying so after a failed read.
+ * Input: what to do on Continue. */
 export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
   const [loaded, reload] = useLoad(loadSetupStatus, [], "setup-status");
-  const [fresh, setFresh] = useState<SetupStatus | null>(null);
+  const [known, setKnown] = useState(SETUP_READS);
   const [ticks, setTicks] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState(false);
   const [problem, setProblem] = useState("");
-  const status: Loaded<SetupStatus> = fresh ? { kind: "ok", value: fresh } : loaded;
+  const status: Loaded<SetupStatus> = known.latest ? { kind: "ok", value: known.latest } : loaded;
   const value = status.kind === "ok" ? status.value : null;
   const running = value !== null && setupBusy(value);
   const checking = value !== null && toolsChecking(value);
 
   useEffect(() => {
-    if (loaded.kind === "ok") setFresh(loaded.value);
+    setKnown((old) => foldSetupRead(old, loaded));
   }, [loaded]);
 
   useEffect(() => {
@@ -110,9 +115,9 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
 
   useEffect(() => {
     if (!running && !checking) return;
-    const timer = window.setTimeout(reload, SETUP_POLL_MS);
+    const timer = window.setTimeout(reload, setupPollMs(known.failures));
     return () => window.clearTimeout(timer);
-  }, [running, checking, value]);
+  }, [running, checking, known]);
 
   const run = async () => {
     if (busy || ticks === null) return;
@@ -121,7 +126,7 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     const result = await runSetup(ticks);
     setBusy(false);
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : intakeCopy(result)); return; }
-    setFresh(result.value);
+    setKnown((old) => ({ ...old, latest: result.value, failures: 0, line: "" }));
     setStarted(true);
   };
 
@@ -130,5 +135,5 @@ export function ToolsSetup({ onContinue }: { onContinue: () => void }) {
     return on ? (list.includes(id) ? list : [...list, id]) : list.filter((item) => item !== id);
   });
 
-  return <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} onRun={() => void run()} onContinue={onContinue} />;
+  return <ToolsSetupView status={status} ticks={ticks ?? []} onTick={tick} busy={busy} started={started} problem={problem} stale={known.line} onRun={() => void run()} onContinue={onContinue} />;
 }

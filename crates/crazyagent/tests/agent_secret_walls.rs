@@ -80,8 +80,7 @@ fn quoted(path: &Path) -> String {
 }
 
 fn owner_home() -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    home.canonicalize().unwrap_or(home)
+    ToolHomes::owner().unwrap().home().to_path_buf()
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -555,6 +554,13 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );
+    expected.insert(
+        "TMPPREFIX".to_owned(),
+        crazyagent::sandbox::shell_tmp_prefix(&case.tmp)
+            .to_str()
+            .unwrap()
+            .to_owned(),
+    );
     assert_eq!(seen, expected);
     assert!(
         seen.iter()
@@ -936,5 +942,95 @@ fn a_tools_on_agent_cannot_drive_the_engine_tmux_server() {
     assert!(
         !escaped.exists(),
         "the agent ran a command outside its sandbox"
+    );
+}
+
+const CLT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// Runs `git rev-parse --git-dir` in a folder, either as an agent process with exactly the
+/// shared builder's environment (the Full access command, the widest an agent runs) or as
+/// the owner's plain git with a cleared environment. Inputs: the folder, the owner home and
+/// whether it runs as an agent. Output: the process result.
+fn git_dir_in(folder: &Path, home: &Path, agent: bool) -> Output {
+    let base = [
+        ("PATH", OsStr::new("/usr/bin:/bin")),
+        ("HOME", home.as_os_str()),
+    ];
+    let mut command = if agent {
+        crazyagent::sandbox::unconfined_command(
+            Path::new(CLT_GIT),
+            &base,
+            std::iter::empty::<(&OsStr, Option<&OsStr>)>(),
+        )
+        .unwrap()
+    } else {
+        let mut owner = Command::new(CLT_GIT);
+        owner.env_clear().envs(base).env("GIT_CONFIG_NOSYSTEM", "1");
+        owner
+    };
+    command
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crazyagent::spawn_gate::output(&mut command).unwrap()
+}
+
+#[test]
+fn an_agent_git_never_opens_a_folder_laid_out_as_a_bare_repository() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(temp.path()).unwrap();
+    let home = root.join("home");
+    fs::create_dir(&home).unwrap();
+    let layout = root.join("notes");
+    for (name, text) in [
+        ("HEAD", "ref: refs/heads/main\n"),
+        ("config", "[core]\n\tbare = true\n"),
+        ("objects/info/packs", "\n"),
+        ("refs/heads/main", "\n"),
+    ] {
+        let path = layout.join(name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, text).unwrap();
+    }
+    let owner = git_dir_in(&layout, &home, false);
+    assert!(owner.status.success(), "{owner:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&owner.stdout).trim(),
+        ".",
+        "the owner's plain git opens the layout"
+    );
+
+    let agent = git_dir_in(&layout, &home, true);
+    assert!(
+        !agent.status.success(),
+        "an agent's git opened the layout: {agent:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&agent.stderr).contains("cannot use bare repository"),
+        "{agent:?}"
+    );
+
+    let project = root.join("project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    let made = crazyagent::spawn_gate::output(
+        Command::new(CLT_GIT)
+            .env_clear()
+            .env("HOME", &home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["init", "-q"])
+            .current_dir(&project)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let normal = git_dir_in(&project.join("src"), &home, true);
+    assert!(normal.status.success(), "{normal:?}");
+    assert_eq!(
+        Path::new(String::from_utf8_lossy(&normal.stdout).trim()),
+        project.join(".git"),
+        "an agent's git still finds an ordinary repository from a subfolder"
     );
 }

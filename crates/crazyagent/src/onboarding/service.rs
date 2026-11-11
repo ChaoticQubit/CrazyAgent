@@ -2,9 +2,11 @@
 use super::MappingFacts;
 use super::draft::{self, Answer, Drafted};
 use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
-use super::{Step, now_ms};
+#[cfg(unix)]
+use super::main_graph;
+use super::{Step, bounded_reason, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::CredentialRef;
 use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
@@ -13,17 +15,20 @@ use crate::research::jobs::JobError;
 use crate::research::runner::ResearchLimits;
 use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
+    confined_unavailable,
 };
 use crate::sandbox::SandboxError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::cell::Cell;
+#[cfg(unix)]
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_MS: i64 = 30_000;
 const HEARTBEAT_MS: i64 = 5_000;
@@ -35,6 +40,13 @@ const ENGINE_TICK: Duration = Duration::from_secs(2);
 /// takes effect while the claim still lets newer projects go first.
 const PAUSE_RECHECK_MS: i64 = 10_000;
 const RUN_NAME_BYTES_MAX: usize = 96;
+#[cfg(unix)]
+const ONBOARDED_MAX: i64 = 256;
+#[cfg(unix)]
+const REFRESH_PREFIX: &str = "graph-main-";
+/// How often a main graph refresh build looks for a waiting onboarding step to give way to.
+#[cfg(unix)]
+const STEP_POLL: Duration = Duration::from_secs(1);
 const NO_ACCOUNT: &str = "No signed-in account in this pool can map the project";
 const MAPPING_HARNESSES: [ResearchHarness; 2] =
     [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
@@ -48,25 +60,48 @@ const GRAPH_NOT_STARTED: &str = "Graph build could not start";
 #[cfg(unix)]
 const MAPPING_TIMED_OUT: &str = "Mapping agent ran out of time";
 const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
+/// The most output tokens of each Claude Code mapping request: about 2.5 times a
+/// 3000-token answer. Claude Code 2.1.309 continues an answer cut here at most three
+/// times, so a runaway try writes at most 32000 tokens and ends by itself in about 200 s,
+/// inside [`MAPPING_TRY_TIME`].
+#[cfg(unix)]
+const MAPPING_OUTPUT_TOKENS: u32 = 8_000;
+/// How long one mapping try may run by default before a fresh try starts.
+const MAPPING_TRY_TIME: Duration = Duration::from_secs(240);
+/// How many fresh tries one mapping step gives its agent inside
+/// [`OnboardingLimits::mapping_time`], each with its own agent state.
+pub(crate) const MAPPING_TRIES: u32 = 3;
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
 #[cfg(unix)]
 pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
+/// The plain reason a mapping step fails with when `.crazyagent/overview.md` is there but
+/// is not a file with text, so the engine neither reads it nor writes over it.
+pub const OVERVIEW_BLOCKED: &str =
+    "The overview could not be written: .crazyagent/overview.md is empty or not a plain file";
+/// The plain reason a step fails with when its stored onboarding state cannot be read, so
+/// it is not claimed again and again.
+const ROW_UNREADABLE: &str =
+    "The saved onboarding state could not be read; remove the project and add it again";
 #[cfg(unix)]
 const GRAPHIFY_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/graphify", "/usr/local/bin/graphify"];
 
-/// How long each onboarding step may run before it fails as out of time.
+/// How long each onboarding step may run before it fails as out of time, and how long
+/// one try of the mapping agent may run inside its step before a fresh try starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OnboardingLimits {
     pub graph_time: Duration,
     pub mapping_time: Duration,
+    pub mapping_try_time: Duration,
 }
 
 impl Default for OnboardingLimits {
-    /// Ten minutes for the graph build and fifteen for the mapping agent.
+    /// Ten minutes for the graph build and fifteen for the mapping step, of which each
+    /// mapping try may take four.
     fn default() -> Self {
         Self {
             graph_time: Duration::from_secs(600),
             mapping_time: Duration::from_secs(900),
+            mapping_try_time: MAPPING_TRY_TIME,
         }
     }
 }
@@ -106,10 +141,11 @@ struct Claimed {
     kind: Kind,
 }
 
-/// Picks the research account for a pool and the harnesses the runner can
-/// start. Input: the pool reference and the usable harnesses. Output: the
-/// account, or why there is none, such as every fitting member paused.
-type AccountLookup = dyn Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send;
+/// Picks the research account for a project from its pool and the harnesses the
+/// runner can start. Input: the project, the pool reference and the usable
+/// harnesses. Output: the account, or why there is none, such as every fitting
+/// member paused or held for the project.
+type AccountLookup = dyn Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send;
 
 /// What the account and graphify lookups resolve to on every step, so a
 /// newly assigned pool member or a newly installed graphify takes effect
@@ -121,6 +157,8 @@ struct Work {
     limits: OnboardingLimits,
     tick: Duration,
     claimer: String,
+    #[cfg(unix)]
+    main_graphs: bool,
 }
 
 /// Background loop that moves every onboarding forward one step at a time:
@@ -145,11 +183,34 @@ impl OnboardingService {
         tick: Duration,
     ) -> Self
     where
-        A: Fn(&CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
+        A: Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
         G: Fn() -> Option<PathBuf> + Send + 'static,
     {
+        Self::begin(runner, accounts, graphify, limits, tick, false)
+    }
+
+    /// Starts the loop as [`OnboardingService::start`] does; with `main_graphs` set, as the
+    /// engine runs it, it also publishes each graph it builds for agents to copy and keeps
+    /// every onboarded project's main graph built and current (DEC-123).
+    fn begin<A, G>(
+        runner: Arc<ResearchRunner>,
+        accounts: A,
+        graphify: G,
+        limits: OnboardingLimits,
+        tick: Duration,
+        main_graphs: bool,
+    ) -> Self
+    where
+        A: Fn(&str, &CredentialRef, &[ResearchHarness]) -> AccountPick + Send + 'static,
+        G: Fn() -> Option<PathBuf> + Send + 'static,
+    {
+        #[cfg(not(unix))]
+        let _ = main_graphs;
         assert!(!tick.is_zero());
         assert!(!limits.graph_time.is_zero() && !limits.mapping_time.is_zero());
+        assert!(
+            !limits.mapping_try_time.is_zero() && limits.mapping_try_time <= limits.mapping_time
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -162,6 +223,8 @@ impl OnboardingService {
             limits,
             tick,
             claimer: format!("onboarding-{}-{nanos}", std::process::id()),
+            #[cfg(unix)]
+            main_graphs,
         };
         let worker = {
             let stop = stop.clone();
@@ -213,6 +276,8 @@ fn serve(work: &Work, stop: &AtomicBool) {
         return;
     };
     let halted = || stop.load(Ordering::SeqCst) || work.runner.is_stopping();
+    #[cfg(unix)]
+    let mut refresh = Refresh::default();
     while !halted() {
         let _ = recover_stale(&database);
         match claim(&database, &work.claimer) {
@@ -222,7 +287,14 @@ fn serve(work: &Work, stop: &AtomicBool) {
                     std::thread::sleep(work.tick);
                 }
             }
-            Ok(None) | Err(_) => std::thread::sleep(work.tick),
+            Ok(None) => {
+                #[cfg(unix)]
+                if work.main_graphs && refresh_step(work, &database, &mut refresh, &halted) {
+                    continue;
+                }
+                std::thread::sleep(work.tick);
+            }
+            Err(_) => std::thread::sleep(work.tick),
         }
     }
 }
@@ -239,25 +311,36 @@ fn recover_stale(database: &Connection) -> rusqlite::Result<usize> {
     )
 }
 
-/// Claims the oldest waiting step: a graph build, or a mapping once its
+/// The onboarding rows a worker may claim, as a condition on `onboarding o`: unclaimed, and
+/// a waiting graph build, or a waiting mapping once its graph step has finished either way,
+/// while the owner has not saved the setup and no account pause it waits on is still
+/// running, or that pause was last checked [`PAUSE_RECHECK_MS`] ago. Binds `?1` the first
+/// setup revision, `?2` the time now and `?3` the pause recheck cut-off.
+const CLAIMABLE: &str = "claimer IS NULL AND (graph_state='waiting'
+    OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
+        AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
+            OR updated_ms<=?3)
+        AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
+            AND json_extract(s.body,'$.revision')>?1)))";
+
+/// Claims the oldest waiting step ([`CLAIMABLE`]): a graph build, or a mapping once its
 /// graph step has finished either way, while the owner has not saved the
 /// setup and no account pause it waits on is still running, or that pause was
 /// last checked [`PAUSE_RECHECK_MS`] ago. Marks it running under `claimer`
-/// and counts the attempt. Returns `None` when nothing waits.
+/// and counts the attempt; a row whose pool or draft cannot be read fails with
+/// [`ROW_UNREADABLE`] instead. A step of a project whose folder is being moved into the
+/// projects home is not claimed until the move is finished or forgotten. Returns `None`
+/// when nothing waits.
 fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String> {
     let tx = rusqlite::Transaction::new_unchecked(database, TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let now = now_ms();
     let row = tx
         .query_row(
-            "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms FROM onboarding o
-             WHERE claimer IS NULL AND (graph_state='waiting'
-                OR (mapping_state='waiting' AND graph_state IN ('done','failed','off')
-                    AND (mapping_reason IS NULL OR CAST(mapping_reason AS INTEGER)<=?2
-                        OR updated_ms<=?3)
-                    AND NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=o.project
-                        AND json_extract(s.body,'$.revision')>?1)))
-             ORDER BY created_ms,project LIMIT 1",
+            &format!(
+                "SELECT project,repo,pool,drafted,runs,graph_state='waiting',created_ms
+                 FROM onboarding o WHERE {CLAIMABLE} ORDER BY created_ms,project LIMIT 1"
+            ),
             params![
                 crate::project_setup::FIRST_REVISION as i64,
                 now,
@@ -280,12 +363,39 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     let Some((project, repo, pool, drafted, runs, graph, created_ms)) = row else {
         return Ok(None);
     };
+    if crate::projects_home::project_move_holds(&tx, std::path::Path::new(&repo))
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(None);
+    }
     let kind = if graph { Kind::Graph } else { Kind::Mapping };
+    let read = CredentialRef::new(pool)
+        .ok()
+        .zip(serde_json::from_str::<Drafted>(&drafted).ok());
+    let Some((pool, drafted)) = read else {
+        let changed = tx
+            .execute(
+                &format!(
+                    "UPDATE onboarding SET {0}_state='failed',{0}_reason=?2,updated_ms=?3
+                     WHERE project=?1 AND claimer IS NULL",
+                    kind.prefix()
+                ),
+                params![project, ROW_UNREADABLE, now],
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(changed, 1);
+        tx.commit().map_err(|error| error.to_string())?;
+        return Ok(None);
+    };
+    let tries = match kind {
+        Kind::Graph => "",
+        Kind::Mapping => ",mapping_try=NULL,mapping_try_ms=NULL,mapping_try_earlier=NULL",
+    };
     let changed = tx
         .execute(
             &format!(
                 "UPDATE onboarding SET {0}_state='running',{0}_reason=NULL,runs=runs+1,
-                    claimer=?2,heartbeat_ms=?3,updated_ms=?3
+                    claimer=?2,heartbeat_ms=?3,updated_ms=?3{tries}
                  WHERE project=?1 AND claimer IS NULL",
                 kind.prefix()
             ),
@@ -297,8 +407,8 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
     Ok(Some(Claimed {
         project,
         repo: PathBuf::from(repo),
-        pool: CredentialRef::new(pool).map_err(|problem| problem.0)?,
-        drafted: serde_json::from_str(&drafted).map_err(|error| error.to_string())?,
+        pool,
+        drafted,
         created_ms,
         runs: runs + 1,
         kind,
@@ -316,6 +426,7 @@ fn finish(
 ) -> Result<(), String> {
     let (state, reason) = step.columns();
     assert_ne!(state, "running");
+    let found = drafted.and_then(draft::found_column);
     let drafted = drafted
         .map(serde_json::to_string)
         .transpose()
@@ -324,11 +435,43 @@ fn finish(
         .execute(
             &format!(
                 "UPDATE onboarding SET {0}_state=?3,{0}_reason=?4,
-                    drafted=COALESCE(?5,drafted),claimer=NULL,heartbeat_ms=NULL,updated_ms=?6
+                    drafted=COALESCE(?5,drafted),mapping_found=COALESCE(?7,mapping_found),
+                    claimer=NULL,heartbeat_ms=NULL,updated_ms=?6
                  WHERE project=?1 AND claimer=?2",
                 claimed.kind.prefix()
             ),
-            params![claimed.project, claimer, state, reason, drafted, now_ms()],
+            params![
+                claimed.project,
+                claimer,
+                state,
+                reason,
+                drafted,
+                now_ms(),
+                found
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Records on the claimed row which mapping try starts now and why the try before it
+/// failed, which the onboarding view shows while the step runs. Changes nothing once
+/// another worker holds the row. Takes the worker's database and claimer, the claim, the
+/// try number and the earlier try's reason. Returns an error when the row is unwritable.
+fn record_try(
+    database: &Connection,
+    claimer: &str,
+    claimed: &Claimed,
+    number: u32,
+    earlier: Option<&str>,
+) -> Result<(), String> {
+    assert!((1..=MAPPING_TRIES).contains(&number));
+    assert_eq!(number == 1, earlier.is_none());
+    database
+        .execute(
+            "UPDATE onboarding SET mapping_try=?3,mapping_try_ms=?4,mapping_try_earlier=?5
+             WHERE project=?1 AND claimer=?2",
+            params![claimed.project, claimer, number, now_ms(), earlier],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -344,21 +487,32 @@ fn store_draft(
     let body = serde_json::to_string(drafted).map_err(|error| error.to_string())?;
     database
         .execute(
-            "UPDATE onboarding SET drafted=?3,updated_ms=?4 WHERE project=?1 AND claimer=?2",
-            params![claimed.project, claimer, body, now_ms()],
+            "UPDATE onboarding SET drafted=?3,mapping_found=COALESCE(?5,mapping_found),updated_ms=?4
+             WHERE project=?1 AND claimer=?2",
+            params![
+                claimed.project,
+                claimer,
+                body,
+                now_ms(),
+                draft::found_column(drafted)
+            ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 /// The agent state name of one step attempt: the step, the project, when its
-/// onboarding row was made and the attempt, so no attempt reuses a folder an
-/// earlier onboarding of the same project id left. The project part is cut
-/// short only when the whole name would pass the bound. Returns the name.
-fn run_name(claimed: &Claimed) -> String {
+/// onboarding row was made, the attempt and, for a mapping try, `t` and the try
+/// number, so no try reuses a folder an earlier try or an earlier onboarding of
+/// the same project id left. The project part is cut short only when the whole
+/// name would pass the bound. Takes the claim and the try. Returns the name.
+fn run_name(claimed: &Claimed, try_number: Option<u32>) -> String {
     assert!(claimed.project.is_ascii() && !claimed.project.is_empty());
     let head = format!("onboard-{}-", claimed.kind.short());
-    let tail = format!("-{}-{}", claimed.created_ms, claimed.runs);
+    let mut tail = format!("-{}-{}", claimed.created_ms, claimed.runs);
+    if let Some(number) = try_number {
+        tail.push_str(&format!("-t{number}"));
+    }
     let room = RUN_NAME_BYTES_MAX - head.len() - tail.len();
     let project = &claimed.project[..claimed.project.len().min(room)];
     let name = format!("{head}{project}{tail}");
@@ -392,7 +546,7 @@ fn run_step(
         lost.get() || halted()
     };
     let (step, drafted) = match claimed.kind {
-        Kind::Graph => (graph_step(work, claimed, &beat), None),
+        Kind::Graph => (graph_step(work, database, claimed, &beat), None),
         Kind::Mapping => {
             let (step, drafted) = mapping_step(work, database, claimed, &beat);
             (step, Some(drafted))
@@ -403,20 +557,41 @@ fn run_step(
     waits
 }
 
-fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
+fn graph_step(
+    work: &Work,
+    database: &rusqlite::Connection,
+    claimed: &Claimed,
+    beat: &dyn Fn() -> bool,
+) -> Step {
     let Some(graphify) = (work.graphify)() else {
         return Step::failed(GRAPHIFY_MISSING);
+    };
+    let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
+        Ok(hidden) => hidden,
+        Err(_) => return Step::failed("project hidden folders unreadable"),
+    };
+    #[cfg(unix)]
+    let tip = if work.main_graphs {
+        main_tip(database, &claimed.project, &claimed.repo)
+    } else {
+        None
     };
     match graph::update(
         &graphify,
         &claimed.repo,
         work.runner.state(),
-        &run_name(claimed),
+        &run_name(claimed, None),
+        &hidden,
         work.limits.graph_time,
         beat,
     ) {
         #[cfg(unix)]
-        Ok(GraphEnding::Built) => Step::Done,
+        Ok(GraphEnding::Built) => {
+            if let Some(tip) = tip {
+                publish_main(&claimed.repo, tip, &hidden);
+            }
+            Step::Done
+        }
         Ok(GraphEnding::Failed(reason)) => Step::failed(reason),
         #[cfg(unix)]
         Ok(GraphEnding::TimedOut) => Step::failed(GRAPH_TIMED_OUT),
@@ -424,6 +599,272 @@ fn graph_step(work: &Work, claimed: &Claimed, beat: &dyn Fn() -> bool) -> Step {
         Ok(GraphEnding::Stopped) => Step::WAITING,
         Err(RunError::Uncertain(_)) => Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
         Err(error) => not_started(Kind::Graph, &error),
+    }
+}
+
+/// What the idle loop remembers between main graph checks (DEC-123): when each project
+/// was last looked at, and when its last build failed, so a project is checked at
+/// most every [`main_graph::CHECK_EVERY`] and built again after a failure only once
+/// [`main_graph::retry_waits`] lets it, whatever its tip.
+#[cfg(unix)]
+#[derive(Default)]
+struct Refresh {
+    checked: HashMap<String, Instant>,
+    failed: HashMap<String, Instant>,
+}
+
+/// Builds and publishes at most one project's main graph while no onboarding step waits
+/// (DEC-123): only while the code graph switch is on and the system builds graphs, for a
+/// project ([`refreshable`]) whose absolute folder holds a `.crazyagent` folder and whose
+/// published graph is missing or was built at another tip than its main branch holds now,
+/// which covers every landing and the owner's own commits, or while the project hid other
+/// folders than it hides now. The first pass runs at engine start. Takes the work, the
+/// worker's database, what earlier passes saw and `halted`. Returns whether a build ran.
+#[cfg(unix)]
+fn refresh_step(
+    work: &Work,
+    database: &Connection,
+    refresh: &mut Refresh,
+    halted: &dyn Fn() -> bool,
+) -> bool {
+    if !graphs_wanted(database) {
+        return false;
+    }
+    let Ok(projects) = refreshable(database) else {
+        return false;
+    };
+    assert!(projects.len() <= ONBOARDED_MAX as usize);
+    let known = |project: &String| projects.iter().any(|(id, _)| id == project);
+    refresh.checked.retain(|project, _| known(project));
+    refresh.failed.retain(|project, _| known(project));
+    let now = Instant::now();
+    for (project, repo) in &projects {
+        let looked = refresh.checked.get(project);
+        if looked.is_some_and(|at| now.duration_since(*at) < main_graph::CHECK_EVERY) {
+            continue;
+        }
+        refresh.checked.insert(project.clone(), now);
+        if !repo.is_absolute()
+            || crate::projects_home::state_folder(repo).as_path() == repo.as_path()
+        {
+            continue;
+        }
+        if main_graph::retry_waits(refresh.failed.get(project).copied(), now) {
+            continue;
+        }
+        let Some(tip) = main_tip(database, project, repo) else {
+            continue;
+        };
+        let Ok(hidden) = crate::sandbox::hidden_paths::load(database, project) else {
+            continue;
+        };
+        let published = main_graph::latest(repo);
+        if !main_graph::due(
+            published.as_ref(),
+            &tip,
+            &main_graph::hidden_digest(&hidden),
+        ) {
+            continue;
+        }
+        match refresh_build(work, database, project, repo, tip, &hidden, halted) {
+            Refreshed::Published => {
+                refresh.failed.remove(project);
+            }
+            Refreshed::Failed => {
+                refresh.failed.insert(project.clone(), Instant::now());
+            }
+            Refreshed::GaveWay => {}
+        }
+        return true;
+    }
+    false
+}
+
+/// Whether the engine builds main graphs now ([`main_graph::wanted`]), from the code graph
+/// switch as Setup stores it, read in a transaction that writes nothing. Takes the worker's
+/// database. Returns the answer; a switch that cannot be read counts as off.
+#[cfg(unix)]
+fn graphs_wanted(database: &Connection) -> bool {
+    let Ok(tx) = database.unchecked_transaction() else {
+        return false;
+    };
+    let switch = crate::storage::setup::entry_switch(&tx, crate::setup::pack::GRAPH_ENTRY)
+        .ok()
+        .flatten();
+    main_graph::wanted(switch, std::env::consts::OS)
+}
+
+/// Whether a new or ready onboarding step waits to be claimed ([`CLAIMABLE`]): a graph step,
+/// or a mapping with no account pause or one whose pause has ended. The pause recheck
+/// cut-off is bound to the smallest time, so a mapping that only rechecks its pause every
+/// [`PAUSE_RECHECK_MS`] never halts a refresh and waits one build instead. Takes the
+/// worker's database. Returns the answer; a table that cannot be read counts as no step
+/// waiting, since the claim then fails too.
+#[cfg(unix)]
+fn step_waits(database: &Connection) -> bool {
+    database
+        .query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM onboarding o WHERE {CLAIMABLE})"),
+            params![
+                crate::project_setup::FIRST_REVISION as i64,
+                now_ms(),
+                i64::MIN
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false)
+}
+
+/// The stop a main graph refresh build polls (DEC-123): yes once the engine halts, or once
+/// an onboarding step waits to be claimed ([`step_waits`]), so a new project's onboarding
+/// never waits behind a refresh. The table is read at most every [`STEP_POLL`], and a yes
+/// stays yes. Takes the worker's database and `halted`. Returns the stop.
+#[cfg(unix)]
+fn gives_way<'a>(database: &'a Connection, halted: &'a dyn Fn() -> bool) -> impl Fn() -> bool + 'a {
+    let read: Cell<Option<Instant>> = Cell::new(None);
+    let waits = Cell::new(false);
+    move || {
+        if halted() {
+            return true;
+        }
+        if !waits.get() && read.get().is_none_or(|at| at.elapsed() >= STEP_POLL) {
+            read.set(Some(Instant::now()));
+            waits.set(step_waits(database));
+        }
+        waits.get()
+    }
+}
+
+/// The projects whose main graph the refresh looks after, with their folders, at most
+/// `ONBOARDED_MAX` in project order: each onboarded project whose graph step is over, at its
+/// onboarding folder, and each project with no onboarding row that declares a repository,
+/// its first repository standing in for its folder as the trash guards read it. Takes the
+/// worker's database. Returns the list.
+#[cfg(unix)]
+fn refreshable(database: &Connection) -> rusqlite::Result<Vec<(String, PathBuf)>> {
+    let mut statement = database.prepare(
+        "SELECT p.id,COALESCE(o.repo,json_extract(p.body,'$.spec.repositories[0]'))
+         FROM projects p LEFT JOIN onboarding o ON o.project=p.id
+         WHERE (o.project IS NULL AND json_type(p.body,'$.spec.repositories[0]')='text')
+            OR (o.claimer IS NULL AND o.graph_state NOT IN ('waiting','running'))
+         ORDER BY p.id LIMIT ?1",
+    )?;
+    let rows = statement.query_map([ONBOARDED_MAX], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            PathBuf::from(row.get::<_, String>(1)?),
+        ))
+    })?;
+    rows.collect()
+}
+
+/// The tip a project's main graph is built at ([`crate::landing::main_tip`]), only a commit
+/// id as git writes it. Takes the worker's database, the project and its folder. Returns
+/// the tip, None while it cannot be read.
+#[cfg(unix)]
+fn main_tip(database: &Connection, project: &str, repo: &Path) -> Option<String> {
+    let project = crate::protocol::ProjectId::new(project.to_owned()).ok()?;
+    crate::landing::main_tip(database, repo, &project)
+        .ok()
+        .flatten()
+        .filter(|tip| main_graph::tip_valid(tip))
+}
+
+/// How one main graph refresh ended (DEC-123).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refreshed {
+    /// Built and published.
+    Published,
+    /// Stopped for a waiting onboarding step or the engine's stop; never a failure, so the
+    /// project is tried again at its next check.
+    GaveWay,
+    /// Failed, timed out, did not start or was not published.
+    Failed,
+}
+
+/// Rebuilds one project's main graph in place through the confined graph build and
+/// publishes it at `tip` with the folders it hid ([`publish_main`]), then removes the
+/// build's run folder and profile unless its processes may still run. The build stops as
+/// soon as an onboarding step waits ([`gives_way`]). Takes the work, the worker's database,
+/// the project, its folder, the tip read before the build, the project's hidden folders
+/// and `halted`. Returns how the refresh ended.
+#[cfg(unix)]
+fn refresh_build(
+    work: &Work,
+    database: &Connection,
+    project: &str,
+    repo: &Path,
+    tip: String,
+    hidden: &[PathBuf],
+    halted: &dyn Fn() -> bool,
+) -> Refreshed {
+    let Some(graphify) = (work.graphify)() else {
+        return Refreshed::Failed;
+    };
+    let name = refresh_name(project, now_ms());
+    let ending = graph::update(
+        &graphify,
+        repo,
+        work.runner.state(),
+        &name,
+        hidden,
+        work.limits.graph_time,
+        &gives_way(database, halted),
+    );
+    if !matches!(ending, Err(RunError::Uncertain(_))) {
+        forget_run(work.runner.state(), &name);
+    }
+    match ending {
+        Ok(GraphEnding::Built) if publish_main(repo, tip, hidden) => Refreshed::Published,
+        Ok(GraphEnding::Stopped) => Refreshed::GaveWay,
+        _ => Refreshed::Failed,
+    }
+}
+
+/// The run name of one main graph refresh: `graph-main-`, the project id cut to fit, and
+/// the start time. Takes the project and the time. Returns the name, at most
+/// `RUN_NAME_BYTES_MAX` bytes.
+#[cfg(unix)]
+fn refresh_name(project: &str, now: i64) -> String {
+    assert!(project.is_ascii() && !project.is_empty());
+    let tail = format!("-{now}");
+    let room = RUN_NAME_BYTES_MAX - REFRESH_PREFIX.len() - tail.len();
+    let name = format!(
+        "{REFRESH_PREFIX}{}{tail}",
+        &project[..project.len().min(room)]
+    );
+    assert!(name.len() <= RUN_NAME_BYTES_MAX);
+    name
+}
+
+/// Removes a finished refresh's run folder and Seatbelt profile from the onboarding state,
+/// so refreshes after every landing leave nothing behind. Takes the state folder and the
+/// run name; a part that cannot be removed is left.
+#[cfg(unix)]
+fn forget_run(state: &Path, name: &str) {
+    assert!(name.starts_with(REFRESH_PREFIX));
+    let _ = std::fs::remove_dir_all(state.join("agents").join(name));
+    let _ = std::fs::remove_file(state.join("profiles").join(format!("{name}.sb")));
+}
+
+/// Publishes a graph just built for agents to copy ([`main_graph::publish`]), stamped with
+/// the tip read before its build, the time now and the digest of the folders the build hid;
+/// a failure is logged by its kind and leaves the last published graph. Takes the project
+/// folder, the tip and the hidden folders. Returns whether it was published.
+#[cfg(unix)]
+fn publish_main(repo: &Path, tip: String, hidden: &[PathBuf]) -> bool {
+    let build = main_graph::Build {
+        tip,
+        built_ms: now_ms(),
+        hidden: main_graph::hidden_digest(hidden),
+    };
+    match main_graph::publish(repo, &build) {
+        Ok(published) => published,
+        Err(error) => {
+            eprintln!("graph_publish_failed cause={:?}", error.kind());
+            false
+        }
     }
 }
 
@@ -447,8 +888,8 @@ fn start_diagnostic(kind: Kind, cause: &str) -> String {
 }
 
 /// The short cause code of a runner error: which refusal or failure stopped the
-/// start, never the error text, which can name paths. Takes the error. Returns
-/// lowercase letters, digits and `_` only.
+/// start, never the error text, which can name paths; a setup code that is not plain
+/// is withheld. Takes the error. Returns lowercase letters, digits and `_` only.
 fn start_cause(error: &RunError) -> String {
     let cause = match error {
         RunError::Invalid(reason) if reason == RUN_NAME_USED => "run_name_used".to_owned(),
@@ -463,7 +904,7 @@ fn start_cause(error: &RunError) -> String {
         RunError::Account(_) => "account_unavailable".to_owned(),
         RunError::Busy => "account_busy".to_owned(),
         RunError::Uncertain(_) => "cleanup_uncertain".to_owned(),
-        RunError::Setup(code) => (*code).to_owned(),
+        RunError::Setup(code) => crate::protocol::plain_code(code).to_owned(),
         RunError::Io(error) => io_cause("io", error),
     };
     assert!(
@@ -495,8 +936,11 @@ fn io_cause(prefix: &str, error: &std::io::Error) -> String {
 /// Maps the project: collects the bounded evidence, saves the draft the
 /// manifests alone give, then asks a tools-off agent on the pool for an
 /// overview and the remaining fields and merges its answer into the gaps.
-/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with,
-/// and waits while every pool member that fits is paused after a limit.
+/// A try that runs out of [`OnboardingLimits::mapping_try_time`], fails or
+/// answers with no overview starts a fresh try on a new pick of the pool, up
+/// to [`MAPPING_TRIES`] inside the step's time; each try is recorded for the
+/// view. Fails with [`CODEX_MISSING`] when the runner has no harness to map
+/// with, and waits while every pool member that fits is paused after a limit.
 /// Returns the step's ending and the draft to keep.
 fn mapping_step(
     work: &Work,
@@ -505,7 +949,16 @@ fn mapping_step(
     beat: &dyn Fn() -> bool,
 ) -> (Step, Drafted) {
     let layout = claimed.repo.join(CRAZYAGENT_DIRECTORY);
-    let evidence = draft::gather(&claimed.repo);
+    let hidden = match crate::sandbox::hidden_paths::load(database, &claimed.project) {
+        Ok(hidden) => hidden,
+        Err(_) => {
+            return (
+                Step::failed("project hidden folders unreadable"),
+                claimed.drafted.clone(),
+            );
+        }
+    };
+    let evidence = draft::gather(&claimed.repo, &hidden);
     let (found, stack) = draft::found_facts(&evidence, &claimed.repo);
     let mut base = claimed.drafted.clone();
     base.draft.pool = Some(claimed.pool.clone());
@@ -516,6 +969,10 @@ fn mapping_step(
     if draft::save(&layout, &base).is_err() {
         return (Step::failed(DRAFT_UNSAVED), base);
     }
+    let _ = super::seal_draft(database, &claimed.repo, &base);
+    if draft::overview_blocked(&layout) {
+        return (Step::failed(OVERVIEW_BLOCKED), base);
+    }
     let harnesses: Vec<ResearchHarness> = MAPPING_HARNESSES
         .into_iter()
         .filter(|harness| work.runner.can_run(*harness))
@@ -523,57 +980,131 @@ fn mapping_step(
     if harnesses.is_empty() {
         return (Step::failed(CODEX_MISSING), base);
     }
-    let account = match (work.accounts)(&claimed.pool, &harnesses) {
-        AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => *account,
-        AccountPick::Paused { until_ms } => {
-            return (
-                Step::Waiting {
-                    until_ms: Some(until_ms),
-                },
-                base,
-            );
-        }
-        _ => return (Step::failed(NO_ACCOUNT), base),
-    };
-    let name = run_name(claimed);
     #[cfg(unix)]
     let prompt = draft::prompt(&evidence, &found);
-    let project = ProjectId::new(claimed.project.clone()).ok();
-    let run = ReadOnlyRun {
-        name: &name,
-        agent: "onboarding",
-        project: project.as_ref(),
-        #[cfg(unix)]
-        folder: &claimed.repo,
-        #[cfg(unix)]
-        prompt: &prompt,
-        account: &account,
-        wall_time: work.limits.mapping_time,
-    };
-    match work.runner.run_read_only(&run, beat) {
-        #[cfg(unix)]
-        Ok(ReadOnlyEnding::Answered(text)) => answered(&layout, &base, &text, &found, &stack),
-        Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
-        #[cfg(unix)]
-        Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
-        #[cfg(unix)]
-        Ok(ReadOnlyEnding::Stopped) => (Step::WAITING, base),
-        Err(RunError::Busy) => (Step::WAITING, base),
-        Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
-        Err(RunError::Uncertain(_)) => (
-            Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
-            base,
-        ),
-        Err(error) => (not_started(Kind::Mapping, &error), base),
+    #[cfg(unix)]
+    let project = crate::protocol::ProjectId::new(claimed.project.clone()).ok();
+    let started = Instant::now();
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut kept = base.clone();
+    let mut causes: Vec<String> = Vec::with_capacity(MAPPING_TRIES as usize);
+    for number in 1..=MAPPING_TRIES {
+        let left = work.limits.mapping_time.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        let account = match (work.accounts)(&claimed.project, &claimed.pool, &harnesses) {
+            AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => {
+                *account
+            }
+            AccountPick::Paused { until_ms } => {
+                return (
+                    Step::Waiting {
+                        until_ms: Some(until_ms),
+                    },
+                    kept,
+                );
+            }
+            _ => return (Step::failed(NO_ACCOUNT), kept),
+        };
+        let _ = record_try(
+            database,
+            &work.claimer,
+            claimed,
+            number,
+            causes.last().map(String::as_str),
+        );
+        let name = run_name(claimed, Some(number));
+        let run = ReadOnlyRun {
+            name: &name,
+            #[cfg(unix)]
+            agent: "onboarding",
+            #[cfg(unix)]
+            project: project.as_ref(),
+            #[cfg(unix)]
+            folder: &claimed.repo,
+            #[cfg(unix)]
+            prompt: &prompt,
+            account: &account,
+            wall_time: work.limits.mapping_try_time.min(left),
+            #[cfg(unix)]
+            output_tokens: Some(MAPPING_OUTPUT_TOKENS),
+        };
+        let cause = match work.runner.run_read_only(&run, beat) {
+            #[cfg(unix)]
+            Ok(ReadOnlyEnding::Answered(text)) => {
+                let (step, merged, wrote, asks) = answered(&layout, &base, &text, &found, &stack);
+                let _ = super::seal_draft(database, &claimed.repo, &merged);
+                if let Some(overview) = wrote {
+                    let _ = super::seal_overview(database, &claimed.repo, &overview);
+                }
+                match step {
+                    Step::Failed { reason } if reason == MAPPING_NO_OVERVIEW => {
+                        kept = merged;
+                        reason
+                    }
+                    step => {
+                        if matches!(step, Step::Done) {
+                            raise_setup_questions(database, &claimed.project, &asks);
+                        }
+                        return (step, merged);
+                    }
+                }
+            }
+            Ok(ReadOnlyEnding::Failed(reason))
+                if confined_unavailable(std::env::consts::OS) == Some(reason.as_str()) =>
+            {
+                return (Step::failed(&reason), kept);
+            }
+            Ok(ReadOnlyEnding::Failed(reason)) => reason,
+            #[cfg(unix)]
+            Ok(ReadOnlyEnding::TimedOut) => MAPPING_TIMED_OUT.to_owned(),
+            #[cfg(unix)]
+            Ok(ReadOnlyEnding::Stopped) => return (Step::WAITING, kept),
+            Err(RunError::Busy) => return (Step::WAITING, kept),
+            Err(RunError::Account(_)) => return (Step::failed(NO_ACCOUNT), kept),
+            Err(RunError::Uncertain(_)) => {
+                return (
+                    Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
+                    kept,
+                );
+            }
+            Err(error) => return (not_started(Kind::Mapping, &error), kept),
+        };
+        causes.push(bounded_reason(&cause));
+    }
+    (Step::failed(&tries_failed(&causes)), kept)
+}
+
+/// The plain reason of a mapping step whose every try failed: the one try's own
+/// reason, how many tries failed and their shared reason, or each try's reason in
+/// order. Input: the reasons in try order, at least one. Output: the reason.
+fn tries_failed(causes: &[String]) -> String {
+    assert!(!causes.is_empty() && causes.len() <= MAPPING_TRIES as usize);
+    let tries = causes.len();
+    match causes {
+        [only] => only.clone(),
+        [first, rest @ ..] if rest.iter().all(|cause| cause == first) => {
+            format!("Mapping agent failed {tries} tries: {first}")
+        }
+        _ => {
+            let each: Vec<String> = causes
+                .iter()
+                .enumerate()
+                .map(|(index, cause)| format!("try {}: {cause}", index + 1))
+                .collect();
+            format!("Mapping agent failed {tries} tries: {}", each.join("; "))
+        }
     }
 }
 
 /// Finishes a mapping step from the agent's answer: merges its fields into the gaps of
-/// `base`, saves the draft and writes `overview.md` when none exists yet. An answer with
-/// no overview text, while no overview is kept from before, fails the step with
-/// [`MAPPING_NO_OVERVIEW`] and still keeps the merged draft. Takes the `.crazyagent`
-/// folder, the draft so far, the answer text and the facts the manifests gave.
-/// Returns the step's ending and the draft to keep.
+/// `base`, saves the draft and writes `overview.md` when nothing is there yet. With no
+/// overview kept, the step fails with [`OVERVIEW_BLOCKED`] while something else sits at
+/// `overview.md`, else with [`MAPPING_NO_OVERVIEW`], and still keeps the merged draft.
+/// Takes the `.crazyagent` folder, the draft so far, the answer text and the facts the
+/// manifests gave. Returns the step's ending, the draft to keep, the overview it wrote and,
+/// once the step is done, the questions the answer left for the owner.
 #[cfg(unix)]
 pub(crate) fn answered(
     layout: &Path,
@@ -581,19 +1112,46 @@ pub(crate) fn answered(
     text: &str,
     found: &MappingFacts,
     stack: &[String],
-) -> (Step, Drafted) {
+) -> (Step, Drafted, Option<String>, Vec<crate::questions::Ask>) {
     let answer = draft::parse_answer(text);
     let merged = draft::merge(base, &answer, found, stack);
     let Ok(wrote) = draft::write_overview(layout, &answer.overview) else {
-        return (Step::failed(DRAFT_UNSAVED), base.clone());
+        return (Step::failed(DRAFT_UNSAVED), base.clone(), None, Vec::new());
     };
     if draft::save(layout, &merged).is_err() {
-        return (Step::failed(DRAFT_UNSAVED), base.clone());
+        return (Step::failed(DRAFT_UNSAVED), base.clone(), wrote, Vec::new());
     }
-    if !wrote && draft::overview(layout).is_none() {
-        return (Step::failed(MAPPING_NO_OVERVIEW), merged);
+    if wrote.is_none() && draft::overview(layout).is_none() {
+        let reason = if draft::overview_blocked(layout) {
+            OVERVIEW_BLOCKED
+        } else {
+            MAPPING_NO_OVERVIEW
+        };
+        return (Step::failed(reason), merged, None, Vec::new());
     }
-    (Step::Done, merged)
+    (Step::Done, merged, wrote, answer.questions)
+}
+
+/// Raises the questions a finished mapping left for the owner as the mapping's own, once
+/// each while pending. The first refusal, such as a full question log, stops it and is
+/// logged as `onboarding_questions_unlogged`, so the mapping never fails on its questions.
+/// Takes the engine connection, the project and the questions.
+#[cfg(unix)]
+pub(crate) fn raise_setup_questions(
+    database: &Connection,
+    project: &str,
+    asks: &[crate::questions::Ask],
+) {
+    let Ok(project) = crate::protocol::ProjectId::new(project) else {
+        return;
+    };
+    let source = crate::questions::EngineSource::Mapping;
+    for ask in asks {
+        if crate::questions::raise(database, &project, &source, ask).is_err() {
+            eprintln!("onboarding_questions_unlogged project={}", project.as_str());
+            return;
+        }
+    }
 }
 
 /// The graphify executable this machine has, looked up again on each call:
@@ -679,21 +1237,23 @@ pub fn start_for_engine(
         Some(codex) => ResearchRunner::new(&database, &state, codex, ResearchLimits::default()),
         None => ResearchRunner::without_codex(&database, &state, ResearchLimits::default()),
     }
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.to_string())?
+    .with_settings(global, project);
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)
             .map_err(|error| error.to_string())?;
     }
     let resolver = SettingsResolver::new(global, project, &projects, &database)?;
-    Ok(OnboardingService::start(
+    Ok(OnboardingService::begin(
         Arc::new(runner),
-        move |pool: &CredentialRef, harnesses: &[ResearchHarness]| {
-            resolver.pool_pick(pool, harnesses)
+        move |project: &str, pool: &CredentialRef, harnesses: &[ResearchHarness]| {
+            resolver.pool_pick(project, pool, harnesses)
         },
         move || engine_graphify(&runtime),
         OnboardingLimits::default(),
         ENGINE_TICK,
+        true,
     ))
 }
 

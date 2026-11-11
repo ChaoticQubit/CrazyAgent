@@ -13,10 +13,17 @@ assert.equal(baseline.services[0][0], "@wdio/tauri-service");
 assert.equal(baseline.services[0][1].driverProvider, "embedded");
 assert.equal(baseline.services[0][1].autoInstallTauriDriver, false);
 
+const SPECS = {
+  "model-access": "model-access.e2e.mjs",
+  "model-access-read-only": "model-access-read-only.e2e.mjs",
+  "pools-screen": "pools-screen.e2e.mjs",
+};
+assert(SPECS[process.env.CRAZYAGENT_DESKTOP_TEST_SUITE], "a suite this configuration runs");
+
 export const config = {
   ...baseline,
   services: [[NoRespawnTauriService, baseline.services[0][1]]],
-  specs: [fileURLToPath(new URL("model-access.e2e.mjs", import.meta.url))],
+  specs: [fileURLToPath(new URL(SPECS[process.env.CRAZYAGENT_DESKTOP_TEST_SUITE], import.meta.url))],
   specFileRetries: 0,
   mochaOpts: { timeout: 100000, retries: 0 },
   afterTest: async function (test, context, result) {

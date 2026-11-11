@@ -73,11 +73,12 @@ fn response(head: &str, body: &[u8]) -> Vec<u8> {
 
 #[test]
 fn the_channel_file_defaults_to_stable_round_trips_and_refuses_bad_values() {
-    let root = tempfile::tempdir().unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Stable);
-    save_channel(root.path(), Channel::Dev).unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Dev);
-    let file = root.path().join("update.toml");
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("engine");
+    assert_eq!(read_channel(&root).unwrap(), Channel::Stable);
+    save_channel(&root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
+    let file = root.join("update.toml");
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "channel = \"dev\"\n"
@@ -90,16 +91,41 @@ fn the_channel_file_defaults_to_stable_round_trips_and_refuses_bad_values() {
             0o600
         );
     }
-    save_channel(root.path(), Channel::Stable).unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Stable);
+    save_channel(&root, Channel::Stable).unwrap();
+    assert_eq!(read_channel(&root).unwrap(), Channel::Stable);
     std::fs::write(&file, "").unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Stable);
+    assert_eq!(read_channel(&root).unwrap(), Channel::Stable);
     std::fs::write(&file, "channel = \"nightly\"\n").unwrap();
-    assert_eq!(code(read_channel(root.path())), "update_channel_invalid");
+    assert_eq!(code(read_channel(&root)), "update_channel_invalid");
     std::fs::write(&file, "channel = [").unwrap();
-    assert_eq!(code(read_channel(root.path())), "update_channel_invalid");
+    assert_eq!(code(read_channel(&root)), "update_channel_invalid");
     std::fs::write(&file, format!("channel = \"dev\"\n#{}", "x".repeat(5000))).unwrap();
-    assert_eq!(code(read_channel(root.path())), "update_channel_invalid");
+    assert_eq!(code(read_channel(&root)), "update_channel_invalid");
+}
+
+#[test]
+fn saving_the_channel_creates_a_missing_data_folder_the_engine_accepts() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("CrazyAgent").join("engine");
+    save_channel(&root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
+    crate::paths::Layout::new(root.clone())
+        .unwrap()
+        .prepare()
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for folder in [root.parent().unwrap(), root.as_path()] {
+            assert_eq!(
+                std::fs::metadata(folder).unwrap().permissions().mode() & 0o7777,
+                0o700
+            );
+        }
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(code(save_channel(&root, Channel::Stable)), "update_io");
+        assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
+    }
 }
 
 #[test]

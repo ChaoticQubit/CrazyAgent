@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const BRIDGE_CODES: &[&str] = &["not_connected", "agent_launch_failed"];
 
-fn agent_error(error: EngineError) -> BridgeError {
+pub(super) fn agent_error(error: EngineError) -> BridgeError {
     let code = match error.0.as_str() {
         "controller_disconnected" => "not_connected",
         launch if launch.starts_with("launch_") => "agent_launch_failed",
@@ -84,8 +84,8 @@ impl NativeBridge {
 
     /// The second step of releasing an account: ends each holder through the owner's own
     /// intent, as the owner's other cancels are delivered. A research job is cancelled
-    /// and a master conversation is closed; one that already ended is refused, which is
-    /// not an error. Inputs: the holders and a fresh draft generation. Output: Ok once
+    /// and a master conversation is closed; what a Full access agent left running was let
+    /// go of by the first step. One that already ended is refused, which is not an error. Inputs: the holders and a fresh draft generation. Output: Ok once
     /// each was answered, or `pending_intent` while one may still be recorded.
     pub async fn end_holders(
         &mut self,
@@ -98,6 +98,7 @@ impl NativeBridge {
                     self.cancel_research(project.as_str(), job, generation)
                         .await?
                 }
+                Holder::Leftover { .. } => continue,
                 Holder::Master { project, session } => {
                     self.ready_for_intent(generation)?;
                     self.controller()?
@@ -105,7 +106,7 @@ impl NativeBridge {
                             project_id: project.clone(),
                         })
                         .await
-                        .map_err(|_| failure("owner_read_failed"))?;
+                        .map_err(|error| uncaused("owner_read_failed", &error.0))?;
                     self.controller()?
                         .begin_mutation(
                             OwnerMutation::ProjectMaster {

@@ -3,8 +3,11 @@ use super::*;
 use crate::engine::owner::{AccountSecret, OwnerResult};
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
-use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crate::projects_home::icloud::Progress;
+use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::CredentialRef;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -26,6 +29,7 @@ pub(in crate::tui) enum IntakeQuery {
     AddExisting {
         source: String,
         mode: AddMode,
+        overrides: Vec<AddOverride>,
         generation: u64,
     },
     StartOnboarding {
@@ -46,14 +50,22 @@ pub(in crate::tui) enum IntakeQuery {
     CloneRepo {
         full_name: String,
     },
+    IcloudDownload {
+        path: String,
+    },
 }
 
-/// One intake job for the owner worker: a plain query, or a pasted GitHub token.
+/// One intake job for the owner worker: a plain query, a pasted GitHub token, or an iCloud
+/// download with the flag the screen sets to stop it.
 /// The token travels only here, never in a query, so no reply, log or Debug output can echo it.
-/// The token job answers as a `GitHubStatus` query.
+/// The token job answers as a `GitHubStatus` query, the download as an `IcloudDownload` query.
 pub(in crate::tui) enum IntakeJob {
     Query(IntakeQuery),
     GitHubToken(AccountSecret),
+    IcloudDownload {
+        path: String,
+        cancel: Arc<AtomicBool>,
+    },
 }
 
 /// What the engine answered to one intake request.
@@ -63,7 +75,7 @@ pub(in crate::tui) enum IntakeJob {
 pub(in crate::tui) enum IntakeView {
     Home(ProjectsHome),
     Found(Vec<FoundProject>),
-    FolderSize(u64),
+    FolderSize(crate::projects_home::Measured),
     Onboarding(Box<OnboardingView>),
     OnboardingStarted(ProjectId),
     GitHub(GitHubStatus),
@@ -71,6 +83,8 @@ pub(in crate::tui) enum IntakeView {
     Repos(GitHubRepoPage),
     Cloned(CloneReceipt),
     Changed(OwnerResult),
+    IcloudProgress(Progress),
+    IcloudDownloaded(u64),
 }
 
 /// One intake reply for the screens.
@@ -87,9 +101,16 @@ impl IntakeEvent {
     /// Takes the job.
     /// Returns the event for its query, or for the status read a token job answers as.
     pub(in crate::tui) fn unavailable(job: &IntakeJob) -> Self {
+        Self::failed(job, "trusted_connection_unavailable")
+    }
+
+    /// The reply for a job that failed before it reached the engine.
+    /// Takes the job and the problem code.
+    /// Returns the event for its query, or for the status read a token job answers as.
+    pub(in crate::tui) fn failed(job: &IntakeJob, code: &str) -> Self {
         Self {
             query: job.query(),
-            result: Err("trusted_connection_unavailable".into()),
+            result: Err(code.to_owned()),
         }
     }
 }
@@ -102,6 +123,7 @@ impl IntakeJob {
         match self {
             Self::Query(query) => query.clone(),
             Self::GitHubToken(_) => IntakeQuery::GitHubStatus,
+            Self::IcloudDownload { path, .. } => IntakeQuery::IcloudDownload { path: path.clone() },
         }
     }
 }
@@ -117,19 +139,28 @@ impl Connection {
 
 impl NativeOwner {
     /// Runs one intake job through the trusted owner controller.
-    /// Takes the job.
+    /// Takes the job and where a download's progress events go while it runs.
     /// Returns the event; a transport failure detaches the connection so the shell reconnects.
-    pub(super) async fn intake(&mut self, job: IntakeJob) -> IntakeEvent {
+    pub(super) async fn intake(
+        &mut self,
+        job: IntakeJob,
+        report: impl FnMut(IntakeEvent),
+    ) -> IntakeEvent {
         let query = job.query();
         let mut lost = false;
-        let result = self.intake_view(job, &mut lost).await;
+        let result = self.intake_view(job, &mut lost, report).await;
         if lost {
             self.detach();
         }
         IntakeEvent { query, result }
     }
 
-    async fn intake_view(&mut self, job: IntakeJob, lost: &mut bool) -> Result<IntakeView, String> {
+    async fn intake_view(
+        &mut self,
+        job: IntakeJob,
+        lost: &mut bool,
+        mut report: impl FnMut(IntakeEvent),
+    ) -> Result<IntakeView, String> {
         if !self.ready {
             return Err("trusted_connection_unavailable".into());
         }
@@ -152,6 +183,20 @@ impl NativeOwner {
                     .map(IntakeView::GitHub)
                     .map_err(problem);
             }
+            IntakeJob::IcloudDownload { path, cancel } => {
+                let query = IntakeQuery::IcloudDownload { path: path.clone() };
+                let progress = |progress| {
+                    report(IntakeEvent {
+                        query: query.clone(),
+                        result: Ok(IntakeView::IcloudProgress(progress)),
+                    })
+                };
+                return controller
+                    .icloud_download(path, &cancel, progress)
+                    .await
+                    .map(IntakeView::IcloudDownloaded)
+                    .map_err(problem);
+            }
         };
         Ok(match query {
             IntakeQuery::Home => {
@@ -172,10 +217,11 @@ impl NativeOwner {
             IntakeQuery::AddExisting {
                 source,
                 mode,
+                overrides,
                 generation,
             } => IntakeView::Changed(applied(
                 controller
-                    .add_existing_folder(source, mode, generation)
+                    .add_existing_folder(source, mode, overrides, generation)
                     .await
                     .map_err(problem)?,
             )?),
@@ -214,6 +260,7 @@ impl NativeOwner {
             IntakeQuery::CloneRepo { full_name } => {
                 IntakeView::Cloned(controller.clone_repo(full_name).await.map_err(problem)?)
             }
+            IntakeQuery::IcloudDownload { .. } => return Err("icloud_download_needs_job".into()),
         })
     }
 }

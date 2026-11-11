@@ -23,7 +23,7 @@ impl NativeBridge {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }

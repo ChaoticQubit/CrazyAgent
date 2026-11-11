@@ -572,6 +572,90 @@ fn a_master_lease_whose_worktree_gains_a_config_worktree_is_no_longer_ready() {
     );
 }
 
+/// OB-7b: a Ready master lease whose check fails once on a read is checked once more and
+/// stays Ready. The step closes the repository's refs folder before its first listing, a
+/// permission failure, and opens it again before the next one.
+#[test]
+fn a_ready_master_lease_whose_check_fails_once_on_a_read_stays_ready() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let closed = case.repository.join(".git/refs");
+    let listings = std::rc::Rc::new(std::cell::Cell::new(0));
+    let step = {
+        let (closed, listings) = (closed.clone(), listings.clone());
+        worktrees::BeforeRead::set(move |path, listing| {
+            if path != closed || !listing {
+                return;
+            }
+            listings.set(listings.get() + 1);
+            let mode = if listings.get() == 1 { 0o000 } else { 0o755 };
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        })
+    };
+    let state = case.lease_state();
+    drop(step);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(listings.get(), 2, "the check ran once more, and only once");
+    assert_eq!(state, LeaseState::Ready);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+}
+
+/// OB-7b: a read that keeps failing is tried once more and no further, and the lease reads
+/// Uncertain; it is Ready again once the folder can be read.
+#[test]
+fn a_ready_master_lease_whose_check_fails_twice_on_a_read_is_uncertain_until_it_reads() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let closed = case.repository.join(".git/refs");
+    let listings = std::rc::Rc::new(std::cell::Cell::new(0));
+    let step = {
+        let (closed, listings) = (closed.clone(), listings.clone());
+        worktrees::BeforeRead::set(move |path, listing| {
+            if path == closed && listing {
+                listings.set(listings.get() + 1);
+            }
+        })
+    };
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let state = case.lease_state();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(listings.get(), 2, "two tries, no third");
+    assert_eq!(state, LeaseState::Uncertain);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+    drop(step);
+}
+
+/// OB-7b: a check that meets a refused entry, here a link put in a file's place inside
+/// .git, is not tried again and the lease reads Uncertain at once.
+#[test]
+fn a_ready_master_lease_whose_check_meets_a_refused_entry_is_uncertain_with_no_second_try() {
+    let mut case = Case::new();
+    case.ready_lease();
+    let planted = case.repository.join(".git/ob7-note");
+    std::fs::write(&planted, b"kept\n").unwrap();
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+    let outside = case.root.path().join("ob7-outside");
+    std::fs::write(&outside, b"outside\n").unwrap();
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let step = {
+        let (planted, reads) = (planted.clone(), reads.clone());
+        worktrees::BeforeRead::set(move |path, listing| {
+            if path != planted || listing {
+                return;
+            }
+            reads.set(reads.get() + 1);
+            if reads.get() == 1 {
+                std::fs::remove_file(path).unwrap();
+                std::os::unix::fs::symlink(&outside, path).unwrap();
+            }
+        })
+    };
+    let state = case.lease_state();
+    drop(step);
+    assert_eq!(reads.get(), 1, "a refusal was tried again");
+    assert_eq!(state, LeaseState::Uncertain);
+}
+
 #[test]
 fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
     let mut case = Case::new();
@@ -599,6 +683,49 @@ fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
         .unwrap();
     assert_eq!(receipts, 0);
     assert_eq!(tasks, 0);
+}
+
+#[test]
+fn a_conversation_started_with_new_session_passes_the_bootstrap_scope_check() {
+    let mut case = Case::new();
+    crate::master_sessions::mark_owner_turn(
+        &case.db,
+        &case.session.project_id,
+        case.session.session_id.as_str(),
+        "claude-code",
+    )
+    .unwrap();
+    assert!(
+        crate::master_sessions::has_owner_turn(&case.db, &case.session.session_id).unwrap(),
+        "the session the owner used holds an owner turn"
+    );
+    let action = MasterOwnerAction::NewSession {
+        project_id: case.session.project_id.clone(),
+        expected_config_id: case.session.config_id.clone(),
+        expected_source_hash: case.session.source_hash.clone(),
+        selection: Box::new(case.session.selection.clone()),
+        cancel_running: false,
+    };
+    assert_eq!(case.act("actual-new-session", action), OwnerResult::Applied);
+    let reply = storage::master_session::read(
+        &mut case.db,
+        &case.config,
+        Some(&case.sources),
+        &case.started.owners[0].admission,
+        &OwnerRead::ProjectMaster {
+            project_id: case.session.project_id.clone(),
+        },
+    )
+    .unwrap();
+    let OwnerData::ProjectMaster {
+        session: Some(session),
+    } = reply.data
+    else {
+        panic!("actual NewSession must produce a persisted session");
+    };
+    assert_ne!(session.session_id, case.session.session_id);
+    let tx = case.db.transaction().unwrap();
+    super::current_session(&tx, &session).unwrap();
 }
 
 #[test]
@@ -750,4 +877,66 @@ fn a_session_with_turns_from_before_launch_records_counts_as_launched_with_an_un
     assert_eq!(unknown, 1);
     let tx = case.db.transaction().unwrap();
     assert!(!harness_groups::quiescent(&tx, &case.session.session_id).unwrap());
+}
+
+fn set_devices(value: &mut serde_json::Value, device: u64) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                if key == "device" {
+                    *field = serde_json::Value::from(device);
+                } else {
+                    set_devices(field, device);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            items.iter_mut().for_each(|item| set_devices(item, device))
+        }
+        _ => {}
+    }
+}
+
+/// A reboot that renumbers the volume leaves the master's lease and admission pins on
+/// the old device number with the lease Uncertain, as build 18 left the owner's rows; the
+/// next run's first send requalifies the lease to Ready and its git folder resolves.
+#[test]
+fn a_renumbered_master_lease_requalifies_on_the_first_send() {
+    use std::os::unix::fs::MetadataExt;
+    let mut case = Case::new();
+    case.ready_lease();
+    let renumbered = std::fs::metadata(case.root.path()).unwrap().dev() ^ 1;
+    for table in ["repository_admissions", "worktree_leases"] {
+        let rows: Vec<(i64, String)> = case
+            .db
+            .prepare(&format!("SELECT rowid, body FROM {table}"))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!rows.is_empty(), "{table}");
+        for (rowid, body) in rows {
+            let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let before = value.to_string();
+            set_devices(&mut value, renumbered);
+            assert_ne!(value.to_string(), before, "{table} pins a device");
+            if table == "worktree_leases" {
+                value["lease"]["state"] = serde_json::Value::from("Uncertain");
+            }
+            case.db
+                .execute(
+                    &format!("UPDATE {table} SET body=?2 WHERE rowid=?1"),
+                    rusqlite::params![rowid, serde_json::to_string(&value).unwrap()],
+                )
+                .unwrap();
+        }
+    }
+    let mut case = case.restart();
+    assert_eq!(case.lease_state(), LeaseState::RecoveryRequired);
+    assert_eq!(case.submit("send-after-renumber"), OwnerResult::Applied);
+    assert_eq!(case.lease_state(), LeaseState::Ready);
+    let lease = leases(&case.db, &case.session).remove(0);
+    let git_dir = crate::worktrees::lease_git_dir(&case.db, &lease).unwrap();
+    assert!(git_dir.is_dir(), "{}", git_dir.display());
 }

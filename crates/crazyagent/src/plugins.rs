@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 pub mod check;
+pub mod hook_folder;
 pub mod skill_folder;
 
 pub const SKILLS_PER_SCOPE_MAX: usize = 100;
@@ -13,13 +14,17 @@ pub const SERVER_NAME_BYTES_MAX: usize = 64;
 pub const COMMAND_BYTES_MAX: usize = 1024;
 pub const ARGS_MAX: usize = 32;
 pub const ARG_BYTES_MAX: usize = 1024;
+pub const COMMAND_LINE_BYTES_MAX: usize = 4096;
 pub const URL_BYTES_MAX: usize = 2048;
 pub const SECRETS_PER_SERVER_MAX: usize = 16;
 pub const SECRET_NAME_BYTES_MAX: usize = 64;
 pub const TOOLS_MAX: usize = 256;
 pub const TOOL_NAME_BYTES_MAX: usize = 128;
+pub const TOOL_NAMES_BYTES_MAX: usize = 12 * 1024;
+pub const HOOKS_PER_SCOPE_MAX: usize = 100;
+pub const HOOKS_PER_PLUGIN_MAX: usize = 64;
 
-/// Where a skill or MCP server applies: every project, or one project only.
+/// Where a skill, MCP server or hook applies: every project, or one project only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Scope {
@@ -55,7 +60,8 @@ fn printable(text: &str) -> bool {
 impl ServerSpec {
     /// Checks the command or URL before it is saved.
     /// Input: an untrusted spec. Output: Ok, or a code naming the first problem:
-    /// a relative or oversized command, too many or bad arguments, or a URL that is
+    /// a relative or oversized command, too many or bad arguments, a command and
+    /// arguments over `COMMAND_LINE_BYTES_MAX` together, or a URL that is
     /// not https (plain http is allowed only for this Mac) or carries a password.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
@@ -71,6 +77,8 @@ impl ServerSpec {
                     || args
                         .iter()
                         .any(|arg| arg.len() > ARG_BYTES_MAX || !printable(arg))
+                    || command.len() + args.iter().map(String::len).sum::<usize>()
+                        > COMMAND_LINE_BYTES_MAX
                 {
                     return Err(error("server_args_invalid"));
                 }
@@ -160,6 +168,22 @@ pub fn validate_server_name(name: &str) -> Result<(), EngineError> {
 /// Checks a secret's name, used as an environment variable for commands or a header for URLs.
 /// Input: the owner's name. Output: Ok for 1 to 64 letters, digits, _ or -, not starting
 /// with a digit or -.
+/// Checks the secrets a server is added with: each a valid secret name, none named twice
+/// and at most `SECRETS_PER_SERVER_MAX`. Input: the names. Output: Ok, or the name's own
+/// refusal, `server_secret_duplicate` or `server_secret_limit`.
+pub fn validate_secret_names(names: &[&str]) -> Result<(), EngineError> {
+    for (index, name) in names.iter().enumerate() {
+        validate_secret_name(name)?;
+        if names[..index].contains(name) {
+            return Err(error("server_secret_duplicate"));
+        }
+    }
+    if names.len() > SECRETS_PER_SERVER_MAX {
+        return Err(error("server_secret_limit"));
+    }
+    Ok(())
+}
+
 pub fn validate_secret_name(name: &str) -> Result<(), EngineError> {
     let valid = !name.is_empty()
         && name.len() <= SECRET_NAME_BYTES_MAX
@@ -209,6 +233,8 @@ pub struct SkillView {
     pub on_here: Option<bool>,
     pub source: String,
     pub folder: String,
+    pub version: u64,
+    pub refused: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,6 +261,7 @@ pub struct ServerView {
     pub checks: u64,
     pub secrets: Vec<SecretView>,
     pub on_here: Option<bool>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +284,58 @@ pub struct EffectiveServer {
     pub name: String,
     pub spec: ServerSpec,
     pub secrets: Vec<EffectiveSecret>,
+}
+
+/// One tool with its switches, as Settings lists it: a CrazyAgent built-in tool (`server_id`
+/// none, `server` the CrazyAgent server name) or one checked tool of an MCP server, keyed by
+/// the server's name as agents see it. `global` is the every-project switch, On when never
+/// set; `here` is the project's own stored switch, none in global settings or when the project
+/// follows the global one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolView {
+    pub server: String,
+    pub server_id: Option<String>,
+    pub tool: String,
+    pub description: String,
+    pub builtin: bool,
+    pub global: crate::coord::tool_switches::Switch,
+    pub here: Option<crate::coord::tool_switches::Switch>,
+}
+
+/// One hook as Settings lists it: the plugin it came from, the Claude Code event and
+/// matcher it runs on, its command, where it applies and whether it is on. `follows` names
+/// the skill or MCP server the hook came with; the hook runs only while that item is on.
+/// `version` is the hook's owner change version a project switch names, as for skills.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookView {
+    pub id: String,
+    pub name: String,
+    pub plugin: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub scope: Scope,
+    pub scope_label: String,
+    pub enabled: bool,
+    pub on_here: Option<bool>,
+    pub follows: Option<String>,
+    pub source: String,
+    pub version: u64,
+}
+
+/// One hook an agent launch writes into its generated plugin: the plugin's stored folder
+/// copy its command runs from, the event, matcher, command and timeout in seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EffectiveHook {
+    pub plugin: String,
+    pub event: String,
+    pub matcher: Option<String>,
+    pub command: String,
+    pub timeout: Option<u32>,
+    pub folder: PathBuf,
 }
 
 /// The exact skills and MCP servers agents launched for one project receive.
@@ -336,6 +415,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "The description in SKILL.md must be 1 to 1024 characters.",
     ),
     (
+        "skill_description_hidden",
+        "The description in SKILL.md has characters you cannot see, so agents could read something you did not approve.",
+    ),
+    (
         "skill_too_many_files",
         "A skill folder can hold up to 200 files.",
     ),
@@ -398,7 +481,7 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "server_args_invalid",
-        "Use up to 32 arguments, each on one line.",
+        "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
     ),
     (
         "server_url_invalid",
@@ -414,6 +497,10 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "server_secret_invalid",
         "Enter the secret on one line, up to 8192 characters.",
+    ),
+    (
+        "server_secret_too_short",
+        "Use a secret of at least 8 characters. A shorter one is part of an agent's launch command, so CrazyAgent cannot keep it hidden.",
     ),
     (
         "server_changed",
@@ -436,6 +523,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Can't start: this file can't be run.",
     ),
     ("server_cant_start", "The server can't start."),
+    (
+        crate::sandbox::OWNER_PORTS_UNREADABLE,
+        "CrazyAgent can't read its settings file, so it did not run the check. Fix the file and check again.",
+    ),
     (
         "server_cleanup_uncertain",
         "The server's processes could not be confirmed stopped.",
@@ -461,6 +552,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Only items from global settings can be switched here.",
     ),
     (
+        "stale_revision",
+        "This changed in another window, so yours was not saved. The list shows it now.",
+    ),
+    (
         "plugin_store_unavailable",
         "CrazyAgent can't write its plugin folder.",
     ),
@@ -471,6 +566,41 @@ const PROBLEMS: &[(&str, &str)] = &[
     (
         "plugin_secret_store_unavailable",
         "CrazyAgent can't write its plugin folder.",
+    ),
+    ("hooks_none_found", "This folder has no Claude Code hooks."),
+    (
+        "hooks_invalid",
+        "The hooks file in this folder is not valid hooks JSON.",
+    ),
+    ("hooks_too_many", "This plugin has more than 64 hooks."),
+    (
+        "hooks_too_large",
+        "The files these hooks run are larger than 16 MB or 2048 files.",
+    ),
+    (
+        "hook_plugin_name_invalid",
+        "The plugin name must be 1 to 32 letters, digits, ., - or _.",
+    ),
+    (
+        "hooks_plugin_manifest_missing",
+        "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
+    ),
+    (
+        "hooks_already_added",
+        "These hooks were already added here.",
+    ),
+    ("hook_limit", "There are already 100 hooks here."),
+    (
+        "tool_unknown",
+        "That tool is not on this server. Check the server again to list its tools.",
+    ),
+    (
+        "tool_delete_builtin_only",
+        "Only a CrazyAgent tool can be deleted. Turn an MCP server's tool off instead.",
+    ),
+    (
+        "coord_tool_invalid",
+        "This tool's name has characters a switch can't hold. Only letters, digits, _, - and . work.",
     ),
 ];
 

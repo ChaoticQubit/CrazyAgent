@@ -24,7 +24,7 @@ Ecologists keep field notes on paper or in general note apps that lose data with
 1. National Park Service data  https://www.nps.gov
 ";
 
-fn clocks(text: &str) -> String {
+pub(super) fn clocks(text: &str) -> String {
     let characters: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut index = 0;
@@ -73,14 +73,23 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
                 .project_context_item(project, path, offset)
                 .await
                 .map(SetupView::Item),
-            SetupQuery::Memories { project, after } => controller
-                .project_memories(project, after)
-                .await
-                .map(SetupView::Memories),
+            SetupQuery::Memories { project, after } => match after {
+                None => controller.all_project_memories(project).await,
+                Some(after) => controller.project_memories(project, Some(after)).await,
+            }
+            .map(SetupView::Memories),
             SetupQuery::ReadPaths { project } => controller
                 .project_read_paths(project)
                 .await
                 .map(SetupView::ReadPaths),
+            SetupQuery::HiddenPaths { project } => controller
+                .project_hidden_paths(project)
+                .await
+                .map(SetupView::HiddenPaths),
+            SetupQuery::AgentPolicy { project } => controller
+                .project_agent_policy(project)
+                .await
+                .map(SetupView::AgentPolicy),
             other => panic!("unexpected read {other:?}"),
         };
         screen.apply(&query, result.map_err(|error| error.0));

@@ -1,7 +1,7 @@
 use super::super::custody::CustodySession;
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
-use crate::engine::owner::{HostStamp, NativeProfileBinding};
+use crate::engine::owner::{HostStamp, NativeAuthAction, NativeAuthMethod, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
@@ -253,4 +253,114 @@ fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() 
 fn native_auth_codex_launch_rejects_relative_executable_or_profile() {
     assert!(super::command(std::path::Path::new("codex"), std::path::Path::new("/home")).is_err());
     assert!(super::command(std::path::Path::new("/codex"), std::path::Path::new("home")).is_err());
+}
+
+#[test]
+fn native_auth_codex_device_code_wait_outlasts_the_fifteen_minute_code() {
+    let device = NativeAuthAction::SignIn {
+        method: NativeAuthMethod::CodexDeviceCode,
+    };
+    let wait = super::run_time(&device).unwrap() - super::EXPIRY_MARGIN;
+    assert!(wait > Duration::from_secs(15 * 60), "{wait:?}");
+    for (method, time) in [
+        (NativeAuthMethod::CodexBrowser, 590),
+        (NativeAuthMethod::CodexExisting, 60),
+    ] {
+        let action = NativeAuthAction::SignIn { method };
+        assert_eq!(super::run_time(&action).unwrap(), Duration::from_secs(time));
+    }
+    assert_eq!(
+        super::run_time(&NativeAuthAction::Logout).unwrap(),
+        Duration::from_secs(5)
+    );
+    let claude = NativeAuthAction::SignIn {
+        method: NativeAuthMethod::ClaudeOfficial,
+    };
+    assert!(super::run_time(&claude).is_err());
+}
+
+#[test]
+fn native_auth_codex_stderr_tail_is_masked_for_the_engine_log() {
+    let stderr = b"2026-11-05T14:53:30Z ERROR codex_login: code QX4F-9KTB at \
+https://auth.openai.com/codex/device?user_code=QX4F9KTB for owner@example.test \
+token sk-live-9a8b7c6d5e4f3a2b qx4f9ktb \x1b[31mred\x1b[0m\n\
+ERROR codex_login: device auth timed out after 15 minutes\n";
+    let text = super::masked(stderr, Some("QX4F-9KTB"));
+    for secret in [
+        "QX4F",
+        "9KTB",
+        "qx4f",
+        "auth.openai.com",
+        "owner@example.test",
+        "example",
+        "9a8b7c6d5e4f3a2b",
+        "\x1b",
+    ] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    assert!(
+        text.ends_with("ERROR codex_login: device auth timed out after 15 minutes"),
+        "{text}"
+    );
+    assert!(text.len() <= 512);
+    assert!(
+        text.bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+    );
+    let long = vec![b'a'; 64 * 1024];
+    assert!(super::masked(&long, None).len() <= 512);
+}
+
+#[test]
+fn native_auth_codex_dropped_notification_names_keep_only_short_plain_methods() {
+    assert_eq!(
+        super::dropped_name("account/login/completedV2", None),
+        "account/login/completedV2"
+    );
+    assert_eq!(super::dropped_name("", None), "*");
+    assert_eq!(super::dropped_name("account/login code=QX4F", None), "*");
+    assert_eq!(super::dropped_name(&"m".repeat(65), None), "*");
+    assert_eq!(super::dropped_name(&"m".repeat(64), None), "m".repeat(64));
+}
+
+#[test]
+fn native_auth_codex_stderr_masks_a_letters_only_code_inside_joined_words() {
+    let stderr = br#"ERROR codex_login: {"user_code":"WDJB-MJHT", code:WDJB-MJHT (code:WDJB-MJHT) Code:"wdjb-mjht" token=WDJBMJHT xWDJBx MJHT.
+ERROR codex_login: device auth timed out after 15 minutes"#;
+    let text = super::masked(stderr, Some("WDJB-MJHT"));
+    for secret in ["WDJB", "MJHT", "wdjb", "mjht"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    assert!(
+        text.ends_with("ERROR codex_login: device auth timed out after 15 minutes"),
+        "{text}"
+    );
+    let unknown = super::masked(
+        br#"{"user_code":"ABCD-EFGH"} code:KLMN-PQRS userCode=TUVW-XYZA user code: BCDF-GHJK ok"#,
+        None,
+    );
+    for secret in [
+        "ABCD", "EFGH", "KLMN", "PQRS", "TUVW", "XYZA", "BCDF", "GHJK",
+    ] {
+        assert!(!unknown.contains(secret), "{secret} in {unknown}");
+    }
+    assert!(unknown.ends_with(" ok"), "{unknown}");
+}
+
+#[test]
+fn native_auth_codex_dropped_names_never_carry_a_letters_only_code() {
+    let code = Some("WDJB-MJHT");
+    for method in [
+        "account/login/WDJB-MJHT",
+        "account/login/wdjbmjht",
+        "device/WDJB",
+        "codeMJHT/x",
+    ] {
+        assert_eq!(super::dropped_name(method, code), "*", "{method}");
+    }
+    assert_eq!(
+        super::dropped_name("account/login/completedV2", code),
+        "account/login/completedV2"
+    );
+    assert_eq!(super::dropped_name("code/KLMN-PQRS", None), "*");
 }

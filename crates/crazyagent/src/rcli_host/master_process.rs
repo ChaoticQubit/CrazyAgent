@@ -9,8 +9,10 @@ use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitSta
 use std::thread;
 use std::time::{Duration, Instant};
 
-const STDOUT_BYTES_MAX: usize = 16_777_216;
-const STDERR_BYTES_MAX: usize = 16_384;
+/// The bytes of frames one rcli master host may write in its run, the same total a Claude
+/// Code master has for its output (OB-5 final). Past it the run ends with the output limit
+/// code. It bounds the bytes read, not the frames: no count of frames ends a run.
+const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 const WRITE_TIME: Duration = Duration::from_secs(1);
 const CLEANUP_TIME: Duration = Duration::from_secs(6);
 const INTERVAL: Duration = Duration::from_millis(5);
@@ -23,7 +25,6 @@ pub(super) struct HostProcess {
     stderr: Option<ChildStderr>,
     pending: Vec<u8>,
     stdout_bytes: usize,
-    stderr_bytes: usize,
     status: Option<ExitStatus>,
     group_absent: bool,
     clean: bool,
@@ -44,7 +45,6 @@ impl HostProcess {
             stderr: Some(stderr),
             pending: Vec::new(),
             stdout_bytes: 0,
-            stderr_bytes: 0,
             status: None,
             group_absent: false,
             clean: false,
@@ -146,8 +146,13 @@ impl HostProcess {
         Ok(length + 4)
     }
 
+    /// Drains what the host wrote to its error pipe so the host never waits on it. The
+    /// bytes are read and dropped, at most 16 KiB a call: nothing of them is kept, so no
+    /// total of them ends a turn (OB-5 r2). Input: the process. Output: Ok, or a plain code
+    /// for a pipe that failed.
     fn read_stderr(&mut self) -> Result<(), ProtocolError> {
         let mut scratch = [0; 1024];
+        let mut drained = 0;
         for _ in 0..16 {
             let Some(output) = self.stderr.as_mut() else {
                 return Ok(());
@@ -158,17 +163,15 @@ impl HostProcess {
                     return Ok(());
                 }
                 Ok(count) => {
-                    self.stderr_bytes += count;
-                    if self.stderr_bytes > STDERR_BYTES_MAX {
-                        return Err(error("rcli_master_stderr_limit"));
-                    }
+                    assert!(count <= scratch.len());
+                    drained += count;
                 }
                 Err(failure) if failure.kind() == io::ErrorKind::Interrupted => {}
                 Err(failure) if failure.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(_) => return Err(error("rcli_master_stderr_failed")),
             }
         }
-        assert!(self.stderr_bytes <= STDERR_BYTES_MAX);
+        assert!(drained <= 16 * scratch.len());
         assert!(self.child.id() > 1);
         Ok(())
     }
@@ -341,6 +344,9 @@ mod tests {
         assert_eq!(survivors(processes, Duration::from_secs(1)), []);
     }
 
+    /// macOS only: it waits for the EPERM that macOS alone answers for a group whose members
+    /// all exited and are not reaped. Linux answers Ok until the reap; its twin row covers that.
+    #[cfg(target_os = "macos")]
     #[test]
     fn exited_unreaped_host_group_is_not_cleanup_uncertainty() {
         let mut command = Command::new("/bin/sh");
@@ -369,6 +375,48 @@ mod tests {
         assert!(process.group_absent);
     }
 
+    /// The Linux twin of `exited_unreaped_host_group_is_not_cleanup_uncertainty`. A group
+    /// whose only member exited and is not reaped still takes signal 0 and TERM there, so
+    /// the cleanup reaps the host first and ends clean once the group answers ESRCH.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exited_unreaped_host_group_answers_until_the_reap_and_is_then_absent() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "exit 0"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        let stat = format!("/proc/{}/stat", process.child.id());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_to_string(&stat).is_ok_and(|stat| {
+            stat.rsplit(')')
+                .next()
+                .is_some_and(|rest| rest.starts_with(" Z"))
+        }) {
+            assert!(
+                Instant::now() < deadline,
+                "host did not become an exited unreaped group"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let group = process.group();
+        assert_eq!(rustix::process::test_kill_process_group(group), Ok(()));
+        assert!(process.status.is_none());
+        process.observe_group().unwrap();
+        process.signal(Signal::TERM).unwrap();
+        assert!(!process.group_absent);
+        process.cleanup().unwrap();
+        assert!(process.status.is_some());
+        assert!(process.group_absent);
+        assert_eq!(
+            rustix::process::test_kill_process_group(group),
+            Err(rustix::io::Errno::SRCH)
+        );
+    }
+
     #[test]
     fn a_refused_group_signal_before_the_leader_can_be_reaped_leaves_the_deadline_to_decide() {
         let mut command = Command::new("/bin/sleep");
@@ -387,6 +435,9 @@ mod tests {
         assert!(process.group_absent);
     }
 
+    /// macOS only: it waits for the EPERM that macOS alone answers for a group whose members
+    /// all exited and are not reaped. Linux answers Ok until the reap; its twin row covers that.
+    #[cfg(target_os = "macos")]
     #[test]
     fn exited_group_member_reaped_by_its_own_parent_is_not_cleanup_uncertainty() {
         let mut command = Command::new("/bin/sleep");
@@ -422,5 +473,55 @@ mod tests {
         assert!(reaper.join().unwrap().success());
         assert!(process.status.is_some());
         assert!(process.group_absent);
+    }
+
+    /// A stand-in host that writes 1,100 frames of the largest size, 65,536 bytes after the
+    /// four byte length, and then waits on its input.
+    const FLOODING_HOST: &str = r#"i=0
+while [ "$i" -lt 1100 ]; do
+  printf '\000\001\000\000%065536d' 0
+  i=$((i + 1))
+done
+read -r _
+"#;
+
+    /// The frames of one run are bounded by 64 MiB of bytes, as a Claude Code master's
+    /// output is, and not by the 16 MiB an rcli master had (OB-5 final). Every whole frame
+    /// under the bound is handed over: 1,023 of the largest size, where the old bound gave
+    /// 255. The frame that crosses it ends the run with the output limit code.
+    #[test]
+    fn frames_up_to_sixty_four_mebibytes_are_read_and_the_next_ends_with_the_output_code() {
+        const FRAME: usize = FRAME_BYTES_MAX + 4;
+        assert_eq!(STDOUT_BYTES_MAX, 64 * 1024 * 1024);
+        assert_eq!(FRAME, 65_540);
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", FLOODING_HOST])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let mut process = HostProcess::spawn(command).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut frames = 0;
+        let failure = loop {
+            assert!(Instant::now() < deadline, "{frames} frames read in time");
+            match process.frame() {
+                Ok(Some(frame)) => {
+                    assert_eq!(frame.len(), FRAME);
+                    assert_eq!(frame[..4], [0, 1, 0, 0]);
+                    frames += 1;
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(1)),
+                Err(failure) => break failure,
+            }
+        };
+        assert_eq!(failure.0, "rcli_master_output_limit");
+        assert_eq!(frames, STDOUT_BYTES_MAX / FRAME);
+        assert_eq!(frames, 1023);
+        assert!(frames > 16_777_216 / FRAME);
+        assert!(process.stdout_bytes > STDOUT_BYTES_MAX);
+        assert!(process.stdout_bytes <= STDOUT_BYTES_MAX + 4096);
+        process.cleanup().unwrap();
     }
 }

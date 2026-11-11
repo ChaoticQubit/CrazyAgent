@@ -2,14 +2,16 @@ import { Terminal } from "@xterm/xterm";
 import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
 import styles from "../../src/style.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
-import { terminalOptions } from "../../src/screens/team/terminal-panel.tsx";
+import { followScroll, terminalOptions } from "../../src/screens/team/terminal-panel.tsx";
 
 let terminal = null;
 export const sent = [];
+const behind = [];
 
 export function mount(rows) {
   terminal?.dispose();
   sent.length = 0;
+  behind.length = 0;
   document.head.innerHTML = "";
   for (const text of [styles, teamStyles, xtermStyles]) {
     const style = document.createElement("style");
@@ -39,4 +41,14 @@ export function view() {
 
 export function frames() {
   return new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+}
+
+/** Follows the terminal's scroll as the panel does for Jump to latest. */
+export function follow() {
+  followScroll(terminal, (value) => behind.push(value));
+}
+
+/** The latest Jump to latest flag, or null before the first report. */
+export function reading() {
+  return behind.length ? behind[behind.length - 1] : null;
 }

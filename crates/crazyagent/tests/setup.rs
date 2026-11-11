@@ -172,7 +172,7 @@ async fn graphify_already_in_the_plugin_store_reads_installed_and_switches_like_
     assert_eq!(
         result(
             owner
-                .set_pack_entry("graphify".into(), false, 1)
+                .set_pack_entry("graphify".into(), false, 0, 1)
                 .await
                 .unwrap()
         ),
@@ -193,7 +193,7 @@ async fn graphify_already_in_the_plugin_store_reads_installed_and_switches_like_
     assert_eq!(
         result(
             owner
-                .set_pack_entry("graphify".into(), true, 2)
+                .set_pack_entry("graphify".into(), true, 1, 2)
                 .await
                 .unwrap()
         ),
@@ -204,7 +204,12 @@ async fn graphify_already_in_the_plugin_store_reads_installed_and_switches_like_
         PackState::On
     );
     assert_eq!(
-        result(owner.remove_pack_entry("graphify".into(), 3).await.unwrap()),
+        result(
+            owner
+                .remove_pack_entry("graphify".into(), 2, 3)
+                .await
+                .unwrap()
+        ),
         OwnerResult::Applied
     );
     assert_eq!(
@@ -229,13 +234,9 @@ async fn no_entry_is_forced_and_unknown_or_uninstalled_entries_are_refused_plain
     let mut owner = case.controller().await;
 
     assert_eq!(
-        result(owner.remove_pack_entry("graphify".into(), 1).await.unwrap()),
-        rejected("pack_not_installed")
-    );
-    assert_eq!(
         result(
             owner
-                .set_pack_entry("graphify".into(), false, 1)
+                .remove_pack_entry("graphify".into(), 0, 1)
                 .await
                 .unwrap()
         ),
@@ -244,7 +245,16 @@ async fn no_entry_is_forced_and_unknown_or_uninstalled_entries_are_refused_plain
     assert_eq!(
         result(
             owner
-                .set_pack_entry("superpowers".into(), false, 1)
+                .set_pack_entry("graphify".into(), false, 0, 1)
+                .await
+                .unwrap()
+        ),
+        rejected("pack_not_installed")
+    );
+    assert_eq!(
+        result(
+            owner
+                .set_pack_entry("superpowers".into(), false, 0, 1)
                 .await
                 .unwrap()
         ),
@@ -262,7 +272,7 @@ async fn no_entry_is_forced_and_unknown_or_uninstalled_entries_are_refused_plain
     assert_eq!(
         result(
             owner
-                .set_pack_entry("bad id!".into(), true, 1)
+                .set_pack_entry("bad id!".into(), true, 0, 1)
                 .await
                 .unwrap()
         ),

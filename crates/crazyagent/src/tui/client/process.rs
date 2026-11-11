@@ -1,12 +1,20 @@
 use super::settings::connection_lost;
 use super::*;
+use crate::engine::owner::{ProcessText, SavedText};
 
 #[cfg(all(test, unix))]
 mod tests;
 
 /// One Process request the TUI sends.
-/// Reads or saves the app-wide or one project's instructions, reads a seed for a preview,
-/// or reads what one team agent received at its last launch (none for the newest master).
+/// Reads or saves the app-wide or one project's instructions, reads a seed for a preview
+/// (the default process or one file the owner named), reads what one team agent received at
+/// its last launch (none for the newest master), reads or saves one project's agent
+/// instruction settings, reads its workflow adoption, lists or confirms the one-time
+/// import of its own instruction files, lists the moved files still waiting for a commit or
+/// commits that move (DEC-106 and its addendum), asks a model for a cleaned text to review
+/// (Edit with AI: the app text names the pool the owner picked, a project names none), or
+/// reads or saves the app-wide Edit with AI choice. A save names the version it read and,
+/// only for "Keep mine" after a stale reply, the older version the owner opened.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -16,21 +24,70 @@ pub(in crate::tui) enum ProcessQuery {
     Save {
         project: Option<ProjectId>,
         text: String,
+        version: u64,
+        opened: Option<u64>,
     },
-    ImportGlobal,
+    ReadFile {
+        path: std::path::PathBuf,
+    },
     Default,
     Agent {
         project: ProjectId,
         agent: Option<i64>,
     },
+    Settings {
+        project: ProjectId,
+    },
+    SaveSettings {
+        project: ProjectId,
+        settings: crate::engine::owner::InstructionSettings,
+        version: Option<u64>,
+    },
+    Adoption {
+        project: ProjectId,
+    },
+    PendingImport {
+        project: ProjectId,
+    },
+    ConfirmImport {
+        project: ProjectId,
+    },
+    Uncommitted {
+        project: ProjectId,
+    },
+    CommitImport {
+        project: ProjectId,
+    },
+    Propose {
+        project: Option<ProjectId>,
+        pool: Option<crate::protocol::CredentialRef>,
+    },
+    AppSettings,
+    SaveAppSettings {
+        settings: crate::engine::owner::AppInstructionSettings,
+    },
 }
 
-/// What one Process request returned: the text read (empty for a save), or what one team
-/// agent received at its last launch.
+/// What one Process request returned: a seed text, the saved text with its version, what a
+/// save did (saved with what it comes to beside what a Claude master takes, or stale with
+/// the newer text), what one team agent received at its last launch, one project's agent
+/// instruction settings as stored with their version, its workflow adoption, the
+/// instruction files an import would move or moved, the moved paths still waiting for a
+/// commit with the checked-out branch, that commit, a proposed text with the version it was
+/// made from, or the app-wide Edit with AI choice as stored.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
+    Current(ProcessText),
+    Saved(SavedText),
     Agent(Box<crate::engine::owner::AgentInstructions>),
+    Settings(crate::engine::owner::InstructionView),
+    Adoption(Box<crate::engine::owner::Adoption>),
+    Files(Vec<crate::engine::owner::ImportFile>),
+    Uncommitted(crate::engine::owner::UncommittedImport),
+    Committed(crate::engine::owner::ImportCommit),
+    Proposal(crate::engine::owner::Proposal),
+    AppSettings(crate::engine::owner::AppInstructionSettings),
 }
 
 /// One Process reply for the screens.
@@ -47,9 +104,16 @@ impl ProcessEvent {
     /// Takes the query.
     /// Returns the event for that query.
     pub(in crate::tui) fn unavailable(query: ProcessQuery) -> Self {
+        Self::failed(query, "trusted_connection_unavailable")
+    }
+
+    /// The reply for a request that failed before it reached the engine.
+    /// Takes the query and the problem code.
+    /// Returns the event for that query.
+    pub(in crate::tui) fn failed(query: ProcessQuery, code: &str) -> Self {
         Self {
             query,
-            result: Err("trusted_connection_unavailable".into()),
+            result: Err(code.to_owned()),
         }
     }
 }
@@ -98,13 +162,18 @@ impl NativeOwner {
             ProcessQuery::Read { project } => controller
                 .process_text(project)
                 .await
-                .map(ProcessReply::Text),
-            ProcessQuery::Save { project, text } => controller
-                .save_process_text(project, text)
+                .map(ProcessReply::Current),
+            ProcessQuery::Save {
+                project,
+                text,
+                version,
+                opened,
+            } => controller
+                .save_process_text(project, text, version, opened)
                 .await
-                .map(|()| ProcessReply::Text(String::new())),
-            ProcessQuery::ImportGlobal => controller
-                .import_global_instructions()
+                .map(ProcessReply::Saved),
+            ProcessQuery::ReadFile { path } => controller
+                .read_instruction_file(path)
                 .await
                 .map(ProcessReply::Text),
             ProcessQuery::Default => controller.default_process().await.map(ProcessReply::Text),
@@ -112,6 +181,50 @@ impl NativeOwner {
                 .agent_instructions(project, agent)
                 .await
                 .map(|view| ProcessReply::Agent(Box::new(view))),
+            ProcessQuery::Settings { project } => controller
+                .instruction_settings(project)
+                .await
+                .map(ProcessReply::Settings),
+            ProcessQuery::SaveSettings {
+                project,
+                settings,
+                version,
+            } => controller
+                .save_instruction_settings(project, settings, version)
+                .await
+                .map(ProcessReply::Settings),
+            ProcessQuery::Adoption { project } => controller
+                .adoption(project)
+                .await
+                .map(|view| ProcessReply::Adoption(Box::new(view))),
+            ProcessQuery::PendingImport { project } => controller
+                .instruction_import(project)
+                .await
+                .map(ProcessReply::Files),
+            ProcessQuery::ConfirmImport { project } => controller
+                .confirm_instruction_import(project)
+                .await
+                .map(ProcessReply::Files),
+            ProcessQuery::Uncommitted { project } => controller
+                .uncommitted_instruction_import(project)
+                .await
+                .map(ProcessReply::Uncommitted),
+            ProcessQuery::CommitImport { project } => controller
+                .commit_instruction_import(project)
+                .await
+                .map(ProcessReply::Committed),
+            ProcessQuery::Propose { project, pool } => controller
+                .propose_process(project, pool)
+                .await
+                .map(ProcessReply::Proposal),
+            ProcessQuery::AppSettings => controller
+                .app_instruction_settings()
+                .await
+                .map(ProcessReply::AppSettings),
+            ProcessQuery::SaveAppSettings { settings } => controller
+                .save_app_instruction_settings(settings)
+                .await
+                .map(ProcessReply::AppSettings),
         }
         .map_err(problem)
     }

@@ -1,6 +1,8 @@
 use super::settings::connection_lost;
 use super::*;
-use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView};
+use crate::landing::{
+    AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches, WaitingChanges,
+};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -15,12 +17,22 @@ pub(in crate::tui) enum ChangesQuery {
     },
     Diff {
         id: ChangeSetId,
+        head: String,
         page: u16,
     },
     Accept {
         id: ChangeSetId,
         expected_head: String,
         message: String,
+    },
+    AcceptInto {
+        id: ChangeSetId,
+        expected_head: String,
+        message: String,
+        target: String,
+    },
+    Branches {
+        id: ChangeSetId,
     },
     Discard {
         id: ChangeSetId,
@@ -32,6 +44,9 @@ pub(in crate::tui) enum ChangesQuery {
     Update {
         id: ChangeSetId,
     },
+    Waiting {
+        project: Option<ProjectId>,
+    },
 }
 
 /// What the engine answered to one Changes request.
@@ -42,9 +57,11 @@ pub(in crate::tui) enum ChangesView {
     List(Vec<ChangeSetView>),
     Diff(ChangeDiff),
     Accepted(AcceptOutcome),
+    Branches(TargetBranches),
     Discarded { restorable_until_ms: u64 },
     Restored,
     Updating,
+    Waiting(WaitingChanges),
 }
 
 /// One Changes reply for the screens.
@@ -61,9 +78,16 @@ impl ChangesEvent {
     /// Takes the query.
     /// Returns the event for that query.
     pub(in crate::tui) fn unavailable(query: ChangesQuery) -> Self {
+        Self::failed(query, "trusted_connection_unavailable")
+    }
+
+    /// The reply for a request that failed before it reached the engine.
+    /// Takes the query and the problem code.
+    /// Returns the event for that query.
+    pub(in crate::tui) fn failed(query: ChangesQuery, code: &str) -> Self {
         Self {
             query,
-            result: Err("trusted_connection_unavailable".into()),
+            result: Err(code.to_owned()),
         }
     }
 }
@@ -112,9 +136,12 @@ impl NativeOwner {
             ChangesQuery::List { project } => {
                 ChangesView::List(controller.change_sets(project).await.map_err(problem)?)
             }
-            ChangesQuery::Diff { id, page } => {
-                ChangesView::Diff(controller.change_diff(id, page).await.map_err(problem)?)
-            }
+            ChangesQuery::Diff { id, head, page } => ChangesView::Diff(
+                controller
+                    .change_diff(id, head, page)
+                    .await
+                    .map_err(problem)?,
+            ),
             ChangesQuery::Accept {
                 id,
                 expected_head,
@@ -125,6 +152,20 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            ChangesQuery::AcceptInto {
+                id,
+                expected_head,
+                message,
+                target,
+            } => ChangesView::Accepted(
+                controller
+                    .accept_changes_into(id, expected_head, Some(message), Some(target))
+                    .await
+                    .map_err(problem)?,
+            ),
+            ChangesQuery::Branches { id } => {
+                ChangesView::Branches(controller.change_branches(id).await.map_err(problem)?)
+            }
             ChangesQuery::Discard { id, expected_head } => ChangesView::Discarded {
                 restorable_until_ms: controller
                     .discard_changes(id, expected_head)
@@ -138,6 +179,9 @@ impl NativeOwner {
             ChangesQuery::Update { id } => {
                 controller.update_changes(id).await.map_err(problem)?;
                 ChangesView::Updating
+            }
+            ChangesQuery::Waiting { project } => {
+                ChangesView::Waiting(controller.waiting_changes(project).await.map_err(problem)?)
             }
         })
     }

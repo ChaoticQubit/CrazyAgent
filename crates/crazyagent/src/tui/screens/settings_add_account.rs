@@ -601,6 +601,11 @@ impl SignIn {
                         lines.push(Line::raw("2. Enter this code"));
                         lines.push(join([Line::raw("   "), styled(code, Role::Heading, theme)]));
                         lines.push(Line::raw("3. Approve CrazyAgent in ChatGPT"));
+                        if let Some(left) = view.and_then(|v| v.code_left)
+                            && self.problem.is_none()
+                        {
+                            lines.push(Line::raw(format!("   {}", code_left_line(left))));
+                        }
                         lines.push(Line::default());
                     }
                     (Some(page), None) => {
@@ -1084,6 +1089,9 @@ impl AddAccount {
                         ));
                     }
                 }
+                if view.phase == NativeAuthPhase::Uncertain {
+                    sign_in.problem = Some(sign_in_problem(sign_in.choice.native, view));
+                }
                 match view.phase {
                     NativeAuthPhase::AuthenticatedObserved => self.done_from_sign_in(ctx),
                     NativeAuthPhase::UnauthenticatedObserved
@@ -1103,7 +1111,7 @@ impl AddAccount {
                     _ => {}
                 }
             }
-            Err(code) => sign_in.problem = Some(plain_sign_in(code)),
+            Err(code) => sign_in.problem = Some(refused_sign_in(code, sign_in.choice.native)),
         }
     }
 
@@ -1557,20 +1565,150 @@ impl AddAccount {
     }
 }
 
-fn plain_sign_in(code: &str) -> String {
+/// The sentence for each sign-in failure code the engine can record: the words the app's sign-in
+/// panel shows, so both clients say the same thing, except `native_auth_recovery_required`:
+/// the app names its own button, and the TUI says that the engine clears it on a later try
+/// or after an engine restart. `{harness}` and `{name}` stand for the harness and provider of the
+/// sign-in method.
+const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
+    (
+        "native_auth_bootstrap_timeout",
+        "CrazyAgent's account helper didn't start in time. Try again.",
+    ),
+    ("native_auth_cancelled", "Sign-in cancelled."),
+    (
+        "native_auth_claude_credential_expiring",
+        "Claude Code couldn't renew this account's sign-in before it expires. Try again.",
+    ),
+    ("native_auth_claude_deadline", "This code expired."),
+    (
+        "native_auth_claude_destination_unsupported",
+        "Claude Code gave a sign-in page address CrazyAgent doesn't recognize. Update CrazyAgent and Claude Code, then try again.",
+    ),
+    (
+        "native_auth_claude_input_invalid",
+        "Paste the complete code from the Claude page.",
+    ),
+    (
+        "native_auth_claude_keychain_unavailable",
+        "CrazyAgent couldn't set up this account's own keychain for Claude Code. Try again. If it keeps failing, delete the account, then add it again.",
+    ),
+    (
+        "native_auth_claude_launch_failed",
+        "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again.",
+    ),
+    (
+        "native_auth_claude_native_exit",
+        "Claude Code stopped before it finished. Try again.",
+    ),
+    (
+        "native_auth_claude_output_invalid",
+        "Claude Code didn't finish because of a problem CrazyAgent couldn't handle. Try again, and update Claude Code if it keeps happening.",
+    ),
+    (
+        "native_auth_claude_profile_mismatch",
+        "Claude Code's settings folder for this account didn't match the one CrazyAgent set up. Try again, and update Claude Code if it keeps happening.",
+    ),
+    (
+        "native_auth_claude_status_invalid",
+        "Claude Code's account check didn't give an answer CrazyAgent could use. Update Claude Code, then try again.",
+    ),
+    (
+        "native_auth_claude_subscription_unsupported",
+        "This account isn't signed in with a Claude subscription. Sign in with a Claude Pro or Max account, or use an API key instead.",
+    ),
+    (
+        "native_auth_codex_deadline",
+        "Codex didn't answer in time. Try again.",
+    ),
+    (
+        "native_auth_codex_exited_before_observation",
+        "Codex stopped before it finished. Try again.",
+    ),
+    (
+        "native_auth_codex_io_failed",
+        "CrazyAgent lost contact with Codex. Try again.",
+    ),
+    (
+        "native_auth_codex_protocol_invalid",
+        "Codex gave an answer CrazyAgent couldn't use. Update Codex, then try again.",
+    ),
+    (
+        "native_auth_host_executable_changed",
+        "{harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.",
+    ),
+    (
+        "native_auth_host_executable_unsafe",
+        "{harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall {harness}, then try again.",
+    ),
+    (
+        "native_auth_host_unavailable",
+        "{harness} isn't installed on this Mac, so {name} sign-in isn't available. Install {harness}, then check again in Settings, Harnesses.",
+    ),
+    (
+        "native_auth_interrupted",
+        "Sign-in didn't finish. Try again.",
+    ),
+    (
+        "native_auth_login_failed",
+        "Sign-in didn't finish. Try again.",
+    ),
+    (
+        "native_auth_native_request_failed",
+        "Sign-in didn't finish. Try again.",
+    ),
+    (
+        "native_auth_recovery_required",
+        "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.",
+    ),
+    ("native_auth_sign_in_expired", "This code expired."),
+    (
+        "native_auth_sign_in_page_timed_out",
+        "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.",
+    ),
+    (
+        "native_auth_sign_in_timed_out",
+        "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.",
+    ),
+    (
+        "native_profile_custody_unsafe",
+        "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
+    ),
+    (
+        "native_profile_identity_changed",
+        "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again.",
+    ),
+    (
+        "native_profile_in_use",
+        "An agent is using this account now. Try again after it stops.",
+    ),
+];
+
+/// The plain sentence for a sign-in failure code. Inputs: the code and the sign-in method,
+/// which names the harness. Output: the listed sentence, the TUI's own for a code the engine
+/// does not record, the config sentence, or the coded fallback.
+fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
+    let (harness, name) = match native {
+        Some(
+            NativeAuthMethod::CodexBrowser
+            | NativeAuthMethod::CodexDeviceCode
+            | NativeAuthMethod::CodexExisting,
+        ) => ("Codex", "ChatGPT"),
+        Some(NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting) | None => {
+            ("Claude Code", "Claude")
+        }
+    };
+    if let Some((_, sentence)) = SIGN_IN_SENTENCES.iter().find(|(listed, _)| *listed == code) {
+        return sentence
+            .replace("{harness}", harness)
+            .replace("{name}", name);
+    }
     match code {
         "native_auth_claude_input_outcome_unknown" => {
             "The code may not have reached Claude. Wait a moment, then try again."
         }
         "native_auth_method_mismatch" => "This account cannot use that sign-in method.",
-        "native_auth_recovery_required" => {
-            "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent."
-        }
-        "native_auth_interrupted" => "The sign-in did not finish. Start it again.",
         "native_auth_connection_missing" | "account_not_found" => "This account no longer exists.",
-        "native_auth_sign_in_expired" => {
-            "The sign-in code expired before it was approved. Start the sign-in again."
-        }
         other => {
             return crate::config::plain_problem(other)
                 .map_or_else(|| coded("The sign-in did not work.", other), str::to_owned);
@@ -1579,20 +1717,45 @@ fn plain_sign_in(code: &str) -> String {
     .to_owned()
 }
 
-fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
-    match (view.phase, native) {
-        (NativeAuthPhase::UnauthenticatedObserved, Some(NativeAuthMethod::CodexExisting)) => {
+/// The sentence for a sign-in request the engine refused. `native_auth_recovery_required`
+/// is its refusal while a sign-in of the account is still open or never confirmed how it
+/// ended; every start first lets the engine settle one whose harness has let go, so a
+/// later try or an engine restart clears it. Inputs: the refusal code and the sign-in method.
+/// Output: the sentence.
+fn refused_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
+    if code == "native_auth_recovery_required" {
+        return "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.".to_owned();
+    }
+    plain_sign_in(code, native)
+}
+
+/// The line under a ChatGPT device code that says how long it still works. Input: the time
+/// the code has left. Output: the line.
+pub(super) fn code_left_line(left: std::time::Duration) -> String {
+    match left.as_secs().div_ceil(60) {
+        0 => "This code ran out.".to_owned(),
+        1 => "This code works for 1 more minute.".to_owned(),
+        minutes => format!("This code works for {minutes} more minutes."),
+    }
+}
+
+/// The sentence for a sign-in view that did not sign in: the recorded code's sentence when
+/// the engine recorded one, else the phase's own line. Inputs: the sign-in method and the
+/// engine's view. Output: the sentence.
+pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
+    match (view.phase, native, view.problem.as_deref()) {
+        (NativeAuthPhase::UnauthenticatedObserved, Some(NativeAuthMethod::CodexExisting), _) => {
             "Codex is not signed in on this Mac. Choose Sign in with ChatGPT instead.".into()
         }
-        (NativeAuthPhase::Cancelled, _) => "The sign-in was cancelled.".into(),
-        (NativeAuthPhase::Unavailable, _) => "This sign-in is not available on this Mac.".into(),
-        (_, Some(NativeAuthMethod::CodexDeviceCode)) if view.device_code.is_some() => {
+        (_, _, Some(code)) => plain_sign_in(code, native),
+        (NativeAuthPhase::Cancelled, _, None) => "The sign-in was cancelled.".into(),
+        (NativeAuthPhase::Unavailable, _, None) => {
+            "This sign-in is not available on this Mac.".into()
+        }
+        (_, Some(NativeAuthMethod::CodexDeviceCode), None) if view.device_code.is_some() => {
             "The code expired or was not approved.".into()
         }
-        _ => match view.problem.as_deref() {
-            Some(code) => plain_sign_in(code),
-            None => "The sign-in did not finish.".into(),
-        },
+        (_, _, None) => "The sign-in did not finish.".into(),
     }
 }
 

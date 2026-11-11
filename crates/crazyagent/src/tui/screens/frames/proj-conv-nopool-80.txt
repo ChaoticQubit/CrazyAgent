@@ -1,7 +1,7 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Conversation
 ────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
-───────────────━━━━━━━━━━━━━━───────────────────────────────────────────────────
+  Overview   Conversation   Agents   Changes   Questions   Context   Settings
+─────────────━━━━━━━━━━━━───────────────────────────────────────────────────────
   Master  Codex                                                 ! Needs a pool
 
   This project has no pool, so the master cannot start.

@@ -3,8 +3,10 @@ use super::new_project::{
     harness_name, size_label, team_summary,
 };
 use super::new_project_input::{TextInput, cells, char_cells};
+use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
+use crate::sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
 use ratatui::style::Style;
@@ -85,6 +87,7 @@ impl Look {
             "\u{00bb}" => ">",
             "\u{229b}" => "*",
             "\u{2213}" => "~",
+            "\u{225f}" => "?=",
             "\u{29c9}" => "[",
             "\u{2630}" => "=",
             "\u{2190}" => "<",
@@ -454,6 +457,10 @@ fn radio(on: bool, label: &str) -> String {
     format!("{} {label}", if on { "(*)" } else { "( )" })
 }
 
+/// The words of the roadmap planning toggle on New project and on the import and clone
+/// setup review.
+pub(in crate::tui) const ROADMAP_LABEL: &str = "Plan a roadmap after research";
+
 /// Gives the glyph of a research kind.
 /// Takes the kind.
 /// Returns its Unicode glyph from DESIGN.md section 6.3.
@@ -464,6 +471,7 @@ pub(in crate::tui) fn research_glyph(kind: ResearchKind) -> &'static str {
         ResearchKind::DesignResearch => "\u{25ec}",
         ResearchKind::FrontEndDesign => "\u{25ad}",
         ResearchKind::TechStackResearch => "\u{2263}",
+        ResearchKind::RoadmapPlanning => "\u{25a4}",
     }
 }
 
@@ -474,6 +482,7 @@ fn research_description(kind: ResearchKind) -> &'static str {
         ResearchKind::DesignResearch => "Patterns and references for the look",
         ResearchKind::FrontEndDesign => "A first UI for the platforms you picked",
         ResearchKind::TechStackResearch => "Libraries, hosting and architecture options",
+        ResearchKind::RoadmapPlanning => "Versions, time per version and how to release",
     }
 }
 
@@ -561,16 +570,16 @@ impl Draw<'_> {
     }
 }
 
-/// Draws the New project wizard body for the current step.
-/// Takes the wizard, the frame width and height, and the look.
-/// Returns the body rows, cursor, breadcrumb and help keys.
+/// Draws the New project wizard body for the current step, never narrower than the
+/// smallest frame the shell draws. Takes the wizard, the frame width and height, and
+/// the look. Returns the body rows, cursor, breadcrumb and help keys.
 pub(in crate::tui) fn wizard_screen(
     wizard: &Wizard,
     width: u16,
     height: u16,
     look: &Look,
 ) -> Screen {
-    let width = usize::from(width);
+    let width = usize::from(width.max(crate::tui::frame::MIN_WIDTH));
     let wide = width >= 100;
     let content = if wide { width - 30 } else { width - 4 };
     let mut draw = Draw {
@@ -917,6 +926,26 @@ fn work(draw: &mut Draw) {
             &look,
         ));
     }
+    let roadmap = columns(
+        &[26, content.saturating_sub(32)],
+        vec![
+            Row::of(
+                checkbox(
+                    wizard.roadmap,
+                    &format!("{} Roadmap", look.glyph("\u{2630}")),
+                ),
+                look.fg,
+            ),
+            Row::of(ROADMAP_LABEL, look.muted),
+        ],
+    );
+    draw.add(list_row(
+        roadmap,
+        content,
+        focus && wizard.work_cursor == ResearchKind::ALL.len(),
+        focus,
+        &look,
+    ));
     draw.add(Row::default());
     let count = wizard.research.len();
     draw.add(Row::of(
@@ -1233,6 +1262,10 @@ fn picker_box(
                 format!("{} Can't start", look.glyph("\u{2298}")),
                 look.warning,
             ),
+            HarnessState::MasterOnly => (
+                format!("{} Master only", look.glyph("\u{25e7}")),
+                look.warning,
+            ),
             HarnessState::Unknown => (String::new(), look.muted),
         };
         let extra = if choice.limited.is_some() {
@@ -1361,6 +1394,19 @@ fn review_summary(draw: &mut Draw) {
         )
         .pad(content),
     );
+    if wizard.phase == Phase::Editing {
+        let picking = wizard.focused() == Control::Access;
+        draw.add(entry(
+            "Agent access",
+            Row::of(
+                format!("< {} >", wizard.access.label()),
+                if picking { look.selection } else { look.fg },
+            ),
+        ));
+        if wizard.access == AgentAccess::Full {
+            draw.note(FULL_ACCESS_WARNING, look.warning);
+        }
+    }
     draw.add(Row::default());
 }
 
@@ -1521,6 +1567,13 @@ pub(in crate::tui) fn help_keys(wizard: &Wizard) -> Vec<(&'static str, &'static 
             ("Enter", "Pick harness"),
             ("Space", "Tools on or off"),
             ("d", "Remove"),
+            STEPS,
+            LEAVE,
+        ],
+        Control::Access => vec![
+            ("\u{2190}\u{2192}", "Change"),
+            ("Enter", "Create project"),
+            ("Tab", "Buttons"),
             STEPS,
             LEAVE,
         ],

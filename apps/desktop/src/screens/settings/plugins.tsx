@@ -1,30 +1,39 @@
-import { createRef, useRef, useState, type RefObject } from "react";
+import { createRef, Fragment, useRef, useState, type RefObject } from "react";
 import {
-  addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret, removeMcpServer,
-  removeSkill, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type ImportCandidate, type ImportedSkill,
-  type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillDetail, type SkillView,
+  addHooks, addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listHooks, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret,
+  removeMcpServer, removeSkill, setHookEnabled, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type HookView,
+  type ImportCandidate, type ImportedSkill, type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope,
+  type Result, type SkillDetail, type SkillView, type Failure,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
-  Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, Menu, NotReady, Notice, Panel, SecretField, Segmented, Skeleton, StatusBadge, Switch, TextArea,
+  Button, Checkbox, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, SecretField, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, Switch, TextArea,
   TextField,
-  type MenuItem,
 } from "../../ui";
 import { navigate } from "../../ui/router";
 import { MarkdownView } from "../project/markdown";
 import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
+import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
+import { ToolSwitches, ToolsSection } from "./tools";
 
 const ARGS_MAX = 32;
 const SECRETS_MAX = 16;
 const NAME_COPY = "Use 1 to 64 lowercase letters, digits, - or _ for the name.";
 const SECRET_NAME_COPY = "Use letters, digits, _ or - for the secret name, starting with a letter.";
 const COMMAND_COPY = "Enter the full path to the command, starting with /.";
-const ARGS_COPY = "Use up to 32 arguments, each on one line.";
+const ARGS_COPY = "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.";
 const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const NOT_READY = "This change isn't ready in this build yet.";
+
+/** Whether a refused skill or server change means what the screen shows is out of date, so it
+ * is read again: the item changed since it was shown, went away, or moved on to a newer
+ * version. Input: the refusal. Output: true to read again. */
+export function readsAgain(failure: Failure): boolean {
+  return failure.kind === "error" && /changed|not_found|stale_revision/.test(failure.code);
+}
 
 const WORDS: Record<McpServerView["status"], string> = {
   approved: "Approved", waiting_for_approval: "Needs approval", off: "Turned off", cant_start: "Can't start",
@@ -127,6 +136,20 @@ export function pluginSwitch(item: { scope: PluginScope; enabled: boolean; on_he
   return { checked: item.enabled, label: item.scope.kind === "global" ? "On for every project" : "On", project: false };
 }
 
+/** Whether a project has switched off an item from global settings. The engine sends on_here
+ * as true or false for every global item read with a project, and off is the only change a
+ * project can make. Inputs: the item and the project id, if any. Output: the answer, always
+ * false outside a project. */
+export function pluginChanged(item: { scope: PluginScope; on_here: boolean | null }, projectId?: string): boolean {
+  return Boolean(projectId) && item.scope.kind === "global" && item.on_here === false;
+}
+
+/** Says that agents do not get a stored skill the engine refuses now, and why.
+ * Input: the refusal code. Output: the sentence. */
+export function skillUnused(code: string): string {
+  return `Agents don't get this skill. ${plainError(code)}`;
+}
+
 /** The skills list as a pure view of the engine read. Inputs: the read, the project id when
  * shown in a project, the last failure and the actions. */
 export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen, onToggle, onRemove, onRetry }: {
@@ -147,39 +170,46 @@ export function SkillsView({ skills, projectId, failure, onAdd, onImport, onOpen
     {onImport && <Button icon="folder-input" onClick={onImport}>Import my skills</Button>}
     <Button icon="folder-plus" onClick={onAdd}>Add skill</Button>
   </span>;
-  return <div className="stack-small">
-    <div className="row between">
-      <p className="secondary">A skill is a folder with a SKILL.md file. Global skills are available to every project; you can switch them off per project.</p>
-      {skills.value.length > 0 && add}
-    </div>
-    {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    {skills.value.length === 0 ? <EmptyState icon="book-open" title="No skills yet" compact action={add} /> : <Panel padded={false}><div className="rows">
-      {skills.value.map((skill, index) => {
-        const on = pluginSwitch(skill, projectId);
-        return <div className="item-row" key={skill.id}>
-          <div className="stack-small"><span className="title"><SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]}
-            onOpen={() => onOpen(skill)} /></span><span className="secondary">{skill.description}</span>
-            <span className="mono muted small">{homePath(skill.source)}</span></div>
-          <span className="row">
-            <Button variant="quiet" size="small" icon="book-open" aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
-            <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
-              disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
-            {!on.project && <Menu label={`More for ${skill.name}`} items={[{ label: "Remove", icon: "trash", danger: true, onSelect: () => onRemove(skill) }]} />}
-          </span>
-        </div>;
-      })}
-    </div></Panel>}
-  </div>;
+  return <SettingSection title="Skills" actions={skills.value.length > 0 ? add : undefined}
+    about="A skill is a folder with a SKILL.md file. Global skills are available to every project; you can switch them off per project.">
+    {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
+    {skills.value.length === 0 ? <div className="set-body"><EmptyState icon="book-open" title="No skills yet" compact action={add} /></div> : skills.value.map((skill, index) => {
+      const on = pluginSwitch(skill, projectId);
+      return <SettingLine key={skill.id} label={skill.name} changed={pluginChanged(skill, projectId)}
+        shown={<SkillTag name={skill.name} skills={[{ id: skill.id, name: skill.name, description: skill.line || skill.description }]} onOpen={() => onOpen(skill)} />}
+        help={<><span>{skill.description}</span><span className="mono small">{homePath(skill.source)}</span>
+          {skill.refused && <span className="row"><StatusBadge word="Not given to agents" tone="danger" /><span>{skillUnused(skill.refused)}</span></span>}</>}>
+        <Switch id={`skill-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
+          disabledReason={on.project && !skill.enabled ? "Turned off for every project in Settings." : undefined} />
+        <Button aria-label={`Open ${skill.name}`} onClick={() => onOpen(skill)}>Open</Button>
+        {!on.project && <Button variant="quiet" aria-label={`Remove ${skill.name}`} onClick={() => onRemove(skill)}>Remove</Button>}
+      </SettingLine>;
+    })}
+  </SettingSection>;
 }
 
-/** Drops the frontmatter block at the top of a SKILL.md, which the detail view shows as the
- * skill's name and description instead. Input: the file text. Output: the Markdown body. */
+/** Drops the frontmatter block at the top of a SKILL.md: the detail view shows it as the
+ * skill's name and description, plus any other header line agents read. Input: the file text.
+ * Output: the Markdown body. */
 export function skillBody(text: string): string {
   const source = text.replace(/^\uFEFF/, "");
   const lines = source.split("\n");
   if (lines[0]?.trimEnd() !== "---") return source;
   const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
   return end < 0 ? source : lines.slice(end + 1).join("\n").replace(/^(\s*\n)+/, "");
+}
+
+/** The SKILL.md header lines agents read that the detail view does not already show as the
+ * skill's name and description: every non-blank line of a closed frontmatter block other
+ * than the plain `name:` and `description:` lines. Inputs: the file text and the skill.
+ * Output: the lines in file order, none when the file has no closed header. */
+export function skillHeaderExtra(text: string, skill: { name: string; description: string }): string[] {
+  const lines = text.replace(/^\uFEFF/, "").split("\n").map((line) => line.replace(/\r$/, ""));
+  if (lines[0]?.trimEnd() !== "---") return [];
+  const end = lines.findIndex((line, index) => index > 0 && line.trimEnd() === "---");
+  if (end < 0) return [];
+  return lines.slice(1, end)
+    .filter((line) => line.trim() !== "" && line !== `name: ${skill.name}` && line !== `description: ${skill.description}`);
 }
 
 /** A file size as the detail view lists it. Input: bytes. Output: such as "812 B" or "4.2 KB". */
@@ -205,8 +235,12 @@ export function SkillDetailView({ detail, projectId, failure, onToggle, onOpenLi
   if (detail.kind === "error") return <LoadError message={detail.message} onRetry={onRetry} />;
   const { skill, text, files, files_more } = detail.value;
   const on = pluginSwitch(skill, projectId);
+  const extra = skillHeaderExtra(text, skill);
   return <div className="stack">
     <p className="secondary">{skill.description}</p>
+    {skill.refused && <Notice tone="danger">{skillUnused(skill.refused)} Remove it in Settings, Plugins and skills.</Notice>}
+    {extra.length > 0 && <Notice tone="warn"><span>Agents also read these lines of its SKILL.md header:</span>
+      <pre className="mono small" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", margin: 0 }}>{extra.map(displayText).join("\n")}</pre></Notice>}
     <div className="row between">
       <span className="stack-small"><span className="secondary">{skill.scope_label}</span><span className="mono muted small">{homePath(skill.source)}</span></span>
       <Switch id="skill-detail-on" label={on.label} checked={on.checked} onChecked={(next) => onToggle(skill, next)}
@@ -236,9 +270,12 @@ export function SkillDetailDialog({ id, projectId, onClose, onChanged }: {
   const toggle = async (skill: SkillView, on: boolean) => {
     setFailure("");
     const target = pluginSwitch(skill, projectId);
-    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on) : await setSkillEnabled(skill.id, on));
+    const result = session.noteResult<unknown>(target.project && projectId ? await switchPlugin(projectId, skill.id, on, skill.version) : await setSkillEnabled(skill.id, on, skill.version));
     if (result.kind === "ok") { session.showToast(on ? "Skill turned on." : "Skill turned off."); reload(); onChanged(); }
-    else setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+    else {
+      setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+      if (readsAgain(result)) { reload(); onChanged(); }
+    }
   };
   const title = detail.kind === "ok" ? detail.value.skill.name : "Skill";
   return <Dialog open title={title} onClose={onClose} wide footer={<Button onClick={onClose}>Close</Button>}>
@@ -297,7 +334,7 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
   const { found, more } = list.value;
   return <div className="stack-small">
     <p className="secondary">From ~/.claude/skills and ~/.codex/skills. Ticked skills are copied into CrazyAgent and turned on for every project. Dotfiles and files that look like keys or passwords are left out, and your folders don't change.</p>
-    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{importSentence(outcome)}</Notice>)}
+    {outcomes.map((outcome, index) => <Notice key={`${index}-${outcome.name}`} tone={outcome.result.kind === "ok" ? "ok" : "danger"}>{displayText(importSentence(outcome))}</Notice>)}
     {found.length === 0 ? <EmptyState icon="folder-input" title="No skills found in those folders" compact /> : <Panel padded={false}><div className="rows">
       {found.map((item) => {
         const word = importWord(item.state);
@@ -305,8 +342,8 @@ export function ImportSkillsView({ list, ticked, outcomes, onTick, onRetry }: {
           : item.state.kind === "differs" ? "Importing replaces the added copy and keeps its project switches." : "";
         return <div className="item-row" key={item.folder}>
           <Checkbox checked={ticked.has(item.folder)} disabled={!importable(item.state)} onChecked={(on) => onTick(item, on)}
-            label={<span className="stack-small"><span className="title">{item.name}</span>{item.line && <span className="secondary">{item.line}</span>}
-              <span className="mono muted small">{IMPORT_FROM[item.from]}: {homePath(item.folder)}</span>{why && <span className="secondary">{why}</span>}</span>} />
+            label={<span className="stack-small"><span className="title">{displayText(item.name)}</span>{item.line && <span className="secondary">{displayText(item.line)}</span>}
+              <span className="mono muted small">{IMPORT_FROM[item.from]}: {displayText(homePath(item.folder))}</span>{why && <span className="secondary">{why}</span>}</span>} />
           {word && <StatusBadge word={word} tone={item.state.kind === "unusable" ? "danger" : item.state.kind === "differs" ? "warn" : "neutral"} />}
         </div>;
       })}
@@ -366,55 +403,80 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
   onRemove: (server: McpServerView) => void;
   onRetry: () => void;
 }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   if (servers.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (servers.kind === "not_ready") return <NotReady what="MCP servers" compact />;
   if (servers.kind === "error") return <LoadError message="Couldn't load MCP servers." onRetry={onRetry} />;
   const add = <Button icon="plus" onClick={onAdd}>Add MCP server</Button>;
-  return <div className="stack-small">
-    <div className="row between">
-      <p className="secondary">MCP servers give agents extra tools. The engine checks each server, and you approve it before agents can use it.</p>
-      {servers.value.length > 0 && add}
-    </div>
-    {failure && <Notice tone="danger" alert>{failure}</Notice>}
-    {servers.value.length === 0 ? <EmptyState icon="plug" title="No MCP servers yet" compact action={add} /> : <Panel padded={false}><div className="rows">
-      {servers.value.map((server, index) => {
-        const on = pluginSwitch(server, projectId);
-        const command = server.spec.kind === "stdio";
-        const menu: MenuItem[] = [
-          ...(command ? [{ label: "Check", icon: "refresh-cw" as const, onSelect: () => onCheck(server) }] : []),
-          ...(on.project ? [] : [{ label: "Secrets", icon: "key-round" as const, onSelect: () => onSecrets(server) },
-            { label: "Remove", icon: "trash" as const, danger: true, onSelect: () => onRemove(server) }]),
-        ];
-        return <div key={server.id}>
-          <div className="item-row">
-            <div className="stack-small">
-              <span className="row"><span className="title">{server.name}</span><StatusBadge word={serverWord(server.status)} /></span>
-              <span className="mono muted small">{server.runs}</span>
-              {server.status === "cant_start" && <span className="row">
-                <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>
-                {command && <Button size="small" icon="refresh-cw" pending={busy === server.id} pendingLabel="Checking..." onClick={() => onCheck(server)}>Check again</Button>}
-              </span>}
-              {server.tools.length > 0 && <span className="secondary">Tools: {server.tools.join(", ")}</span>}
-            </div>
-            <span className="row">
-              <Switch id={`server-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(server, next)}
-                disabledReason={on.project && !server.enabled ? "Turned off for every project in Settings." : undefined} />
-              {menu.length > 0 && <Menu label={`More for ${server.name}`} items={menu} />}
-            </span>
-          </div>
-          {server.status === "waiting_for_approval" && <div className="review">
-            {command ? <span>Runs: <span className="mono">{server.runs}</span></span>
-              : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>}
-            {serverFacts(server).slice(1).map((fact) => <span key={fact}>{fact}</span>)}
-            <span className="row">
-              <Button variant="primary" icon="shield-check" pending={busy === server.id} pendingLabel="Approving..." onClick={() => onApprove(server)}>Approve</Button>
-              {!on.project && <Button icon="trash" onClick={() => onRemove(server)}>Remove</Button>}
-            </span>
-          </div>}
-        </div>;
-      })}
-    </div></Panel>}
-  </div>;
+  const line = (server: McpServerView, index: number) => {
+    const on = pluginSwitch(server, projectId);
+    const command = server.spec.kind === "stdio";
+    const waiting = server.status === "waiting_for_approval";
+    const broken = server.status === "cant_start";
+    const check = broken ? "Check again" : "Check";
+    const checking = busy === `check:${server.id}`;
+    const open = expanded === server.id;
+    return <Fragment key={server.id}>
+      <SettingLine label={server.name} changed={pluginChanged(server, projectId)} shown={<>{server.name} <StatusBadge word={serverWord(server.status)} /></>} help={<>
+        {!waiting && <span className="mono small">{server.runs}</span>}
+        {waiting && (command ? <span>Runs: <span className="mono">{server.runs}</span></span>
+          : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>)}
+        {waiting && serverFacts(server).slice(1).map((fact) => <span key={fact}>{fact}</span>)}
+        {broken && <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>}
+        {server.tools.length > 0 && <span><Button size="small" variant="quiet" icon={open ? "chevron-down" : "chevron-right"} aria-expanded={open} onClick={() => setExpanded(open ? null : server.id)}>
+          {server.tools.length} {server.tools.length === 1 ? "tool" : "tools"}
+        </Button></span>}
+      </>}>
+        <Switch id={`server-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(server, next)}
+          disabledReason={on.project && !server.enabled ? "Turned off for every project in Settings." : undefined} />
+        {command && <Button aria-label={`${check} ${server.name}`} pending={checking} pendingLabel="Checking..." disabled={busy !== null} onClick={() => onCheck(server)}>{check}</Button>}
+        {waiting && <Button variant="primary" icon="shield-check" aria-label={`Approve ${server.name}`} pending={busy === server.id} pendingLabel="Approving..." disabled={busy !== null} onClick={() => onApprove(server)}>Approve</Button>}
+        {!on.project && <Button aria-label={`Secrets for ${server.name}`} onClick={() => onSecrets(server)}>Secrets</Button>}
+        {!on.project && <Button variant="quiet" aria-label={`Remove ${server.name}`} onClick={() => onRemove(server)}>Remove</Button>}
+      </SettingLine>
+      {open && <div className="review"><ToolSwitches projectId={projectId} serverId={server.id} /></div>}
+    </Fragment>;
+  };
+  return <SettingSection title="MCP servers" actions={servers.value.length > 0 ? add : undefined}
+    about="MCP servers give agents extra tools. The engine checks each server, and you approve it before agents can use it.">
+    {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
+    {servers.value.length === 0 ? <div className="set-body"><EmptyState icon="plug" title="No MCP servers yet" compact action={add} /></div> : servers.value.map(line)}
+  </SettingSection>;
+}
+
+/** What one hook row says it runs on: its event and, when set, its matcher.
+ * Input: the hook. Output: the line. */
+export function hookTrigger(hook: HookView): string {
+  return hook.matcher ? `${hook.event}, matching ${hook.matcher}` : hook.event;
+}
+
+/** The hooks list as a pure view of the engine read: each hook with its plugin, event,
+ * command and switch. Inputs: the read, the project id when shown in a project, the last
+ * failure and the actions. */
+export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry }: {
+  hooks: Loaded<HookView[]>;
+  projectId?: string;
+  failure: string;
+  onAdd: () => void;
+  onToggle: (hook: HookView, on: boolean) => void;
+  onRetry: () => void;
+}) {
+  if (hooks.kind === "loading") return <Skeleton shape="row" count={4} />;
+  if (hooks.kind === "not_ready") return <NotReady what="Hooks" compact />;
+  if (hooks.kind === "error") return <LoadError message="Couldn't load hooks." onRetry={onRetry} />;
+  const add = <Button icon="folder-plus" onClick={onAdd}>Add hooks from a plugin</Button>;
+  return <SettingSection title="Hooks" actions={hooks.value.length > 0 ? add : undefined}
+    about="Hooks are commands Claude Code agents run on events such as session start or a tool call. They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.">
+    {failure && <div className="set-body"><Notice tone="danger" alert>{failure}</Notice></div>}
+    {hooks.value.length === 0 ? <div className="set-body"><EmptyState icon="zap" title="No hooks yet" compact action={add} /></div> : hooks.value.map((hook, index) => {
+      const on = pluginSwitch(hook, projectId);
+      return <SettingLine key={hook.id} label={hook.plugin} changed={pluginChanged(hook, projectId)}
+        help={<><span>{hookTrigger(hook)}</span><span className="mono small">{hook.command}</span>{hook.follows && <span>Runs while {hook.follows} is on.</span>}</>}>
+        <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
+          disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
+      </SettingLine>;
+    })}
+  </SettingSection>;
 }
 
 /** The Add skill dialog: the macOS folder chooser, or a typed full path when the chooser is
@@ -465,16 +527,35 @@ export function AddSkillDialog({ open, scope, message, onClose, onAdded }: {
 }
 
 interface SecretRow {
+  id: number;
   name: string;
   value: RefObject<HTMLInputElement | null>;
 }
 
-function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
+/** Reads each secret row's name with the value in that row's own masked field.
+ * Input: the rows. Output: name and value pairs in row order. */
+export function readSecrets(rows: SecretRow[]): { name: string; value: string }[] {
   return rows.map((row) => ({ name: row.name, value: row.value.current?.value ?? "" }));
 }
 
 function clearSecrets(rows: SecretRow[]): void {
   for (const row of rows) if (row.value.current) row.value.current.value = "";
+}
+
+/** The secret rows of Add MCP server: a name and a masked value each, keyed by an id that never
+ * changes, so removing one row never moves a typed value onto another row's name. Add secret
+ * stops at the secrets limit. Inputs: the rows and their change handler. */
+export function SecretRows({ rows, onRows }: { rows: SecretRow[]; onRows: (rows: SecretRow[]) => void }) {
+  return <>
+    {rows.map((row) => <div className="row" key={row.id}>
+      <TextField id={`server-secret-name-${row.id}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
+        onValue={(value) => onRows(rows.map((other) => other.id === row.id ? { ...other, name: value } : other))} />
+      <SecretField id={`server-secret-value-${row.id}`} label="Value" inputRef={row.value} />
+      <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; onRows(rows.filter((other) => other.id !== row.id)); }} />
+    </div>)}
+    {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus"
+      onClick={() => onRows([...rows, { id: Math.max(0, ...rows.map((other) => other.id)) + 1, name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+  </>;
 }
 
 /** The Add MCP server dialog: name, a command on this Mac or a URL, and secrets by name.
@@ -531,13 +612,7 @@ export function AddServerDialog({ open, scope, onClose, onAdded }: {
       <div className="stack-small">
         <span className="title">Secrets</span>
         <p className="secondary">{form.kind === "stdio" ? "Each secret is given to the command as an environment value." : "Each secret is sent to the URL as a header."} CrazyAgent's engine keeps them privately; you won't see them again.</p>
-        {rows.map((row, index) => <div className="row" key={index}>
-          <TextField id={`server-secret-name-${index}`} label="Secret name" value={row.name} spellCheck={false} autoComplete="off"
-            onValue={(value) => setRows(rows.map((other, at) => at === index ? { ...other, name: value } : other))} />
-          <SecretField id={`server-secret-value-${index}`} label="Value" inputRef={row.value} />
-          <Button iconOnly="Remove secret" icon="trash" onClick={() => { if (row.value.current) row.value.current.value = ""; setRows(rows.filter((_, at) => at !== index)); }} />
-        </div>)}
-        {rows.length < SECRETS_MAX && <span><Button size="small" icon="plus" onClick={() => setRows([...rows, { name: "", value: createRef<HTMLInputElement>() }])}>Add secret</Button></span>}
+        <SecretRows rows={rows} onRows={setRows} />
         {errors.secrets && <span className="field-error" role="alert">{errors.secrets}</span>}
       </div>
       {errors.form && <Notice tone="danger" alert>{errors.form}</Notice>}
@@ -615,9 +690,10 @@ type Removing = { kind: "skill"; skill: SkillView } | { kind: "server"; server: 
 export function PluginsAndSkills({ projectId, skill }: { projectId?: string; skill?: string } = {}) {
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
-  const [section, setSection] = useState<"skills" | "servers">("skills");
+  const [section, setSection] = useState<"skills" | "servers" | "hooks" | "tools">("skills");
   const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
+  const [hooks, reloadHooks] = useLoad(() => listHooks(projectId), [projectId], "hooks");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();
@@ -635,7 +711,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     const result = session.noteResult(await action());
     setBusy(null);
     if (result.kind === "ok") { session.showToast(done(result.value)); reload(); }
-    else { setFailure(result.kind === "not_ready" ? NOT_READY : result.message); if (result.kind === "error" && /changed|not_found/.test(result.code)) reload(); }
+    else { setFailure(result.kind === "not_ready" ? NOT_READY : result.message); if (readsAgain(result)) reload(); }
   }
 
   const addSkillFromChooser = async () => {
@@ -649,32 +725,49 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   const toggleSkill = (skill: SkillView, on: boolean) => {
     const target = pluginSwitch(skill, projectId);
-    void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on) : setSkillEnabled(skill.id, on),
+    void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on, skill.version) : setSkillEnabled(skill.id, on, skill.version),
       () => on ? "Skill turned on." : "Skill turned off.", reloadSkills);
+  };
+  const addHooksFromChooser = async () => {
+    setFailure("");
+    const picked = await pickFolder("plugin");
+    if (picked.kind !== "ok") return setFailure(picked.kind === "not_ready" ? "The folder chooser isn't ready in this build." : picked.message);
+    const folder = picked.value;
+    if (folder === null) return;
+    await act(folder, () => addHooks(scope, folder), (added) => `Added ${added.length} ${added.length === 1 ? "hook" : "hooks"}.`, reloadHooks);
+  };
+  const toggleHook = (hook: HookView, on: boolean) => {
+    const target = pluginSwitch(hook, projectId);
+    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on),
+      () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
   };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
-    void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on) : setMcpServerEnabled(server.id, on),
+    void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on, server.version) : setMcpServerEnabled(server.id, on, server.version),
       () => on ? "Server turned on." : "Server turned off.", reloadServers);
   };
   const confirmRemove = () => {
     if (!removing) return;
     const item = removing;
     setRemoving(undefined);
-    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id), () => "Skill removed.", reloadSkills);
-    else void act(item.server.id, () => removeMcpServer(item.server.id), () => "Server removed.", reloadServers);
+    if (item.kind === "skill") void act(item.skill.id, () => removeSkill(item.skill.id, item.skill.version), () => "Skill removed.", reloadSkills);
+    else void act(item.server.id, () => removeMcpServer(item.server.id, item.server.version), () => "Server removed.", reloadServers);
   };
 
+  const picker = <Segmented label="Plugins and skills" value={section} onValue={(next) => { setFailure(""); setSection(next); }}
+    options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }, { value: "hooks", label: "Hooks", icon: "zap" }, { value: "tools", label: "Tools", icon: "wrench" }]} />;
+
   return <div className="stack">
-    <Segmented label="Plugins and skills" value={section} onValue={(next) => { setFailure(""); setSection(next); }}
-      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }]} />
-    {section === "skills"
+    {projectId ? picker : <div className="settings-top"><h2>Plugins and skills</h2>{picker}</div>}
+    {section === "tools" && <ToolsSection projectId={projectId} onAddTool={() => setAdding({ kind: "server" })} />}
+    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} />}
+    {section === "hooks" || section === "tools" ? null : section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}
         onToggle={toggleServer} onSecrets={setSecrets} onRemove={(server) => setRemoving({ kind: "server", server })}
         onApprove={(server) => void act(server.id, () => approveMcpServer(server.id, server.spec), () => "Server approved.", reloadServers)}
-        onCheck={(server) => void act(server.id, () => checkMcpServer(server.id),
+        onCheck={(server) => void act(`check:${server.id}`, () => checkMcpServer(server.id),
           (checked) => checked.status === "cant_start" ? `${checked.name} can't start.` : `${checked.name} answered with ${checked.tools.length} ${checked.tools.length === 1 ? "tool" : "tools"}.`,
           reloadServers)} />}
     <AddSkillDialog open={adding?.kind === "skill"} scope={scope} message={adding?.kind === "skill" ? adding.message : undefined} onClose={() => setAdding(undefined)}

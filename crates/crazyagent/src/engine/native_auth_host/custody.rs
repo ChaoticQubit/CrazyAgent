@@ -3,7 +3,7 @@ use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 #[cfg(test)]
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 #[cfg(test)]
 use std::os::fd::OwnedFd;
 #[cfg(test)]
@@ -28,6 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(test)]
 const TERM_GRACE: Duration = Duration::from_millis(100);
 const DROP_TIME: Duration = Duration::from_secs(2);
+const GROUP_SETTLE_TIME: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const READ_BYTES: usize = 4096;
 #[cfg(test)]
@@ -473,6 +474,22 @@ fn sleep_until(deadline: Instant) {
     thread::sleep(POLL_INTERVAL.min(remaining));
 }
 
+/// Waits until the process group of a dedicated child that was already reaped is gone.
+/// macOS can still find such a group for some milliseconds and answer EPERM, no member it
+/// may signal, before it answers ESRCH; a member it may signal answers at once and is a
+/// survivor. Input: the group. Output: whether the group was gone within the settle bound.
+fn reaped_group_gone(group: Pid) -> bool {
+    assert!(group.as_raw_nonzero().get() > 1);
+    let deadline = Instant::now() + GROUP_SETTLE_TIME;
+    loop {
+        match rustix::process::test_kill_process_group(group) {
+            Err(rustix::io::Errno::SRCH) => return true,
+            Err(rustix::io::Errno::PERM) if Instant::now() < deadline => sleep_until(deadline),
+            _ => return false,
+        }
+    }
+}
+
 pub(super) fn retain_direct_child(
     retained: &mut Option<Child>,
     incoming: Child,
@@ -645,7 +662,7 @@ impl CustodySession {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         let group = group?;
-        if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+        if !reaped_group_gone(group) {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         self.guard
@@ -670,6 +687,13 @@ impl CustodySession {
             .claude_expiry()
     }
 
+    /// Whether this session was ever handed a child, even one reaped since, so a session
+    /// that never started one can retire without one. Input: none. Output: true once a
+    /// child was handed over.
+    pub(in crate::engine) fn child_attempted(&self) -> bool {
+        self.child_attempted
+    }
+
     pub(in crate::engine) fn child_mut(&mut self) -> Result<&mut Child, EngineError> {
         let child = self
             .child
@@ -689,6 +713,35 @@ impl CustodySession {
             .as_ref()
             .expect("session retains its physical guard");
         channel.observe_codex(guard, event).await
+    }
+
+    /// Sends what the session saw of its Codex child when a sign-in failed or ran out of time,
+    /// for the engine log. Inputs: the channel and the log. Output: whether to go on or cancel.
+    pub(in crate::engine) async fn log_codex(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+        log: crate::engine::owner::native_auth::CodexLog,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
+        channel.log_codex(guard, log).await
+    }
+
+    /// Reports how the session's started Codex child ended without an app-server outcome.
+    /// Inputs: the channel and the host observation. Output: whether to go on or cancel.
+    pub(in crate::engine) async fn observe_codex_host(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+        observation: crate::engine::owner::native_auth::CodexAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        assert!(self.child_attempted);
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
+        channel.observe_codex_host(guard, observation).await
     }
 
     pub(in crate::engine) async fn observe_claude(
@@ -723,7 +776,7 @@ impl CustodySession {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         let group = group?;
-        if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+        if !reaped_group_gone(group) {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         let guard = self.guard.as_ref().expect("session retains physical guard");
@@ -775,10 +828,10 @@ impl Drop for CustodySession {
                 None => cleanup_direct_child(child, deadline).map(|status| status.is_some()),
             };
             if !matches!(cleaned, Ok(true)) {
-                eprintln!("native_auth_child_cleanup_uncertain");
                 if let Some(guard) = self.guard.take() {
                     std::mem::forget(guard);
                 }
+                let _ = writeln!(io::stderr(), "native_auth_child_cleanup_uncertain");
             }
         }
     }
@@ -821,6 +874,13 @@ pub(super) fn cleanup_owned_group(
 }
 
 impl Retirement {
+    /// Whether this retirement was sealed after a reaped child rather than with no child
+    /// ever started, which picks the engine request that retires it. Input: none.
+    /// Output: true after a reaped child.
+    pub(in crate::engine) fn child_reaped(&self) -> bool {
+        matches!(self.kind, RetirementKind::ChildReaped)
+    }
+
     pub(in crate::engine) fn revalidate(
         &self,
         host: &HostStamp,

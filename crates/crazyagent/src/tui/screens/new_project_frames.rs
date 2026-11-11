@@ -3,7 +3,8 @@ use super::new_project_input::cells;
 use super::new_project_tests::{key, load_catalog, type_text, wizard};
 use super::new_project_view::{Look, Row, Screen, research_glyph, spread, wizard_screen};
 use crate::project_setup::ResearchKind;
-use crate::tui::frame::header;
+use crate::sandbox::policy::AgentAccess;
+use crate::tui::frame::{footer, header, hint};
 use crate::tui::glyphs::{ASCII, UNICODE};
 use crate::tui::theme::{Appearance, Colors, Depth, Theme};
 use crossterm::event::KeyCode;
@@ -12,28 +13,6 @@ use ratatui::backend::TestBackend;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
-
-fn help_line(width: usize, items: &[(&'static str, &'static str)], look: &Look) -> Row {
-    let separator = if width >= 100 { "   " } else { "  " };
-    let right = Row::of("?", look.heading).push(" Help ", look.fg);
-    let mut row = Row::of(" ", Style::new());
-    let mut used = 1;
-    for (index, (name, label)) in items.iter().enumerate() {
-        let gap = if index == 0 { 0 } else { separator.len() };
-        let piece = gap + cells(name) + 1 + cells(label);
-        if used + piece + right.width() + 2 > width {
-            break;
-        }
-        if index > 0 {
-            row = row.push(separator, Style::new());
-        }
-        row = row
-            .push(*name, look.heading)
-            .push(format!(" {label}"), look.fg);
-        used += piece;
-    }
-    spread(width, row, right)
-}
 
 /// Draws a screen inside the shared frame on a real ratatui test terminal.
 /// Takes the screen, the terminal size, the message line and the look; follows the generator in DESIGN.md.
@@ -44,6 +23,20 @@ pub(super) fn compose(
     height: u16,
     message: &str,
     look: &Look,
+) -> String {
+    compose_pending(screen, width, height, message, look, 0)
+}
+
+/// Draws a screen inside the shared frame as [`compose`] does, with the footer badge the
+/// shell shows while questions wait for the owner. Takes what `compose` takes and the
+/// pending question count. Returns the plain text of every terminal row.
+pub(super) fn compose_pending(
+    screen: &Screen,
+    width: u16,
+    height: u16,
+    message: &str,
+    look: &Look,
+    pending: u64,
 ) -> String {
     let columns = usize::from(width);
     let body = usize::from(height) - 4;
@@ -66,9 +59,15 @@ pub(super) fn compose(
     } else {
         Row::of(format!(" {message}"), look.fg).pad(columns)
     });
-    rows.push(help_line(columns, &screen.help, look));
+    let hints: Vec<_> = screen
+        .help
+        .iter()
+        .map(|(key, label)| hint(key, label))
+        .collect();
+    let help = footer(columns, &hints, pending, &theme, glyphs);
     let lines: Vec<Line<'static>> = std::iter::once(top)
         .chain(rows.into_iter().map(Row::line))
+        .chain(std::iter::once(help))
         .collect();
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
@@ -135,6 +134,11 @@ fn about() -> Wizard {
     wizard
 }
 
+/// Draws every wizard frame the design reviews. Takes nothing. Returns the frames by id. The
+/// review frames show the access level the wizard preselects by itself, and the row checks
+/// that level first. Where the design's level cannot run yet, as on Linux, the wizard
+/// preselects the default level instead: the row checks that too and only then sets the
+/// design's level, so one reviewed frame serves every system.
 fn wizard_frames() -> Vec<(String, String)> {
     let look = Look::plain();
     let mut drawn = Vec::new();
@@ -169,9 +173,42 @@ fn wizard_frames() -> Vec<(String, String)> {
     draw("wiz-team-80", &wizard, 80, 24);
     wizard.done[Step::Team.index()] = true;
     wizard.go(Step::Review);
+    if AgentAccess::NEW_PROJECT.unavailable().is_none() {
+        assert_eq!(wizard.access, AgentAccess::NEW_PROJECT);
+    } else {
+        assert_eq!(wizard.access, AgentAccess::default());
+        wizard.access = AgentAccess::NEW_PROJECT;
+    }
     draw("wiz-review-120", &wizard, 120, 36);
     draw("wiz-review-80", &wizard, 80, 24);
     drawn
+}
+
+#[test]
+fn a_window_narrower_than_the_frame_minimum_never_breaks_the_wizard() {
+    let look = Look::plain();
+    let mut wizard = about();
+    load_catalog(&mut wizard, &["c-codex"]);
+    let steps = [
+        Step::About,
+        Step::Stack,
+        Step::Documents,
+        Step::Work,
+        Step::Pool,
+        Step::Team,
+        Step::Review,
+    ];
+    for step in steps {
+        wizard.done[step.index()] = true;
+    }
+    for step in steps {
+        wizard.go(step);
+        let minimum = compose(&wizard_screen(&wizard, 80, 24, &look), 80, 24, "", &look);
+        for width in [0, 1, 4, 8, 9, 10, 40, 79] {
+            let narrow = compose(&wizard_screen(&wizard, width, 24, &look), 80, 24, "", &look);
+            assert_eq!(narrow, minimum, "{step:?} at width {width}");
+        }
+    }
 }
 
 #[test]

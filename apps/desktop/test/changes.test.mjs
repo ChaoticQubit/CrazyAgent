@@ -13,9 +13,20 @@ const NOW = Date.UTC(2026, 9, 26, 18, 0);
 const set = (extra = {}) => ({
   id: "cs-1", agent: { kind: "sub", id: "team-1", label: "agent-1" }, state: "pending", base: "a".repeat(40), head: "b".repeat(40),
   files: 3, added: 12, removed: 4, last_outcome: "succeeded", checked: false, created_ms: NOW - 60_000, updated_ms: NOW - 1000,
-  restorable_until_ms: null, conflicts: [], message: "Add a file", waiting: false, ...extra,
+  restorable_until_ms: null, conflicts: [], regenerated: [], message: "Add a file", waiting: false, ...extra,
 });
 const file = (extra = {}) => ({ path: "src/app.ts", old_path: null, status: "modified", kind: "text", marks: [], ...extra });
+
+test("a numbered change set is named by its number, agent, subject and files wherever it is named (AL17)", () => {
+  const wren = set({ number: 16, agent: { kind: "sub", id: "team-2", label: "Wren" }, message: "checkout UI\n\nThe form and its summary.", files: 7 });
+  assert.equal(model.changeSetName(wren), "Change set #16 (Wren: checkout UI, 7 files)");
+  assert.equal(model.changeSetName(set({ number: 1, agent: { kind: "master", id: "s-1", label: "master" }, message: "", files: 1 })), "Change set #1 (Master, 1 file)");
+  assert.equal(model.changeSetName(set({ number: 2, message: "x".repeat(80) })), `Change set #2 (agent-1: ${"x".repeat(45)}..., 3 files)`);
+  assert.equal(model.changeSetName(set({ number: null })), "agent-1", "a set the engine has not numbered yet is named by its agent");
+  assert.equal(model.changeSetName(set()), "agent-1", "an engine without numbers sends none");
+  const row = renderToStaticMarkup(createElement(view.ChangeRow, { set: wren, active: false, onSelect() {} }));
+  assert.match(row, /<strong>Change set #16 \(Wren: checkout UI, 7 files\)<\/strong>/u);
+});
 
 test("a change set reads as its agent, a state word, its size and that CrazyAgent did not check it", () => {
   assert.equal(model.agentName(set()), "agent-1");
@@ -33,6 +44,12 @@ test("a change set reads as its agent, a state word, its size and that CrazyAgen
   assert.equal(model.outcomeNote(set()), null);
   assert.equal(model.outcomeNote(set({ last_outcome: "failed" })), "The agent's last turn failed. These are the changes it made before it stopped.");
   assert.equal(model.outcomeNote(set({ last_outcome: "cancelled" })), "The agent's last turn was stopped. These are the changes it made before it stopped.");
+});
+
+test("a set its agent is fixing for conflicts with main says so in Changes", () => {
+  assert.deepEqual(model.stateBadge(set({ state: "updating", conflicts: ["README"] })), { word: "Agent is fixing conflicts with main", tone: "info" });
+  assert.deepEqual(model.stateBadge(set({ state: "updating", conflicts: ["README"], waiting: true })), { word: "Updated, waiting for the agent", tone: "warn" });
+  assert.deepEqual(model.stateBadge(set({ state: "updating" })), { word: "Agent is updating", tone: "info" });
 });
 
 test("each state offers only the actions the engine can take", () => {
@@ -67,6 +84,10 @@ test("every file says how it changed and marks what can change more than its tex
   assert.deepEqual(model.fileMarks(file({ marks: ["executable", "mode"] })), ["Can run as a program", "File mode changed"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitattributes", marks: ["attributes"] })), [".gitattributes: changes how Git treats files"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitmodules", marks: ["modules"] })), [".gitmodules: changes the project's submodules"]);
+  assert.deepEqual(model.fileMarks(file({ path: "AGENTS.md", marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"]);
+  for (const path of ["claude.md", "web/Agents.md", "AGENTS.override.md", ".claude/commands/x.md"]) {
+    assert.deepEqual(model.fileMarks(file({ path, marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"], path);
+  }
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] })).length, 1, "a mark this build does not know is still shown");
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] }))[0], "Marked new mark");
   assert.equal(model.fileLine(file({ path: "evil\u001b[31m.ts" })), "Modified evil\\u001b[31m.ts");
@@ -101,6 +122,8 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_owner_identity_missing" }), "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_owner_unavailable" }), "Your project folder couldn't be read. Check that it is still there, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_too_large" }), "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.");
+  assert.equal(client.changesRefusal({ code: "changes_bare_repository" }), "These changes add a folder Git would open as a repository: a HEAD file beside objects and refs. Ask the agent to remove it.");
+  assert.equal(client.changesRefusal({ code: "changes_link_outside" }), "These changes add a link that points outside the project or into an agent's folder. Ask the agent to remove it.");
   assert.equal(client.changesRefusal({ code: "changes_message_invalid" }), "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_workspace_invalid" }), "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.");
   assert.equal(client.changesRefusal({ code: "changes_master_tools_off" }), "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.");
@@ -149,8 +172,48 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   assert.doesNotMatch(html, /Write a commit message/);
   assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
   const blank = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "" }), pending: false, onCancel() {}, onAccept() {} }));
-  assert.match(blank, /Write a commit message of up to 4096 bytes to accept\./);
+  assert.match(blank, /Write a commit message of up to 4096 bytes, with no hidden characters, to accept\./);
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
+});
+
+test("Accept lands on the team's Land on branch unless the owner picks another, and says where and whether it is checked out", () => {
+  const listed = { branches: ["feat/x", "main", "stage"], current: "feat/x", land_on: "stage" };
+  const away = "They land as one commit on stage, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are. CrazyAgent did not check them.";
+  assert.deepEqual(model.acceptTarget(listed, "stage"), { picked: null, text: away });
+  assert.deepEqual(model.acceptTarget(listed, "feat/x"), { picked: "feat/x", text: "They land as one commit on feat/x, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." });
+  assert.equal(model.acceptTarget(listed, "main").picked, "main");
+  assert.deepEqual(model.acceptTarget({ branches: ["main"], current: "main", land_on: null }, "main"),
+    { picked: null, text: "They land as one commit on main, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." },
+    "with no Land on branch the engine lands on the checked-out one");
+  assert.deepEqual(model.acceptTarget(null, ""), { picked: null, text: "They land as one commit on your project's Land on branch, under your own Git name. CrazyAgent did not check them." });
+  assert.deepEqual(listed.branches.map((name) => model.branchLabel(listed, name)), ["feat/x (checked out)", "main", "stage (Land on)"]);
+  assert.equal(model.branchLabel({ branches: ["main"], current: "main", land_on: "main" }, "main"), "main (Land on, checked out)");
+});
+
+test("Accept with a missing Land on branch names it, offers no default and waits for a picked branch", () => {
+  const missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+  const listed = { branches: ["feat/x", "main"], current: "feat/x", land_on: null, land_on_problem: missing };
+  assert.deepEqual(model.acceptTarget(listed, ""), { picked: null, text: missing });
+  assert.equal(model.acceptBlocked(listed, ""), true);
+  assert.deepEqual(model.acceptTarget(listed, "feat/x"), { picked: "feat/x", text: "They land as one commit on feat/x, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." });
+  assert.equal(model.acceptBlocked(listed, "feat/x"), false);
+  assert.equal(model.acceptTarget(listed, "main").picked, "main");
+  assert.equal(model.acceptBlocked({ branches: ["main"], current: "main", land_on: "main" }, "main"), false);
+  assert.equal(model.acceptBlocked(null, ""), false);
+});
+
+test("Accept shows hidden characters in a proposed message as escapes and never sends them", () => {
+  assert.equal(model.commitMessage("Owner title\u{e0041}\u{e0042}"), null);
+  assert.equal(model.commitMessage("Zero\u200bwidth"), null);
+  assert.equal(model.commitMessage("Ship it \u{1f468}\u200d\u{1f4bb}"), "Ship it \u{1f468}\u200d\u{1f4bb}");
+  const hidden = set({ message: "Formats changed files.\u{e0041}\u{e0042}" });
+  const html = renderToStaticMarkup(createElement(view.AcceptDialog, { set: hidden, pending: false, onCancel() {}, onAccept() {} }));
+  assert.match(html, /<textarea[^>]*>Formats changed files\.\\u\{e0041\}\\u\{e0042\}<\/textarea>/);
+  assert.doesNotMatch(html, /[\u{e0000}-\u{e0fff}]/u);
+  assert.match(html, /The proposed message held characters you cannot see\. They are shown as escapes: check it before you accept\./);
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
+  const plain = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "Add a file" }), pending: false, onCancel() {}, onAccept() {} }));
+  assert.doesNotMatch(plain, /characters you cannot see/);
 });
 
 test("a set merged but not yet handed to its agent says so and can be asked again or discarded", () => {
@@ -161,6 +224,14 @@ test("a set merged but not yet handed to its agent says so and can be asked agai
   assert.deepEqual(model.actions(set({ state: "updating" }), NOW), { accept: false, discard: false, update: false, restore: false });
   assert.deepEqual(model.stateBadge(set({ state: "pending", waiting: true })), { word: "Ready to review", tone: "info" });
   assert.equal(client.changesRefusal({ code: "team_agent_not_found" }), "The agent that made these changes is no longer on the team, so it can't update them. Discard them instead.");
+});
+
+test("a lockfile the project's tools rebuilt is named as their work while its set waits for review", () => {
+  const rebuilt = set({ regenerated: ["Cargo.lock", "web/package-lock.json"] });
+  assert.equal(model.regeneratedNote?.(rebuilt), "Rebuilt with this project's own tools to fit your branch: Cargo.lock, web/package-lock.json. They ran on the agent's work, so review the result like the agent's own edits.");
+  assert.equal(model.regeneratedNote?.(set()), null);
+  assert.equal(model.regeneratedNote?.({ ...rebuilt, state: "accepted" }), null);
+  assert.match(readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8"), /regeneratedNote\(set\)/);
 });
 
 test("a change set that moved on while open goes back to review: Accept and Discard wait for its last page and send the head reviewed", () => {
@@ -190,4 +261,27 @@ test("a change set that moved on while open goes back to review: Accept and Disc
   assert.match(source, /disabled=\{busy \|\| !settled\} onClick=\{\(\) => onAsk\(\{ kind: "accept", set: asked \}\)\}/);
   assert.match(source, /disabled=\{busy \|\| !settled\} onClick=\{\(\) => onAsk\(\{ kind: "discard", set: asked \}\)\}/);
   assert.match(source, /const asked = \{ \.\.\.set, head \};/);
+});
+
+test("a change set closed outside the app says how, keeps its note and offers no action", () => {
+  const landed = set({ state: "accepted", outside: true });
+  const removed = set({ state: "discarded", outside: true, restorable_until_ms: null });
+  assert.deepEqual(model.stateBadge(landed), { word: "Landed outside the app", tone: "ok" });
+  assert.deepEqual(model.stateBadge(removed), { word: "Removed outside the app", tone: "neutral" });
+  assert.equal(model.restoreNote(landed, NOW), "Your branch already has these changes. They were landed outside the app.");
+  assert.equal(model.restoreNote(removed, NOW), "The agent's copy of these changes was removed outside the app, so they cannot be restored.");
+  const none = { accept: false, discard: false, update: false, restore: false };
+  assert.deepEqual(model.actions(landed, NOW), none);
+  assert.deepEqual(model.actions(removed, NOW), none);
+});
+test("every diff page is read at the head under review, and a page refused as moved on rereads the list (RV-DS-13)", () => {
+  assert.equal(client.loadChangeDiff.length, 3, "the diff read names the change set, the head and the page");
+  const api = readFileSync(new URL("../src/api-changes.ts", import.meta.url), "utf8");
+  assert.match(api, /call<ChangeDiff>\("desktop_change_diff", \{ id, head, page \}\)/);
+  const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
+  assert.match(source, /load = loadChangeDiff \}/, "Detail reads pages from the engine unless a test hands it a reader");
+  assert.match(source, /void load\(set\.id, head, page\)/);
+  assert.match(source, /if \(result\.kind === "error" && result\.code === "changes_stale"\) \{\n\s+setStaleAt\(set\);\n\s+setReview\(movedOn\);\n\s+onMoved\(\);/);
+  assert.match(source, /const \[list, reread\] = useChangeList\(data\.id\);/);
+  assert.match(source, /onMoved=\{reread\}/);
 });

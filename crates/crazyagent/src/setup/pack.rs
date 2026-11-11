@@ -68,8 +68,9 @@ pub enum PackSource {
 }
 
 /// One pinned entry of the default pack as shipped in `pack.toml`: a stable id, its
-/// kind and group, the pinned source, the SPDX license, whether it starts on, and a
-/// short install hint for setup.
+/// kind and group, the pinned source, the SPDX license, whether it starts on, a short
+/// install hint for setup and, for an npm package the engine installs itself, the
+/// package tarball's `sha512-` integrity that npm must record before the engine uses it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackManifestEntry {
@@ -80,6 +81,8 @@ pub struct PackManifestEntry {
     pub license: String,
     pub on_by_default: bool,
     pub install: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<String>,
 }
 
 /// The whole default-pack manifest: its format version and every entry in setup order.
@@ -88,6 +91,16 @@ pub struct PackManifestEntry {
 pub struct PackManifest {
     pub version: u32,
     pub entries: Vec<PackManifestEntry>,
+}
+
+fn sha512_integrity(text: &str) -> bool {
+    text.strip_prefix("sha512-").is_some_and(|hash| {
+        hash.len() == 88
+            && hash.ends_with("==")
+            && hash[..86]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/')
+    })
 }
 
 fn error(code: &str) -> EngineError {
@@ -156,6 +169,13 @@ impl PackManifestEntry {
         }
         if self.on_by_default == (self.group == PackGroup::Optional) {
             return Err(error("pack_entry_default_invalid"));
+        }
+        if self
+            .integrity
+            .as_deref()
+            .is_some_and(|text| !sha512_integrity(text))
+        {
+            return Err(error("pack_entry_integrity_invalid"));
         }
         match &self.source {
             PackSource::Git { repo, commit, path } => {

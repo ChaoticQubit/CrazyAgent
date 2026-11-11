@@ -1,11 +1,12 @@
+use super::new_project_view::printable;
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::AccountSecret;
 use crate::plugins::{
-    ARG_BYTES_MAX, ARGS_MAX, COMMAND_BYTES_MAX, SECRET_NAME_BYTES_MAX, SECRETS_PER_SERVER_MAX,
-    SERVER_NAME_BYTES_MAX, Scope, ServerSpec, ServerStatus, ServerView, SkillView, URL_BYTES_MAX,
-    validate_secret_name, validate_server_name,
+    ARG_BYTES_MAX, ARGS_MAX, COMMAND_BYTES_MAX, HookView, SECRET_NAME_BYTES_MAX,
+    SECRETS_PER_SERVER_MAX, SERVER_NAME_BYTES_MAX, Scope, ServerSpec, ServerStatus, ServerView,
+    SkillView, URL_BYTES_MAX, validate_secret_name, validate_server_name,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
@@ -81,6 +82,12 @@ pub fn tilde(path: &str, ctx: &Ctx) -> String {
     }
 }
 
+/// Says that agents do not get a stored skill the engine refuses now, and why.
+/// Input: the refusal code. Output: the sentence.
+pub fn unused(code: &str) -> String {
+    format!("Agents don't get this skill. {}", plugin_plain(code))
+}
+
 /// A plain sentence for an engine problem code about skills and MCP servers.
 /// Input: the code. Output: the sentence.
 pub fn plugin_plain(code: &str) -> &'static str {
@@ -91,6 +98,9 @@ pub fn plugin_plain(code: &str) -> &'static str {
         "skill_frontmatter_missing" => "SKILL.md needs a name and a description at the top.",
         "skill_name_invalid" | "skill_description_invalid" => {
             "SKILL.md has a name or description CrazyAgent cannot use."
+        }
+        "skill_description_hidden" => {
+            "SKILL.md's description has characters you cannot see, so CrazyAgent will not use it."
         }
         "skill_name_taken" | "server_name_taken" => "Another one already uses this name.",
         "skill_too_large" | "skill_too_many_files" | "skill_too_deep" => {
@@ -131,6 +141,15 @@ pub fn plugin_plain(code: &str) -> &'static str {
         | "plugin_store_unsafe"
         | "skill_store_unavailable" => "The engine cannot save plugins right now.",
         other => crate::plugins::plain_problem(other).unwrap_or_else(|| plain(other)),
+    }
+}
+
+/// What a hook runs, as the list shows it: its event, the tools it matches and its command.
+/// Input: the hook. Output: one line for the list.
+pub fn hook_runs(hook: &HookView) -> String {
+    match &hook.matcher {
+        Some(matcher) => format!("{} {matcher}: {}", hook.event, hook.command),
+        None => format!("{}: {}", hook.event, hook.command),
     }
 }
 
@@ -204,6 +223,7 @@ pub fn words(line: &str) -> Result<Vec<String>, &'static str> {
 enum Picked {
     Skill(usize),
     Server(usize),
+    Hook(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -223,18 +243,21 @@ enum Open {
     Remove { remove_focused: bool },
 }
 
-/// Settings, Plugins and skills: skills and MCP servers for every project, with
-/// On or off, details, approval and remove.
-/// Input: keys and the engine's skill and server lists. Output: both lists.
+/// Settings, Plugins and skills: skills, MCP servers and hooks for every
+/// project, with On or off, details, approval and remove.
+/// Input: keys and the engine's skill, server and hook lists. Output: the lists.
 pub struct Plugins {
     skills: Vec<SkillView>,
     servers: Vec<ServerView>,
+    hooks: Vec<HookView>,
     load: Load<()>,
     waiting: bool,
+    hooks_waiting: bool,
     changing: Option<String>,
     selected: usize,
     skill_offset: usize,
     server_offset: usize,
+    hook_offset: usize,
     open: Open,
 }
 
@@ -251,12 +274,15 @@ impl Plugins {
         Self {
             skills: Vec::new(),
             servers: Vec::new(),
+            hooks: Vec::new(),
             load: Load::Idle,
             waiting: false,
+            hooks_waiting: false,
             changing: None,
             selected: 0,
             skill_offset: 0,
             server_offset: 0,
+            hook_offset: 0,
             open: Open::None,
         }
     }
@@ -273,6 +299,10 @@ impl Plugins {
     }
 
     fn reload(&mut self, ctx: &mut Ctx) {
+        if !self.hooks_waiting {
+            self.hooks_waiting = true;
+            send(ctx, SettingsJob::Hooks { project: None });
+        }
         if self.waiting {
             return;
         }
@@ -284,14 +314,17 @@ impl Plugins {
     }
 
     fn count(&self) -> usize {
-        self.skills.len() + self.servers.len()
+        self.skills.len() + self.servers.len() + self.hooks.len()
     }
 
     fn picked(&self) -> Option<Picked> {
+        let listed = self.skills.len() + self.servers.len();
         if self.selected < self.skills.len() {
             Some(Picked::Skill(self.selected))
-        } else if self.selected < self.count() {
+        } else if self.selected < listed {
             Some(Picked::Server(self.selected - self.skills.len()))
+        } else if self.selected < self.count() {
+            Some(Picked::Hook(self.selected - listed))
         } else {
             None
         }
@@ -320,7 +353,7 @@ impl Plugins {
                 actions.extend([Action::Edit, Action::Toggle, Action::Remove]);
                 actions
             }
-            Some(Picked::Skill(_)) | None => Vec::new(),
+            Some(Picked::Skill(_) | Picked::Hook(_)) | None => Vec::new(),
         }
     }
 
@@ -345,15 +378,32 @@ impl Plugins {
                 let skill = &self.skills[index];
                 let enabled = !skill.enabled;
                 let done = format!("{} is {}.", skill.name, if enabled { "on" } else { "off" });
-                let id = skill.id.clone();
-                self.change(PluginChange::SetSkill { id, enabled }, done, ctx);
+                let (id, version) = (skill.id.clone(), skill.version);
+                let change = PluginChange::SetSkill {
+                    id,
+                    enabled,
+                    version,
+                };
+                self.change(change, done, ctx);
             }
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let enabled = !server.enabled;
                 let done = format!("{} is {}.", server.name, if enabled { "on" } else { "off" });
-                let id = server.id.clone();
-                self.change(PluginChange::SetServer { id, enabled }, done, ctx);
+                let (id, version) = (server.id.clone(), server.version);
+                let change = PluginChange::SetServer {
+                    id,
+                    enabled,
+                    version,
+                };
+                self.change(change, done, ctx);
+            }
+            Some(Picked::Hook(index)) => {
+                let hook = &self.hooks[index];
+                let enabled = !hook.enabled;
+                let done = format!("{} is {}.", hook.name, if enabled { "on" } else { "off" });
+                let id = hook.id.clone();
+                self.change(PluginChange::SetHook { id, enabled }, done, ctx);
             }
             None => {}
         }
@@ -392,22 +442,24 @@ impl Plugins {
             Some(Picked::Skill(index)) => {
                 let skill = &self.skills[index];
                 let done = format!("Removed {}.", skill.name);
-                let id = skill.id.clone();
-                self.change(PluginChange::RemoveSkill { id }, done, ctx);
+                let (id, version) = (skill.id.clone(), skill.version);
+                self.change(PluginChange::RemoveSkill { id, version }, done, ctx);
             }
             Some(Picked::Server(index)) => {
                 let server = &self.servers[index];
                 let done = format!("Removed {} and its secrets.", server.name);
-                let id = server.id.clone();
-                self.change(PluginChange::RemoveServer { id }, done, ctx);
+                let (id, version) = (server.id.clone(), server.version);
+                self.change(PluginChange::RemoveServer { id, version }, done, ctx);
             }
-            None => {}
+            Some(Picked::Hook(_)) | None => {}
         }
     }
 
-    fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize) {
+    fn windows(&self, ctx: &Ctx, subtitle_rows: usize) -> (usize, usize, usize) {
         let content = (ctx.height as usize).saturating_sub(4 + 1);
-        let avail = content.saturating_sub(1 + subtitle_rows + 1 + 3).max(2);
+        let avail = content.saturating_sub(1 + subtitle_rows + 1 + 3 + 2).max(3);
+        let hooks = self.hooks.len().max(1).min((avail / 3).max(1));
+        let avail = avail.saturating_sub(hooks).max(2);
         let servers_wanted = self.servers.len().max(1);
         let skills = self
             .skills
@@ -415,7 +467,7 @@ impl Plugins {
             .max(1)
             .min(avail.saturating_sub(servers_wanted.min(avail / 2)).max(1));
         let servers = servers_wanted.min(avail.saturating_sub(skills).max(1));
-        (skills, servers)
+        (skills, servers, hooks)
     }
 
     fn section(
@@ -488,7 +540,7 @@ impl Plugins {
                 .map(|part| styled(part, Role::Muted, theme)),
         );
         lines.push(Line::default());
-        let (skill_window, server_window) = self.windows(ctx, subtitle_rows);
+        let (skill_window, server_window, hook_window) = self.windows(ctx, subtitle_rows);
         let picked = self.picked();
         let skill_pick = match picked {
             Some(Picked::Skill(index)) => Some(index),
@@ -498,6 +550,11 @@ impl Plugins {
             Some(Picked::Server(index)) => Some(index),
             _ => None,
         };
+        let hook_pick = match picked {
+            Some(Picked::Hook(index)) => Some(index),
+            _ => None,
+        };
+        self.hook_offset = Self::follow(hook_pick, self.hook_offset, hook_window, self.hooks.len());
         self.skill_offset = Self::follow(
             skill_pick,
             self.skill_offset,
@@ -545,9 +602,12 @@ impl Plugins {
                 .take(skill_window)
                 .map(|(index, skill)| {
                     let values = vec![
-                        styled(skill.name.clone(), Role::Accent, theme),
+                        styled(printable(skill.name.clone()), Role::Accent, theme),
                         Line::raw(if skill.enabled { "On" } else { "Off" }),
-                        Line::raw(tilde(&skill.source, ctx)),
+                        match &skill.refused {
+                            Some(code) => styled(unused(code), Role::Error, theme),
+                            None => Line::raw(printable(tilde(&skill.source, ctx))),
+                        },
                     ];
                     list_row(
                         cells(&widths, values, 2, glyphs),
@@ -620,6 +680,58 @@ impl Plugins {
                 ctx,
             ));
         }
+        lines.push(Line::default());
+        lines.push(heading("Hooks", self.hooks.len()));
+        if self.hooks.is_empty() {
+            lines.push(styled(
+                "No hooks yet. Press h to add a plugin folder's hooks.",
+                Role::Muted,
+                theme,
+            ));
+        } else {
+            let row_limit = if self.hooks.len() > hook_window {
+                limit - 1
+            } else {
+                limit
+            };
+            let widths = [
+                NAME_WIDTH,
+                SKILL_STATE_WIDTH,
+                row_limit
+                    .saturating_sub(2 + NAME_WIDTH + SKILL_STATE_WIDTH + 4)
+                    .max(1),
+            ];
+            let rows = self
+                .hooks
+                .iter()
+                .enumerate()
+                .skip(self.hook_offset)
+                .take(hook_window)
+                .map(|(index, hook)| {
+                    let values = vec![
+                        Line::raw(printable(hook.plugin.clone())),
+                        Line::raw(if hook.enabled { "On" } else { "Off" }),
+                        Line::raw(printable(hook_runs(hook))),
+                    ];
+                    list_row(
+                        cells(&widths, values, 2, glyphs),
+                        row_limit,
+                        hook_pick == Some(index),
+                        focused,
+                        theme,
+                        glyphs,
+                    )
+                })
+                .collect();
+            lines.extend(Self::section(
+                rows,
+                self.hooks.len(),
+                hook_window,
+                self.hook_offset,
+                limit,
+                ctx,
+            ));
+        }
         lines
     }
 
@@ -647,7 +759,7 @@ impl Plugins {
         let labels: Vec<&str> = actions.iter().map(|action| self.label(*action)).collect();
         let mut body = Vec::new();
         let title = match self.picked()? {
-            Picked::Skill(_) => return None,
+            Picked::Skill(_) | Picked::Hook(_) => return None,
             Picked::Server(index) => {
                 let server = &self.servers[index];
                 let asking = server.status == ServerStatus::WaitingForApproval;
@@ -795,9 +907,11 @@ impl Screen for Plugins {
         vec![
             hint("a", "Add skill"),
             hint("m", "Add MCP server"),
+            hint("h", "Add hooks"),
             hint("Space", "On or off"),
             hint("Enter", "Details"),
             hint("i", "Import"),
+            hint("l", "Tools"),
             hint("d", "Remove"),
             sections_hint(ctx.glyphs),
             hint("Esc", "Home"),
@@ -813,6 +927,19 @@ impl Screen for Plugins {
             Key::Char('a') => return Flow::Replace(Box::new(AddPlugin::skill())),
             Key::Char('i') => return Flow::Replace(Box::new(ImportSkillsPage::new())),
             Key::Char('m') => return Flow::Replace(Box::new(AddPlugin::server())),
+            Key::Char('h') => return Flow::Replace(Box::new(AddPlugin::hooks())),
+            Key::Char('l') => {
+                let at = match self.picked() {
+                    Some(Picked::Server(index)) => index + 1,
+                    _ => 0,
+                };
+                let servers = self
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.clone(), server.name.clone()))
+                    .collect();
+                return Flow::Replace(Box::new(ToolsPage::new(servers, at)));
+            }
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char(' ') if self.changing.is_none() => self.toggle(ctx),
             Key::Enter if self.changing.is_none() => match self.picked() {
@@ -824,9 +951,12 @@ impl Screen for Plugins {
                     )));
                 }
                 Some(Picked::Server(_)) => self.open = Open::Details { focus: 0 },
-                None => {}
+                Some(Picked::Hook(_)) | None => {}
             },
-            Key::Char('d') if self.picked().is_some() && self.changing.is_none() => {
+            Key::Char('d')
+                if matches!(self.picked(), Some(Picked::Skill(_) | Picked::Server(_)))
+                    && self.changing.is_none() =>
+            {
                 self.open = Open::Remove {
                     remove_focused: false,
                 }
@@ -862,6 +992,18 @@ impl Screen for Plugins {
                         plugin_plain(code),
                     )),
                     Err(_) => {}
+                }
+            }
+            Some(SettingsEvent::Hooks(None, result)) => {
+                self.hooks_waiting = false;
+                match result {
+                    Ok(hooks) => {
+                        self.hooks = hooks.clone();
+                        self.selected = self.selected.min(self.count().saturating_sub(1));
+                    }
+                    Err(code) => {
+                        ctx.say(Message::error("Could not read hooks.", plugin_plain(code)))
+                    }
                 }
             }
             Some(SettingsEvent::PluginChanged(result)) => {
@@ -903,6 +1045,7 @@ impl Screen for Plugins {
                         self.servers[index].name.clone(),
                         "Agents lose its tools in every project. Its saved secrets are deleted.",
                     ),
+                    Picked::Hook(_) => return None,
                 };
                 let room = usize::from(MODAL_WIDTH) - 4;
                 let mut body = vec![Line::raw(format!("Remove {name}?")), Line::default()];
@@ -944,7 +1087,7 @@ impl Screen for Plugins {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.waiting || self.changing.is_some()
+        self.waiting || self.hooks_waiting || self.changing.is_some()
     }
 
     fn place(&self) -> Option<Place> {
@@ -1000,6 +1143,7 @@ fn draw_form(
 enum Kind {
     Skill,
     Server,
+    Hooks,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1013,9 +1157,10 @@ enum Focus {
     Submit,
 }
 
-/// Add skill and Add MCP server: a skill folder, or a server's name, command
-/// or URL and hidden secrets, for every project or for one project. Secret
-/// values go to the engine and are never shown.
+/// Add skill, Add MCP server and Add hooks: a skill folder, a server's name,
+/// command or URL and hidden secrets, or a plugin folder whose hooks are added,
+/// for every project or for one project. Secret values go to the engine and are
+/// never shown.
 /// Input: keys. Output: one add request; the list it came from when it is done.
 pub struct AddPlugin {
     kind: Kind,
@@ -1042,6 +1187,16 @@ impl AddPlugin {
     /// Input: none. Output: the screen with the name field focused.
     pub fn server() -> Self {
         Self::new(Kind::Server)
+    }
+
+    /// The Add hooks form.
+    /// Input: none. Output: the screen with the plugin folder field focused.
+    pub fn hooks() -> Self {
+        let mut form = Self::new(Kind::Hooks);
+        form.folder = TextField::new("Plugin folder", FOLDER_CHARS_MAX)
+            .placeholder("~/Plugins/caveman")
+            .note("A Claude Code plugin folder with hooks. CrazyAgent keeps its own copy.");
+        form
     }
 
     /// The same form adding only for one project, returning to that project's
@@ -1082,7 +1237,7 @@ impl AddPlugin {
             secret_value: TextField::secret("", SECRET_VALUE_CHARS_MAX),
             secrets: Vec::new(),
             focus: match kind {
-                Kind::Skill => Focus::Folder,
+                Kind::Skill | Kind::Hooks => Focus::Folder,
                 Kind::Server => Focus::Name,
             },
             waiting: false,
@@ -1091,7 +1246,7 @@ impl AddPlugin {
 
     fn order(&self) -> &'static [Focus] {
         match self.kind {
-            Kind::Skill => &[Focus::Folder, Focus::Submit],
+            Kind::Skill | Kind::Hooks => &[Focus::Folder, Focus::Submit],
             Kind::Server => &[
                 Focus::Name,
                 Focus::Type,
@@ -1172,25 +1327,29 @@ impl AddPlugin {
             return;
         }
         match self.kind {
-            Kind::Skill => {
+            Kind::Skill | Kind::Hooks => {
                 let typed = self.folder.value().trim();
                 let folder = match (typed.strip_prefix("~/"), ctx.home.as_deref()) {
                     (Some(rest), Some(home)) => format!("{home}/{rest}"),
                     _ => typed.to_owned(),
                 };
                 if !folder.starts_with('/') {
-                    self.folder.error = Some(
-                        "Use the full path of the folder, such as ~/Skills/frontend-design.".into(),
-                    );
+                    self.folder.error = Some(if self.kind == Kind::Hooks {
+                        "Use the full path of the folder, such as ~/Plugins/caveman.".into()
+                    } else {
+                        "Use the full path of the folder, such as ~/Skills/frontend-design.".into()
+                    });
                     self.focus = Focus::Folder;
                     return;
                 }
                 self.waiting = true;
                 let scope = self.scope();
-                send(
-                    ctx,
-                    SettingsJob::Plugin(PluginChange::AddSkill { scope, folder }),
-                );
+                let change = if self.kind == Kind::Hooks {
+                    PluginChange::AddHooks { scope, folder }
+                } else {
+                    PluginChange::AddSkill { scope, folder }
+                };
+                send(ctx, SettingsJob::Plugin(change));
             }
             Kind::Server => {
                 let name = self.name.value().trim().to_owned();
@@ -1259,6 +1418,22 @@ impl AddPlugin {
                 lines.push(Line::default());
                 lines.push(buttons(
                     &["Add skill"],
+                    (self.focus == Focus::Submit).then_some(0),
+                    theme,
+                ));
+            }
+            Kind::Hooks => {
+                lines.push(styled("Add hooks", Role::Accent, theme));
+                lines.push(Line::raw(if self.project.is_some() {
+                    "Only this project's agents run them. Turn any hook off any time."
+                } else {
+                    "Every project's agents run them. Turn any hook off any time."
+                }));
+                lines.push(Line::default());
+                place(&mut lines, &self.folder, self.focus == Focus::Folder);
+                lines.push(Line::default());
+                lines.push(buttons(
+                    &["Add hooks"],
                     (self.focus == Focus::Submit).then_some(0),
                     theme,
                 ));
@@ -1355,6 +1530,7 @@ impl Screen for AddPlugin {
         let page = match self.kind {
             Kind::Skill => "Add skill",
             Kind::Server => "Add MCP server",
+            Kind::Hooks => "Add hooks",
         };
         crumbs_of(self.project.as_ref(), page)
     }
@@ -1365,6 +1541,7 @@ impl Screen for AddPlugin {
             (_, Focus::Type) => "Next",
             (Kind::Skill, _) => "Add skill",
             (Kind::Server, _) => "Add server",
+            (Kind::Hooks, _) => "Add hooks",
         };
         vec![
             hint("Tab", "Next field"),
@@ -1421,10 +1598,11 @@ impl Screen for AddPlugin {
             }
             Ok(None) => {
                 ctx.say(Message::success(
-                    if self.project.is_some() {
-                        "Skill added for this project."
-                    } else {
-                        "Skill added for every project."
+                    match (self.kind, self.project.is_some()) {
+                        (Kind::Hooks, true) => "Hooks added for this project.",
+                        (Kind::Hooks, false) => "Hooks added for every project.",
+                        (_, true) => "Skill added for this project.",
+                        (_, false) => "Skill added for every project.",
                     },
                     "",
                 ));
@@ -1433,7 +1611,7 @@ impl Screen for AddPlugin {
             Err(code) => {
                 let problem = plugin_plain(code);
                 match self.kind {
-                    Kind::Skill => self.folder.error = Some(problem.into()),
+                    Kind::Skill | Kind::Hooks => self.folder.error = Some(problem.into()),
                     Kind::Server => ctx.say(Message::error(
                         problem,
                         "Type any secrets again; they were not kept.",
@@ -1564,8 +1742,11 @@ impl EditServer {
                     "Changed {}. Approve it before agents can use it.",
                     self.server.name
                 ));
-                let id = self.server.id.clone();
-                send(ctx, SettingsJob::Plugin(PluginChange::Update { id, spec }));
+                let (id, version) = (self.server.id.clone(), self.server.version);
+                send(
+                    ctx,
+                    SettingsJob::Plugin(PluginChange::Update { id, spec, version }),
+                );
             }
         }
     }
@@ -1827,6 +2008,10 @@ impl Screen for EditServer {
                 ctx.say(Message::success(&done, ""));
             }
             Ok(None) => {}
+            Err(code) if code == crate::storage::versioned::STALE_CODE => {
+                ctx.say(Message::error(plugin_plain(code), ""));
+                return back_to(self.project.as_ref(), ctx);
+            }
             Err(code) => ctx.say(Message::error(plugin_plain(code), "")),
         }
         Flow::Handled
@@ -1884,8 +2069,10 @@ impl Screen for EditServer {
 
 mod import_page;
 mod skill_detail;
+mod tool_page;
 pub use import_page::ImportSkillsPage;
 pub use skill_detail::SkillDetailPage;
+pub use tool_page::ToolsPage;
 
 #[cfg(test)]
 mod tests;

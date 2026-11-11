@@ -1,4 +1,7 @@
+use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
 use super::{
+    KEPT_PORTS_MAX, LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF,
+    LINUX_OPEN_NETWORK_NEEDS_LANDLOCK, LINUX_RESOLVER_NEEDS_UDP, LinuxSockets, OWNER_PORTS,
     ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote, agent_env,
     clean_absolute, invalid,
 };
@@ -13,6 +16,8 @@ use seccompiler::{
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
+use std::ops::RangeInclusive;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -31,11 +36,43 @@ const READ: &str = "--read";
 const WRITE: &str = "--write";
 const CONNECT: &str = "--connect";
 const LIMIT_NETWORK: &str = "--limit-network";
+const OPEN_SOCKETS: &str = "--open-sockets";
+const KEEP_FREE: &str = "--keep-free";
 const PROBE: &str = "--probe";
+/// The most ports one open-network agent is kept off: the owner's fixed ports, the kept
+/// local model ports and every model proxy port.
+const KEEP_FREE_MAX: usize =
+    OWNER_PORTS.len() + KEPT_PORTS_MAX + (*PROXY_PORTS.end() - *PROXY_PORTS.start()) as usize + 1;
+/// The socket family of SMC, whose listener holds a TCP port and takes plain TCP clients.
+const AF_SMC: u64 = 43;
+const PICKED_PORTS_FILE: &str = "/proc/sys/net/ipv4/ip_local_port_range";
+const PICKED_PORTS_BYTES_MAX: u64 = 64;
+const PICKED_PORTS_UNREADABLE: &str = "CrazyAgent cannot read which ports this Linux hands out \
+     by itself (net.ipv4.ip_local_port_range), so it cannot keep the owner's ports free of an \
+     open-network agent";
+const _: () = {
+    let mut index = 0;
+    while index < OWNER_PORTS.len() {
+        assert!(OWNER_PORTS[index] < PICKED_PORTS_START);
+        index += 1;
+    }
+};
 const FS_ABI: ABI = ABI::V3;
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: i64 = 0x4000_0000;
 const NET_ABI: ABI = ABI::V4;
+const SOCKET_TYPE_MASK: u64 = 0xf;
+const DNS_PORT: u16 = 53;
+const DNS_OVER_TCP: &str = "use-vc";
+const LIMITED_NETWORK_OFF: &str = "the Linux limited-network sockets setting is 'Do not start \
+     limited-network agents'; choose 'TCP only' or 'TCP ports only' in Settings";
+const RESOLVER_NEEDS_UDP: &str = "this harness cannot look up names over TCP, which the Linux \
+     limited-network sockets setting 'TCP only' needs; choose 'TCP ports only' in Settings, which \
+     lets UDP and other sockets reach any host";
+const HARNESS_UNCHECKED: &str = "this harness starts through a script CrazyAgent cannot check for \
+     the Linux limited-network sockets setting 'TCP only'; start it from a program, or a script \
+     whose first line names a program by its full path, or choose 'TCP ports only' in Settings, \
+     which lets UDP and other sockets reach any host";
 const SCOPE_ABI: ABI = ABI::V6;
 
 const SYSTEM_READ_ROOTS: &[&str] = &[
@@ -83,14 +120,18 @@ const LANDLOCK_DEVICES: &[&str] = &[
 
 /// The rules the Landlock helper applies to itself before it starts the harness: read and
 /// execute beneath `read`, full access beneath `write`, and, when `limit_network` is set,
-/// outbound TCP only to the `connect` ports. The engine renders it as helper arguments and
-/// the helper parses it back.
+/// outbound TCP only to the `connect` ports, no TCP listener and no socket but TCP, unless
+/// `open_sockets` keeps the other socket kinds open ([`LinuxSockets::TcpPorts`]). An open
+/// network names `keep_free` instead: the agent binds any TCP port but those. The engine
+/// renders it as helper arguments and the helper parses it back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LandlockPolicy {
     pub read: Vec<PathBuf>,
     pub write: Vec<PathBuf>,
     pub connect: Vec<u16>,
     pub limit_network: bool,
+    pub open_sockets: bool,
+    pub keep_free: Vec<u16>,
 }
 
 impl LandlockPolicy {
@@ -108,8 +149,15 @@ impl LandlockPolicy {
         if self.limit_network {
             args.push(LIMIT_NETWORK.into());
         }
+        if self.open_sockets {
+            args.push(OPEN_SOCKETS.into());
+        }
         for port in &self.connect {
             args.push(CONNECT.into());
+            args.push(port.to_string().into());
+        }
+        for port in &self.keep_free {
+            args.push(KEEP_FREE.into());
             args.push(port.to_string().into());
         }
         args
@@ -122,6 +170,8 @@ impl LandlockPolicy {
 pub enum HelperRequest {
     Probe {
         limit_network: bool,
+        open_sockets: bool,
+        keep_free: bool,
     },
     Run {
         policy: LandlockPolicy,
@@ -133,8 +183,9 @@ pub enum HelperRequest {
 impl HelperRequest {
     /// Parses the helper arguments after its own name. Input: flags from
     /// [`LandlockPolicy::args`] then `--`, an absolute program and its arguments, or
-    /// `--probe` with an optional `--limit-network`. Output: the request, or the reason the
-    /// arguments are refused.
+    /// `--probe` with an optional `--limit-network` and `--open-sockets`, or with
+    /// `--keep-free` and a port. `--open-sockets` needs `--limit-network` and `--keep-free`
+    /// an open network. Output: the request, or the reason the arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
         let mut policy = LandlockPolicy::default();
         let mut probe = false;
@@ -143,10 +194,14 @@ impl HelperRequest {
             match flag.to_str() {
                 Some(PROBE) => probe = true,
                 Some(LIMIT_NETWORK) => policy.limit_network = true,
+                Some(OPEN_SOCKETS) => policy.open_sockets = true,
                 Some(READ) => policy.read.push(absolute(rest.next())?),
                 Some(WRITE) => policy.write.push(absolute(rest.next())?),
                 Some(CONNECT) => policy.connect.push(port(rest.next())?),
+                Some(KEEP_FREE) => policy.keep_free.push(port(rest.next())?),
                 Some("--") if !probe => {
+                    open_needs_limit(&policy)?;
+                    binds_fit(&policy)?;
                     let program = absolute(rest.next())?;
                     if policy.read.len() + policy.write.len() > HELPER_PATHS_MAX {
                         return Err("too many path grants".into());
@@ -160,13 +215,38 @@ impl HelperRequest {
                 _ => return Err(format!("unexpected argument {}", flag.to_string_lossy())),
             }
         }
-        if probe && policy.read.is_empty() && policy.write.is_empty() && policy.connect.is_empty() {
+        let bare = policy.read.is_empty() && policy.write.is_empty() && policy.connect.is_empty();
+        if probe && bare {
+            open_needs_limit(&policy)?;
+            binds_fit(&policy)?;
             return Ok(Self::Probe {
                 limit_network: policy.limit_network,
+                open_sockets: policy.open_sockets,
+                keep_free: !policy.keep_free.is_empty(),
             });
         }
         Err("missing the harness command after --".into())
     }
+}
+
+fn open_needs_limit(policy: &LandlockPolicy) -> Result<(), String> {
+    if policy.open_sockets && !policy.limit_network {
+        return Err(format!("{OPEN_SOCKETS} needs {LIMIT_NETWORK}"));
+    }
+    Ok(())
+}
+
+/// Refuses kept ports that do not fit the policy: beside a limited network, which binds
+/// nothing as it is, or more of them than [`KEEP_FREE_MAX`]. Input: the parsed policy.
+/// Output: Ok, or the reason.
+fn binds_fit(policy: &LandlockPolicy) -> Result<(), String> {
+    if policy.limit_network && !policy.keep_free.is_empty() {
+        return Err(format!("{KEEP_FREE} needs an open network"));
+    }
+    if policy.keep_free.len() > KEEP_FREE_MAX {
+        return Err("too many kept ports".into());
+    }
+    Ok(())
 }
 
 fn absolute(value: Option<OsString>) -> Result<PathBuf, String> {
@@ -186,10 +266,80 @@ fn port(value: Option<OsString>) -> Result<u16, String> {
         .ok_or_else(|| "port must be 1 to 65535".to_string())
 }
 
-fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
+/// The ports Linux hands out by itself, as `net.ipv4.ip_local_port_range` gives them; IPv6
+/// follows the same setting. Input: the file's text. Output: the lowest and the highest
+/// port, or none for text that is not two port numbers in rising order.
+fn picked_ports(text: &str) -> Option<RangeInclusive<u16>> {
+    let mut numbers = text.split_ascii_whitespace().map(str::parse::<u16>);
+    let low = numbers.next()?.ok()?;
+    let high = numbers.next()?.ok()?;
+    (numbers.next().is_none() && low <= high).then_some(low..=high)
+}
+
+/// Reads [`picked_ports`] for the network this process is in. No input. Output: the range,
+/// or none when the setting cannot be read.
+fn read_picked_ports() -> Option<RangeInclusive<u16>> {
+    let mut text = String::new();
+    fs::File::open(PICKED_PORTS_FILE)
+        .ok()?
+        .take(PICKED_PORTS_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    picked_ports(&text)
+}
+
+/// Refuses an open network whose kept ports Linux could hand to the agent by itself.
+/// Landlock checks only the port a bind names: a bind to port 0, or a listen on a socket
+/// that was never bound, gets a port Linux picks from its range with no check, and no rule
+/// can refuse a listen. So every kept port must lie outside that range, or no open-network
+/// agent starts. Inputs: the kept ports and the range, none when it cannot be read.
+/// Output: Ok, or the plain reason naming the first kept port inside the range.
+fn kept_outside_picked(kept: &[u16], picked: Option<&RangeInclusive<u16>>) -> Result<(), String> {
+    let Some(picked) = picked else {
+        return Err(PICKED_PORTS_UNREADABLE.into());
+    };
+    let Some(port) = kept.iter().find(|port| picked.contains(*port)) else {
+        return Ok(());
+    };
+    let (low, high) = (picked.start(), picked.end());
+    Err(format!(
+        "port {port} is kept free for the owner's apps, a local model or a model proxy, and this \
+         Linux hands out ports {low} to {high} by itself, so an agent with an open network \
+         could end up listening on it; move the local model to a port below {low}, or have an \
+         administrator move net.ipv4.ip_local_port_range away from port {port}"
+    ))
+}
+
+/// The TCP ports an open-network agent may bind. Landlock has no rule that refuses a port,
+/// so the helper allows every other one, port 0 among them, which asks Linux for a free
+/// port: [`kept_outside_picked`] holds that such a port is never a kept one. Input: the
+/// kept ports, none of them 0. Output: every port that is not kept, in rising order.
+fn bindable(keep_free: &[u16]) -> Vec<u16> {
+    assert!(!keep_free.contains(&0));
+    let mut kept = vec![false; usize::from(u16::MAX) + 1];
+    for port in keep_free {
+        kept[usize::from(*port)] = true;
+    }
+    let ports: Vec<u16> = (0..=u16::MAX)
+        .filter(|port| !kept[usize::from(*port)])
+        .collect();
+    assert!(ports.iter().all(|port| !keep_free.contains(port)));
+    assert!(ports.len() + keep_free.len() > usize::from(u16::MAX));
+    ports
+}
+
+/// Applies the policy's Landlock rules to this process. A limited network handles every
+/// network right and allows only its `connect` ports. An open network with kept ports
+/// handles TCP bind alone and, with `rules`, allows every [`bindable`] port; without `rules`,
+/// as in a probe, it only proves this kernel handles the right. Inputs: the policy, and
+/// whether to add the bind rules. Output: what the kernel enforced, or the ruleset error.
+fn enforce(policy: &LandlockPolicy, rules: bool) -> Result<RestrictionStatus, RulesetError> {
+    let keeps = !policy.limit_network && !policy.keep_free.is_empty();
     let mut ruleset = Ruleset::default().handle_access(AccessFs::from_all(FS_ABI))?;
     if policy.limit_network {
         ruleset = ruleset.handle_access(AccessNet::from_all(NET_ABI))?;
+    } else if keeps {
+        ruleset = ruleset.handle_access(AccessNet::BindTcp)?;
     }
     let mut created = ruleset
         .create()?
@@ -203,6 +353,11 @@ fn enforce(policy: &LandlockPolicy) -> Result<RestrictionStatus, RulesetError> {
         ))?;
     for port in &policy.connect {
         created = created.add_rule(NetPort::new(*port, AccessNet::ConnectTcp))?;
+    }
+    if keeps && rules {
+        for port in bindable(&policy.keep_free) {
+            created = created.add_rule(NetPort::new(port, AccessNet::BindTcp))?;
+        }
     }
     created.restrict_self()
 }
@@ -219,17 +374,25 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
 }
 
 /// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
-/// socket and a new io_uring ring both fail with `EACCES`. Landlock does not mediate a
+/// socket and a new io_uring ring both fail with `EACCES`, and with `tcp_only` so does every
+/// socket but TCP over IPv4 or IPv6 and routing netlink, since Landlock limits TCP only and
+/// a datagram, raw or other family socket reaches any host. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
-/// `socketpair(2)` stays allowed since it reaches no path. Output: the installed filter, or
-/// the reason this kernel or architecture cannot hold it.
-fn refuse_unix_sockets() -> Result<(), String> {
+/// `socketpair(2)` stays allowed since it reaches no path. With `plain_tcp` the filter also
+/// refuses the stream sockets that hold a TCP port without being plain TCP, which
+/// Landlock's bind rules do not see on every kernel. Inputs: whether only TCP sockets may open, and whether
+/// Landlock keeps TCP ports free of this agent. Output: the installed filter, or the reason
+/// this kernel or architecture cannot hold it.
+fn refuse_sockets(tcp_only: bool, plain_tcp: bool) -> Result<(), String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
-    rules.insert(libc::SYS_socket, unix_domain()?);
+    rules.insert(libc::SYS_socket, refused_sockets(tcp_only, plain_tcp)?);
     rules.insert(libc::SYS_io_uring_setup, Vec::new());
     #[cfg(target_arch = "x86_64")]
     {
-        rules.insert(X32_SYSCALL_BIT | libc::SYS_socket, unix_domain()?);
+        rules.insert(
+            X32_SYSCALL_BIT | libc::SYS_socket,
+            refused_sockets(tcp_only, plain_tcp)?,
+        );
         rules.insert(X32_SYSCALL_BIT | libc::SYS_io_uring_setup, Vec::new());
     }
     let arch: TargetArch = std::env::consts::ARCH
@@ -249,16 +412,67 @@ fn refuse_unix_sockets() -> Result<(), String> {
     seccompiler::apply_filter(&program).map_err(|error| format!("seccomp: {error}"))
 }
 
-fn unix_domain() -> Result<Vec<SeccompRule>, String> {
-    let family = SeccompCondition::new(
-        0,
-        SeccompCmpArgLen::Dword,
-        SeccompCmpOp::Eq,
-        libc::AF_UNIX as u64,
-    )
-    .map_err(|error| format!("seccomp: {error}"))?;
-    let rule = SeccompRule::new(vec![family]).map_err(|error| format!("seccomp: {error}"))?;
-    Ok(vec![rule])
+/// The `socket(2)` calls the filter refuses, any one rule refusing a call: a Unix-domain
+/// socket, and with `tcp_only` a family other than IPv4, IPv6 and netlink, a netlink socket
+/// other than routing (glibc's `getaddrinfo` reads interface addresses through it), an IPv4
+/// or IPv6 socket of a type other than stream, and one naming a protocol other than TCP.
+/// With `plain_tcp` and without `tcp_only`, which covers them already: an SMC socket, and an
+/// IPv4 or IPv6 stream socket naming a protocol other than TCP, such as Multipath TCP or
+/// SMC, whose listeners take plain TCP clients on a port no bind rule checked. Inputs: whether only TCP sockets may open, and whether Landlock keeps TCP ports
+/// free of this agent. Output: the rules, or the reason seccomp cannot express one.
+fn refused_sockets(tcp_only: bool, plain_tcp: bool) -> Result<Vec<SeccompRule>, String> {
+    let seccomp = |error: seccompiler::BackendError| format!("seccomp: {error}");
+    let rule = |conditions: &[(u8, SeccompCmpOp, u64)]| {
+        let conditions = conditions
+            .iter()
+            .map(|(arg, op, value)| {
+                SeccompCondition::new(*arg, SeccompCmpArgLen::Dword, op.clone(), *value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(seccomp)?;
+        SeccompRule::new(conditions).map_err(seccomp)
+    };
+    let mut rules = vec![rule(&[(0, SeccompCmpOp::Eq, libc::AF_UNIX as u64)])?];
+    if tcp_only {
+        rules.push(rule(&[
+            (0, SeccompCmpOp::Ne, libc::AF_INET as u64),
+            (0, SeccompCmpOp::Ne, libc::AF_INET6 as u64),
+            (0, SeccompCmpOp::Ne, libc::AF_NETLINK as u64),
+        ])?);
+        rules.push(rule(&[
+            (0, SeccompCmpOp::Eq, libc::AF_NETLINK as u64),
+            (2, SeccompCmpOp::Ne, libc::NETLINK_ROUTE as u64),
+        ])?);
+        for family in [libc::AF_INET as u64, libc::AF_INET6 as u64] {
+            for kind in (0..=SOCKET_TYPE_MASK).filter(|kind| *kind != libc::SOCK_STREAM as u64) {
+                rules.push(rule(&[
+                    (0, SeccompCmpOp::Eq, family),
+                    (1, SeccompCmpOp::MaskedEq(SOCKET_TYPE_MASK), kind),
+                ])?);
+            }
+            rules.push(rule(&[
+                (0, SeccompCmpOp::Eq, family),
+                (2, SeccompCmpOp::Ne, 0),
+                (2, SeccompCmpOp::Ne, libc::IPPROTO_TCP as u64),
+            ])?);
+        }
+    } else if plain_tcp {
+        rules.push(rule(&[(0, SeccompCmpOp::Eq, AF_SMC)])?);
+        for family in [libc::AF_INET as u64, libc::AF_INET6 as u64] {
+            rules.push(rule(&[
+                (0, SeccompCmpOp::Eq, family),
+                (
+                    1,
+                    SeccompCmpOp::MaskedEq(SOCKET_TYPE_MASK),
+                    libc::SOCK_STREAM as u64,
+                ),
+                (2, SeccompCmpOp::Ne, 0),
+                (2, SeccompCmpOp::Ne, libc::IPPROTO_TCP as u64),
+            ])?);
+        }
+    }
+    assert!(!rules.is_empty());
+    Ok(rules)
 }
 
 /// Tells whether the ruleset the helper applied holds the boundary. Inputs: the status
@@ -292,9 +506,9 @@ fn own_session() -> Result<(), String> {
 }
 
 /// Entry point of the `crazyagent-landlock` helper. Input: its arguments after its own name.
-/// A probe applies an empty ruleset, the scope layer and the Unix-socket filter to itself
-/// and exits 0 when this kernel holds them; a run applies the policy, the scope layer and
-/// the filter to itself, moves into a session of its own and then replaces itself with the
+/// A probe applies a ruleset with no rule, the scope layer and the socket filter to itself and
+/// exits 0 when this kernel holds them; a run applies the policy, the scope layer and the
+/// filter to itself, moves into a session of its own and then replaces itself with the
 /// harness. Output: the exit code, 2 for refused arguments, 3 when the kernel cannot hold
 /// the policy or the session, 126 when the harness cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
@@ -306,9 +520,15 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         }
     };
     let (policy, launch) = match request {
-        HelperRequest::Probe { limit_network } => (
+        HelperRequest::Probe {
+            limit_network,
+            open_sockets,
+            keep_free,
+        } => (
             LandlockPolicy {
                 limit_network,
+                open_sockets,
+                keep_free: OWNER_PORTS[..usize::from(keep_free)].to_vec(),
                 ..LandlockPolicy::default()
             },
             None,
@@ -319,7 +539,14 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             args,
         } => (policy, Some((program, args))),
     };
-    match enforce(&policy) {
+    let keeps = !policy.limit_network && !policy.keep_free.is_empty();
+    if keeps
+        && let Err(reason) = kept_outside_picked(&policy.keep_free, read_picked_ports().as_ref())
+    {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
+    match enforce(&policy, launch.is_some()) {
         Ok(status) if accepted(&status.ruleset, status.no_new_privs) => {}
         Ok(status) => {
             eprintln!(
@@ -337,7 +564,8 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         eprintln!("crazyagent-landlock: {error}");
         return ExitCode::from(3);
     }
-    if let Err(reason) = refuse_unix_sockets() {
+    let plain_tcp = policy.limit_network || !policy.keep_free.is_empty();
+    if let Err(reason) = refuse_sockets(policy.limit_network && !policy.open_sockets, plain_tcp) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
     }
@@ -368,8 +596,12 @@ pub enum LinuxBackend {
 /// backends: the project folder is read-only, its existing entries are writable except the
 /// protected paths, symbolic links and the git metadata git follows (`GIT_FOLLOWED`), and
 /// the agent's home, temp dir and worktrees are writable. A policy confined to one worktree
-/// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports;
-/// bubblewrap cannot, so a tools-off agent needs Landlock.
+/// is refused, since neither backend can hold its git denies. Landlock limits outbound TCP to the model endpoint ports
+/// and, under the owner's [`LinuxSockets`] setting, the socket filter refuses every other kind
+/// of network socket or no limited-network agent starts; bubblewrap cannot limit ports, so a
+/// tools-off agent needs Landlock. An open network needs Landlock as well: its bind rules keep
+/// the agent's listeners off the owner's fixed ports, the kept local model ports and the
+/// model proxy ports (`kept_free`), which bubblewrap cannot do.
 #[derive(Debug)]
 pub struct LinuxSandbox {
     sandbox: ProjectSandbox,
@@ -379,12 +611,12 @@ pub struct LinuxSandbox {
 impl LinuxSandbox {
     /// Binds the policy to one backend. Input: the project policy and the helper or bwrap
     /// executable as an absolute file. Output: the sandbox, `Invalid` for a bad executable,
-    /// or `Unavailable` for a network limit on bubblewrap or for a policy confined to one
-    /// worktree, whose git denies neither backend can hold.
+    /// or `Unavailable` for a network limit or an open network on bubblewrap, which keeps no
+    /// port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
+    /// worktree, whose git denies neither backend can hold, or for a limited network the
+    /// sockets setting starts no agent on.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
-        if sandbox.checkout.is_some() {
-            return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
-        }
+        admitted(&sandbox)?;
         let executable = match &backend {
             LinuxBackend::Landlock { helper } => helper,
             LinuxBackend::Bubblewrap { bwrap } => bwrap,
@@ -392,27 +624,43 @@ impl LinuxSandbox {
         if !clean_absolute(executable) || !executable.is_file() {
             return Err(invalid("sandbox executable must be an absolute file"));
         }
-        if matches!(backend, LinuxBackend::Bubblewrap { .. })
-            && matches!(sandbox.network(), SandboxNetwork::Only(_))
-        {
-            return Err(SandboxError::Unavailable(
-                "limiting an agent to its model endpoints needs Landlock network rules \
-                 (Linux 6.7 or newer); bubblewrap cannot limit ports"
-                    .into(),
-            ));
+        if matches!(backend, LinuxBackend::Bubblewrap { .. }) {
+            match sandbox.network() {
+                SandboxNetwork::Open => {
+                    return Err(SandboxError::Unavailable(
+                        LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into(),
+                    ));
+                }
+                SandboxNetwork::Only(remotes) if !remotes.is_empty() => {
+                    return Err(SandboxError::Unavailable(
+                        "limiting an agent's network to a few ports needs Landlock network \
+                         rules (Linux 6.7 or newer); bubblewrap cannot limit ports"
+                            .into(),
+                    ));
+                }
+                SandboxNetwork::Only(_) => {}
+            }
         }
         Ok(Self { sandbox, backend })
     }
 
     /// Picks the backend this machine holds: Landlock when the helper exists and its probe
-    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path. Input:
-    /// the project policy and the helper executable. Output: the sandbox, or `Unavailable`
-    /// when neither backend can hold it.
+    /// passes for the policy's network needs, otherwise bubblewrap from a fixed path. An open
+    /// network probes the TCP bind rules that keep ports free and never falls back to
+    /// bubblewrap. Input: the project policy and the helper executable. Output: the
+    /// sandbox, or `Unavailable` when neither backend can hold it.
     pub fn detect(sandbox: ProjectSandbox, helper: &Path) -> Result<Self, SandboxError> {
+        admitted(&sandbox)?;
         let mut probe = Command::new(helper);
         probe.arg(PROBE);
-        if matches!(sandbox.network(), SandboxNetwork::Only(_)) {
+        let open = matches!(sandbox.network(), SandboxNetwork::Open);
+        if open {
+            probe.arg(KEEP_FREE).arg(OWNER_PORTS[0].to_string());
+        } else {
             probe.arg(LIMIT_NETWORK);
+            if sandbox.linux_sockets() == LinuxSockets::TcpPorts {
+                probe.arg(OPEN_SOCKETS);
+            }
         }
         let held = clean_absolute(helper)
             && helper.is_file()
@@ -431,6 +679,11 @@ impl LinuxSandbox {
                     helper: helper.to_path_buf(),
                 },
             );
+        }
+        if open {
+            return Err(SandboxError::Unavailable(
+                LINUX_OPEN_NETWORK_NEEDS_LANDLOCK.into(),
+            ));
         }
         match BWRAP_PATHS
             .iter()
@@ -470,11 +723,44 @@ impl LinuxSandbox {
     }
 }
 
+/// Refuses a policy neither Linux backend starts: one confined to its own worktree, a
+/// limited network under [`LinuxSockets::Refuse`], or an open network with a kept port
+/// that Linux could hand to the agent by itself ([`kept_outside_picked`]). Input: the
+/// policy. Output: Ok, or the plain `Unavailable` reason.
+fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
+    if sandbox.checkout.is_some() || sandbox.clone.is_some() {
+        return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
+    }
+    if matches!(sandbox.network(), SandboxNetwork::Open) {
+        kept_outside_picked(&kept_free(sandbox), read_picked_ports().as_ref())
+            .map_err(SandboxError::Unavailable)?;
+    }
+    if matches!(sandbox.network(), SandboxNetwork::Only(_))
+        && sandbox.linux_sockets() == LinuxSockets::Refuse
+    {
+        return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
+    }
+    Ok(())
+}
+
 impl Sandbox for LinuxSandbox {
     fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
+        }
+        match self.sandbox.linux_refusal(program) {
+            None => {}
+            Some(LINUX_LIMITED_NETWORK_OFF) => {
+                return Err(SandboxError::Unavailable(LIMITED_NETWORK_OFF.into()));
+            }
+            Some(LINUX_HARNESS_UNCHECKED) => {
+                return Err(SandboxError::Unavailable(HARNESS_UNCHECKED.into()));
+            }
+            Some(code) => {
+                assert_eq!(code, LINUX_RESOLVER_NEEDS_UDP);
+                return Err(SandboxError::Unavailable(RESOLVER_NEEDS_UDP.into()));
+            }
         }
         let cwd = harness
             .get_current_dir()
@@ -492,21 +778,24 @@ impl Sandbox for LinuxSandbox {
         let mut command = match &self.backend {
             LinuxBackend::Landlock { helper } => {
                 let mut command = Command::new(helper);
-                command.args(landlock_policy(&grants, self.sandbox.network()).args());
+                command.args(landlock_policy(&grants, &self.sandbox).args());
                 command
             }
-            LinuxBackend::Bubblewrap { bwrap } => bwrap_command(bwrap, &grants, cwd),
+            LinuxBackend::Bubblewrap { bwrap } => {
+                bwrap_command(bwrap, &grants, cwd, self.sandbox.network())
+            }
         };
-        let env = agent_env(
-            &[
-                ("HOME", self.sandbox.agent_home().as_os_str()),
-                ("TMPDIR", self.sandbox.agent_tmp().as_os_str()),
-                ("PATH", OsStr::new(AGENT_PATH)),
-                ("LANG", OsStr::new("C")),
-                ("LC_ALL", OsStr::new("C")),
-            ],
-            harness.get_envs(),
-        )?;
+        let mut base = vec![
+            ("HOME", self.sandbox.agent_home().as_os_str()),
+            ("TMPDIR", self.sandbox.agent_tmp().as_os_str()),
+            ("PATH", OsStr::new(AGENT_PATH)),
+            ("LANG", OsStr::new("C")),
+            ("LC_ALL", OsStr::new("C")),
+        ];
+        if self.sandbox.resolves_over_tcp() {
+            base.push(("RES_OPTIONS", OsStr::new(DNS_OVER_TCP)));
+        }
+        let env = agent_env(&base, harness.get_envs())?;
         command
             .arg("--")
             .arg(program)
@@ -609,7 +898,7 @@ fn writable_children(
     Ok(())
 }
 
-fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy {
+fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy {
     let mut read: Vec<PathBuf> = SYSTEM_READ_ROOTS
         .iter()
         .chain(&["/proc"])
@@ -618,20 +907,52 @@ fn landlock_policy(grants: &Grants, network: &SandboxNetwork) -> LandlockPolicy 
     read.extend(grants.read.iter().cloned());
     let mut write: Vec<PathBuf> = LANDLOCK_DEVICES.iter().map(PathBuf::from).collect();
     write.extend(grants.write.iter().cloned());
-    let (limit_network, connect) = match network {
+    let (limit_network, mut connect) = match sandbox.network() {
         SandboxNetwork::Open => (false, Vec::new()),
         SandboxNetwork::Only(remotes) => (true, ports(remotes)),
+    };
+    if sandbox.resolves_over_tcp() {
+        connect.push(DNS_PORT);
+        connect.sort_unstable();
+        connect.dedup();
+    }
+    let open_sockets = limit_network && sandbox.linux_sockets() == LinuxSockets::TcpPorts;
+    let keep_free = if limit_network {
+        Vec::new()
+    } else {
+        kept_free(sandbox)
     };
     assert!(
         read.len() + write.len() <= HELPER_PATHS_MAX,
         "the helper accepts every policy the engine writes"
     );
+    assert_eq!(limit_network, keep_free.is_empty());
     LandlockPolicy {
         read,
         write,
         connect,
         limit_network,
+        open_sockets,
+        keep_free,
     }
+}
+
+/// The TCP ports an open-network agent never listens on: the owner's fixed ports, the kept
+/// local model ports and every model proxy port, as the macOS boundary keeps them. Input:
+/// the policy. Output: those ports, rising and each once.
+fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
+    let mut ports: Vec<u16> = OWNER_PORTS
+        .iter()
+        .chain(&sandbox.kept_ports)
+        .copied()
+        .chain(PROXY_PORTS)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    assert!(OWNER_PORTS.iter().all(|port| ports.contains(port)));
+    assert!(!ports.contains(&0));
+    assert!(ports.len() <= KEEP_FREE_MAX);
+    ports
 }
 
 fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
@@ -646,7 +967,7 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     ports
 }
 
-fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
+fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNetwork) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
@@ -662,6 +983,9 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
         "--tmpfs",
         "/tmp",
     ]);
+    if matches!(network, SandboxNetwork::Only(remotes) if remotes.is_empty()) {
+        command.arg("--unshare-net");
+    }
     for &root in SYSTEM_READ_ROOTS {
         command.args(["--ro-bind-try", root, root]);
     }
@@ -694,7 +1018,239 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
         };
-        let command = bwrap_command(Path::new(BWRAP_PATHS[0]), &grants, Path::new("/tmp"));
+        let command = bwrap_command(
+            Path::new(BWRAP_PATHS[0]),
+            &grants,
+            Path::new("/tmp"),
+            &SandboxNetwork::Open,
+        );
         assert!(command.get_args().any(|arg| arg == "--new-session"));
+    }
+
+    #[test]
+    fn bubblewrap_cuts_off_the_network_only_when_nothing_is_allowed() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let unshares = |network: SandboxNetwork| {
+            bwrap_command(
+                Path::new(BWRAP_PATHS[0]),
+                &grants,
+                Path::new("/tmp"),
+                &network,
+            )
+            .get_args()
+            .any(|arg| arg == "--unshare-net")
+        };
+        assert!(unshares(SandboxNetwork::Only(Vec::new())));
+        assert!(!unshares(SandboxNetwork::Open));
+    }
+
+    fn project(network: SandboxNetwork) -> (tempfile::TempDir, ProjectSandbox) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let folders = ["project", "home", "tmp"].map(|name| root.join(name));
+        for folder in &folders {
+            fs::create_dir(folder).unwrap();
+        }
+        let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network).unwrap();
+        (temp, sandbox)
+    }
+
+    #[test]
+    fn an_open_network_agent_binds_every_port_but_the_kept_ones() {
+        let keep_free = [1455, 11434, 41300];
+        let ports = bindable(&keep_free);
+        assert_eq!(ports.len(), usize::from(u16::MAX) + 1 - keep_free.len());
+        assert_eq!(ports[..3], [0, 1, 2]);
+        assert_eq!(ports.last(), Some(&u16::MAX));
+        for port in keep_free {
+            assert!(!ports.contains(&port), "{port}");
+            assert!(ports.contains(&(port - 1)), "{port}");
+            assert!(ports.contains(&(port + 1)), "{port}");
+        }
+        assert_eq!(bindable(&[]).len(), usize::from(u16::MAX) + 1);
+    }
+
+    #[test]
+    fn an_open_network_policy_keeps_the_owner_model_and_proxy_ports_free() {
+        let (_temp, sandbox) = project(SandboxNetwork::Open);
+        let sandbox = sandbox.keep_ports(&[8080, 11434, 1234]).unwrap();
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let policy = landlock_policy(&grants, &sandbox);
+        assert!(!policy.limit_network);
+        let mut expected = vec![1234, 1455, 8080, 11434];
+        expected.extend(PROXY_PORTS);
+        assert_eq!(policy.keep_free, expected);
+        assert_eq!(policy.keep_free.len(), 4 + 128);
+        assert_eq!(
+            HelperRequest::parse(
+                policy
+                    .args()
+                    .into_iter()
+                    .chain(["--".into(), "/bin/true".into()])
+                    .collect()
+            ),
+            Ok(HelperRequest::Run {
+                policy,
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_ports_linux_hands_out_are_read_as_two_rising_numbers_or_not_at_all() {
+        assert_eq!(picked_ports("32768\t60999\n"), Some(32768..=60999));
+        assert_eq!(picked_ports("1024 65535"), Some(1024..=65535));
+        assert_eq!(picked_ports("40000 40000"), Some(40000..=40000));
+        for text in [
+            "",
+            "32768",
+            "60999 32768",
+            "1 2 3",
+            "low high",
+            "32768 70000",
+            "-1 5",
+        ] {
+            assert_eq!(picked_ports(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn an_open_network_is_refused_when_linux_could_hand_out_a_kept_port() {
+        let (_temp, sandbox) = project(SandboxNetwork::Open);
+        let usual = PICKED_PORTS_START..=60_999;
+        let kept = kept_free(&sandbox.clone().keep_ports(&[8080, 18_080]).unwrap());
+        assert_eq!(
+            kept_outside_picked(&kept, Some(&usual)),
+            Ok(()),
+            "the owner ports and the whole proxy block lie below the ports Linux hands out"
+        );
+        let inside = kept_free(&sandbox.clone().keep_ports(&[40_000]).unwrap());
+        let reason = kept_outside_picked(&inside, Some(&usual)).unwrap_err();
+        assert!(reason.starts_with("port 40000 is kept free"), "{reason}");
+        assert!(reason.contains("ports 32768 to 60999"), "{reason}");
+        let moved = kept_outside_picked(&kept, Some(&(1024..=65_535))).unwrap_err();
+        assert!(moved.starts_with("port 1455 is kept free"), "{moved}");
+        assert_eq!(
+            kept_outside_picked(&kept, None),
+            Err(PICKED_PORTS_UNREADABLE.to_owned()),
+            "a range that cannot be read starts no open-network agent"
+        );
+        assert!(kept_outside_picked(&[], None).is_err());
+    }
+
+    #[test]
+    fn a_kept_port_inside_this_machines_picked_ports_refuses_the_open_network() {
+        let picked = read_picked_ports().expect("Linux test machines show their port range");
+        let inside = (*picked.start()).max(1);
+        let helper = std::env::current_exe().unwrap();
+        let landlock = || LinuxBackend::Landlock {
+            helper: helper.clone(),
+        };
+        let (_kept, sandbox) = project(SandboxNetwork::Open);
+        let sandbox = sandbox.keep_ports(&[inside]).unwrap();
+        match LinuxSandbox::new(sandbox, landlock()) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains(&format!("port {inside} ")), "{reason}");
+            }
+            other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
+        }
+        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        let closed = sandbox.keep_ports(&[inside]).unwrap();
+        assert!(
+            LinuxSandbox::new(closed, landlock()).is_ok(),
+            "a network that binds nothing is not held to the range"
+        );
+    }
+
+    #[test]
+    fn a_limited_network_policy_names_no_kept_port() {
+        let (_temp, sandbox) = project(SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let policy = landlock_policy(&grants, &sandbox);
+        assert!(policy.limit_network);
+        assert!(policy.keep_free.is_empty());
+        assert!(!policy.args().iter().any(|arg| arg == KEEP_FREE));
+    }
+
+    #[test]
+    fn the_helper_refuses_kept_ports_that_do_not_fit_its_policy() {
+        let parse = |args: &[&str]| HelperRequest::parse(args.iter().map(OsString::from).collect());
+        assert_eq!(
+            parse(&[PROBE, KEEP_FREE, "1455"]),
+            Ok(HelperRequest::Probe {
+                limit_network: false,
+                open_sockets: false,
+                keep_free: true,
+            })
+        );
+        assert_eq!(
+            parse(&[PROBE]),
+            Ok(HelperRequest::Probe {
+                limit_network: false,
+                open_sockets: false,
+                keep_free: false,
+            })
+        );
+        for refused in [
+            &[PROBE, LIMIT_NETWORK, KEEP_FREE, "1455"][..],
+            &[LIMIT_NETWORK, KEEP_FREE, "1455", "--", "/bin/true"],
+            &[KEEP_FREE, "0", "--", "/bin/true"],
+            &[KEEP_FREE, "--", "/bin/true"],
+            &[PROBE, KEEP_FREE],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        let many: Vec<OsString> = (1..=KEEP_FREE_MAX + 1)
+            .flat_map(|port| [OsString::from(KEEP_FREE), OsString::from(port.to_string())])
+            .chain(["--".into(), "/bin/true".into()])
+            .collect();
+        assert_eq!(
+            HelperRequest::parse(many),
+            Err("too many kept ports".into())
+        );
+    }
+
+    #[test]
+    fn bubblewrap_starts_no_open_network_agent_since_it_keeps_no_port_free() {
+        let bwrap = std::env::current_exe().unwrap();
+        let backend = || LinuxBackend::Bubblewrap {
+            bwrap: bwrap.clone(),
+        };
+        let (_open, sandbox) = project(SandboxNetwork::Open);
+        match LinuxSandbox::new(sandbox, backend()) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert_eq!(reason, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK);
+            }
+            other => panic!("an open network on bubblewrap must be refused: {other:?}"),
+        }
+        let (_closed, sandbox) = project(SandboxNetwork::Only(Vec::new()));
+        assert!(LinuxSandbox::new(sandbox, backend()).is_ok());
+        let (_absent, sandbox) = project(SandboxNetwork::Open);
+        match LinuxSandbox::detect(sandbox, Path::new("/nonexistent/crazyagent-landlock")) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert_eq!(reason, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK);
+            }
+            other => panic!("an open network without the helper must be refused: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guarded_tcp_ports_refuse_the_stream_sockets_that_are_not_plain_tcp() {
+        assert_eq!(refused_sockets(false, false).unwrap().len(), 1);
+        assert_eq!(refused_sockets(false, true).unwrap().len(), 4);
+        assert_eq!(
+            refused_sockets(true, true).unwrap().len(),
+            refused_sockets(true, false).unwrap().len()
+        );
     }
 }

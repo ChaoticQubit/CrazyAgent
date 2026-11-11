@@ -1,10 +1,15 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{AgentInstructions, OwnerClient, PROCESS_CODES};
+use crazyagent::engine::owner::{
+    Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile,
+    InstructionSettings, InstructionView, OwnerClient, PROCESS_CODES, ProcessText, Proposal,
+    SavedText, UncommittedImport,
+};
 use crazyagent::protocol::ProjectId;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-fn process_error(error: EngineError) -> BridgeError {
+pub(super) fn process_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }
@@ -37,11 +42,12 @@ impl NativeBridge {
     }
 
     /// Reads the owner's instructions, run without the bridge lock. Input: none for the
-    /// app-wide text, or the project id. Output: the text, empty when none is saved.
+    /// app-wide text, or the project id. Output: the text, empty when none is saved, and the
+    /// version a save names.
     pub fn process_text(
         &self,
         project_id: Option<String>,
-    ) -> Result<Unlocked<String>, BridgeError> {
+    ) -> Result<Unlocked<ProcessText>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
@@ -49,30 +55,109 @@ impl NativeBridge {
         }))
     }
 
-    /// Saves the owner's instructions whole, run without the bridge lock. Inputs: none for
-    /// the app-wide text, or the project id, and the text. Output: unit once stored.
+    /// Saves the owner's instructions whole, run without the bridge lock, when no other save
+    /// landed since they were read. Inputs: none for the app-wide text, or the project id;
+    /// the text; the version read; and only for "Keep mine" after a stale reply, the older
+    /// version the owner opened. Output: the saved version with, for app or project text,
+    /// what agents now get beside what a Claude master takes, or the stale reply with the
+    /// newer text.
     pub fn save_process_text(
         &self,
         project_id: Option<String>,
         text: String,
-    ) -> Result<Unlocked<()>, BridgeError> {
+        version: u64,
+        opened: Option<u64>,
+    ) -> Result<Unlocked<SavedText>, BridgeError> {
         let project = project(project_id)?;
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .save_process_text(project, text)
+                .save_process_text(project, text, version, opened)
                 .await
                 .map_err(process_error)
         }))
     }
 
-    /// Reads the owner's `~/.claude/CLAUDE.md` for a preview, run without the bridge lock.
-    /// Only the owner's Import click calls this. Output: the text.
-    pub fn import_global_instructions(&self) -> Result<Unlocked<String>, BridgeError> {
+    /// Reads one instructions file the owner picked in the native chooser, run without the
+    /// bridge lock; nothing is saved. Input: the absolute path the chooser returned. Output:
+    /// the text for the app-wide editor.
+    pub fn read_instruction_file(&self, path: String) -> Result<Unlocked<String>, BridgeError> {
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .import_global_instructions()
+                .read_instruction_file(PathBuf::from(path))
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Lists the project's own instruction files an import would copy into its instructions
+    /// and move aside, run without the bridge lock; nothing changes. Input: the project id.
+    /// Output: the files, each with why it would stay, empty when there is nothing to import.
+    pub fn instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<Vec<ImportFile>>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .instruction_import(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Copies the project's own instruction files into its instructions and moves them into
+    /// `.crazyagent/imported/`, run without the bridge lock, on the owner's confirm only.
+    /// Input: the project id. Output: the moved files.
+    pub fn confirm_instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<Vec<ImportFile>>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .confirm_instruction_import(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Lists the moved instruction files whose move the project folder has not committed,
+    /// with its checked-out branch, run without the bridge lock. Input: the project id.
+    /// Output: the paths, empty when no move waits for a commit, and the branch.
+    pub fn uncommitted_instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<UncommittedImport>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .uncommitted_instruction_import(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Commits the instruction import's move as one local commit holding only the moved
+    /// files, never pushed, run without the bridge lock, on the owner's click only.
+    /// Input: the project id. Output: the commit, its branch and the files it holds.
+    pub fn commit_instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<ImportCommit>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .commit_instruction_import(project)
                 .await
                 .map_err(process_error)
         }))
@@ -83,6 +168,18 @@ impl NativeBridge {
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client.default_process().await.map_err(process_error)
+        }))
+    }
+
+    /// Reads what a launch now gives every agent of the project, as the engine renders it
+    /// for the project's mode, run without the bridge lock. Input: the project id. Output:
+    /// the text, or the code of the part the engine cannot read.
+    pub fn given_text(&self, project_id: String) -> Result<Unlocked<String>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client.given_text(project).await.map_err(process_error)
         }))
     }
 
@@ -100,6 +197,111 @@ impl NativeBridge {
         Ok(Box::pin(async move {
             client
                 .agent_instructions(project, agent)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Reads one project's agent instruction settings, run without the bridge lock.
+    /// Input: the project id. Output: the settings, the defaults when never changed, with
+    /// their version.
+    pub fn instruction_settings(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<InstructionView>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .instruction_settings(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Reads one project's workflow adoption, run without the bridge lock. Input: the
+    /// project id. Output: its nudges option, the counted tools and each recent agent's
+    /// counts, flags and reminders.
+    pub fn adoption(&self, project_id: String) -> Result<Unlocked<Adoption>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client.adoption(project).await.map_err(process_error)
+        }))
+    }
+
+    /// Stores one project's agent instruction settings whole, run without the bridge lock.
+    /// Inputs: the project id, the settings and the version the page read, none when it
+    /// could not read the stored settings and replaces them. Output: the settings as stored
+    /// with their new version, or `stale_revision` when they changed since that version.
+    pub fn save_instruction_settings(
+        &self,
+        project_id: String,
+        settings: InstructionSettings,
+        version: Option<u64>,
+    ) -> Result<Unlocked<InstructionView>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .save_instruction_settings(project, settings, version)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Asks the engine for a cleaned version of the saved instructions, run without the
+    /// bridge lock; nothing is saved. Inputs: none for the app text, or the project id; and
+    /// the id of the pool the owner picked for this run, needed for the app text and never
+    /// taken for a project. Output: the proposal with the version it was made from.
+    pub fn propose_process(
+        &self,
+        project_id: Option<String>,
+        pool: Option<String>,
+    ) -> Result<Unlocked<Proposal>, BridgeError> {
+        let project = project(project_id)?;
+        let pool = pool
+            .map(|id| {
+                crazyagent::protocol::CredentialRef::new(id)
+                    .map_err(|_| failure("instructions_cleanup_pool_unknown"))
+            })
+            .transpose()?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .propose_process(project, pool)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Reads the app-wide instruction settings, run without the bridge lock. Output: the
+    /// settings, on when never stored.
+    pub fn app_instruction_settings(
+        &self,
+    ) -> Result<Unlocked<AppInstructionSettings>, BridgeError> {
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_instruction_settings()
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Stores the app-wide instruction settings whole, run without the bridge lock. Input:
+    /// the settings. Output: the settings as stored.
+    pub fn save_app_instruction_settings(
+        &self,
+        settings: AppInstructionSettings,
+    ) -> Result<Unlocked<AppInstructionSettings>, BridgeError> {
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .save_app_instruction_settings(settings)
                 .await
                 .map_err(process_error)
         }))

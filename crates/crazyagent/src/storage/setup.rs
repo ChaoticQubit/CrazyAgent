@@ -3,6 +3,7 @@ use super::*;
 use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{SetupAction, SetupStatus, progress};
+use crate::storage::versioned;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -25,6 +26,11 @@ pub(crate) enum Command {
         source: String,
         skills: Vec<PathBuf>,
         server: Option<(String, ServerSpec)>,
+    },
+    #[cfg(unix)]
+    SeedHooks {
+        id: String,
+        plugin: PathBuf,
     },
     Sweep,
 }
@@ -149,6 +155,30 @@ fn taken(problem: EngineError) -> EngineError {
     }
 }
 
+/// Writes the next default-pack version when an installed entry holds this plugin, so a
+/// change made on the plugin screen refuses a pack screen opened before it. Inputs: the
+/// transaction and the plugin id. Output: Ok, or a store failure.
+pub(super) fn plugin_changed(tx: &Transaction<'_>, id: &str) -> Result<(), EngineError> {
+    let manifest = manifest()?;
+    for entry in &manifest.entries {
+        let record = match load_pack(tx, &entry.id)? {
+            Some(record) => Some(record),
+            None => present(tx, entry)?,
+        };
+        let held = record.is_some_and(|record| {
+            record.skills.iter().any(|skill| skill == id) || record.server.as_deref() == Some(id)
+        });
+        if held {
+            let item = versioned::default_pack_item();
+            let current = versioned::current(tx, &item)?.version;
+            let written = versioned::owner_write(tx, &item, current)?;
+            assert_eq!(written.ok(), Some(current + 1));
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 fn missing(problem: &EngineError) -> bool {
     matches!(problem.0.as_str(), "skill_not_found" | "server_not_found")
 }
@@ -164,7 +194,11 @@ fn remove_items(
     moved: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), EngineError> {
     for id in &record.skills {
-        match plugins::run(tx, root, plugins::Command::RemoveSkill { id: id.clone() }) {
+        let command = plugins::Command::RemoveSkill {
+            id: id.clone(),
+            version: plugins::plugin_version(tx, id)?,
+        };
+        match plugins::run(tx, root, command) {
             Ok(plugins::ResultValue::SkillRemoved(folder)) => {
                 if std::fs::symlink_metadata(&folder).is_ok() {
                     let parent = folder
@@ -182,7 +216,11 @@ fn remove_items(
         }
     }
     if let Some(id) = &record.server {
-        match plugins::run(tx, root, plugins::Command::RemoveServer { id: id.clone() }) {
+        let command = plugins::Command::RemoveServer {
+            id: id.clone(),
+            version: plugins::plugin_version(tx, id)?,
+        };
+        match plugins::run(tx, root, command) {
             Ok(plugins::ResultValue::Removed(references)) => {
                 for reference in references {
                     tx.execute(
@@ -208,10 +246,85 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
     }
 }
 
+/// What a new pin keeps from the pin it replaces: whether the entry is on, each skill's
+/// on/off state and per-project switches by skill name, and the server when the new pin
+/// names the same one.
+#[cfg(unix)]
+struct Kept {
+    enabled: bool,
+    server: Option<String>,
+    skills: Vec<(String, bool, Vec<String>)>,
+}
+
+/// Reads what the owner set on an older pin, then removes its skills, and its server
+/// unless the new pin names the same server, which is then reused so its secrets,
+/// switches and on/off state stay. Inputs: the transaction, engine root, old row, new
+/// server and the moved-aside folders. Output: what the new pin keeps.
+#[cfg(unix)]
+fn carry(
+    tx: &Transaction<'_>,
+    root: &Path,
+    old: PackRecord,
+    server: Option<&(String, ServerSpec)>,
+    moved: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<Kept, EngineError> {
+    let mut skills = Vec::new();
+    for id in &old.skills {
+        let held: Option<(String, String)> = tx
+            .query_row(
+                "SELECT name, body FROM plugin_items WHERE id=?1 AND kind='skill'",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((name, body)) = held else {
+            continue;
+        };
+        let enabled = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| body.get("enabled")?.as_bool())
+            .ok_or_else(|| error("setup_record_invalid"))?;
+        let mut statement = tx
+            .prepare("SELECT project FROM plugin_switches WHERE item=?1")
+            .map_err(error)?;
+        let projects = statement
+            .query_map([id], |row| row.get::<_, String>(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        skills.push((name, enabled, projects));
+    }
+    let reused = match (&old.server, server) {
+        (Some(id), Some((name, _))) => tx
+            .query_row(
+                "SELECT name FROM plugin_items WHERE id=?1 AND kind='server'",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .filter(|held| held == name)
+            .map(|_| id.clone()),
+        _ => None,
+    };
+    let mut dropped = old;
+    if reused.is_some() {
+        dropped.server = None;
+    }
+    remove_items(tx, root, &dropped, moved)?;
+    Ok(Kept {
+        enabled: dropped.enabled,
+        server: reused,
+        skills,
+    })
+}
+
 /// Installs one entry's pinned skills and server, replacing an older pin the pack itself
-/// installed. An item the owner holds under the entry's name is adopted as present and
-/// never replaced or removed. Inputs: the transaction, engine root, new row, skill folders
-/// and server, plus the lists of added and moved-aside folders. Output: any failure.
+/// installed while keeping what the owner set on it (see `carry`). An item the owner holds
+/// under the entry's name is adopted as present and never replaced or removed. Inputs: the
+/// transaction, engine root, new row, skill folders and server, plus the lists of added
+/// and moved-aside folders. Output: any failure.
 #[cfg(unix)]
 fn install(
     tx: &Transaction<'_>,
@@ -222,19 +335,22 @@ fn install(
     added: &mut Vec<PathBuf>,
     moved: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), EngineError> {
+    let mut kept = None;
     if let Some(old) = load_pack(tx, &record.id)? {
         if old.source == record.source {
             return Ok(());
         }
         if old.source != PRESENT {
-            remove_items(tx, root, &old, moved)?;
+            kept = Some(carry(tx, root, old, server.as_ref(), moved)?);
         }
     }
+    let reused = kept.as_ref().and_then(|kept| kept.server.clone());
     if let Some(entry) = manifest()?
         .entries
         .iter()
         .find(|entry| entry.id == record.id)
         && let Some(owned) = present(tx, entry)?
+        && (reused.is_none() || owned.server != reused)
     {
         return save_pack(tx, &owned);
     }
@@ -258,34 +374,68 @@ fn install(
         };
         added.push(PathBuf::from(&change.view.folder));
         record.skills.push(change.view.id.clone());
+        let carried = kept
+            .iter()
+            .flat_map(|kept| &kept.skills)
+            .find(|(name, ..)| *name == change.view.name);
+        if let Some((_, enabled, projects)) = carried {
+            if !enabled {
+                plugins::run(
+                    tx,
+                    root,
+                    plugins::Command::SetSkill {
+                        id: change.view.id.clone(),
+                        enabled: false,
+                        version: plugins::plugin_version(tx, &change.view.id)?,
+                    },
+                )?;
+            }
+            for project in projects {
+                tx.execute(
+                    "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
+                    [project, &change.view.id],
+                )
+                .map_err(error)?;
+            }
+        }
     }
     if let Some((name, spec)) = server {
-        let change = plugins::run(
-            tx,
-            root,
-            plugins::Command::AddServer {
+        let command = match &reused {
+            Some(id) => plugins::Command::UpdateServer {
+                id: id.clone(),
+                spec: spec.clone(),
+                version: plugins::plugin_version(tx, id)?,
+            },
+            None => plugins::Command::AddServer {
                 scope: Scope::Global,
                 name,
                 spec: spec.clone(),
+                secrets: Vec::new(),
             },
-        )
-        .map_err(taken)?;
+        };
+        let change = plugins::run(tx, root, command).map_err(taken)?;
         let plugins::ResultValue::Server(view) = change else {
             return Err(error("setup_record_invalid"));
         };
-        plugins::run(
-            tx,
-            root,
-            plugins::Command::Approve {
-                id: view.id.clone(),
-                spec,
-            },
-        )?;
+        if view.enabled {
+            plugins::run(
+                tx,
+                root,
+                plugins::Command::Approve {
+                    id: view.id.clone(),
+                    spec,
+                },
+            )?;
+        }
         record.server = Some(view.id.clone());
     }
-    assert!(record.enabled);
     assert!(!record.skills.is_empty() || record.server.is_some());
-    save_pack(tx, &record)
+    if kept.is_none_or(|kept| kept.enabled) {
+        assert!(record.enabled);
+        save_pack(tx, &record)
+    } else {
+        set(tx, root, &mut record, false)
+    }
 }
 
 fn set(
@@ -298,6 +448,7 @@ fn set(
         let command = plugins::Command::SetSkill {
             id: skill.clone(),
             enabled: on,
+            version: plugins::plugin_version(tx, skill)?,
         };
         match plugins::run(tx, root, command) {
             Ok(_) => {}
@@ -309,6 +460,7 @@ fn set(
         let command = plugins::Command::SetServer {
             id: server.clone(),
             enabled: on,
+            version: plugins::plugin_version(tx, server)?,
         };
         match plugins::run(tx, root, command) {
             Ok(_) => {}
@@ -349,6 +501,36 @@ fn installed(
         }
     }
     Ok(rows)
+}
+
+/// Takes an installed entry for an owner switch or removal once the pack is still at the
+/// version the screen showed, writing the next pack version before the entry changes.
+/// Inputs: the transaction, the entry and the version shown. Output: the entry's record,
+/// or none when the entry is not installed or the pack moved on (see `refusal`).
+fn owned(
+    tx: &Transaction<'_>,
+    entry: &PackManifestEntry,
+    version: u64,
+) -> Result<Option<PackRecord>, EngineError> {
+    if entry_switch(tx, &entry.id)?.is_none() {
+        return Ok(None);
+    }
+    let Ok(next) = versioned::owner_write(tx, &versioned::default_pack_item(), version)? else {
+        return Ok(None);
+    };
+    assert_eq!(next, version + 1);
+    let record = adopted(tx, entry)?;
+    assert!(record.is_some(), "an installed pack entry is adopted");
+    Ok(record)
+}
+
+/// Names why `owned` gave no record: `pack_not_installed` before `stale_revision`.
+/// Inputs: the transaction and the entry. Output: the refusal code.
+fn refusal(tx: &Transaction<'_>, entry: &PackManifestEntry) -> Result<&'static str, EngineError> {
+    Ok(match entry_switch(tx, &entry.id)? {
+        None => "pack_not_installed",
+        Some(_) => versioned::STALE_CODE,
+    })
 }
 
 fn manifest() -> Result<PackManifest, EngineError> {
@@ -395,22 +577,22 @@ pub(crate) fn apply_owner(
             progress::with(root, |state| state.graph_tool = graph_tool);
             Ok(Outcome::Applied)
         }
-        SetupAction::Set { id, on } => {
+        SetupAction::Set { id, on, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
             };
-            let Some(mut record) = adopted(tx, known)? else {
-                return Ok(rejected("pack_not_installed"));
+            let Some(mut record) = owned(tx, known, *version)? else {
+                return Ok(rejected(refusal(tx, known)?));
             };
             set(tx, root, &mut record, *on)?;
             Ok(Outcome::Applied)
         }
-        SetupAction::Remove { id } => {
+        SetupAction::Remove { id, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));
             };
-            let Some(record) = adopted(tx, known)? else {
-                return Ok(rejected("pack_not_installed"));
+            let Some(record) = owned(tx, known, *version)? else {
+                return Ok(rejected(refusal(tx, known)?));
             };
             let mut moved = Vec::new();
             if let Err(problem) = remove_items(tx, root, &record, &mut moved) {
@@ -435,11 +617,15 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         dependencies: progress::dependency_rows(&progress),
         pack: progress::pack_rows(&manifest, &installed, &progress),
         running: progress.running,
+        notes: Vec::new(),
+        version: versioned::current(tx, &versioned::default_pack_item())?.version,
     })
 }
 
 fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     let folder = root.join(plugins::STORE).join(SKILLS[0]).join(SKILLS[1]);
     if let Ok(entries) = std::fs::read_dir(&folder) {
         for entry in entries.flatten() {
@@ -490,25 +676,96 @@ fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
     tx.commit().map_err(error)
 }
 
+/// Adds the hooks an installed, switched-on entry's plugin folder defines as global hooks
+/// that follow the entry's MCP server, or else its first skill (the owner's own item when
+/// the entry adopted one), unless hooks already follow that item or already exist under
+/// those names. An entry not installed or switched off gets none. Inputs: the engine
+/// connection, the engine root, the entry id and its plugin folder. Output: nothing, or the
+/// plain reason, with the hooks' folder copy removed when they did not commit.
+#[cfg(unix)]
+fn seed_hooks(
+    connection: &mut Connection,
+    root: &Path,
+    id: &str,
+    plugin: &Path,
+) -> Result<(), EngineError> {
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let Some(record) = load_pack(&tx, id)? else {
+        return Ok(());
+    };
+    if !record.enabled {
+        return Ok(());
+    }
+    let Some(follows) = record
+        .server
+        .clone()
+        .or_else(|| record.skills.first().cloned())
+    else {
+        return Ok(());
+    };
+    if plugins::hooks_follow(&tx, &follows)? {
+        return Ok(());
+    }
+    let source = plugin
+        .to_str()
+        .ok_or_else(|| error("pack_no_skills"))?
+        .to_owned();
+    let command = plugins::Command::AddHooks {
+        scope: Scope::Global,
+        source,
+        follows: Some(follows),
+    };
+    match plugins::run(&tx, root, command) {
+        Ok(plugins::ResultValue::HooksAdded(_, copy)) => tx.commit().map_err(|problem| {
+            let _ = std::fs::remove_dir_all(&copy);
+            error(problem)
+        }),
+        Ok(_) => Err(error("setup_record_invalid")),
+        Err(problem)
+            if matches!(
+                problem.0.as_str(),
+                "hooks_none_found" | "hooks_already_added"
+            ) =>
+        {
+            Ok(())
+        }
+        Err(problem) => Err(problem),
+    }
+}
+
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
-/// MCP server in one transaction, or sweep folders and secrets that removals left. Copied
-/// skill folders are removed again and moved ones put back when an install does not
-/// commit; replaced ones are deleted after it commits. Inputs: the engine connection, the
-/// engine root and the job. Output: nothing, or the plain reason.
+/// MCP server in one transaction, add the hooks of its plugin folder and keep why they were
+/// refused for the entry's setup row, or sweep folders and secrets that removals left.
+/// Copied skill folders are removed again and moved ones put back when an install does not
+/// commit; replaced ones are deleted after it commits.
+/// Inputs: the engine connection, the engine root and the job. Output: nothing, or the
+/// plain reason.
 #[cfg(unix)]
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,
     command: Command,
 ) -> Result<(), EngineError> {
-    let Command::Install {
-        id,
-        source,
-        skills,
-        server,
-    } = command
-    else {
-        return sweep(connection, root);
+    let (id, source, skills, server) = match command {
+        Command::Install {
+            id,
+            source,
+            skills,
+            server,
+        } => (id, source, skills, server),
+        Command::SeedHooks { id, plugin } => {
+            let seeded = seed_hooks(connection, root, &id, &plugin);
+            progress::with(root, |state| match &seeded {
+                Ok(()) => state.hooks.remove(&id),
+                Err(problem) => state
+                    .hooks
+                    .insert(id.clone(), crate::setup::pack_reason(&problem.0)),
+            });
+            return seeded;
+        }
+        Command::Sweep => return sweep(connection, root),
     };
     if source.is_empty() || source == PRESENT || (skills.is_empty() && server.is_none()) {
         return Err(error("pack_unknown"));
@@ -522,7 +779,9 @@ pub(crate) fn execute(
     };
     let mut added = Vec::new();
     let mut moved = Vec::new();
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     let outcome = install(&tx, root, record, skills, server, &mut added, &mut moved)
         .and_then(|()| tx.commit().map_err(error));
     match outcome {

@@ -75,14 +75,48 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 }
 
 /// Accepts one connection on a Tokio Unix listener, taking the gate only for
-/// each accept attempt, never while waiting.
-/// Input: the listener. Output: the stream and its peer address.
+/// each accept attempt, never while waiting. A failure a later accept outlives,
+/// such as an aborted peer or a full descriptor table, is logged and retried
+/// after a pause that doubles up to a second, so it never ends a server.
+/// Input: the listener. Output: the stream and its peer address, or a lasting error.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub async fn accept_unix(
     listener: &tokio::net::UnixListener,
 ) -> io::Result<(tokio::net::UnixStream, tokio::net::unix::SocketAddr)> {
-    std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await
+    let mut pause = ACCEPT_PAUSE_MIN;
+    loop {
+        match std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await {
+            Err(error) if passing(&error) => {
+                eprintln!("accept_retried: {error}");
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(ACCEPT_PAUSE_MAX);
+            }
+            accepted => return accepted,
+        }
+    }
+}
+
+#[cfg(unix)]
+const ACCEPT_PAUSE_MIN: std::time::Duration = std::time::Duration::from_millis(10);
+#[cfg(unix)]
+const ACCEPT_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Tells whether an accept failure belongs to one connection or to a resource
+/// that frees up, so a later accept can succeed on the same listener.
+/// Input: the accept error. Output: true to retry, false for a lasting failure.
+#[cfg(unix)]
+fn passing(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+    ) || matches!(
+        Errno::from_io_error(error),
+        Some(Errno::MFILE | Errno::NFILE | Errno::NOBUFS | Errno::NOMEM | Errno::PROTO)
+    )
 }
 
 /// Accepts on the platform's stand-in listener where there are no Unix sockets;
@@ -192,6 +226,17 @@ pub fn connect_unix_std(
     guarded(|| std::os::unix::net::UnixStream::connect(&address))
 }
 
+/// Accepts one waiting connection on a non-blocking Unix listener inside the gate, never
+/// waiting for one. Input: the listener. Output: the stream, or `WouldBlock` when none
+/// waits, or the accept failure.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn accept_unix_std(
+    listener: &std::os::unix::net::UnixListener,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    guarded(|| listener.accept()).map(|(stream, _)| stream)
+}
+
 /// Binds a blocking Unix listener inside the gate, through the short address of a path
 /// too long for a socket address. Input: the socket path. Output: the listener.
 #[cfg(unix)]
@@ -230,6 +275,49 @@ pub fn unix_pair_std() -> io::Result<(
 #[allow(clippy::disallowed_methods)]
 pub fn bind_tcp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::TcpListener> {
     guarded(|| std::net::TcpListener::bind(address))
+}
+
+/// Binds a blocking TCP listener like [`bind_tcp_std`] but without `SO_REUSEADDR`, so the
+/// bind fails with `AddrInUse` while any socket holds the port, including a wildcard
+/// listener of this user that `std`'s bind would sit beside, and a closed connection
+/// still in TIME_WAIT. It queues up to the system's `SOMAXCONN` connections, the largest
+/// queue nix takes (128 on macOS). Input: the address. Output: the close-on-exec listener.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    use nix::sys::socket::{
+        AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, SockaddrIn6, bind, listen, socket,
+    };
+    use std::os::fd::AsRawFd;
+    let family = match address {
+        std::net::SocketAddr::V4(_) => AddressFamily::Inet,
+        std::net::SocketAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let socket = guarded(|| -> io::Result<std::os::fd::OwnedFd> {
+        let socket = socket(family, SockType::Stream, SockFlag::empty(), None)?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        Ok(socket)
+    })?;
+    match address {
+        std::net::SocketAddr::V4(v4) => bind(socket.as_raw_fd(), &SockaddrIn::from(v4))?,
+        std::net::SocketAddr::V6(v6) => bind(socket.as_raw_fd(), &SockaddrIn6::from(v6))?,
+    }
+    listen(&socket, Backlog::MAXCONN)?;
+    Ok(std::net::TcpListener::from(socket))
+}
+
+/// The [`bind_tcp_std_exclusive`] of a system whose `std` bind sets no `SO_REUSEADDR`.
+/// Input: the address. Output: the listener.
+#[cfg(not(unix))]
+pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::net::TcpListener> {
+    bind_tcp_std(address)
+}
+
+/// Binds a blocking UDP socket inside the gate.
+/// Input: the address. Output: the socket.
+#[allow(clippy::disallowed_methods)]
+pub fn bind_udp_std(address: impl std::net::ToSocketAddrs) -> io::Result<std::net::UdpSocket> {
+    guarded(|| std::net::UdpSocket::bind(address))
 }
 
 /// Connects a blocking TCP stream inside the gate, so the gate is held for the

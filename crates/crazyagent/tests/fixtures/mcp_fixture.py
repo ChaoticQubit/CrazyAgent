@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -24,6 +25,17 @@ def reached(path, write):
         return False
 
 
+def listened(port):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", port))
+            server.listen(1)
+        return True
+    except OSError:
+        return False
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "normal"
     first = "echo"
@@ -39,6 +51,8 @@ def main():
             except OSError:
                 pass
         reached(os.path.join(home, "planted"), True)
+    if mode == "listen":
+        first = "listened" if listened(int(sys.argv[2])) else "refused"
     if mode == "exit":
         sys.exit(3)
     if mode == "hang":
@@ -61,6 +75,12 @@ def main():
             })
         elif method == "tools/list":
             cursor = message.get("params", {}).get("cursor")
+            if mode == "deaf":
+                reply(message, {"tools": [{"name": first, "inputSchema": {"type": "object"}}], "nextCursor": "c" * (900 * 1024)})
+                with open(sys.argv[2], "w") as handle:
+                    handle.write(str(os.getpid()))
+                time.sleep(30)
+                return
             if cursor is None:
                 reply(message, {"tools": [{"name": first, "inputSchema": {"type": "object"}}], "nextCursor": "page-2"})
             else:

@@ -1,12 +1,13 @@
 use super::new_project_input::char_cells;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, Notice, TABS, window};
-use super::settings_plugins::{plugin_plain, short_runs};
-use crate::plugins::{Scope, ServerStatus, ServerView, SkillView};
+use super::settings_plugins::{hook_runs, plugin_plain, short_runs};
+use crate::plugins::{HookView, Scope, ServerStatus, ServerView, SkillView};
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
+use std::cell::{Cell, RefCell};
 
 const WIDE: usize = 96;
 const NAME_WIDTH: usize = 22;
@@ -17,8 +18,8 @@ const PANEL_TEXT_LINES: usize = 2;
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
 /// to queue, whose reply comes back through `apply`; AddSkill, AddServer,
-/// Edit and OpenSkill ask the host to open the add form, the server's edit
-/// page or the skill's page for this project.
+/// AddHooks, Edit, OpenSkill and Tools ask the host to open the add form, the
+/// server's edit page, the skill's page or the tool switches for this project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
@@ -26,23 +27,36 @@ pub(in crate::tui) enum PluginsReply {
     Send(SettingsJob),
     AddSkill,
     AddServer,
+    AddHooks,
     Edit(Box<ServerView>),
-    OpenSkill { id: String, name: String },
+    OpenSkill {
+        id: String,
+        name: String,
+    },
+    Tools {
+        servers: Vec<(String, String)>,
+        at: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
     Skill(usize),
     Server(usize),
+    Hook(usize),
 }
 
-/// The skills and MCP servers one project's agents get: every-project items
-/// with whether they are on here, and this project's own items.
+/// The skills, MCP servers and hooks one project's agents get: every-project
+/// items with whether they are on here, and this project's own items.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
+/// Drawing the approval question keeps its first command line in range and
+/// notes the server whose command showed through its last line; `y` approves
+/// only that server with that command.
 pub(in crate::tui) struct ProjectPlugins {
     pub project: ProjectId,
     pub skills: Vec<SkillView>,
     pub servers: Vec<ServerView>,
+    pub hooks: Vec<HookView>,
     pub loaded: bool,
     pub cursor: usize,
     pub confirm: Option<String>,
@@ -50,7 +64,10 @@ pub(in crate::tui) struct ProjectPlugins {
     pub notice: Option<Notice>,
     waiting: bool,
     stale: bool,
+    hooks_stale: bool,
     changing: Option<String>,
+    command_top: Cell<usize>,
+    read_through: RefCell<Option<(String, String)>>,
 }
 
 impl ProjectPlugins {
@@ -62,6 +79,7 @@ impl ProjectPlugins {
             project,
             skills: Vec::new(),
             servers: Vec::new(),
+            hooks: Vec::new(),
             loaded: false,
             cursor: 0,
             confirm: None,
@@ -69,22 +87,37 @@ impl ProjectPlugins {
             notice: None,
             waiting: false,
             stale: true,
+            hooks_stale: false,
             changing: None,
+            command_top: Cell::new(0),
+            read_through: RefCell::new(None),
         }
     }
 
-    /// Gives the next read: one at the start and one after every change, never
-    /// two at once.
-    /// Takes the view. Returns `SettingsJob::ProjectPlugins`, or none.
+    /// Gives the next read: skills and servers at the start and after every
+    /// change, then that project's hooks, never two at once.
+    /// Takes the view. Returns `SettingsJob::ProjectPlugins`, `SettingsJob::Hooks`
+    /// or none.
     pub fn next_job(&mut self) -> Option<SettingsJob> {
-        if self.waiting || !self.stale {
+        if self.waiting {
             return None;
         }
-        self.waiting = true;
-        self.stale = false;
-        Some(SettingsJob::ProjectPlugins {
-            project: self.project.clone(),
-        })
+        if self.stale {
+            self.waiting = true;
+            self.stale = false;
+            self.hooks_stale = true;
+            return Some(SettingsJob::ProjectPlugins {
+                project: self.project.clone(),
+            });
+        }
+        if self.hooks_stale {
+            self.waiting = true;
+            self.hooks_stale = false;
+            return Some(SettingsJob::Hooks {
+                project: Some(self.project.clone()),
+            });
+        }
+        None
     }
 
     /// Forgets the read and change in flight after the engine connection dropped.
@@ -116,13 +149,36 @@ impl ProjectPlugins {
                             assert!(visible(scope, &self.project));
                             assert_eq!(on_here.is_some(), *scope == Scope::Global);
                         }
+                        let asked = self.asking().map(|server| server.runs.clone());
                         self.skills = skills.clone();
                         self.servers = servers.clone();
                         self.loaded = true;
+                        if self.asking().map(|server| &server.runs) != asked.as_ref() {
+                            self.command_top.set(0);
+                            *self.read_through.borrow_mut() = None;
+                        }
                     }
                     Err(code) => {
                         self.notice = Some(Notice::problem(format!(
                             "Could not read this project's plugins. {}",
+                            plugin_plain(code)
+                        )));
+                    }
+                }
+            }
+            SettingsEvent::Hooks(Some(project), result) if project == &self.project => {
+                self.waiting = false;
+                match result {
+                    Ok(hooks) => {
+                        for hook in hooks {
+                            assert!(visible(&hook.scope, &self.project));
+                            assert_eq!(hook.on_here.is_some(), hook.scope == Scope::Global);
+                        }
+                        self.hooks = hooks.clone();
+                    }
+                    Err(code) => {
+                        self.notice = Some(Notice::problem(format!(
+                            "Could not read this project's hooks. {}",
                             plugin_plain(code)
                         )));
                     }
@@ -156,14 +212,17 @@ impl ProjectPlugins {
     }
 
     fn count(&self) -> usize {
-        self.skills.len() + self.servers.len()
+        self.skills.len() + self.servers.len() + self.hooks.len()
     }
 
     fn item(&self) -> Option<Item> {
+        let listed = self.skills.len() + self.servers.len();
         if self.cursor < self.skills.len() {
             Some(Item::Skill(self.cursor))
-        } else if self.cursor < self.count() {
+        } else if self.cursor < listed {
             Some(Item::Server(self.cursor - self.skills.len()))
+        } else if self.cursor < self.count() {
+            Some(Item::Hook(self.cursor - listed))
         } else {
             None
         }
@@ -186,25 +245,30 @@ impl ProjectPlugins {
                 let server = &self.servers[index];
                 (&server.id, &server.name, &server.scope)
             }
+            Item::Hook(index) => {
+                let hook = &self.hooks[index];
+                (&hook.id, &hook.name, &hook.scope)
+            }
         };
         Some((id.clone(), name.clone(), *scope == Scope::Global))
     }
 
     fn removed(&self) -> Option<(&str, bool)> {
         self.local(self.removing.as_deref()?)
+            .map(|(name, skill, _)| (name, skill))
     }
 
-    fn local(&self, id: &str) -> Option<(&str, bool)> {
+    fn local(&self, id: &str) -> Option<(&str, bool, u64)> {
         let local = |scope: &Scope| *scope != Scope::Global;
         self.skills
             .iter()
             .find(|skill| skill.id == id && local(&skill.scope))
-            .map(|skill| (skill.name.as_str(), true))
+            .map(|skill| (skill.name.as_str(), true, skill.version))
             .or_else(|| {
                 self.servers
                     .iter()
                     .find(|server| server.id == id && local(&server.scope))
-                    .map(|server| (server.name.as_str(), false))
+                    .map(|server| (server.name.as_str(), false, server.version))
             })
     }
 
@@ -245,9 +309,19 @@ impl ProjectPlugins {
         }
         if let Some(id) = self.confirm.clone() {
             return match key.code {
-                KeyCode::Char('y') => {
+                KeyCode::Char('y') if self.read_whole_command() => {
                     self.confirm = None;
                     self.approve(&id)
+                }
+                KeyCode::Down => {
+                    self.command_top
+                        .set(self.command_top.get().saturating_add(1));
+                    PluginsReply::Handled
+                }
+                KeyCode::Up => {
+                    self.command_top
+                        .set(self.command_top.get().saturating_sub(1));
+                    PluginsReply::Handled
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
                     self.confirm = None;
@@ -268,8 +342,20 @@ impl ProjectPlugins {
             KeyCode::Char(' ') => self.toggle(),
             KeyCode::Char('a') => PluginsReply::AddSkill,
             KeyCode::Char('m') => PluginsReply::AddServer,
+            KeyCode::Char('h') => PluginsReply::AddHooks,
             KeyCode::Char('d') => self.ask_remove(),
             KeyCode::Char('e') => self.edit(),
+            KeyCode::Char('l') => PluginsReply::Tools {
+                servers: self
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.clone(), server.name.clone()))
+                    .collect(),
+                at: match self.item() {
+                    Some(Item::Server(index)) => index + 1,
+                    _ => 0,
+                },
+            },
             KeyCode::Enter => match self.item() {
                 Some(Item::Skill(index)) => PluginsReply::OpenSkill {
                     id: self.skills[index].id.clone(),
@@ -279,6 +365,8 @@ impl ProjectPlugins {
                     if self.servers[index].status == ServerStatus::WaitingForApproval =>
                 {
                     self.confirm = Some(self.servers[index].id.clone());
+                    self.command_top.set(0);
+                    *self.read_through.borrow_mut() = None;
                     PluginsReply::Handled
                 }
                 _ => PluginsReply::Ignored,
@@ -305,7 +393,7 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let (id, name, enabled, on_here) = match item {
+        let (id, name, enabled, on_here, version) = match item {
             Item::Skill(index) => {
                 let skill = &self.skills[index];
                 (
@@ -313,6 +401,7 @@ impl ProjectPlugins {
                     skill.name.clone(),
                     skill.enabled,
                     skill.on_here,
+                    skill.version,
                 )
             }
             Item::Server(index) => {
@@ -322,6 +411,17 @@ impl ProjectPlugins {
                     server.name.clone(),
                     server.enabled,
                     server.on_here,
+                    server.version,
+                )
+            }
+            Item::Hook(index) => {
+                let hook = &self.hooks[index];
+                (
+                    hook.id.clone(),
+                    hook.name.clone(),
+                    hook.enabled,
+                    hook.on_here,
+                    hook.version,
                 )
             }
         };
@@ -337,6 +437,7 @@ impl ProjectPlugins {
                     project: self.project.clone(),
                     id,
                     on: !on,
+                    version,
                 },
                 if on {
                     format!("{name} is off for this project.")
@@ -348,11 +449,20 @@ impl ProjectPlugins {
                 PluginChange::SetSkill {
                     id,
                     enabled: !enabled,
+                    version,
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
             (None, Item::Server(_)) => (
                 PluginChange::SetServer {
+                    id,
+                    enabled: !enabled,
+                    version,
+                },
+                format!("{name} is {}.", if enabled { "off" } else { "on" }),
+            ),
+            (None, Item::Hook(_)) => (
+                PluginChange::SetHook {
                     id,
                     enabled: !enabled,
                 },
@@ -365,9 +475,13 @@ impl ProjectPlugins {
 
     fn ask_remove(&mut self) -> PluginsReply {
         let Some((id, name, global)) = self.chosen() else {
-            return PluginsReply::Handled;
+            return PluginsReply::Ignored;
         };
-        if global {
+        if matches!(self.item(), Some(Item::Hook(_))) {
+            self.notice = Some(Notice::plain(format!(
+                "{name} is a hook. Press Space to turn it off."
+            )));
+        } else if global {
             self.notice = Some(Notice::plain(format!(
                 "{name} is for every project. Switch it off here, or remove it in Settings."
             )));
@@ -381,16 +495,21 @@ impl ProjectPlugins {
         if self.still_saving() {
             return PluginsReply::Handled;
         }
-        let Some((name, skill)) = self.local(id).map(|(name, skill)| (name.to_owned(), skill))
+        let Some((name, skill, version)) = self
+            .local(id)
+            .map(|(name, skill, version)| (name.to_owned(), skill, version))
         else {
             return PluginsReply::Handled;
         };
         let id = id.to_owned();
         let (change, done) = if skill {
-            (PluginChange::RemoveSkill { id }, format!("Removed {name}."))
+            (
+                PluginChange::RemoveSkill { id, version },
+                format!("Removed {name}."),
+            )
         } else {
             (
-                PluginChange::RemoveServer { id },
+                PluginChange::RemoveServer { id, version },
                 format!("Removed {name} and its secrets."),
             )
         };
@@ -413,6 +532,15 @@ impl ProjectPlugins {
         PluginsReply::Edit(Box::new(server.clone()))
     }
 
+    fn read_whole_command(&self) -> bool {
+        self.asking().is_some_and(|server| {
+            matches!(
+                &*self.read_through.borrow(),
+                Some((id, runs)) if *id == server.id && *runs == server.runs
+            )
+        })
+    }
+
     fn approve(&mut self, id: &str) -> PluginsReply {
         if self.still_saving() {
             return PluginsReply::Handled;
@@ -428,8 +556,9 @@ impl ProjectPlugins {
         PluginsReply::Send(SettingsJob::Plugin(change))
     }
 
-    /// Draws the Skills and MCP servers sections of the project's Settings tab; a short window
-    /// cuts the details panel first, so the notice and any question always show.
+    /// Draws the Skills, MCP servers and Hooks sections of the project's Settings tab; a short window
+    /// cuts the details panel first, so the notice and any question always show. An
+    /// approval question takes the whole section and never more than `room` rows.
     /// Takes the content width, the rows available and the look.
     /// Returns the rows and the help keys.
     pub fn rows(&self, content: usize, room: usize, look: &Look) -> (Vec<Row>, Help) {
@@ -440,11 +569,19 @@ impl ProjectPlugins {
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
             return (lines, self.help());
         }
-        let footer = self.footer(content, look);
+        if let Some(server) = self.asking() {
+            return (self.approval(server, content, room, look), self.help());
+        }
+        let footer = self.footer(look);
+        let floor = 6 + footer.len();
+        let spaced = room > 9 + footer.len();
+        let reserve = if spaced { 9 } else { 6 };
         let mut panel = self.panel(content, look);
-        panel.truncate(room.saturating_sub(6 + footer.len()));
-        let fixed = 6 + panel.len() + footer.len();
-        let free = room.saturating_sub(fixed).max(2);
+        panel.truncate(room.saturating_sub(reserve + footer.len()));
+        let fixed = reserve + panel.len() + footer.len();
+        let free = room.saturating_sub(fixed).max(3);
+        let hook_rows = self.hooks.len().max(1).min((free / 3).max(1));
+        let free = free.saturating_sub(hook_rows).max(2);
         let wanted_servers = self.servers.len().max(1).min(free / 2);
         let skill_rows = self
             .skills
@@ -497,7 +634,9 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
 
         lines.push(self.heading("MCP servers", self.servers.len(), content, look));
         if self.servers.is_empty() {
@@ -534,9 +673,48 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
+
+        lines.push(self.heading("Hooks", self.hooks.len(), content, look));
+        if self.hooks.is_empty() {
+            lines.push(Row::of(
+                "  No hooks yet. Press h to add a plugin folder's hooks for this project.",
+                look.muted,
+            ));
+        }
+        let picked = match selected {
+            Some(Item::Hook(index)) => index,
+            _ => 0,
+        };
+        let first = window(picked, self.hooks.len(), hook_rows);
+        for (index, hook) in self.hooks.iter().enumerate().skip(first).take(hook_rows) {
+            let mut cells = vec![
+                Row::of(hook.plugin.clone(), look.fg),
+                state(hook.enabled, hook.on_here, None, look),
+                Row::of(place(&hook.scope), look.fg),
+            ];
+            if wide {
+                cells.push(Row::of(hook_runs(hook), look.muted));
+            }
+            lines.push(list_row(
+                columns(&widths, cells),
+                content,
+                selected == Some(Item::Hook(index)),
+                true,
+                look,
+            ));
+        }
+        if spaced {
+            lines.push(Row::default());
+        }
         lines.extend(panel);
+        if !footer.is_empty() {
+            lines.truncate(room.saturating_sub(footer.len()));
+        }
         lines.extend(footer);
+        assert!(lines.len() <= room.max(floor));
         (lines, self.help())
     }
 
@@ -581,9 +759,6 @@ impl ProjectPlugins {
                     Row::of(server.name.clone(), look.heading),
                     Row::of(server.scope.label(), look.muted),
                 ));
-                if self.confirm.is_some() {
-                    return rows;
-                }
                 rows.push(entry("Runs", short_runs(server), look.fg));
                 match &server.problem {
                     Some(problem) => rows.extend(
@@ -600,11 +775,43 @@ impl ProjectPlugins {
                     None => {}
                 }
             }
+            Some(Item::Hook(index)) => {
+                let hook = &self.hooks[index];
+                rows.push(spread(
+                    content,
+                    Row::of(hook.name.clone(), look.heading),
+                    Row::of(hook.scope.label(), look.muted),
+                ));
+                rows.push(entry("Runs", hook_runs(hook), look.fg));
+                if let Some(follows) = &hook.follows {
+                    rows.push(entry(
+                        "Follows",
+                        format!("Runs while {follows} is on."),
+                        look.fg,
+                    ));
+                }
+            }
         }
         rows
     }
 
-    fn footer(&self, content: usize, look: &Look) -> Vec<Row> {
+    /// The fewest body rows the plugins section needs: a heading, a row of content and
+    /// its footer. The footer is the two-row remove question while one is open, otherwise
+    /// the one-row notice, otherwise nothing. Callers reserve this many rows so the footer
+    /// stays on screen.
+    pub fn floor(&self) -> usize {
+        6 + self.footer_len()
+    }
+
+    fn footer_len(&self) -> usize {
+        if self.removed().is_some() {
+            2
+        } else {
+            usize::from(self.notice.is_some())
+        }
+    }
+
+    fn footer(&self, look: &Look) -> Vec<Row> {
         if let Some((name, skill)) = self.removed() {
             return vec![
                 Row::of(format!("Remove {name}?"), look.warning)
@@ -622,10 +829,22 @@ impl ProjectPlugins {
                 ),
             ];
         }
-        let Some(server) = self.asking() else {
-            return self.notice.iter().map(|notice| notice.row(look)).collect();
-        };
+        self.notice.iter().map(|notice| notice.row(look)).collect()
+    }
+
+    /// Draws the approval question: the server, the question and as many lines
+    /// of exactly what it runs as fit from the first line Up and Down chose, with
+    /// a line marker when some do not fit. Records the server and command once
+    /// its last line has shown, which `y` needs before it approves.
+    /// Takes the server asked about, the content width, the rows and the look.
+    /// Returns at most `room` rows.
+    fn approval(&self, server: &ServerView, content: usize, room: usize, look: &Look) -> Vec<Row> {
         let mut rows = vec![
+            spread(
+                content,
+                Row::of(server.name.clone(), look.heading),
+                Row::of(server.scope.label(), look.muted),
+            ),
             Row::of(format!("Approve {}?", server.name), look.warning)
                 .push("   y", look.heading)
                 .push(" Approve   ", look.fg)
@@ -636,17 +855,52 @@ impl ProjectPlugins {
                 look.muted,
             ),
         ];
+        let command = exact_lines(&server.runs, content.saturating_sub(2));
+        let fits = rows.len() + command.len() <= room;
+        let shown = if fits {
+            command.len()
+        } else {
+            room.saturating_sub(rows.len() + 1)
+        };
+        assert!(shown <= command.len());
+        let top = self.command_top.get().min(command.len() - shown);
+        self.command_top.set(top);
+        let end = top + shown;
         rows.extend(
-            exact_lines(&server.runs, content.saturating_sub(2))
-                .into_iter()
-                .map(|line| Row::of("  ", Style::new()).push(line, look.fg)),
+            command[top..end]
+                .iter()
+                .map(|line| Row::of("  ", Style::new()).push(line.clone(), look.fg)),
         );
+        if shown > 0 && end == command.len() {
+            *self.read_through.borrow_mut() = Some((server.id.clone(), server.runs.clone()));
+        }
+        if !fits {
+            let marker = match shown {
+                0 => "  Make the window taller to read what it runs.".to_owned(),
+                _ if end == command.len() => format!(
+                    "  Lines {}-{end} of {}, the end. Up reads back.",
+                    top + 1,
+                    command.len()
+                ),
+                _ => format!(
+                    "  Lines {}-{end} of {}. Down reads on; y waits for the end.",
+                    top + 1,
+                    command.len()
+                ),
+            };
+            rows.push(Row::of(marker, look.warning));
+        }
+        rows.truncate(room);
         rows
     }
 
     fn help(&self) -> Help {
         if self.confirm.is_some() {
-            return vec![("y", "Approve"), ("n", "Not now")];
+            return vec![
+                ("\u{2191}\u{2193}", "Read"),
+                ("y", "Approve"),
+                ("n", "Not now"),
+            ];
         }
         if self.removing.is_some() {
             return vec![("y", "Remove"), ("n", "Keep")];
@@ -660,7 +914,9 @@ impl ProjectPlugins {
         {
             help.push(("Enter", "Approve"));
         }
-        if let Some((_, _, false)) = self.chosen() {
+        if let Some((_, _, false)) = self.chosen()
+            && !matches!(self.item(), Some(Item::Hook(_)))
+        {
             if matches!(self.item(), Some(Item::Server(_))) {
                 help.push(("e", "Edit"));
             }
@@ -669,6 +925,8 @@ impl ProjectPlugins {
         help.extend([
             ("a", "Add skill"),
             ("m", "Add MCP server"),
+            ("h", "Add hooks"),
+            ("l", "Tools"),
             TABS,
             ("Esc", "Home"),
         ]);

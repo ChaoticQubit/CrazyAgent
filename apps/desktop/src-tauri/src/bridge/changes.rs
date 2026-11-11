@@ -1,11 +1,11 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CHANGES_CODES, OwnerClient};
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView};
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
-fn changes_error(error: EngineError) -> BridgeError {
+pub(super) fn changes_error(error: EngineError) -> BridgeError {
     if error.0 == "controller_disconnected" {
         return failure("not_connected");
     }
@@ -48,33 +48,53 @@ impl NativeBridge {
         }))
     }
 
-    /// Reads one page of a change set's diff as plain text, run without the bridge lock.
-    /// Inputs: the change set id and the page. Output: the page.
-    pub fn change_diff(&self, id: String, page: u16) -> Result<Unlocked<ChangeDiff>, BridgeError> {
+    /// Reads one page of a change set's diff as plain text at the head the owner is
+    /// reading, run without the bridge lock. Inputs: the change set id, that head and the
+    /// page. Output: the page, or `changes_stale` once the set moved to another head.
+    pub fn change_diff(
+        &self,
+        id: String,
+        head: String,
+        page: u16,
+    ) -> Result<Unlocked<ChangeDiff>, BridgeError> {
         let id = change_set(id)?;
         let client = self.changes_client()?;
         Ok(Box::pin(async move {
-            client.change_diff(id, page).await.map_err(changes_error)
+            client
+                .change_diff(id, head, page)
+                .await
+                .map_err(changes_error)
         }))
     }
 
-    /// Lands a change set on the owner's checked-out branch, run without the bridge lock.
-    /// Inputs: the change set id, the head the owner reviewed and the owner's edited
-    /// message, None for the proposed one. Output: the landed commit and branch, or the
-    /// conflicting files.
+    /// Lands a change set on a local branch, the checked-out one when none is named, run
+    /// without the bridge lock. Inputs: the change set id, the head the owner reviewed,
+    /// the owner's edited message, None for the proposed one, and the target branch.
+    /// Output: the landed commit and branch, or the conflicting files.
     pub fn accept_change(
         &self,
         id: String,
         expected_head: String,
         message: Option<String>,
+        target: Option<String>,
     ) -> Result<Unlocked<AcceptOutcome>, BridgeError> {
         let id = change_set(id)?;
         let client = self.changes_client()?;
         Ok(Box::pin(async move {
             client
-                .accept_changes(id, expected_head, message)
+                .accept_changes_into(id, expected_head, message, target)
                 .await
                 .map_err(changes_error)
+        }))
+    }
+
+    /// Lists the local branches a change set can be accepted onto, run without the bridge
+    /// lock. Input: the change set id. Output: the branches and the checked-out one.
+    pub fn change_branches(&self, id: String) -> Result<Unlocked<TargetBranches>, BridgeError> {
+        let id = change_set(id)?;
+        let client = self.changes_client()?;
+        Ok(Box::pin(async move {
+            client.change_branches(id).await.map_err(changes_error)
         }))
     }
 
@@ -103,6 +123,16 @@ impl NativeBridge {
         let client = self.changes_client()?;
         Ok(Box::pin(async move {
             client.restore_changes(id).await.map_err(changes_error)
+        }))
+    }
+
+    /// Undoes a change set its own Accept merged, run without the bridge lock. Input: the
+    /// change set id. Output: the undo commit and branch, or the conflicting files.
+    pub fn undo_change(&self, id: String) -> Result<Unlocked<AcceptOutcome>, BridgeError> {
+        let id = change_set(id)?;
+        let client = self.changes_client()?;
+        Ok(Box::pin(async move {
+            client.undo_changes(id).await.map_err(changes_error)
         }))
     }
 

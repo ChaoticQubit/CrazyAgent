@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createWriteStream, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createWriteStream, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
-import { extname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
 export const READY_MS = 60000;
 export const STEP_MS = 30000;
 export const POLL_MS = 100;
+/** The Agents tab's view switch, Team or Agent settings; `me.click("Team", AGENTS_VIEW)` picks
+ * a view as the owner does. */
+export const AGENTS_VIEW = '[role=radiogroup][aria-label="Agents view"] [role=radio]';
 const BODY_BYTES_MAX = 4 * 1024 * 1024;
+const TMUX_FOLDERS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2" };
 
 /** Reads an absolute path from the environment or stops the run with what to set.
@@ -67,6 +71,43 @@ export async function stop(child) {
   clearTimeout(timer);
 }
 
+/** Ends the tmux server an engine ran its agent terminals on, which an engine stop keeps
+ * while a team agent lives, through the socket's name inside its folder, so a folder too long
+ * for a socket address works too; then waits up to `STEP_MS` until no tmux process serves the
+ * folder. Input: the stopped engine's root. Output: none. */
+export async function endTerminals(runtime) {
+  const folder = join(runtime, "terminal");
+  if (!existsSync(join(folder, "tmux.sock"))) return;
+  const tmux = [join(runtime, "setup", "bin"), ...TMUX_FOLDERS].map((place) => join(place, "tmux")).find((program) => existsSync(program));
+  assert.ok(tmux, "the tmux program that served the engine's terminals is installed");
+  spawnSync(tmux, ["-S", "tmux.sock", "kill-server"], { cwd: folder, env: { PATH: "/usr/bin:/bin" }, stdio: "ignore" });
+  for (const deadline = Date.now() + STEP_MS; terminalServers(runtime).length > 0 && Date.now() < deadline; ) await pause(POLL_MS);
+}
+
+/** Lists the tmux processes still serving an engine's agent terminals: each tmux process's
+ * first socket, followed through the short alias the engine gives a folder too long for a
+ * socket address, is matched against the engine's terminal folder. Input: the engine root.
+ * Output: their pids, none once the folder is gone. */
+export function terminalServers(runtime) {
+  let folder;
+  try {
+    folder = realpathSync(join(runtime, "terminal"));
+  } catch {
+    return [];
+  }
+  const listed = spawnSync("/bin/ps", ["-axww", "-o", "pid=,command="], { encoding: "utf8" });
+  assert.equal(listed.status, 0, `ps lists the processes: ${listed.stderr}`);
+  return listed.stdout.split("\n").flatMap((line) => {
+    const found = line.match(/^\s*(\d+)\s+\S*\/tmux\s.*?\s-S\s+(\S+)/);
+    if (!found) return [];
+    try {
+      return realpathSync(dirname(found[2])) === folder ? [Number(found[1])] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 /** Sends one `desktop_*` command to the end-to-end bridge, as the app's invoke would.
  * Input: the bridge port and token, the command and its arguments. Output: the bridge's answer. */
 export function bridgeCall(bridge, cmd, args = {}) {
@@ -101,10 +142,12 @@ export async function value(bridge, cmd, args) {
   return answer.value;
 }
 
-/** Serves the built frontend and forwards the page's invokes to the bridge. The only command
- * answered here is the native folder chooser, with the owner's next pick from `picks`.
- * Input: the built folder, the bridge, the picks and the call log. Output: the server and its port. */
-export async function serveApp(dist, bridge, picks, log) {
+/** Serves the built frontend and forwards the page's invokes to the bridge. The commands
+ * answered here are the native folder chooser, with the owner's next pick from `picks`, and
+ * each native-only command `local` names, whose function gives the answer from the arguments.
+ * Input: the built folder, the bridge, the picks, the call log and the local answers. Output:
+ * the server and its port. */
+export async function serveApp(dist, bridge, picks, log, local = {}) {
   const server = createServer((request, reply) => {
     if (request.method === "POST" && request.url === "/__invoke") {
       const chunks = [];
@@ -122,6 +165,13 @@ export async function serveApp(dist, bridge, picks, log) {
           assert.ok(picks.length > 0, "the page opened the folder chooser more often than the owner picks");
           answer = { value: picks.shift() };
           log.picked += 1;
+        } else if (Object.hasOwn(local, cmd)) {
+          try {
+            answer = await local[cmd](args ?? {});
+          } catch (error) {
+            answer = { failure: { code: "e2e_local_failed", message: error.message } };
+          }
+          log.answers.set(cmd, answer);
         } else {
           const asked = Date.now();
           try {
@@ -178,8 +228,9 @@ export const INTERNALS = `(() => {
   };
 })();`;
 
-/** Page helpers over DevTools: what the owner sees, waiting for it, and real clicks and typing.
- * Input: the page's evaluate and send. Output: the helpers. */
+/** Page helpers over DevTools: what the owner sees, waiting for it, real clicks and typing,
+ * opening a fold by its label, and opening the Agents toolbar's questions drawer. Input: the
+ * page's evaluate and send. Output: the helpers. */
 export function owner({ evaluate, send }, evidence) {
   const seen = () => evaluate("document.body.innerText");
   let shots = 0;
@@ -251,5 +302,23 @@ export function owner({ evaluate, send }, evidence) {
   const enter = async () => {
     for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   };
-  return { seen, waitFor, click, follow, type, enter, capture };
+  const unfold = async (label) => {
+    const fold = `details[aria-label=${JSON.stringify(label)}]`;
+    const deadline = Date.now() + STEP_MS;
+    for (;;) {
+      const open = await evaluate(`document.querySelector(${JSON.stringify(fold)})?.open ?? null`);
+      if (open === true) return;
+      if (Date.now() > deadline) {
+        await capture(`no-fold-${label.replace(/[^a-z0-9]+/gi, "-").slice(0, 40)}`);
+        assert.fail(`the "${label}" fold never opened: ${open === null ? "not on the page" : "still closed"}`);
+      }
+      if (open === false) await follow(`${fold} > summary`);
+      await pause(POLL_MS);
+    }
+  };
+  const asks = async () => {
+    await follow(".tg-asks");
+    await waitFor("the Questions for you drawer", (text) => text.includes("Questions for you"));
+  };
+  return { seen, waitFor, click, follow, type, enter, capture, unfold, asks };
 }

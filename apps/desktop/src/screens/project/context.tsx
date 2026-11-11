@@ -7,10 +7,10 @@ import { Button, ConfirmDialog, Icon, Segmented, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { formatBytes } from "../new-project/wizard";
 import { useLinkOpener } from "./links";
-import { MarkdownView, headings, markdownLinks, parseMarkdown } from "./markdown";
+import { MarkdownView, headings, parseMarkdown } from "./markdown";
 import { folderLabel } from "./overview";
 import { ProjectMemory } from "./memory";
-import { deletable, deleteQuestion, fileIcon, retryPath } from "./research";
+import { deletable, deleteQuestion, fileIcon, researchJobs, retryPath } from "./research";
 import { NotReady, ProjectEmpty, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -63,6 +63,16 @@ function hashParam(name: string): string | null {
   return query ? new URLSearchParams(query).get(name) : null;
 }
 
+export const LINKED_PREFIX = "repo/";
+export const LINKED_BADGE = "Linked from your repo";
+
+/** The path the Context tab shows for an item: a file linked from the repository is shown by
+ * its path in the repository, without the "repo/" the engine lists it under.
+ * Input: the context item. Output: the path to show. */
+export function shownPath(item: ContextItem): string {
+  return item.linked === true && item.path.startsWith(LINKED_PREFIX) ? item.path.slice(LINKED_PREFIX.length) : item.path;
+}
+
 const TEXT_TYPES = ["md", "txt", "csv"];
 const MEMORY = "@memory";
 const extension = (path: string) => path.slice(path.lastIndexOf(".") + 1).toLowerCase();
@@ -96,7 +106,9 @@ export function followContext(project: string, path: string, writing: boolean, a
 export function ContextTab({ data }: { data: ProjectData }) {
   const context = valueOf(data.context);
   const jobs = valueOf(data.research)?.jobs ?? [];
-  const items = context?.items ?? [];
+  const listed = context?.items ?? [];
+  const items = listed.filter((entry) => entry.linked !== true);
+  const linked = listed.filter((entry) => entry.linked === true);
   const [selected, setSelected] = useState<string | null>(() => hashParam("file"));
   const [file, setFile] = useState<Result<{ text: string | null; truncated: boolean }>>();
   const [saving, setSaving] = useState<{ heading: string | null } | null>(null);
@@ -108,11 +120,11 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const [deleting, setDeleting] = useState<{ path: string; busy: boolean } | null>(null);
   const [adding, setAdding] = useState<{ path: string; busy: boolean; error: string } | null>(null);
   const open = useLinkOpener(data.notify);
-  const chosen = selected ?? items.find((item) => item.kind === "brief")?.path ?? items[0]?.path ?? null;
-  const item = items.find((entry) => entry.path === chosen) ?? null;
+  const chosen = selected ?? items.find((item) => item.kind === "brief")?.path ?? listed[0]?.path ?? null;
+  const item = listed.find((entry) => entry.path === chosen) ?? null;
   const running = new Set(jobs.filter((job) => job.status === "running").map((job) => job.report_path));
   const writing = chosen !== null && running.has(chosen);
-  const kind = chosen ? researchKindOf(chosen, jobs) : null;
+  const kind = chosen ? researchKindOf(chosen, researchJobs(jobs)) : null;
 
   useEffect(() => {
     setFile(undefined);
@@ -127,7 +139,6 @@ export function ContextTab({ data }: { data: ProjectData }) {
   const text = file?.kind === "ok" ? file.value.text : null;
   const markdown = chosen !== null && extension(chosen) === "md";
   const blocks = useMemo(() => text !== null && markdown ? parseMarkdown(text) : [], [text, markdown]);
-  const sources = markdownLinks(blocks);
   const preview = saving && text !== null ? sectionText(text, saving.heading) : null;
 
   const readSelection = () => {
@@ -232,18 +243,24 @@ export function ContextTab({ data }: { data: ProjectData }) {
             {items.filter((entry) => entry.kind === "brief").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="file-text" size={14} />brief.md</button></li>)}
             <Group title="documents/" items={items.filter((entry) => entry.kind === "document")} selected={chosen} onSelect={select} running={running} />
             <Group title="research/" items={items.filter((entry) => entry.kind === "research")} selected={chosen} onSelect={select} running={running} />
+            {items.filter((entry) => entry.kind === "plan").map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}><Icon name="list-checks" size={14} />{displayText(entry.path.slice(entry.path.lastIndexOf("/") + 1))}</button></li>)}
           </ul></li>
+          {linked.length > 0 && <li><span className="pj-folder"><Icon name="folder" size={13} />From your repo</span><ul>
+            {linked.map((entry) => <li key={entry.path}><button type="button" className="pj-titem" aria-current={chosen === entry.path || undefined} onClick={() => select(entry.path)}>
+              <Icon name={fileIcon(entry.path)} size={14} />{displayText(shownPath(entry))}</button></li>)}
+          </ul></li>}
         </ul>
       </>}
     </nav>
     <div className="pj-reader">
       {chosen === MEMORY && <ProjectMemory data={data} />}
-      {chosen !== MEMORY && !item && context && <ProjectEmpty title={items.length ? "Pick a file" : "Nothing here yet"}>
-        {items.length ? "Pick a file on the left to read it." : "Research reports appear here as agents finish."}</ProjectEmpty>}
+      {chosen !== MEMORY && !item && context && <ProjectEmpty title={listed.length ? "Pick a file" : "Nothing here yet"}>
+        {listed.length ? "Pick a file on the left to read it." : "Research reports appear here as agents finish."}</ProjectEmpty>}
       {chosen !== MEMORY && item && <>
         <div className="pj-reader-tb">
-          <h2 className="pj-mono">{displayText(item.path)}</h2>
+          <h2 className="pj-mono">{displayText(shownPath(item))}</h2>
           <span className="pj-row">
+            {item.linked === true && <StatusBadge word={LINKED_BADGE} tone="info" />}
             {selection && <Button icon="brain" onClick={() => { setSaving(null); setNoting({ text: selection, scope: "project", busy: false, error: "" }); }}>Save selection</Button>}
             {kind && <button type="button" className="btn" disabled={text === null} onClick={() => setSaving({ heading: null })}>Save to memory</button>}
             {item.kind === "brief" && <button type="button" className="btn" title="The brief is written from the project details"
@@ -288,18 +305,15 @@ export function ContextTab({ data }: { data: ProjectData }) {
             <Button type="submit" variant="primary" icon="brain" pending={noting.busy} pendingLabel="Saving...">Save to memory</Button>
           </div>
         </form>}
-        {file === undefined && <p className="pj-muted" role="status">Opening {displayText(item.path)}...</p>}
+        {file === undefined && <p className="pj-muted" role="status">Opening {displayText(shownPath(item))}...</p>}
         {file?.kind === "not_ready" && <NotReady what="reading project files isn't in this build." />}
         {file?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(file)}</p>}
         {file?.kind === "ok" && text === null && <p className="pj-secondary">{formatBytes(item.bytes)}. A preview isn't shown for this kind of file. Use Open in default app.</p>}
         <div ref={reading} onMouseUp={readSelection} onKeyUp={readSelection}>
         {text !== null && markdown && <article className="pj-md">
-          <MarkdownView source={text} onOpenLink={open} headingAction={kind ? (heading) => <button type="button" className="btn quiet small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
-          {sources.length > 0 && <section className="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources</h3>
-            <ol>{sources.map((source) => <li key={source.href}><a href={source.href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); open(source.href); }}>{displayText(source.text)}</a>
-              {source.text !== source.href && <span className="pj-small pj-muted pj-mono"> {displayText(source.href)}</span>}</li>)}</ol></section>}
+          <MarkdownView source={text} onOpenLink={open} sources headingAction={kind ? (heading) => <button type="button" className="btn quiet small" aria-label={`Save section ${heading} to memory`} onClick={() => setSaving({ heading })}>Save section</button> : undefined} />
         </article>}
-        {text !== null && !markdown && TEXT_TYPES.includes(extension(item.path)) && <pre className="pj-preview">{displayText(text)}</pre>}
+        {text !== null && !markdown && (item.linked === true || TEXT_TYPES.includes(extension(item.path))) && <pre className="pj-preview">{displayText(text)}</pre>}
         </div>
         {file?.kind === "ok" && file.value.truncated && <p className="pj-note">Only the first 1 MB is shown.</p>}
       </>}

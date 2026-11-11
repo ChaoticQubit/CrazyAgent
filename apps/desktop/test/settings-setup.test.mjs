@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const { PackConfirmDialogs, PackSettingsView, packConfirm, TOOLS_BUSY } = await import("../src/screens/settings/pack.tsx");
-const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine } = await import("../src/screens/settings/projects-home.tsx");
+const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine, sizedAsk } = await import("../src/screens/settings/projects-home.tsx");
 const { GitHubSettingsView, GitHubAccountView } = await import("../src/screens/settings/github.tsx");
 const { GitHubSignIn } = await import("../src/screens/intake/clone.tsx");
 const { Icon } = await import("../src/ui/icon.tsx");
@@ -29,14 +29,15 @@ const setup = (extra = {}) => ({ dependencies: [], pack, running: false, ...extr
 const packProps = (status, extra = {}) => ({ status, busy: null, problem: "", skills: [], onSwitch: forbidden, onAsk: forbidden, onRetry: forbidden, onInstallTools: forbidden, ...extra });
 
 const rowOf = (markup, id) => {
-  const start = markup.indexOf(`<strong>${id}</strong>`);
+  const start = markup.indexOf(`data-setting="${id}"`);
   assert.ok(start >= 0, `${id} is listed`);
-  return markup.slice(start, markup.indexOf("</li>", start));
+  const next = markup.indexOf("data-setting=", start + 1);
+  return markup.slice(start, next < 0 ? undefined : next);
 };
 
 test("Settings, Pack lists the pack by group with a switch, Remove or Install on each entry", () => {
   const markup = html(PackSettingsView, packProps(ok(setup())));
-  assert.match(markup, /<h2>Code graph<\/h2>[\s\S]*<h2>Workflow skills<\/h2>[\s\S]*<h2>Context plugins<\/h2>[\s\S]*<h2>Optional<\/h2>/);
+  assert.match(markup, /<h3[^>]*>Code graph[\s\S]*<h3[^>]*>Workflow skills[\s\S]*<h3[^>]*>Context plugins[\s\S]*<h3[^>]*>Optional/);
   assert.doesNotMatch(markup, /Always on/);
   const graph = rowOf(markup, "Graphify skill for agents");
   assert.match(graph, /role="switch"[^>]*aria-checked="true"/);
@@ -55,6 +56,16 @@ test("Settings, Pack lists the pack by group with a switch, Remove or Install on
   assert.match(broken, />Try again<\/button>/);
 });
 
+test("Settings, Pack says why an installed entry's hooks were not added", () => {
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  const listed = pack.map((item) => item.id === "superpowers" ? { ...item, state: { state: "on" }, hooks_refused: refused } : item);
+  const markup = html(PackSettingsView, packProps(ok(setup({ pack: listed }))));
+  const row = rowOf(markup, "superpowers");
+  assert.match(row, /role="switch"[^>]*aria-checked="true"/);
+  assert.ok(row.includes("Hooks not added: This folder has hooks but no .claude-plugin/plugin.json naming the plugin."), row);
+  assert.equal(markup.split("Hooks not added").length - 1, 1, "only the refused entry says so");
+});
+
 test("Settings, Pack locks every change while setup runs or another change is in flight", () => {
   for (const props of [packProps(ok(setup({ running: true }))), packProps(ok(setup()), { busy: "headroom" })]) {
     const markup = html(PackSettingsView, props);
@@ -70,10 +81,10 @@ const tool = (name, state) => ({ name, label: name, state });
 const tools = (tmux, uv, graphify) => [tool("tmux", tmux), tool("uv", uv), tool("graphify", graphify)];
 const present = { state: "found", version: "3.5a" };
 
-test("Settings, Pack lists tmux, uv and graphify first and offers Install tools while one is missing", () => {
+test("Settings, Pack lists tmux, uv and graphify after the pack and offers Install tools while one is missing", () => {
   const skipped = html(PackSettingsView, packProps(ok(setup({ dependencies: tools(present, { state: "missing" }, { state: "failed", reason: "Checksum didn't match." }) }))));
-  assert.match(skipped, /<h2[^>]*>[\s\S]*Tools<\/h2>[\s\S]*<h2>Code graph<\/h2>/);
-  assert.match(rowOf(skipped, "tmux"), /Found[\s\S]*Version 3\.5a on this Mac\./);
+  assert.match(skipped, /<h3[^>]*>Code graph[\s\S]*<h3[^>]*>Tools<\/h3>/);
+  assert.match(rowOf(skipped, "tmux"), /Version 3\.5a on this Mac\.[\s\S]*Found/);
   assert.match(rowOf(skipped, "uv"), /Not installed/);
   assert.match(rowOf(skipped, "graphify"), /Checksum didn&#x27;t match\./);
   assert.match(skipped, /<button type="button" class="btn primary small"[^>]*>(<svg[\s\S]*?<\/svg>)?Install tools<\/button>/);
@@ -198,8 +209,8 @@ test("Settings, GitHub shows the account with Sign out, or the three sign-in way
 test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () => {
   const svg = (name, size) => html(Icon, { name, size });
   const markup = html(PackSettingsView, packProps(ok(setup())));
-  assert.ok(markup.includes(`${svg("blocks", 14)}<strong>superpowers</strong>`), markup);
-  assert.ok(markup.includes(`${svg("server", 14)}<strong>headroom</strong>`), markup);
+  assert.ok(markup.includes(`${svg("blocks", 14)}superpowers<`), markup);
+  assert.ok(markup.includes(`${svg("server", 14)}headroom<`), markup);
   assert.ok(markup.includes(svg("circle-check", 12)), "On carries its status icon");
   assert.ok(markup.includes(svg("power-off", 12)), "Off carries its status icon");
   const base = { busy: false, problem: "", onChoose: forbidden, onUse: forbidden, onMove: forbidden, onCancel: forbidden, onRetry: forbidden };
@@ -207,5 +218,15 @@ test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () =>
   assert.ok(picked.includes(`${svg("check", 15)}Use this folder</button>`), picked);
   assert.ok(picked.includes(`${svg("folder-input", 15)}Move my projects there</button>`), picked);
   const account = html(GitHubAccountView, { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, busy: false, problem: "", onSignOut: forbidden });
-  assert.ok(account.includes(`<h2 class="row">${svg("git-branch", 16)}GitHub account</h2>`), account);
+  assert.ok(account.includes(`${svg("log-out", 15)}Sign out of GitHub</button>`), account);
+});
+
+test("Move my projects waits for a size and names why a folder could not be measured", () => {
+  assert.deepEqual(sizedAsk("/Users/mira/Work", ok({ bytes: 3 * GB })), { path: "/Users/mira/Work", bytes: 3 * GB, sizeProblem: "" });
+  assert.deepEqual(sizedAsk("/Users/mira/Work", ok({ bytes: null, size_problem: "folder_size_timeout" })),
+    { path: "/Users/mira/Work", bytes: null, sizeProblem: "This folder is very large. Use it where it is instead of copying it." });
+  assert.deepEqual(sizedAsk("/Users/mira/Work", ok({ bytes: null })),
+    { path: "/Users/mira/Work", bytes: null, sizeProblem: "Some files in that folder can't be read." });
+  assert.deepEqual(sizedAsk("/Users/mira/Work", notReady), { path: "/Users/mira/Work", bytes: null, sizeProblem: "Measuring the folder isn't in this build." });
+  assert.equal(sizedAsk("/Users/mira/Work", { kind: "error", code: "folder_size_unsafe", message: "That folder can't be measured." }).sizeProblem, "That folder can't be measured.");
 });

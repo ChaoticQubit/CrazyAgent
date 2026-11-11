@@ -9,7 +9,8 @@ use crazyagent::research::runner::{
     ResearchAccount, ResearchLimits, ResearchProject, ResearchRunner, RunError,
 };
 use research_support::{
-    EngineRuntime, claude, codex, hanging_endpoint, processes_with, recording_hanging_endpoint,
+    EngineRuntime, claude, codex, counted_hanging_endpoint, hanging_endpoint, processes_with,
+    recording_hanging_endpoint,
 };
 use std::fs;
 use std::io::{Read, Write};
@@ -17,6 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 const OLLAMA_HOST: &str = "127.0.0.1:11434";
@@ -358,6 +360,75 @@ fn cancelling_running_research_stops_its_process_group() {
     assert!(cancelled_at.elapsed() < Duration::from_secs(10));
     assert_eq!(run.status, ResearchStatus::Cancelled);
     assert_eq!(jobs.get(id).unwrap().unwrap().status.label(), "Cancelled");
+    assert!(!process_group_alive(run.process_group.unwrap()));
+}
+
+/// Turning off a toolchain a running research job was granted stops the job and puts it
+/// back in the queue without spending its attempt, so its next run starts without it.
+#[test]
+fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
+    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice, save};
+    use crazyagent::sandbox::toolchains::Toolchain;
+    let case = case("A plain project.");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let connection = rusqlite::Connection::open(&case.database).unwrap();
+    let rust = |allowed| AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed,
+        }],
+        ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
+        network: crazyagent::sandbox::policy::AgentNetwork::default(),
+    };
+    save(&connection, "project-a", &rust(true)).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let (port, _server) = hanging_endpoint();
+    let runner = Arc::new(runner(&case, limits(Duration::from_secs(120))));
+    let project_root = case.project.clone();
+    let handle = {
+        let runner = runner.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &project_root,
+                    account: Some(endpoint(port)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    save(&connection, "project-a", &rust(false)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            jobs.request_cancel(id).unwrap();
+            let _ = handle.join();
+            panic!("the research job kept running after Rust was turned off");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Queued);
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
+    assert_eq!(
+        job.error.as_deref(),
+        Some(
+            "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it"
+        )
+    );
     assert!(!process_group_alive(run.process_group.unwrap()));
 }
 
@@ -730,6 +801,60 @@ fn each_codex_launch_gets_the_project_context_in_its_home_only_while_it_runs() {
     assert!(!home.join("crazyagent").exists());
 }
 
+/// R7-CTX F1: a tools-on research job's harness, under the job's own sandbox profile and
+/// environment, makes a temp folder as context-mode 1.0.169 does, under the answer of the
+/// `getconf DARWIN_USER_TEMP_DIR` its search path finds with TMPDIR unset, and that folder
+/// lands in the job's short temp folder, not in the per-user temp folder the profile denies.
+#[test]
+fn a_research_job_makes_context_mode_temp_folders_where_its_sandbox_lets_it_write() {
+    let case = case("A booking site for a bike repair shop.");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let folder = harness_folder();
+    let harness = ctx_temp_harness(folder.path());
+    let (port, _server) = hanging_endpoint();
+    let runner = Arc::new(
+        ResearchRunner::new(
+            &case.database,
+            &case.state,
+            &harness,
+            limits(Duration::from_secs(120)),
+        )
+        .unwrap(),
+    );
+    let handle = {
+        let runner = runner.clone();
+        let root = case.project.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &root,
+                    account: Some(endpoint(port)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let home = case
+        .state
+        .join("agents")
+        .join(format!("job-{id}-1"))
+        .join("home");
+    let report = home.join("ctx-temp");
+    wait_for_file(&report, Duration::from_secs(60));
+    let made = fs::read_to_string(&report).unwrap();
+    assert!(jobs.request_cancel(id).unwrap());
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Cancelled);
+    assert!(
+        made.starts_with("made /private/tmp/ca-") && made.contains("/.ctx-mode-"),
+        "the job's context-mode temp folder lands where its sandbox lets it write: {made}"
+    );
+}
+
 #[test]
 fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
     let marker = format!("CLAUDE-CONTEXT-{}", std::process::id());
@@ -738,7 +863,7 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
     let id = jobs
         .enqueue("project-a", "design_research", "claude", false)
         .unwrap();
-    let (port, _server) = hanging_endpoint();
+    let (port, _server, requests) = counted_hanging_endpoint();
     let runner = Arc::new(
         runner(&case, limits(Duration::from_secs(120)))
             .with_claude(&claude())
@@ -767,13 +892,19 @@ fn each_claude_launch_gets_the_project_context_as_files_it_is_pointed_at() {
         .join(format!("job-{id}-1"))
         .join("home")
         .join("crazyagent");
-    wait_for_file(&state.join("instructions.md"), Duration::from_secs(30));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while requests.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the claude agent never asked its model"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     let instructions = fs::read_to_string(state.join("instructions.md")).unwrap();
     assert!(instructions.contains(&marker), "{instructions}");
     let servers = fs::read_to_string(state.join("mcp.json")).unwrap();
     assert!(servers.contains("mcpServers"), "{servers}");
     assert!(!state.join("plugin").exists());
-    std::thread::sleep(Duration::from_secs(1));
     assert!(jobs.request_cancel(id).unwrap());
     let run = handle.join().unwrap();
     assert_eq!(run.status, ResearchStatus::Cancelled);
@@ -895,6 +1026,36 @@ while [ ! -e "$TMPDIR/detached" ]; do /bin/sleep 0.05; done
 {then}
 "#
         ),
+    )
+    .unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+/// Writes a harness standing in for Codex that makes a temp folder as context-mode 1.0.169
+/// does: `getconf DARWIN_USER_TEMP_DIR` found on its search path with TMPDIR unset, then a
+/// `.ctx-mode-XXXXXX` folder made in the answer. It writes `made <folder>` or the failure to
+/// `ctx-temp` in its home and sleeps, so the test reads it while the job still runs. Takes
+/// the folder. Returns the harness.
+fn ctx_temp_harness(folder: &Path) -> PathBuf {
+    let harness = folder.canonicalize().unwrap().join("codex");
+    fs::write(
+        &harness,
+        r#"#!/bin/sh
+out="$HOME/ctx-temp"
+if answer=$(/usr/bin/env -u TMPDIR getconf DARWIN_USER_TEMP_DIR 2>&1); then
+  if made=$(/usr/bin/mktemp -d "${answer%/}/.ctx-mode-XXXXXX" 2>&1); then
+    /bin/rmdir "$made"
+    printf 'made %s\n' "$made" > "$out.part"
+  else
+    printf 'mkdtemp failed under %s: %s\n' "$answer" "$made" > "$out.part"
+  fi
+else
+  printf 'getconf failed: %s\n' "$answer" > "$out.part"
+fi
+/bin/mv "$out.part" "$out"
+exec /bin/sleep 60
+"#,
     )
     .unwrap();
     fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
@@ -1063,4 +1224,92 @@ fn research_whose_engine_dies_leaves_nothing_its_harness_detached() {
         survivors_naming(SLEEP, Duration::from_secs(5)),
         Vec::<u32>::new()
     );
+}
+
+/// Writes a harness standing in for Codex that records, in the agent's home, which outlives
+/// the job's temp folder, the proxy its launch names and the status that proxy gives it for
+/// a CONNECT to a host off the agent's list, then exits. Takes the folder. Returns the
+/// harness.
+fn proxy_reporting_harness(folder: &Path) -> PathBuf {
+    let harness = folder.canonicalize().unwrap().join("codex");
+    fs::write(
+        &harness,
+        r#"#!/bin/sh
+{
+echo "proxy=$HTTPS_PROXY"
+/usr/bin/curl -sS -o /dev/null -w 'connect=%{http_connect}\n' --max-time 10 --proxy "$HTTPS_PROXY" https://example.com/
+} > "$HOME/reach" 2>&1
+exit 0
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+/// A research job with tools under the None network runs with its model proxy bound: its
+/// harness's launch names the proxy, the proxy answers the harness inside its sandbox and
+/// refuses a host off its list, and the job's profile reaches only the proxy's port
+/// (S4B-R2-L1).
+#[test]
+fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
+    use crazyagent::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let case = case("A plain project.");
+    let none = AgentPolicy {
+        network: AgentNetwork::None,
+        ..AgentPolicy::default()
+    };
+    crazyagent::sandbox::policy::save(
+        &rusqlite::Connection::open(&case.database).unwrap(),
+        "project-a",
+        &none,
+    )
+    .unwrap();
+    let folder = harness_folder();
+    let harness = proxy_reporting_harness(folder.path());
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: "https://models.crazyagent.test/v1".into(),
+        model: "proxied-model".into(),
+    };
+    ResearchRunner::new(
+        &case.database,
+        &case.state,
+        &harness,
+        limits(Duration::from_secs(60)),
+    )
+    .unwrap()
+    .run_once(&project(&case, Some(account)))
+    .unwrap()
+    .unwrap();
+    let name = format!("job-{id}-1");
+    let reach = fs::read_to_string(
+        case.state
+            .join("agents")
+            .join(&name)
+            .join("home")
+            .join("reach"),
+    )
+    .unwrap();
+    let port: u16 = reach
+        .lines()
+        .find_map(|line| line.strip_prefix("proxy=http://127.0.0.1:"))
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("the harness's launch names no model proxy: {reach}"));
+    assert!(
+        reach.lines().any(|line| line == "connect=403"),
+        "the model proxy did not answer the harness: {reach}"
+    );
+    let profile =
+        fs::read_to_string(case.state.join("profiles").join(format!("{name}.sb"))).unwrap();
+    assert!(
+        profile.contains(&format!(
+            "(allow network-outbound (remote ip \"localhost:{port}\"))"
+        )),
+        "{profile}"
+    );
+    assert!(!profile.contains("(remote ip \"*:"), "{profile}");
 }

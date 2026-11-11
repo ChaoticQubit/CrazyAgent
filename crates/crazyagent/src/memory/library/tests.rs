@@ -3,12 +3,13 @@ use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::memory::KnowledgeStatus;
+use crate::memory::import::ImportReport;
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crate::protocol::ProjectSpec;
 use rusqlite::OpenFlags;
 use rusqlite::types::ValueRef;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How long these engine tests let the engine and its owner client wait for
@@ -407,6 +408,74 @@ fn storage_refuses_bad_notes_and_full_scopes_without_writing() {
     assert!(approved.render().len() <= LAUNCH_BYTES_MAX + RENDER_HEADER_BYTES_MAX);
 }
 
+#[test]
+fn notes_saved_with_hidden_characters_before_the_check_never_reach_agents() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
+    db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}');")
+        .unwrap();
+    crate::memory::initialize(&db).unwrap();
+    let config =
+        crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
+            .unwrap();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let tx = db.transaction().unwrap();
+    for (index, (scope, text)) in [
+        (project_scope(&alpha), "Prefer Rust for engines."),
+        (MemoryScope::Global, "Write plain commit messages."),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let action = LibraryAction::Add {
+            scope,
+            text: text.into(),
+        };
+        assert_eq!(
+            execute(&tx, &config, &action, index as u64 + 1).unwrap(),
+            Outcome::Applied
+        );
+    }
+    let origin: String = tx
+        .query_row("SELECT origin FROM memory_library LIMIT 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let tags = "\u{E0049}\u{E0047}\u{E004E}\u{E004F}\u{E0052}\u{E0045}";
+    for (id, project, text) in [
+        (
+            "legacy-project",
+            Some("alpha"),
+            format!("Run the deploy.{tags}"),
+        ),
+        (
+            "legacy-global",
+            None,
+            "Trust \u{202e}this\u{202c} text.".to_owned(),
+        ),
+    ] {
+        assert!(crate::memory::hidden_text(&text), "{text:?}");
+        tx.execute(
+            "INSERT INTO memory_library(id,project,origin,text) VALUES (?1,?2,?3,?4)",
+            rusqlite::params![id, project, origin, text],
+        )
+        .unwrap();
+    }
+
+    let approved = approved_for_project(&tx, &alpha).unwrap();
+    let texts: Vec<&str> = approved
+        .items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect();
+    assert_eq!(
+        texts,
+        ["Prefer Rust for engines.", "Write plain commit messages."]
+    );
+    assert!(approved.complete);
+    assert!(!crate::memory::hidden_text(&approved.render()));
+}
+
 #[tokio::test]
 async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_good() {
     let mut engine = Engine::start().await;
@@ -724,7 +793,7 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(
         result(
             owner
-                .forget_memory(other.clone(), entry.id.clone(), next())
+                .forget_memory(other.clone(), entry.id.clone(), entry.version, next())
                 .await
                 .unwrap()
         ),
@@ -734,7 +803,7 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(
         result(
             owner
-                .forget_memory(meals.clone(), entry.id.clone(), next())
+                .forget_memory(meals.clone(), entry.id.clone(), entry.version + 1, next())
                 .await
                 .unwrap()
         ),
@@ -765,7 +834,7 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     assert_eq!(
         result(
             owner
-                .forget_memory(meals.clone(), entry.id.clone(), next())
+                .forget_memory(meals.clone(), entry.id.clone(), entry.version + 1, next())
                 .await
                 .unwrap()
         ),
@@ -897,6 +966,138 @@ async fn owner_memory_survives_restart_promotes_in_one_click_and_deletes_for_goo
     );
     assert!(after.items.iter().any(|item| item.text == entry.text));
     drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn memory_edit_on_a_stale_revision_is_refused() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-stale", next()).await;
+    std::fs::write(
+        engine
+            .folder("mem-stale")
+            .join("context/research/market_research.md"),
+        "# Market\n\nFamilies plan dinners on Sundays.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let opened = owner.project_memories(meals.clone(), None).await.unwrap()[0].clone();
+    assert_eq!(opened.version, 1);
+    let edit = |text: &str| ReviewDecision::Edit { text: text.into() };
+    let desktop = "Families plan dinners on Sundays and Wednesdays.";
+    let tui = "Families plan dinners.";
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    opened.id.clone(),
+                    opened.version,
+                    edit(desktop),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "the first client's edit lands"
+    );
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    opened.id.clone(),
+                    opened.version,
+                    edit(tui),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        rejected("knowledge_version_conflict"),
+        "an edit naming the version it opened is refused once another edit landed"
+    );
+    let current = owner.project_memories(meals.clone(), None).await.unwrap()[0].clone();
+    assert_eq!(
+        (current.version, current.text.as_str()),
+        (2, desktop),
+        "the refused edit changed nothing"
+    );
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(meals.clone(), opened.id.clone(), opened.version, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_changed"),
+        "deleting a memory edited since it was opened is refused"
+    );
+    assert_eq!(
+        result(
+            owner
+                .promote_memory(meals.clone(), opened.id.clone(), opened.version, next())
+                .await
+                .unwrap()
+        ),
+        rejected("memory_changed")
+    );
+    assert_eq!(
+        owner.project_memories(meals.clone(), None).await.unwrap(),
+        vec![current.clone()],
+        "the memory is still there, unchanged"
+    );
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    opened.id.clone(),
+                    current.version,
+                    edit(tui),
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "after reading the newer version, the owner's edit lands over it"
+    );
+    let kept = owner.project_memories(meals.clone(), None).await.unwrap()[0].clone();
+    assert_eq!((kept.version, kept.text.as_str()), (3, tui));
+    assert_eq!(
+        result(
+            owner
+                .forget_memory(meals.clone(), opened.id.clone(), kept.version, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(
+        owner
+            .project_memories(meals, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     engine.stop().await;
 }
 
@@ -1261,6 +1462,701 @@ async fn research_text_with_hidden_characters_stored_before_the_check_is_never_k
         !tables_holding(&engine.database(), tags).contains(&"memory_library".to_owned()),
         "no saved memory holds the hidden characters"
     );
+    assert!(
+        approved_direct(&engine, &meals)
+            .items
+            .iter()
+            .all(|item| !crate::memory::hidden_text(&item.text)),
+        "a kept entry saved before the check never reaches the project's agents"
+    );
     drop(owner);
     engine.stop().await;
+}
+
+#[tokio::test]
+async fn every_project_memory_read_for_counts_and_lists_reaches_past_one_engine_batch() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-pages", next()).await;
+    let headings: Vec<String> = (1..=11)
+        .map(|index| format!("Finding {index:02}"))
+        .collect();
+    let report: String = headings
+        .iter()
+        .map(|heading| format!("## {heading}\n\nHouseholds note {heading}.\n\n"))
+        .collect();
+    std::fs::write(
+        engine
+            .folder("mem-pages")
+            .join("context/research/market_research.md"),
+        format!("# Market\n\n{report}"),
+    )
+    .unwrap();
+    for heading in &headings {
+        assert_eq!(
+            result(
+                owner
+                    .save_research_to_memory(
+                        meals.clone(),
+                        ResearchKind::MarketResearch,
+                        Some(heading.clone()),
+                        next()
+                    )
+                    .await
+                    .unwrap()
+            ),
+            OwnerResult::Applied,
+            "{heading}"
+        );
+    }
+
+    let first = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(
+        first.len(),
+        8,
+        "one engine batch stops at the default batch size"
+    );
+    let all = owner.all_project_memories(meals.clone()).await.unwrap();
+    assert_eq!(all.len(), headings.len(), "every suggestion is read");
+    assert!(
+        all.windows(2)
+            .all(|pair| pair[0].id.as_str() < pair[1].id.as_str()),
+        "batches continue after the last id without repeats"
+    );
+    assert_eq!(all[..first.len()], first[..]);
+    assert!(
+        all.iter()
+            .all(|entry| entry.status == KnowledgeStatus::Provisional && !entry.human_reviewed)
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// An IDE Approve or Reject on a waiting memory only asks: the memory stays waiting, the
+/// desktop's list shows the newest ask with its decision, and the owner's own Keep at that
+/// revision clears the list; an IDE decision on the reviewed revision is then stale.
+#[tokio::test]
+async fn an_ide_decision_waits_in_the_desktop_list_until_the_owner_reviews_it() {
+    use crate::ide::bridge::memory::{Decide, decide};
+    use crate::ide::bridge::{Decision, IdeReply};
+
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let meals = create_project(&mut owner, "mem-ide", next()).await;
+    std::fs::write(
+        engine
+            .folder("mem-ide")
+            .join("context/research/market_research.md"),
+        "# Market\n\nAbout 2 million households plan meals weekly.\n",
+    )
+    .unwrap();
+    assert_eq!(
+        result(
+            owner
+                .save_research_to_memory(meals.clone(), ResearchKind::MarketResearch, None, next())
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let entry = owner
+        .project_memories(meals.clone(), None)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(entry.status, KnowledgeStatus::Provisional);
+    assert!(owner.ide_asks(meals.clone()).await.unwrap().is_empty());
+
+    let runtime = engine.service.as_ref().unwrap().owner_runtime().unwrap();
+    let asked = |decision| Decide {
+        id: entry.id.clone(),
+        revision: entry.version,
+        decision,
+    };
+    for decision in [Decision::Reject, Decision::Approve] {
+        assert_eq!(
+            decide(runtime, &meals, &asked(decision)).await.unwrap(),
+            IdeReply::Ok {
+                data: serde_json::json!({ "confirm": "desktop" }),
+            }
+        );
+        let waiting = owner.ide_asks(meals.clone()).await.unwrap();
+        assert_eq!(
+            waiting
+                .iter()
+                .map(|ask| (ask.entry.id.clone(), ask.entry.version, ask.decision))
+                .collect::<Vec<_>>(),
+            [(entry.id.clone(), entry.version, decision)],
+            "the newest IDE decision on a memory is the one the desktop asks"
+        );
+        let shown = owner.project_memories(meals.clone(), None).await.unwrap();
+        assert_eq!(
+            (shown[0].status.clone(), shown[0].version),
+            (KnowledgeStatus::Provisional, entry.version),
+            "an IDE decision writes no memory"
+        );
+    }
+
+    assert_eq!(
+        result(
+            owner
+                .review_memory(
+                    meals.clone(),
+                    entry.id.clone(),
+                    entry.version,
+                    ReviewDecision::Keep,
+                    next()
+                )
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    assert!(
+        owner.ide_asks(meals.clone()).await.unwrap().is_empty(),
+        "the owner's own review clears the ask"
+    );
+    let kept = owner.project_memories(meals.clone(), None).await.unwrap();
+    assert_eq!(kept[0].status, KnowledgeStatus::Confirmed);
+    assert!(kept[0].human_reviewed);
+    assert!(matches!(
+        decide(runtime, &meals, &asked(Decision::Reject))
+            .await
+            .unwrap(),
+        IdeReply::Stale { .. }
+    ));
+    assert!(owner.ide_asks(meals.clone()).await.unwrap().is_empty());
+    drop(owner);
+    engine.stop().await;
+}
+
+fn import_db() -> (tempfile::TempDir, rusqlite::Connection, EffectiveConfig) {
+    let directory = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}'), ('beta','{}');",
+    )
+    .unwrap();
+    crate::memory::initialize(&db).unwrap();
+    let config =
+        crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
+            .unwrap();
+    (directory, db, config)
+}
+
+fn import_action(project: &str, file: &str, text: &str) -> LibraryAction {
+    LibraryAction::Import {
+        project_id: ProjectId::new(project).unwrap(),
+        file: file.into(),
+        text: text.into(),
+    }
+}
+
+#[test]
+fn import_saves_one_project_memory_per_file_and_refuses_reimport() {
+    let (_directory, mut db, config) = import_db();
+    let tx = db.transaction().unwrap();
+    let text = "Plan meals on Sunday.";
+    let first = import_action("alpha", "a.md", text);
+    assert_eq!(execute(&tx, &config, &first, 1).unwrap(), Outcome::Applied);
+    assert_eq!(
+        execute(&tx, &config, &first, 2).unwrap(),
+        Outcome::Rejected {
+            code: "memory_duplicate".into()
+        }
+    );
+    assert_eq!(
+        execute(&tx, &config, &import_action("alpha", "b.md", text), 3).unwrap(),
+        Outcome::Rejected {
+            code: "memory_duplicate".into()
+        },
+        "the same text in the same project is a duplicate under another name"
+    );
+    assert_eq!(
+        execute(&tx, &config, &import_action("absent", "a.md", text), 4).unwrap(),
+        Outcome::Rejected {
+            code: "memory_project_missing".into()
+        }
+    );
+    let too_long = "t".repeat(TEXT_BYTES_MAX + 1);
+    for (file, text) in [
+        ("../x.md", text),
+        ("a/b.md", text),
+        ("x.txt", text),
+        (".a.md", text),
+        ("a.md", too_long.as_str()),
+        ("a.md", " padded "),
+        ("a.md", "a\u{202e}b"),
+    ] {
+        let action = import_action("alpha", file, text);
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "memory_import_invalid",
+            "{file}"
+        );
+        assert_eq!(
+            execute(&tx, &config, &action, 5).unwrap(),
+            Outcome::Rejected {
+                code: "memory_import_invalid".into()
+            },
+            "{file}"
+        );
+    }
+    let saved: Vec<(Option<String>, String, String)> = tx
+        .prepare("SELECT project, origin, text FROM memory_library")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].0.as_deref(), Some("alpha"));
+    assert_eq!(
+        serde_json::from_str::<MemoryOrigin>(&saved[0].1).unwrap(),
+        MemoryOrigin::Imported {
+            file: "a.md".into()
+        }
+    );
+    assert_eq!(saved[0].2, text);
+}
+
+#[test]
+fn an_imported_memory_reaches_agents_of_its_project_only_as_a_note() {
+    let (_directory, mut db, config) = import_db();
+    let tx = db.transaction().unwrap();
+    let action = import_action("alpha", "a.md", "Plan meals on Sunday.");
+    assert_eq!(execute(&tx, &config, &action, 1).unwrap(), Outcome::Applied);
+    let alpha = approved_for_project(&tx, &ProjectId::new("alpha").unwrap()).unwrap();
+    assert_eq!(
+        alpha.items,
+        vec![ApprovedMemory {
+            scope: ApprovedScope::Project,
+            kind: ApprovedKind::Note,
+            text: "Plan meals on Sunday.".into(),
+        }]
+    );
+    assert!(alpha.render().contains("Plan meals on Sunday."));
+    let beta = approved_for_project(&tx, &ProjectId::new("beta").unwrap()).unwrap();
+    assert!(beta.items.is_empty(), "{beta:?}");
+}
+
+fn memory_folder(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let folder = tempfile::Builder::new()
+        .prefix("ca-mem-import-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for (name, text) in files {
+        std::fs::write(folder.path().join(name), text).unwrap();
+    }
+    folder
+}
+
+#[tokio::test]
+async fn import_memories_counts_imported_and_skipped() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = create_project(&mut owner, "mem-import", 1).await;
+    let response = owner
+        .add_memory(project_scope(&project), "Shop on Monday.".into(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let folder = memory_folder(&[
+        ("a.md", "Plan meals on Sunday."),
+        ("b.md", "---\ntitle: shop\n---\nShop on Monday."),
+        ("c.md", "Cook twice a week."),
+    ]);
+
+    let first = owner
+        .import_memories(project.clone(), folder.path(), 3)
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        ImportReport {
+            imported: 2,
+            skipped: 1
+        }
+    );
+    let page = owner
+        .memories(project_scope(&project), None, None)
+        .await
+        .unwrap();
+    let mut imported: Vec<(String, String)> = page
+        .items
+        .iter()
+        .filter_map(|memory| match &memory.origin {
+            MemoryOrigin::Imported { file } => Some((file.clone(), memory.text.clone())),
+            _ => None,
+        })
+        .collect();
+    imported.sort();
+    assert_eq!(
+        imported,
+        vec![
+            ("a.md".into(), "Plan meals on Sunday.".into()),
+            ("c.md".into(), "Cook twice a week.".into()),
+        ]
+    );
+    assert_eq!(page.items.len(), 3);
+
+    let second = owner
+        .import_memories(project.clone(), folder.path(), 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        second,
+        ImportReport {
+            imported: 0,
+            skipped: 3
+        }
+    );
+    assert_eq!(
+        owner
+            .import_memories(project, Path::new("relative"), 5)
+            .await
+            .unwrap_err()
+            .0,
+        "memory_import_folder_invalid"
+    );
+    engine.stop().await;
+}
+
+#[tokio::test]
+async fn import_memories_stops_at_full() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = create_project(&mut owner, "mem-full", 1).await;
+    let mut generation = 1;
+    for index in 0..SCOPE_ITEMS_MAX - 1 {
+        generation += 1;
+        let response = owner
+            .add_memory(project_scope(&project), format!("note {index}"), generation)
+            .await
+            .unwrap();
+        assert_eq!(result(response), OwnerResult::Applied, "{index}");
+    }
+    let folder = memory_folder(&[
+        ("a.md", "First imported."),
+        ("b.md", "Second imported."),
+        ("c.md", "Third imported."),
+    ]);
+    let report = owner
+        .import_memories(project.clone(), folder.path(), generation + 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        report,
+        ImportReport {
+            imported: 1,
+            skipped: 2
+        }
+    );
+    let page = owner
+        .memories(project_scope(&project), Some("imported".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|memory| memory.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["First imported."]
+    );
+    engine.stop().await;
+}
+
+fn agent_library() -> (tempfile::TempDir, rusqlite::Connection, EffectiveConfig) {
+    let directory = tempfile::tempdir().unwrap();
+    let db = rusqlite::Connection::open(directory.path().join("memory.db")).unwrap();
+    db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}'); INSERT INTO projects VALUES ('beta','{}');")
+        .unwrap();
+    crate::memory::initialize(&db).unwrap();
+    let config =
+        crate::config::resolve_config(&directory.path().join("g"), &directory.path().join("p"))
+            .unwrap();
+    (directory, db, config)
+}
+
+fn owner_change(
+    db: &mut rusqlite::Connection,
+    config: &EffectiveConfig,
+    action: LibraryAction,
+) -> Outcome {
+    let tx = db.transaction().unwrap();
+    let outcome = execute(&tx, config, &action, 1).unwrap();
+    tx.commit().unwrap();
+    outcome
+}
+
+fn memory_with_text(db: &mut rusqlite::Connection, text: &str) -> SavedMemory {
+    let id: String = db
+        .query_row("SELECT id FROM memory_library WHERE text=?1", [text], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let tx = db.transaction().unwrap();
+    get(&tx, &RequestId::new(id).unwrap()).unwrap().unwrap()
+}
+
+fn recalled(db: &mut rusqlite::Connection, project: &ProjectId, query: &str) -> Vec<String> {
+    recall(db, project, query)
+        .unwrap()
+        .unwrap()
+        .into_iter()
+        .map(|memory| memory.text)
+        .collect()
+}
+
+fn approved_texts(db: &mut rusqlite::Connection, project: &ProjectId) -> Vec<String> {
+    let tx = db.transaction().unwrap();
+    approved_for_project(&tx, project)
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.text)
+        .collect()
+}
+
+#[test]
+fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setting() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Save);
+
+    assert_eq!(
+        agent_remember(
+            &mut db,
+            &alpha,
+            " Ada (@lead-a) ",
+            false,
+            "  Use cargo nextest.  "
+        )
+        .unwrap(),
+        Ok(false)
+    );
+    let saved = memory_with_text(&mut db, "Use cargo nextest.");
+    assert_eq!(
+        saved.origin,
+        MemoryOrigin::Agent {
+            agent: "Ada (@lead-a)".into()
+        }
+    );
+    assert_eq!(saved.scope, project_scope(&alpha));
+    assert_eq!(recalled(&mut db, &alpha, "NEXTEST"), ["Use cargo nextest."]);
+    assert!(
+        recalled(&mut db, &beta, "").is_empty(),
+        "a project memory stays in its project"
+    );
+    assert_eq!(approved_texts(&mut db, &alpha), ["Use cargo nextest."]);
+
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentWrites {
+                writes: AgentWrites::Ask
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Ask);
+    assert_eq!(
+        agent_remember(
+            &mut db,
+            &alpha,
+            "Master",
+            true,
+            "Run make check before commits."
+        )
+        .unwrap(),
+        Ok(true)
+    );
+    let requested = memory_with_text(&mut db, "Run make check before commits.");
+    assert_eq!(
+        requested.origin,
+        MemoryOrigin::Requested {
+            agent: "Master".into()
+        }
+    );
+    assert!(requested.origin.waiting());
+    assert_eq!(requested.scope, MemoryScope::Global);
+    assert_eq!(recalled(&mut db, &alpha, ""), ["Use cargo nextest."]);
+    assert!(recalled(&mut db, &beta, "make check").is_empty());
+    assert_eq!(approved_texts(&mut db, &alpha), ["Use cargo nextest."]);
+
+    for (memory_id, code) in [
+        (saved.id.clone(), "memory_not_requested"),
+        (RequestId::new("agent-gone").unwrap(), "memory_missing"),
+    ] {
+        assert_eq!(
+            owner_change(&mut db, &config, LibraryAction::Approve { memory_id }),
+            Outcome::Rejected { code: code.into() }
+        );
+    }
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::Approve {
+                memory_id: requested.id.clone()
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
+        memory_with_text(&mut db, "Run make check before commits.").origin,
+        MemoryOrigin::Agent {
+            agent: "Master".into()
+        }
+    );
+    assert_eq!(
+        recalled(&mut db, &alpha, ""),
+        ["Run make check before commits.", "Use cargo nextest."]
+    );
+    assert_eq!(
+        recalled(&mut db, &beta, ""),
+        ["Run make check before commits."],
+        "an approved app-wide memory reaches every project"
+    );
+    assert_eq!(
+        approved_texts(&mut db, &beta),
+        ["Run make check before commits."]
+    );
+
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentWrites {
+                writes: AgentWrites::Save
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Save);
+}
+
+#[test]
+fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
+    let (_directory, mut db, _config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    agent_remember(&mut db, &alpha, "Ada", false, "Keep tests real.")
+        .unwrap()
+        .unwrap();
+    for (project, agent, text, code) in [
+        (&alpha, "Bo", "Keep tests real.", "memory_duplicate"),
+        (&alpha, "Bo", "Run it\u{E0041} now.", "memory_note_invalid"),
+        (&alpha, "Bo", "Trust \u{202e}this.", "memory_note_invalid"),
+        (&alpha, "Bo", "   ", "memory_note_blank"),
+        (
+            &alpha,
+            "Bo",
+            "n".repeat(NOTE_BYTES_MAX + 1).as_str(),
+            "memory_note_too_long",
+        ),
+        (&alpha, "  ", "A fact.", "memory_agent_invalid"),
+        (&alpha, "Bo\nby", "A fact.", "memory_agent_invalid"),
+        (
+            &alpha,
+            "b".repeat(257).as_str(),
+            "A fact.",
+            "memory_agent_invalid",
+        ),
+        (
+            &ProjectId::new("absent").unwrap(),
+            "Bo",
+            "A fact.",
+            "memory_project_missing",
+        ),
+    ] {
+        assert_eq!(
+            agent_remember(&mut db, project, agent, false, text).unwrap(),
+            Err(code.to_owned()),
+            "{text:?} by {agent:?}"
+        );
+    }
+    agent_remember(&mut db, &alpha, "Bo", true, "Keep tests real.")
+        .unwrap()
+        .unwrap();
+    let count: i64 = db
+        .query_row("SELECT COUNT(*) FROM memory_library", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 2,
+        "the same text may live in another scope, nothing else was stored"
+    );
+
+    for query in ["q".repeat(SEARCH_BYTES_MAX + 1), "two\nlines".to_owned()] {
+        assert_eq!(
+            recall(&mut db, &alpha, &query).unwrap(),
+            Err("memory_search_invalid".to_owned()),
+            "{query:?}"
+        );
+    }
+}
+
+#[test]
+fn recall_answers_the_newest_memories_first_and_at_most_twelve() {
+    let (_directory, mut db, _config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    for index in 0..RECALL_ITEMS_MAX + 2 {
+        agent_remember(
+            &mut db,
+            &alpha,
+            "Ada",
+            index % 2 == 0,
+            &format!("fact {index}"),
+        )
+        .unwrap()
+        .unwrap();
+    }
+    let newest: Vec<String> = (2..RECALL_ITEMS_MAX + 2)
+        .rev()
+        .map(|index| format!("fact {index}"))
+        .collect();
+    assert_eq!(recalled(&mut db, &alpha, "fact"), newest);
+    assert_eq!(
+        recalled(&mut db, &alpha, "fact 1"),
+        ["fact 13", "fact 12", "fact 11", "fact 10", "fact 1"]
+    );
+}
+
+#[test]
+fn an_imported_project_memory_is_recalled_in_its_project_only() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::Import {
+                project_id: alpha.clone(),
+                file: "notes.md".into(),
+                text: "Deploys go out on Tuesdays.".into(),
+            }
+        ),
+        Outcome::Applied
+    );
+    let found = recall(&mut db, &alpha, "tuesdays").unwrap().unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(
+        found[0].origin,
+        MemoryOrigin::Imported {
+            file: "notes.md".into()
+        }
+    );
+    assert!(recalled(&mut db, &beta, "").is_empty());
 }

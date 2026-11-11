@@ -4,14 +4,15 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { AccountChoiceView, ProjectAccountOrderView, planFor, planLine, poolStrategy, projectStrategy, rankInput, reserveInput, strategyOptions, STRATEGIES } = await import("../src/screens/settings/account-choice.tsx");
-const { plainError } = await import("../src/api.ts");
+const { ProjectAccountOrderView, planFor, planLine, poolStrategy, projectStrategy, rankInput, reserveInput, strategyOptions, STRATEGIES } = await import("../src/screens/settings/account-choice.tsx");
+const { plainError, setAccountSchedule } = await import("../src/api.ts");
 
 const schedule = {
   strategy: "manual_rank",
   pools: [{ id: "pool-main", strategy: "balanced" }],
   projects: [{ id: "project-a", strategy: "use_it_or_lose_it" }],
   accounts: [{ connection: "acct-1", plan: { rank: 2, reserve_percent: 10, pin: "use_last" } }],
+  version: 3,
 };
 const member = (id) => ({ id, kind: "claude", provider: "Claude", status: "signed_in", status_label: "Signed in" });
 const pool = { id: "pool-main", name: "Main", summary: "2 Claude", members: [member("acct-1"), member("acct-2")], project_count: 1 };
@@ -42,30 +43,25 @@ test("stored choices read back per pool, project and account with defaults for t
   assert.deepEqual(strategyOptions("Manual rank")[0], { value: "", label: "Default (Manual rank)" });
 });
 
-test("the panel shows the app strategy, the pool's own strategy and each member's plan", () => {
-  const html = renderToStaticMarkup(createElement(AccountChoiceView, {
-    schedule: { kind: "ok", value: schedule }, pools: { kind: "ok", value: [pool] },
-    names: new Map([["acct-1", "Work Claude"], ["acct-2", "Home Claude"]]), onChange: forbidden, onRetry: forbidden,
-  }));
-  assert.match(html, /How every pool picks an account/);
-  assert.match(html, /<option value="manual_rank" selected="">Manual rank<\/option>/);
-  assert.match(html, /Main: account order/);
-  assert.match(html, /<option value="balanced" selected="">Balanced<\/option>/);
-  assert.match(html, /Work Claude/);
-  assert.match(html, /Home Claude/);
-  assert.match(html, /Rank 2, keeps 10% of its week, used last/);
-  assert.match(html, /No rank, used to 100%/);
-  assert.match(html, /<option value="never_use">Never use<\/option>/);
-  const failed = renderToStaticMarkup(createElement(AccountChoiceView, {
-    schedule: { kind: "error", code: "owner_read_failed", message: "x" }, pools: { kind: "ok", value: [pool] },
-    names: new Map(), onChange: forbidden, onRetry: forbidden,
-  }));
-  assert.match(failed, /Couldn&#x27;t load account choice\./);
+test("every scheduling refusal reads as a sentence", () => {
+  for (const code of ["account_rank_invalid", "account_reserve_invalid", "account_schedule_invalid", "account_schedule_full", "connection_not_found", "pool_not_found", "project_not_found"]) {
+    assert.doesNotMatch(plainError(code), /Something went wrong/, code);
+  }
 });
 
-test("every scheduling refusal reads as a sentence", () => {
-  for (const code of ["account_rank_invalid", "account_reserve_invalid", "account_schedule_invalid", "account_schedule_full", "connection_not_found", "pool_not_found"]) {
-    assert.doesNotMatch(plainError(code), /Something went wrong/, code);
+test("a refused account order save for a gone project comes back as its sentence, never the code (PROTO-4 F3)", async () => {
+  const sent = [];
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command) {
+    sent.push(command);
+    return { outcome: "rejected", pending: false, rejection: "project_not_found" };
+  } } };
+  try {
+    const result = await setAccountSchedule({ kind: "project_strategy", project: "project-gone", strategy: "balanced" }, 3);
+    assert.deepEqual(sent, ["desktop_set_account_schedule"]);
+    assert.deepEqual(result, { kind: "error", code: "project_not_found", message: "This project no longer exists." });
+  } finally {
+    globalThis.window = before;
   }
 });
 

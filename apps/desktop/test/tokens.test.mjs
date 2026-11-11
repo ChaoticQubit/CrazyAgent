@@ -71,7 +71,15 @@ test("the system dark theme and the chosen dark theme use identical tokens", () 
 test("the agent terminal keeps one dark palette in every theme and its text meets WCAG AA", () => {
   const light = block(":root");
   const names = Object.keys(light).filter((name) => name.startsWith("terminal-")).sort();
-  assert.deepEqual(names, ["terminal-bg", "terminal-cursor", "terminal-fg", "terminal-selection"]);
+  assert.deepEqual(names, [
+    "terminal-bg", "terminal-black", "terminal-blue", "terminal-border",
+    "terminal-bright-black", "terminal-bright-blue", "terminal-bright-cyan", "terminal-bright-green",
+    "terminal-bright-magenta", "terminal-bright-red", "terminal-bright-white", "terminal-bright-yellow",
+    "terminal-cursor", "terminal-cyan", "terminal-fg", "terminal-green",
+    "terminal-magenta", "terminal-muted", "terminal-red", "terminal-scrollbar",
+    "terminal-scrollbar-hover", "terminal-selection", "terminal-surface", "terminal-white",
+    "terminal-yellow",
+  ]);
   assert.deepEqual(Object.keys(block(':root[data-theme="dark"]')).filter((name) => name.startsWith("terminal-")), []);
   assert.equal(light["terminal-bg"], block(':root[data-theme="dark"]').bg);
   assert.ok(ratio(light["terminal-fg"], light["terminal-bg"]) >= 4.5);

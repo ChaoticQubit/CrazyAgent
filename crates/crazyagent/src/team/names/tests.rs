@@ -9,6 +9,19 @@ fn engine() -> (tempfile::TempDir, Connection) {
     (directory, connection)
 }
 
+fn give_role(
+    connection: &Connection,
+    project: &ProjectId,
+    task: i64,
+    role: &str,
+    expected: u64,
+) -> Result<u64, versioned::Stale> {
+    let tx = connection.unchecked_transaction().unwrap();
+    let done = set_task_role(&tx, project, task, role, expected).unwrap();
+    tx.commit().unwrap();
+    done
+}
+
 fn project(name: &str) -> ProjectId {
     ProjectId::new(name).unwrap()
 }
@@ -185,6 +198,112 @@ fn handles_become_short_kebab_case_or_nothing() {
     assert_eq!(long, "word-word-word-word-word-word-wo");
 }
 
+/// A handle never reads as an agent number a master names agents by (RV-DS-62): bare digits,
+/// `team-<n>`, `sub-agent-<n>` and `<harness>-<n>` are refused as roles and renames, and a
+/// taken role is never suffixed into one.
+#[test]
+fn a_handle_never_reads_as_an_agent_number() {
+    for numbered in [
+        "7",
+        "@7",
+        "team-7",
+        "Team 7",
+        "sub-agent-7",
+        "Sub-agent 7",
+        "codex-7",
+        "@Codex-7",
+        "claude-code-12",
+    ] {
+        assert_eq!(handle(numbered), None, "{numbered}");
+    }
+    for kept in [
+        "onboarding-fix-2",
+        "task-1",
+        "v2",
+        "2fa",
+        "codex",
+        "team",
+        "7up",
+    ] {
+        assert!(handle(kept).is_some(), "{kept}");
+    }
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let first = agent(&connection, "alpha", "sub", "working");
+    let second = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, first, "codex").unwrap(),
+        Ok("codex".into())
+    );
+    assert_eq!(
+        assign_role(&connection, &alpha, second, "codex").unwrap(),
+        Err("team_handle_taken"),
+        "codex-2 would read as agent 2"
+    );
+    assert_eq!(
+        assign_role(&connection, &alpha, second, "7").unwrap(),
+        Err("team_handle_invalid")
+    );
+    assert_eq!(stored_name(&connection, second).unwrap().handle, None);
+}
+
+/// A handle kept in a numbered form from before such handles were refused (RV-DS-62) is
+/// cleared when the engine opens its database (PD-1): agent 3 kept as `Ada (@7)` would read
+/// that way in every roster while `@7` now reaches agent 7. Its label is then its persona
+/// alone; every other handle stays.
+#[test]
+fn a_numbered_handle_kept_from_before_is_cleared_when_the_engine_opens() {
+    let (directory, connection) = engine();
+    let mut legacy = Vec::new();
+    for (persona, handle) in [
+        ("Ada", "7"),
+        ("Grace", "codex-9"),
+        ("Alan", "team-4"),
+        ("Edsger", "sub-agent-5"),
+    ] {
+        let id = agent(&connection, "alpha", "sub", "working");
+        connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'alpha',?2,?3)",
+                params![id, persona, handle],
+            )
+            .unwrap();
+        legacy.push((id, persona));
+    }
+    let kept = agent(&connection, "alpha", "sub", "working");
+    connection
+        .execute(
+            "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,'alpha','Barbara','onboarding-fix-2')",
+            [kept],
+        )
+        .unwrap();
+    drop(connection);
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    crate::team::initialize(&connection).unwrap();
+    for (id, persona) in legacy {
+        assert_eq!(
+            stored_name(&connection, id),
+            Some(AgentName {
+                persona: persona.into(),
+                handle: None
+            }),
+            "{persona}"
+        );
+        assert_eq!(
+            label(AgentRole::Sub, id, name(&connection, id).unwrap().as_ref()),
+            persona
+        );
+    }
+    assert_eq!(
+        label(
+            AgentRole::Sub,
+            kept,
+            name(&connection, kept).unwrap().as_ref()
+        ),
+        "Barbara (@onboarding-fix-2)"
+    );
+}
+
 #[test]
 fn a_role_handle_is_unique_among_the_project_s_live_agents() {
     let (_directory, connection) = engine();
@@ -257,7 +376,7 @@ fn a_task_role_becomes_the_handle_and_a_new_job_without_one_gets_its_task_handle
     let alpha = project("alpha");
     let sub = agent(&connection, "alpha", "sub", "working");
     let named = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, named, "Onboarding fix").unwrap();
+    give_role(&connection, &alpha, named, "Onboarding fix", 0).unwrap();
     assert_eq!(
         assign_task_role(&connection, &alpha, sub, named).unwrap(),
         Some("onboarding-fix".into())
@@ -283,7 +402,7 @@ fn a_task_role_becomes_the_handle_and_a_new_job_without_one_gets_its_task_handle
         Some(format!("task-{plain}"))
     );
     let ignored = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, ignored, "!!!").unwrap();
+    give_role(&connection, &alpha, ignored, "!!!", 0).unwrap();
     assert_eq!(
         assign_task_role(&connection, &alpha, sub, ignored).unwrap(),
         Some(format!("task-{ignored}"))
@@ -295,12 +414,12 @@ fn task_roles_of_tasks_that_no_longer_exist_are_dropped() {
     let (_directory, connection) = engine();
     let alpha = project("alpha");
     let gone = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, gone, "old-job").unwrap();
+    give_role(&connection, &alpha, gone, "old-job", 0).unwrap();
     connection
         .execute("DELETE FROM team_tasks WHERE id=?1", [gone])
         .unwrap();
     let kept = task(&connection, "alpha");
-    set_task_role(&connection, &alpha, kept, "new-job").unwrap();
+    give_role(&connection, &alpha, kept, "new-job", 0).unwrap();
     let roles: Vec<i64> = connection
         .prepare("SELECT task FROM team_task_roles ORDER BY task")
         .unwrap()
@@ -367,6 +486,55 @@ fn the_owner_renames_a_live_sub_agent_s_handle() {
     assert_eq!(
         stored_name(&connection, second).unwrap().handle.as_deref(),
         Some("docs-pass")
+    );
+}
+
+/// A handle shaped like an agent's id form, `team-7`, `<harness>-7` or `7`, is refused from
+/// the owner and never given from a role, so no handle can stand for another agent's id.
+#[test]
+fn no_handle_takes_the_shape_of_an_agent_id() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let sub = agent(&connection, "alpha", "sub", "working");
+    for shaped in [
+        "team-7",
+        "@team-7",
+        "7",
+        "codex-7",
+        "claude-code-12",
+        "team-07",
+    ] {
+        assert_eq!(
+            rename(&connection, &alpha, sub, shaped).unwrap(),
+            Err("team_handle_invalid"),
+            "{shaped}"
+        );
+    }
+    for kept in ["task-7", "team-7a", "codex"] {
+        assert_eq!(
+            rename(&connection, &alpha, sub, kept).unwrap(),
+            Ok(kept.to_owned()),
+            "{kept}"
+        );
+    }
+    assert_eq!(
+        assign_role(&connection, &alpha, sub, "Team 7").unwrap(),
+        Err("team_handle_invalid")
+    );
+    let delegated = task(&connection, "alpha");
+    give_role(&connection, &alpha, delegated, "Team 7", 0).unwrap();
+    assert_eq!(
+        assign_task_role(&connection, &alpha, sub, delegated).unwrap(),
+        Some(format!("task-{delegated}"))
+    );
+    let other = agent(&connection, "alpha", "sub", "idle");
+    assign_role(&connection, &alpha, other, "codex")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        assign_role(&connection, &alpha, sub, "codex").unwrap(),
+        Err("team_handle_taken"),
+        "a taken role never falls back to an id form such as codex-2"
     );
 }
 
@@ -454,5 +622,154 @@ fn labels_read_persona_role_harness_and_status() {
     assert_eq!(
         line("Sub-agent 3", "mystery-tool", "Stopped"),
         "Sub-agent 3 \u{b7} mystery-tool \u{b7} stopped"
+    );
+}
+
+fn stored_role(connection: &Connection, task: i64) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT role FROM team_task_roles WHERE task=?1",
+            [task],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+}
+
+#[test]
+fn stale_task_role_write_is_refused() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let master = agent(&connection, "alpha", "master", "working");
+    let delegated = task(&connection, "alpha");
+    assert_eq!(
+        give_role(&connection, &alpha, delegated, "Onboarding fix", 0),
+        Ok(1),
+        "the master names the role of a task it just created at version 0"
+    );
+    let by_master = versioned::LastWriter::Agent(AgentId::team(master).unwrap());
+    for version in [0, 4] {
+        assert_eq!(
+            give_role(&connection, &alpha, delegated, "Release notes", version),
+            Err(versioned::Stale {
+                version,
+                current: 1,
+                writer: by_master.clone(),
+            }),
+            "a role write from version {version} never replaces version 1"
+        );
+    }
+    assert_eq!(
+        stored_role(&connection, delegated).as_deref(),
+        Some("Onboarding fix"),
+        "the stale write changed nothing"
+    );
+    assert_eq!(
+        give_role(&connection, &alpha, delegated, "Release notes", 1),
+        Ok(2),
+        "after a re-read the redo lands"
+    );
+    assert_eq!(
+        stored_role(&connection, delegated).as_deref(),
+        Some("Release notes")
+    );
+
+    connection
+        .execute("DELETE FROM team_tasks WHERE id=?1", [delegated])
+        .unwrap();
+    let next = task(&connection, "alpha");
+    assert!(next > delegated, "task ids are never reused");
+    assert_eq!(give_role(&connection, &alpha, next, "Docs", 0), Ok(1));
+    assert_eq!(stored_role(&connection, delegated), None);
+    assert_eq!(
+        versioned::current(&connection, &versioned::task_role_item(delegated))
+            .unwrap()
+            .version,
+        0,
+        "a gone task's role forgets its version"
+    );
+
+    let beta = project("beta");
+    let unmastered = task(&connection, "beta");
+    assert_eq!(give_role(&connection, &beta, unmastered, "Docs", 0), Ok(1));
+    assert_eq!(
+        versioned::current(&connection, &versioned::task_role_item(unmastered))
+            .unwrap()
+            .writer,
+        versioned::LastWriter::Owner,
+        "without a recorded master the owner's turn wrote it"
+    );
+}
+
+/// A woken sub-agent gets its names back (WK-R2): its persona, and its role handle while it
+/// is free; when a live agent took the handle while it was stopped, the woken agent gets the
+/// first free suffix and the live one keeps its own, so no two live agents share a handle.
+#[test]
+fn a_woken_agent_reclaims_its_names_and_never_shares_a_live_handle() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let ada = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, ada, "onboarding-fix").unwrap(),
+        Ok("onboarding-fix".into())
+    );
+    let persona = stored_name(&connection, ada).unwrap().persona;
+    stop(&connection, ada);
+    let newer = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, newer, "onboarding-fix").unwrap(),
+        Ok("onboarding-fix".into())
+    );
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(ada)
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(newer)
+    );
+
+    connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [ada],
+        )
+        .unwrap();
+    assert_eq!(
+        reclaim(&connection, &alpha, ada).unwrap(),
+        AgentName {
+            persona: persona.clone(),
+            handle: Some("onboarding-fix-2".into()),
+        }
+    );
+    assert_eq!(
+        stored_name(&connection, newer).unwrap().handle.as_deref(),
+        Some("onboarding-fix"),
+        "the live agent keeps the handle its master knows"
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix-2").unwrap(),
+        Some(ada)
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(newer)
+    );
+
+    stop(&connection, newer);
+    stop(&connection, ada);
+    connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [newer],
+        )
+        .unwrap();
+    assert_eq!(
+        reclaim(&connection, &alpha, newer)
+            .unwrap()
+            .handle
+            .as_deref(),
+        Some("onboarding-fix"),
+        "a free handle is kept as it was"
     );
 }

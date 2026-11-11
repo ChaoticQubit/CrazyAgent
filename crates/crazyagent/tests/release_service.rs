@@ -169,7 +169,6 @@ fn a_path_harness_the_engine_cannot_register_is_skipped_not_fatal() {
     assert_eq!(ready(&mut child).trim(), "ready");
     assert_eq!(check(&root), ready_version());
     let stderr = stopped_stderr(Engine(child));
-    let codex = std::fs::canonicalize(&codex).unwrap();
     assert!(
         stderr.contains(&format!(
             "codex at {} could not be registered (native_auth_host_executable_unsafe)",

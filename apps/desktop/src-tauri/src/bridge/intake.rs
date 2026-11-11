@@ -5,7 +5,8 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
-use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crazyagent::projects_home::icloud::Progress;
+use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::setup::SetupStatus;
 use serde::Serialize;
@@ -19,7 +20,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 57] = [
+pub const INTAKE_CODES: [&str; 71] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -50,11 +51,25 @@ pub const INTAKE_CODES: [&str; 57] = [
     "home_move_project",
     "home_move_too_many",
     "home_move_in_progress",
+    "home_override_invalid",
+    "home_move_agent_work",
+    "home_move_changes_restorable",
+    "home_move_research_running",
+    "home_move_delete_in_progress",
     "home_folder_name_invalid",
     "home_new_project_failed",
     "home_add_unverified",
     "home_add_interrupted",
     "home_record_invalid",
+    "home_icloud_not_downloaded",
+    "home_permission_denied",
+    "icloud_download_busy",
+    "icloud_folder_missing",
+    "icloud_folder_unsafe",
+    "icloud_folder_unreadable",
+    "icloud_path_invalid",
+    "icloud_outcome_unknown",
+    "icloud_owner_unavailable",
     "folder_size_path_invalid",
     "folder_size_unsafe",
     "folder_size_unreadable",
@@ -117,8 +132,9 @@ const GITHUB_CODES: [&str; 35] = [
     "not_connected",
 ];
 
-const SETUP_CODES: [&str; 33] = [
+const SETUP_CODES: [&str; 34] = [
     "owner_outcome_unknown_reconcile_same_identity",
+    "stale_revision",
     "setup_checksum_mismatch",
     "setup_download_failed",
     "setup_homebrew_missing",
@@ -153,17 +169,38 @@ const SETUP_CODES: [&str; 33] = [
     "owner_unavailable",
 ];
 
-/// A folder's size before it is copied in, the GitHub owner/name of its `origin`
-/// remote when that remote is on github.com, so the window can suggest a clone instead,
-/// and how many linked git worktrees it has, which a copy leaves with the original.
+/// What the window asks about before a Move or Copy: the folder's size, or None with the
+/// soft size code (timeout, too large, unreadable) when it could not be measured, how many
+/// of its files are only in iCloud (0 when unmeasured), the
+/// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
+/// folders, whether a Move keeps its git links and which link it breaks, whether a Copy keeps
+/// its own git data, whether it has git at all, and whether it is on the projects folder's
+/// disk (None when that is unknown).
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
-    pub bytes: u64,
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_problem: Option<&'static str>,
+    pub placeholders: u64,
     pub github: Option<String>,
     pub worktrees: usize,
+    pub worktree_paths: Vec<String>,
+    pub movable: bool,
+    pub git_link: crazyagent::projects_home::GitLink,
+    pub copyable: bool,
+    pub git: bool,
+    pub same_volume: Option<bool>,
 }
 
-fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
+pub const WORKTREE_PATHS_MAX: usize = 16;
+
+const SIZE_PROBLEMS: [&str; 3] = [
+    "folder_size_timeout",
+    "folder_size_too_large",
+    "folder_size_unreadable",
+];
+
+pub(super) fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
     let code = if code == "controller_disconnected" {
         "not_connected"
     } else {
@@ -357,37 +394,86 @@ impl NativeBridge {
         }
     }
 
-    /// Measures a folder before Copy, names its GitHub repository when it has one and
-    /// counts its linked git worktrees. Input: an absolute folder path. Output: its size,
-    /// the GitHub owner/name, if any, and the linked worktree count.
+    /// Reads what a Move or Copy of a folder would meet: its size, its GitHub repository,
+    /// its linked git worktrees and their folders, its git links, whether it has git and
+    /// whether it shares the projects folder's disk. A size the engine could not measure is a
+    /// soft code in the answer, not an error, so the other facts still reach the window.
+    /// Input: an absolute folder path. Output: the facts, or the hard error.
     pub async fn folder_size(&mut self, path: String) -> Result<FolderSize, BridgeError> {
         crazyagent::projects_home::path_text(&path, "folder_size_path_invalid")
             .map_err(intake_failure)?;
-        let github = origin_on_github(Path::new(&path));
-        let worktrees = crazyagent::projects_home::linked_worktrees(Path::new(&path));
-        match self.owner_read(OwnerRead::FolderSize { path }).await? {
-            OwnerData::FolderSize { bytes } => bounded(FolderSize {
+        let folder = Path::new(&path);
+        let github = origin_on_github(folder);
+        let worktrees = crazyagent::projects_home::linked_worktrees(folder);
+        let worktree_paths: Vec<String> =
+            crazyagent::projects_home::linked_worktree_paths(folder, WORKTREE_PATHS_MAX)
+                .into_iter()
+                .filter_map(|worktree| worktree.to_str().map(str::to_owned))
+                .collect();
+        assert!(worktree_paths.len() <= WORKTREE_PATHS_MAX);
+        let git_link = crazyagent::projects_home::git_link(folder);
+        let movable = git_link == crazyagent::projects_home::GitLink::None;
+        let copyable = !crazyagent::projects_home::linked_checkout(folder);
+        let git = std::fs::symlink_metadata(folder.join(".git")).is_ok();
+        let same_volume = match self.owner_read(OwnerRead::ProjectsHome).await? {
+            OwnerData::ProjectsHome { home } => home
+                .path
+                .as_deref()
+                .and_then(|root| crazyagent::projects_home::same_volume(folder, Path::new(root))),
+            _ => return Err(failure("owner_read_failed")),
+        };
+        let read = self.owner_read(OwnerRead::FolderSize { path }).await;
+        let (bytes, placeholders, size_problem) = match read {
+            Ok(OwnerData::FolderSize {
                 bytes,
-                github,
-                worktrees,
-            }),
-            _ => Err(failure("owner_read_failed")),
-        }
+                placeholders,
+            }) => (Some(bytes), placeholders, None),
+            Ok(_) => return Err(failure("owner_read_failed")),
+            Err(error) => match SIZE_PROBLEMS
+                .iter()
+                .copied()
+                .find(|code| *code == error.code)
+            {
+                Some(code) => (None, 0, Some(code)),
+                None => return Err(error),
+            },
+        };
+        assert!(bytes.is_some() != size_problem.is_some());
+        assert!(bytes.is_some() || placeholders == 0);
+        bounded(FolderSize {
+            bytes,
+            size_problem,
+            placeholders,
+            github,
+            worktrees,
+            worktree_paths,
+            movable,
+            git_link,
+            copyable,
+            git,
+            same_volume,
+        })
     }
 
     /// Moves or copies an existing folder into the projects home.
-    /// Inputs: the absolute source folder, move or copy and the client generation.
+    /// Inputs: the absolute source folder, move or copy, the soft refusals the owner chose
+    /// to go past for this add and the client generation.
     /// Output: the receipt; the folder then shows as found.
     pub async fn add_existing_folder(
         &mut self,
         source: String,
         mode: AddMode,
+        overrides: Vec<AddOverride>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         crazyagent::projects_home::path_text(&source, "home_source_invalid")
             .map_err(intake_failure)?;
         self.home_change(
-            OwnerMutation::AddExistingFolder { source, mode },
+            OwnerMutation::AddExistingFolder {
+                source,
+                mode,
+                overrides,
+            },
             generation,
         )
         .await
@@ -420,6 +506,43 @@ impl NativeBridge {
             OwnerData::Onboarding { onboarding } => bounded(*onboarding),
             _ => Err(failure("owner_read_failed")),
         }
+    }
+
+    fn icloud_client(&mut self) -> Result<Arc<OwnerClient>, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?.shared_client().map_err(intake_failure)
+    }
+
+    /// Downloads every file of a folder that is only in iCloud and waits until all are on
+    /// this Mac; the folder itself is not moved or changed. Runs without the bridge lock, so
+    /// progress and cancel answer while it waits. Input: the absolute folder. Output: how many
+    /// files it downloaded, or `home_icloud_not_downloaded` after a cancel, stall or time limit.
+    pub fn icloud_download(&mut self, path: String) -> Result<Unlocked<u64>, BridgeError> {
+        crazyagent::projects_home::path_text(&path, "icloud_path_invalid")
+            .map_err(intake_failure)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.icloud_download(path).await.map_err(intake_failure)?)
+        }))
+    }
+
+    /// Reads how far the running iCloud download has come. Output: the counts, or None when
+    /// no download runs.
+    pub fn icloud_progress(&mut self) -> Result<Unlocked<Option<Progress>>, BridgeError> {
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.icloud_progress().await.map_err(intake_failure)?)
+        }))
+    }
+
+    /// Stops the running iCloud download at its next check. Output: whether one was running.
+    pub fn icloud_cancel(&mut self) -> Result<Unlocked<bool>, BridgeError> {
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(client.icloud_cancel().await.map_err(intake_failure)?)
+        }))
     }
 
     fn github_client(&mut self) -> Result<Arc<OwnerClient>, BridgeError> {
@@ -552,28 +675,30 @@ impl NativeBridge {
             .await
     }
 
-    /// Switches one installed pack entry on or off as one owner intent.
-    /// Inputs: its id, the state and a fresh draft generation. Output: the new status.
+    /// Switches one installed pack entry on or off as one owner intent. Inputs: its id,
+    /// the state, the pack version shown and a fresh draft generation. Output: the new status.
     pub async fn set_pack_entry(
         &mut self,
         id: String,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
         let id = pack_ids(vec![id])?.remove(0);
-        self.setup_change(OwnerMutation::SetPackEntry { id, on }, generation)
+        self.setup_change(OwnerMutation::SetPackEntry { id, on, version }, generation)
             .await
     }
 
-    /// Removes one installed pack entry and what it added, as one owner intent.
-    /// Inputs: its id and a fresh draft generation. Output: the new status.
+    /// Removes one installed pack entry and what it added, as one owner intent. Inputs: its
+    /// id, the pack version shown and a fresh draft generation. Output: the new status.
     pub async fn remove_pack_entry(
         &mut self,
         id: String,
+        version: u64,
         generation: u64,
     ) -> Result<SetupStatus, BridgeError> {
         let id = pack_ids(vec![id])?.remove(0);
-        self.setup_change(OwnerMutation::RemovePackEntry { id }, generation)
+        self.setup_change(OwnerMutation::RemovePackEntry { id, version }, generation)
             .await
     }
 
@@ -800,20 +925,32 @@ mod tests {
             include_str!("../../../../../crates/crazyagent/src/projects_home.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/intake.rs"),
             include_str!("../../../../../crates/crazyagent/src/projects_home/layout.rs"),
+            include_str!("../../../../../crates/crazyagent/src/projects_home/icloud.rs"),
         ];
         let mut refusals: Vec<&str> = engine
             .iter()
             .flat_map(|source| source.split("refused(\"").skip(1))
             .filter_map(|rest| rest.split('"').next())
-            .filter(|code| !code.starts_with("home_trash_"))
+            .filter(|code| !code.starts_with("home_trash_") && !code.starts_with("delete_"))
             .collect();
         refusals.sort_unstable();
         refusals.dedup();
         assert!(refusals.contains(&"home_copy_failed"), "{refusals:?}");
-        for code in refusals
-            .into_iter()
-            .chain(["home_move_in_progress", "home_new_project_failed"])
-        {
+        for code in refusals.into_iter().chain([
+            "home_move_in_progress",
+            "home_move_agent_work",
+            "home_move_changes_restorable",
+            "home_move_research_running",
+            "home_move_delete_in_progress",
+            "home_new_project_failed",
+            "home_icloud_not_downloaded",
+            "home_permission_denied",
+            "icloud_folder_missing",
+            "icloud_folder_unreadable",
+            "icloud_path_invalid",
+            "icloud_outcome_unknown",
+            "icloud_owner_unavailable",
+        ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");
         }
         assert_eq!(

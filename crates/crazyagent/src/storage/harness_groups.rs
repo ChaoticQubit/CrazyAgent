@@ -230,7 +230,7 @@ pub(super) fn gone(_group: i32, _started: Option<&str>) -> Result<bool, EngineEr
 /// does not share. Input: the process id. Output: the start identity, or none when no
 /// such process exists.
 #[cfg(target_os = "macos")]
-pub(super) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
+pub(crate) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
     use std::process::{Command, Stdio};
     if pid <= 1 {
         return Err(error("harness_group_invalid"));
@@ -260,7 +260,7 @@ pub(super) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
 /// identity that a reused process id does not share. Input: the process id. Output: the
 /// start identity, or none when no such process exists.
 #[cfg(target_os = "linux")]
-pub(super) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
+pub(crate) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
     if pid <= 1 {
         return Err(error("harness_group_invalid"));
     }
@@ -284,7 +284,7 @@ pub(super) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
 /// Refuses to read a start identity where neither `ps` nor `/proc` is qualified.
 /// Input: unused. Output: `harness_group_probe_unsupported`.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(super) fn start_identity(_pid: i32) -> Result<Option<String>, EngineError> {
+pub(crate) fn start_identity(_pid: i32) -> Result<Option<String>, EngineError> {
     Err(error("harness_group_probe_unsupported"))
 }
 

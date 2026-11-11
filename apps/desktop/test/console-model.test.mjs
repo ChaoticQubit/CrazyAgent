@@ -5,7 +5,7 @@ import test from "node:test";
 const model = await import("../src/screens/project/console-model.ts");
 
 const key = (patch) => ({ key: "Enter", shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, isComposing: false, keyCode: 13, ...patch });
-const node = (id, kind, label) => ({ id, kind, parent: null, label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: null });
+const node = (id, kind, label, extra = {}) => ({ id, kind, parent: null, label, harness: "codex", status: "working", status_label: null, account: null, terminal: null, ...extra });
 
 test("typing / at the start opens the command menu, filtered by what follows", () => {
   assert.deepEqual(model.filterCommands("/").map((command) => command.name), ["help", "clear", "agents", "changes", "usage", "process", "stop"]);
@@ -35,7 +35,9 @@ test("commands are data: each says what it does and where it goes", () => {
   assert.deepEqual(model.commandRoute("agents", "p-1"), { name: "project", id: "p-1", tab: "agents" });
   assert.deepEqual(model.commandRoute("changes", "p-1"), { name: "project", id: "p-1", tab: "changes" });
   assert.deepEqual(model.commandRoute("process", "p-1"), { name: "project", id: "p-1", tab: "process" });
-  assert.deepEqual(model.commandRoute("usage", "p-1"), { name: "settings", tab: "usage" });
+  assert.deepEqual(model.commandRoute("usage", "p-1"), { name: "project", id: "p-1", tab: "metrics" });
+  assert.throws(() => model.commandRoute("usage", ""), /needs its project/);
+  assert.equal(model.filterCommands("/").find((command) => command.name === "usage").help, "Open this project's Metrics");
   assert.deepEqual(model.CONSOLE_COMMANDS.find((command) => command.name === "clear")?.action, { kind: "clear" });
   assert.deepEqual(model.CONSOLE_COMMANDS.find((command) => command.name === "stop")?.action, { kind: "stop" });
   assert.match(model.helpLines().join("\n"), /\/agents\s+Open the Agents tab/);
@@ -90,16 +92,18 @@ test("Up and Down recall sent lines only while the prompt is empty or shows an u
   assert.equal(kept.at(-1), "newest");
 });
 
-test("@ completes the master and every sub-agent by its handle, and files when a list is given", () => {
+test("@ completes the master, every lead, sub-agent and teammate with an agent row by its handle, and files when a list is given", () => {
   const agents = model.agentMentions([
-    node("m", "master", "Master"),
-    node("g", "harness_group", "codex"),
-    node("team-1", "agent", "Ada (@onboarding-fix)"),
-    node("team-2", "agent", "Grace"),
-    node("team-3", "agent", "Sub-agent 7"),
-    node("team-4", "agent", "Linus (@onboarding-fix)"),
+    node("m", "master", "Master", { agent: 1 }),
+    node("teammate-1-12", "teammate", "Teammate %12", { agent: null, pane: "%12" }),
+    node("team-1", "lead", "Ada (@onboarding-fix)", { agent: 1 }),
+    node("team-2", "sub", "Grace", { agent: 2 }),
+    node("team-3", "sub", "Sub-agent 7", { agent: 3 }),
+    node("team-4", "sub", "Linus (@onboarding-fix)", { agent: 4 }),
+    node("team-5", "teammate", "Teammate 5", { agent: 5, pane: "%13" }),
   ]);
-  assert.deepEqual(agents.map((mention) => mention.handle), ["master", "onboarding-fix", "grace", "sub-agent-7"]);
+  assert.deepEqual(agents.map((mention) => mention.handle), ["master", "onboarding-fix", "grace", "sub-agent-7", "teammate-5"],
+    "a teammate known only by its pane has no agent row to reach");
   assert.equal(agents[1].label, "Ada (@onboarding-fix)");
   assert.equal(agents[0].kind, "agent");
   assert.equal(model.agentMentions([]).map((mention) => mention.handle).join(), "master", "@master is always there");
@@ -120,7 +124,7 @@ test("@ opens only at a word start, matches handles and labels, and inserts the 
   assert.equal(model.mentionAt("mail me@host", 12), null, "an @ inside a word is not a tag");
   assert.equal(model.mentionAt("ask @ada now", 12), null, "the caret is past the tag");
   assert.deepEqual(model.mentionAt("ask @ada now", 8), { start: 4, query: "ada" });
-  const agents = model.agentMentions([node("team-1", "agent", "Ada (@onboarding-fix)"), node("team-2", "agent", "Grace")]);
+  const agents = model.agentMentions([node("team-1", "lead", "Ada (@onboarding-fix)"), node("team-2", "sub", "Grace")]);
   assert.deepEqual(model.matchMentions(agents, "").map((mention) => mention.handle), ["master", "onboarding-fix", "grace"]);
   assert.deepEqual(model.matchMentions(agents, "ON").map((mention) => mention.handle), ["onboarding-fix"]);
   assert.deepEqual(model.matchMentions(agents, "ada").map((mention) => mention.handle), ["onboarding-fix"], "the label matches too");

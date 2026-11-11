@@ -130,10 +130,19 @@ test("Account added lines follow the method and the real check result", () => {
   const url = catalog[3].methods[0];
   assert.equal(addedLine(key, account({})), "Key saved. CrazyAgent will check it the first time an agent uses it.");
   assert.equal(addedLine(catalog[0].methods[0], account({})), "Signed in.");
-  assert.equal(addedLine(url, account({}), { kind: "ok", value: { models: ["a", "b", "c"] } }), "Connected. 3 models found.");
-  assert.equal(addedLine(url, account({}), { kind: "ok", value: { models: ["a"] } }), "Connected. 1 model found.");
+  assert.equal(addedLine(url, account({}), { kind: "ok", value: { account: account({ status: "key_saved" }), models: ["a", "b", "c"] } }), "Connected. 3 models found.");
+  assert.equal(addedLine(url, account({}), { kind: "ok", value: { account: account({ status: "key_saved" }), models: ["a"] } }), "Connected. 1 model found.");
   assert.equal(addedLine(url, account({}), { kind: "error", code: "account_url_unreachable", message: "Can't reach this URL." }), "Saved. Can't reach this URL.");
   assert.equal(addedLine(url, account({})), "Saved. Checking the connection...");
+});
+
+test("Account added never says Connected when the engine's check found the URL unreachable or the key turned down", () => {
+  const url = catalog[3].methods[0];
+  const checked = (status) => ({ kind: "ok", value: { account: account({ method: "url", status }), models: [] } });
+  assert.equal(addedLine(url, account({}), checked("unreachable")),
+    "Saved. Can't reach this URL. Check the address and that the server is running.");
+  assert.equal(addedLine(url, account({}), checked("not_signed_in")), "Saved. This URL didn't accept the key. Check it and try again.");
+  assert.equal(addedLine(url, account({}), checked("key_saved")), "Connected. 0 models found.");
 });
 
 test("sign-in stages come from real reducer states, never from a reply the reducer refused", () => {
@@ -161,7 +170,7 @@ test("sign-in stages come from real reducer states, never from a reply the reduc
   assert.deepEqual(signInStage(expired, "chatgpt"), { kind: "failed", text: "This code expired.", hint: "expired" });
   assert.deepEqual(signInStage(answered({ phase: "unavailable", challenge: null, code: null }), "claude").hint, "missing");
   assert.deepEqual(signInFailure("native_auth_some_new_code", "chatgpt"), { text: "Sign-in didn't finish. Try again. (native_auth_some_new_code)", hint: "retry" });
-  const closing = "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.";
+  const closing = "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.";
   assert.deepEqual(signInStage(answered({ phase: "uncertain", challenge: null, code: "native_auth_recovery_required" }), "claude"),
     { kind: "failed", text: closing, hint: "check" });
   assert.deepEqual(signInFailure("native_auth_recovery_required", "claude"), { text: closing, hint: "retry" });
@@ -356,4 +365,23 @@ test("the API key field is masked and uncontrolled, and its copy says the key is
   assert.match(markup, /Sent once to CrazyAgent&#x27;s engine, which keeps it privately\. You won&#x27;t see it again\./);
   assert.match(markup, />Save key<\/button>/);
   assert.doesNotMatch(markup, claims);
+});
+
+test("the device code panel says how long the code still works, and the engine's own give-up says to get a new code", () => {
+  const waiting = (left_s) => panel(answered({ challenge: { kind: "codex_device_code", user_code: "QX4F-9KTB", verification_url: "https://auth.example.invalid/codex/device", left_s } }));
+  assert.match(waiting(600), /QX4F-9KTB/);
+  assert.match(waiting(600), /This code works for 10 more minutes\./);
+  assert.match(waiting(61), /This code works for 2 more minutes\./);
+  assert.match(waiting(60), /This code works for 1 more minute\./);
+  assert.match(waiting(0), /This code ran out\./);
+  assert.doesNotMatch(waiting(null), /This code works|ran out/);
+  assert.doesNotMatch(waiting(-5), /QX4F-9KTB/);
+  const timedOut = answered({ phase: "failed", challenge: null, code: "native_auth_sign_in_timed_out" });
+  const text = "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.";
+  assert.deepEqual(signInStage(timedOut, "chatgpt"), { kind: "failed", text, hint: "expired" });
+  assert.match(panel(timedOut), />Get a new code<\/button>/);
+  const pageTimedOut = answered({ phase: "failed", challenge: null, code: "native_auth_sign_in_page_timed_out",
+    action: { kind: "sign_in", method: "codex_browser" } }, "codex_browser");
+  assert.deepEqual(signInStage(pageTimedOut, "chatgpt"),
+    { kind: "failed", text: "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.", hint: "retry" });
 });

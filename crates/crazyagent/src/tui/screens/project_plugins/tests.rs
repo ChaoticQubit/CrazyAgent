@@ -53,6 +53,8 @@ fn skill(name: &str, scope: Scope, enabled: bool, on_here: Option<bool>) -> Skil
         on_here,
         source: format!("/Users/mira/Skills/{name}"),
         folder: format!("/private/tmp/engine/skills/{name}"),
+        version: 2,
+        refused: None,
     }
 }
 
@@ -76,6 +78,7 @@ fn server(name: &str, scope: Scope, status: ServerStatus, on_here: Option<bool>)
         checks: 0,
         secrets: Vec::new(),
         on_here,
+        version: 2,
     }
 }
 
@@ -106,15 +109,7 @@ fn loaded() -> ProjectPlugins {
 fn frame(view: &ProjectPlugins, width: u16, height: u16) -> Vec<String> {
     let look = Look::plain();
     let columns = usize::from(width);
-    let items: Vec<(String, String)> = Tab::ALL
-        .iter()
-        .map(|tab| {
-            (
-                format!("{} {}", look.glyph(tab.glyph()), tab.label()),
-                String::new(),
-            )
-        })
-        .collect();
+    let items = crate::tui::screens::project_view::tab_items(0, columns, &look);
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Settings as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
     let (lines, help) = view.rows(columns - 4, room, &look);
@@ -186,7 +181,7 @@ fn space_switches_an_every_project_item_for_this_project_only() {
     let change = sent(view.key(press(KeyCode::Char(' '))));
     assert!(matches!(
         change,
-        PluginChange::Switch { ref project, ref id, on: false }
+        PluginChange::Switch { ref project, ref id, on: false, version: 2 }
             if project.as_str() == "tidepool" && id == "pl0xfrontend-design"
     ));
     assert!(view.busy());
@@ -249,7 +244,7 @@ fn project_only_items_turn_on_and_off_for_this_project() {
     let change = sent(view.key(press(KeyCode::Char(' '))));
     assert!(matches!(
         change,
-        PluginChange::SetSkill { ref id, enabled: false } if id == "pl0xtidepool-style"
+        PluginChange::SetSkill { ref id, enabled: false, version: 2 } if id == "pl0xtidepool-style"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(view.notice, Some(Notice::plain("tidepool-style is off.")));
@@ -258,7 +253,7 @@ fn project_only_items_turn_on_and_off_for_this_project() {
     let change = sent(view.key(press(KeyCode::Char(' '))));
     assert!(matches!(
         change,
-        PluginChange::SetServer { ref id, enabled: false } if id == "pl0xpostgres"
+        PluginChange::SetServer { ref id, enabled: false, version: 2 } if id == "pl0xpostgres"
     ));
 }
 
@@ -306,6 +301,7 @@ fn approval_shows_the_whole_command_first() {
     assert_eq!(view.confirm, None);
 
     view.key(press(KeyCode::Enter));
+    frame(&view, 80, 24);
     let change = sent(view.key(press(KeyCode::Char('y'))));
     let PluginChange::Approve { id, spec } = change else {
         panic!("an approval expected");
@@ -322,6 +318,176 @@ fn approval_shows_the_whole_command_first() {
             "postgres can't start. The command exited at once."
         ))
     );
+}
+
+#[test]
+fn at_80x24_the_project_settings_tab_scrolls_a_long_command_and_y_waits_for_its_last_line() {
+    use crate::tui::screens::project::ProjectScreen;
+    use crate::tui::screens::project_view::project_screen;
+
+    let long = format!("{LONG_RUNS}{}", " --table notes_archive_2026".repeat(14));
+    let read = |runs: &str| {
+        let (skills, mut servers) = lists();
+        servers[1].runs = runs.to_owned();
+        SettingsEvent::ProjectPlugins(project(), Ok((skills, servers)))
+    };
+    let mut screen = ProjectScreen::new(project(), "Tidepool".into(), None);
+    screen.open(Tab::Settings);
+    screen.plugins.next_job().unwrap();
+    screen.plugins.apply(&read(&long));
+    for _ in 0..5 {
+        screen.plugins.key(press(KeyCode::Down));
+    }
+    assert!(matches!(
+        screen.plugins.key(press(KeyCode::Enter)),
+        PluginsReply::Handled
+    ));
+    assert!(
+        matches!(
+            screen.plugins.key(press(KeyCode::Char('y'))),
+            PluginsReply::Handled
+        ),
+        "nothing has shown the command yet"
+    );
+    assert_eq!(screen.plugins.confirm.as_deref(), Some("pl0xpostgres"));
+
+    let look = Look::plain();
+    let expected = exact_lines(&long, 74);
+    assert!(
+        expected.len() > 4,
+        "the command needs more rows than 80x24 leaves"
+    );
+    let mut read_lines = vec![false; expected.len()];
+    let mut reached_end = false;
+    for _ in 0..expected.len() + 2 {
+        let drawn = project_screen(&mut screen, 80, 24, &look);
+        let rows: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+        assert!(rows.len() <= 24 && rows.iter().all(|row| row.chars().count() <= 80));
+        assert!(rows.iter().any(|row| row.contains("Project settings")));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Instructions for this project's agents"))
+        );
+        assert!(drawn.help.contains(&("y", "Approve")));
+        let question = rows
+            .iter()
+            .position(|row| row.contains("Approve postgres?"))
+            .unwrap_or_else(|| panic!("the question shows:\n{}", rows.join("\n")));
+        assert!(rows[question].contains("y Approve"));
+        assert!(rows[question + 1].contains("It runs:"));
+        let marker = rows
+            .iter()
+            .position(|row| row.trim_start().starts_with("Lines "))
+            .unwrap_or_else(|| panic!("a line marker shows:\n{}", rows.join("\n")));
+        let numbers: Vec<usize> = rows[marker]
+            .split(|character: char| !character.is_ascii_digit())
+            .filter(|part| !part.is_empty())
+            .map(|part| part.parse().unwrap())
+            .collect();
+        let [first, last, total] = numbers[..] else {
+            panic!("the marker names its lines: {}", rows[marker]);
+        };
+        assert_eq!(total, expected.len());
+        assert_eq!(marker - (question + 2), last + 1 - first);
+        for (offset, row) in rows[question + 2..marker].iter().enumerate() {
+            let line = &expected[first - 1 + offset];
+            assert_eq!(&row[..4 + line.len()], format!("    {line}"));
+            assert!(row[4 + line.len()..].trim().is_empty());
+            read_lines[first - 1 + offset] = true;
+        }
+        if last == total {
+            assert!(rows[marker].contains("the end"));
+            reached_end = true;
+            break;
+        }
+        assert!(rows[marker].contains("y waits for the end"));
+        assert!(
+            matches!(
+                screen.plugins.key(press(KeyCode::Char('y'))),
+                PluginsReply::Handled
+            ),
+            "y waits until the last line has shown"
+        );
+        assert_eq!(screen.plugins.confirm.as_deref(), Some("pl0xpostgres"));
+        assert!(!screen.plugins.busy());
+        screen.plugins.key(press(KeyCode::Down));
+    }
+    assert!(reached_end, "Down reaches the last line");
+    assert!(read_lines.iter().all(|line| *line), "every line showed");
+
+    let changed = format!("{long} --write");
+    screen.plugins.apply(&read(&changed));
+    assert_eq!(screen.plugins.confirm.as_deref(), Some("pl0xpostgres"));
+    assert!(
+        matches!(
+            screen.plugins.key(press(KeyCode::Char('y'))),
+            PluginsReply::Handled
+        ),
+        "a changed command is read again"
+    );
+    let rows: Vec<String> = project_screen(&mut screen, 80, 24, &look)
+        .rows
+        .iter()
+        .map(Row::text)
+        .collect();
+    assert!(
+        rows.iter().any(|row| row.contains("Lines 1-")),
+        "a changed command starts at its first line:\n{}",
+        rows.join("\n")
+    );
+    assert!(matches!(
+        screen.plugins.key(press(KeyCode::Char('y'))),
+        PluginsReply::Handled
+    ));
+    for _ in 0..expected.len() + 2 {
+        screen.plugins.key(press(KeyCode::Down));
+        project_screen(&mut screen, 80, 24, &look);
+    }
+    screen.plugins.key(press(KeyCode::Up));
+    project_screen(&mut screen, 80, 24, &look);
+    let PluginChange::Approve { id, .. } = sent(screen.plugins.key(press(KeyCode::Char('y'))))
+    else {
+        panic!("an approval expected");
+    };
+    assert_eq!(
+        id, "pl0xpostgres",
+        "reading back up keeps the approval open"
+    );
+}
+
+#[test]
+fn a_window_too_short_for_any_command_line_never_approves() {
+    let look = Look::plain();
+    let mut view = loaded();
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    view.key(press(KeyCode::Enter));
+    for room in 0..4 {
+        let (rows, _) = view.rows(76, room, &look);
+        assert!(rows.len() <= room, "{} rows in {room}", rows.len());
+        assert!(matches!(
+            view.key(press(KeyCode::Char('y'))),
+            PluginsReply::Handled
+        ));
+    }
+    let (rows, _) = view.rows(76, 4, &look);
+    assert!(
+        rows.iter()
+            .any(|row| row.text().contains("Make the window taller")),
+        "{:?}",
+        rows.iter().map(Row::text).collect::<Vec<_>>()
+    );
+    assert!(matches!(
+        view.key(press(KeyCode::Char('y'))),
+        PluginsReply::Handled
+    ));
+    assert_eq!(view.confirm.as_deref(), Some("pl0xpostgres"));
+    view.rows(76, 5, &look);
+    assert!(matches!(
+        sent(view.key(press(KeyCode::Char('y')))),
+        PluginChange::Approve { .. }
+    ));
 }
 
 #[test]
@@ -353,6 +519,11 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
         ))
     );
     assert!(
+        matches!(view.next_job(), Some(SettingsJob::Hooks { project: Some(ref asked) }) if *asked == project()),
+        "the hooks read follows each plugins read once"
+    );
+    view.apply(&SettingsEvent::Hooks(Some(project()), Ok(Vec::new())));
+    assert!(
         view.next_job().is_none(),
         "a failed read waits for a change"
     );
@@ -363,6 +534,8 @@ fn reads_are_paced_refusals_are_plain_and_other_projects_are_ignored() {
     );
 
     let mut view = loaded();
+    assert!(matches!(view.next_job(), Some(SettingsJob::Hooks { .. })));
+    view.apply(&SettingsEvent::Hooks(Some(project()), Ok(Vec::new())));
     assert!(view.next_job().is_none());
     sent(view.key(press(KeyCode::Char(' '))));
     view.apply(&SettingsEvent::PluginChanged(Err(
@@ -497,7 +670,7 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     let change = sent(view.key(press(KeyCode::Char('y'))));
     assert!(matches!(
         change,
-        PluginChange::RemoveSkill { ref id } if id == "pl0xtidepool-style"
+        PluginChange::RemoveSkill { ref id, version: 2 } if id == "pl0xtidepool-style"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(view.notice, Some(Notice::plain("Removed tidepool-style.")));
@@ -515,7 +688,7 @@ fn only_this_projects_own_items_are_removed_here_after_asking() {
     let change = sent(view.key(press(KeyCode::Char('y'))));
     assert!(matches!(
         change,
-        PluginChange::RemoveServer { ref id } if id == "pl0xpostgres"
+        PluginChange::RemoveServer { ref id, version: 2 } if id == "pl0xpostgres"
     ));
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(
@@ -784,13 +957,17 @@ async fn a_real_engine_project_switches_an_every_project_skill_off() {
         project: switched,
         id,
         on,
+        version,
     } = sent(view.key(press(KeyCode::Char(' '))))
     else {
         panic!("a project switch expected");
     };
     assert_eq!(switched, project());
     assert!(!on);
-    controller.switch_plugin(switched, id, on).await.unwrap();
+    controller
+        .switch_plugin(switched, id, on, version)
+        .await
+        .unwrap();
     view.apply(&SettingsEvent::PluginChanged(Ok(None)));
     assert_eq!(
         view.notice,
@@ -824,17 +1001,27 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 Request::Pools => connection.shell(ShellRequest::Pools).unwrap(),
                 Request::PoolProjects => connection.shell(ShellRequest::PoolProjects).unwrap(),
                 Request::Projects => connection.shell(ShellRequest::Projects).unwrap(),
+                Request::Process(query) => connection.process(*query).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
+                Request::TeamGraph { project } => connection.team_graph(project).unwrap(),
+                Request::Recovery(query) => connection.recovery(*query).unwrap(),
                 Request::Settings(job) => {
                     sent.push(match job.as_ref() {
                         SettingsJob::ProjectPlugins { .. } => "project plugins",
                         SettingsJob::Plugin(_) => "plugin change",
                         SettingsJob::SkillDetail { .. } => "skill detail",
+                        SettingsJob::Hooks { .. } => "hooks",
                         _ => "settings",
                     });
                     connection.settings(*job).unwrap();
                 }
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
+                    connection.questions(*query).unwrap();
+                }
+                Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
                 other => panic!("the project page never sends {other:?}"),
             }
         }
@@ -916,7 +1103,7 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
 
     shell.key(Key::Char(' '));
     let sent = drive(&mut shell, &mut connection).await;
-    assert_eq!(sent, ["plugin change", "project plugins"]);
+    assert_eq!(sent, ["plugin change", "project plugins", "hooks"]);
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Off here"), "{shown}");
     assert!(
@@ -974,6 +1161,69 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
     let shown = render(&mut shell, 80, 24);
     assert!(shown.contains("Project settings"), "{shown}");
     assert!(!shown.contains("Off here"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_remove_question_warning_stays_visible_at_80x24() {
+    let engine = engine().await;
+    engine
+        .controller
+        .add_mcp_server(
+            here(),
+            "postgres".into(),
+            ServerSpec::Stdio {
+                command: "/bin/echo".into(),
+                args: vec!["hello".into()],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 80;
+    ctx.height = 24;
+    let screen = open(
+        &Place::Project {
+            id: project(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+    for _ in 0..6 {
+        if render(&mut shell, 80, 24).contains("> postgres") {
+            break;
+        }
+        shell.key(Key::Down);
+    }
+    assert!(
+        render(&mut shell, 80, 24).contains("> postgres"),
+        "the server is selected"
+    );
+
+    shell.key(Key::Char('d'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Remove postgres?"), "{shown}");
+    assert!(
+        shown.contains("Its saved secrets are deleted."),
+        "the remove warning stays visible at 80x24: {shown}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1056,4 +1306,367 @@ async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list(
         .find(|server| server.name == "postgres")
         .expect("typing in the box removed no server");
     assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keys_typed_into_the_hidden_folders_box_never_reach_the_plugins_list() {
+    let engine = engine().await;
+    engine
+        .controller
+        .add_mcp_server(
+            here(),
+            "postgres".into(),
+            ServerSpec::Stdio {
+                command: "/bin/echo".into(),
+                args: vec!["hello".into()],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('k'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Hidden folders"), "the box opens: {shown}");
+
+    let typed = "/Users/x/vau[l]t?";
+    for character in typed.chars() {
+        shell.key(Key::Char(character));
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains(typed),
+        "every typed key reaches the hidden box: {shown}"
+    );
+    assert!(
+        !shown.contains("This help") && shown.contains("Hidden folders"),
+        "the banner keys fire nothing while typing: {shown}"
+    );
+    let sent = drive(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"plugin change"), "{sent:?}");
+    assert_eq!(shell.place(), Some(settings));
+    let servers = engine
+        .controller
+        .plugin_servers(Some(project()))
+        .await
+        .unwrap();
+    assert!(
+        servers.iter().any(|server| server.name == "postgres"),
+        "typing in the hidden box removed no server"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quitting_with_the_hidden_box_open_warns_the_hidden_folders_are_unsaved() {
+    let engine = engine().await;
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('k'));
+    assert!(
+        render(&mut shell, 100, 40).contains("Hidden folders"),
+        "the hidden box opens"
+    );
+
+    shell.key(Key::Ctrl('q'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Your hidden folders will not be saved."),
+        "quit warns the open hidden box is a draft: {shown}"
+    );
+    assert_eq!(shell.place(), Some(settings));
+}
+
+#[test]
+fn l_asks_for_the_tools_page_with_every_server_starting_on_the_selected_one() {
+    let mut view = loaded();
+    let every = vec![
+        ("pl0xgithub".to_owned(), "github".to_owned()),
+        ("pl0xpostgres".to_owned(), "postgres".to_owned()),
+    ];
+    match view.key(press(KeyCode::Char('l'))) {
+        PluginsReply::Tools { servers, at } => assert_eq!((servers, at), (every.clone(), 0)),
+        _ => panic!("l opens the tools page"),
+    }
+    for _ in 0..5 {
+        view.key(press(KeyCode::Down));
+    }
+    match view.key(press(KeyCode::Char('l'))) {
+        PluginsReply::Tools { servers, at } => assert_eq!((servers, at), (every, 2)),
+        _ => panic!("l opens the tools page"),
+    }
+    assert!(view.help().contains(&("l", "Tools")), "{:?}", view.help());
+}
+
+async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static str> {
+    let mut sent = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut quiet = 0;
+    loop {
+        let mut moved = false;
+        while let Some(event) = connection.poll_owner().unwrap() {
+            shell.arrive(owner_arrival(event));
+            moved = true;
+        }
+        if !connection.busy()
+            && shell.ctx.link == Link::Ready
+            && let Some(request) = shell.ctx.next_request()
+        {
+            moved = true;
+            match request {
+                Request::Profile => connection.shell(ShellRequest::Profile).unwrap(),
+                Request::Pools => connection.shell(ShellRequest::Pools).unwrap(),
+                Request::PoolProjects => connection.shell(ShellRequest::PoolProjects).unwrap(),
+                Request::Projects => connection.shell(ShellRequest::Projects).unwrap(),
+                Request::Process(query) => connection.process(*query).unwrap(),
+                Request::Setup(query) => connection.project_setup(query).unwrap(),
+                Request::Master(job) => connection.master(*job).unwrap(),
+                Request::TeamGraph { project } => connection.team_graph(project).unwrap(),
+                Request::Recovery(query)
+                    if matches!(
+                        *query,
+                        crate::tui::client::recovery::RecoveryQuery::Read { .. }
+                    ) =>
+                {
+                    connection.recovery(*query).unwrap();
+                }
+                Request::Settings(job) => {
+                    sent.push(match job.as_ref() {
+                        SettingsJob::Plugin(_) => "plugin change",
+                        SettingsJob::Hooks { .. } => "hooks",
+                        _ => "settings",
+                    });
+                    connection.settings(*job).unwrap();
+                }
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
+                    connection.questions(*query).unwrap();
+                }
+                Request::Roadmap(query)
+                    if matches!(
+                        *query,
+                        crate::tui::client::roadmap::RoadmapQuery::Read { .. }
+                    ) =>
+                {
+                    connection.roadmap(*query).unwrap();
+                }
+                other => panic!("the plugins pages never send {other:?}"),
+            }
+        }
+        quiet = if moved || connection.busy() || crate::tui::test_home::connecting(&shell.ctx.link)
+        {
+            0
+        } else {
+            quiet + 1
+        };
+        if quiet > 20 {
+            return sent;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "engine reads never settled: {sent:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn shell_at(engine: &Engine, place: &Place) -> (Shell, Connection) {
+    let connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 120;
+    ctx.height = 36;
+    let screen = open(place, &mut ctx);
+    (Shell::with(ctx, screen), connection)
+}
+
+fn hook_row(shown: &str) -> &str {
+    shown
+        .lines()
+        .find(|line| line.contains("PreToolUse Bash:") || line.contains("  guard  "))
+        .unwrap_or_else(|| panic!("no hook row:\n{shown}"))
+}
+
+/// A real engine's hooks through the TUI: h in Settings, Plugins refuses a folder without
+/// plugin.json with its plain reason, then adds the folder's hooks for every project once it
+/// has one, Space turns the hook off and on again there, and a project's Settings tab
+/// switches that every-project hook off for the project only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_through_the_engine() {
+    let engine = engine().await;
+    let plugin = engine.root.path().join("picked/guard");
+    std::fs::create_dir_all(plugin.join("hooks")).unwrap();
+    std::fs::write(plugin.join("hooks/guard.sh"), "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(
+        plugin.join("hooks/hooks.json"),
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    let global = || engine.controller.plugin_hooks(None);
+
+    let (mut shell, mut connection) = shell_at(
+        &engine,
+        &Place::Settings(crate::tui::screens::SettingsSection::Plugins),
+    );
+    drive_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 36);
+    assert!(
+        shown.contains("No hooks yet. Press h to add a plugin folder's hooks."),
+        "{shown}"
+    );
+
+    shell.key(Key::Char('h'));
+    let shown = render(&mut shell, 120, 36);
+    assert!(
+        shown.contains("Every project's agents run them."),
+        "{shown}"
+    );
+    for character in plugin.display().to_string().chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let shown = render(&mut shell, 120, 36);
+    assert!(
+        shown
+            .contains("This folder has hooks but no .claude-plugin/plugin.json naming the plugin."),
+        "{shown}"
+    );
+    assert!(
+        global().await.unwrap().is_empty(),
+        "a folder without plugin.json adds no hooks"
+    );
+    std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin.join(".claude-plugin/plugin.json"),
+        r#"{"name":"guard"}"#,
+    )
+    .unwrap();
+    shell.key(Key::Enter);
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let hooks = global().await.unwrap();
+    assert_eq!(hooks.len(), 1, "{hooks:?}");
+    assert_eq!(
+        (
+            hooks[0].plugin.as_str(),
+            hooks[0].event.as_str(),
+            hooks[0].matcher.as_deref(),
+            hooks[0].enabled,
+            &hooks[0].scope,
+        ),
+        ("guard", "PreToolUse", Some("Bash"), true, &Scope::Global)
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(shown.contains("Hooks added for every project."), "{shown}");
+    assert!(hook_row(&shown).contains("On"), "{shown}");
+
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    assert!(
+        !global().await.unwrap()[0].enabled,
+        "Space turned the hook off"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Off"), "{shown}");
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    assert!(
+        global().await.unwrap()[0].enabled,
+        "Space turned the hook on again"
+    );
+
+    let (mut shell, mut connection) = shell_at(
+        &engine,
+        &Place::Project {
+            id: project(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Settings,
+        },
+    );
+    drive_settings(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("On"), "{shown}");
+    shell.key(Key::Down);
+    shell.key(Key::Char(' '));
+    let sent = drive_settings(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"plugin change"), "{sent:?}");
+    let here = engine
+        .controller
+        .plugin_hooks(Some(project()))
+        .await
+        .unwrap();
+    assert_eq!(here[0].on_here, Some(false), "{here:?}");
+    assert!(
+        global().await.unwrap()[0].enabled,
+        "every other project keeps it"
+    );
+    let shown = render(&mut shell, 120, 36);
+    assert!(hook_row(&shown).contains("Off here"), "{shown}");
+    assert!(shown.contains("is off for this project."), "{shown}");
 }

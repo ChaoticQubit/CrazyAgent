@@ -1,6 +1,6 @@
 use super::new_project::harness_name;
 use super::new_project_view::{Look, Row, wrap_words};
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TeamGraph};
+use crate::team::{AgentStatus, EdgeState, GraphNode, TeamGraph};
 use crate::tui::ctx::Load;
 use ratatui::style::Style;
 
@@ -45,7 +45,7 @@ fn agent_lines(graph: &TeamGraph, height: usize, look: &Look, lines: &mut Vec<Ro
     let mut agents: Vec<&GraphNode> = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind.agent())
         .collect();
     agents.sort_by(|a, b| {
         live(b)
@@ -107,23 +107,29 @@ fn status_glyph(status: Option<AgentStatus>, look: &Look) -> (&'static str, Styl
 }
 
 /// The task line of one sub-agent: its newest live task, else its newest ended one led by
-/// Done or Failed, as a one-line title. Takes the graph and the agent. Returns the line, or
-/// "No task yet." when it has none.
+/// Done or Failed, as a one-line title, led by the file it waits for under Wait (OS-8).
+/// Takes the graph and the agent. Returns the line, "No task yet." when it has none.
 fn task_line(graph: &TeamGraph, agent: &GraphNode) -> String {
     let live = |state: EdgeState| matches!(state, EdgeState::Sent | EdgeState::Running);
-    let Some(edge) = graph
+    let task = match graph
         .edges
         .iter()
         .filter(|edge| edge.to == agent.id)
         .max_by_key(|edge| (live(edge.state), edge.task_id))
-    else {
-        return "No task yet.".to_owned();
+    {
+        None => "No task yet.".to_owned(),
+        Some(edge) => {
+            let title = super::team::title(&edge.text);
+            match edge.state {
+                EdgeState::Done => format!("Done: {title}"),
+                EdgeState::Failed => format!("Failed: {title}"),
+                EdgeState::Sent | EdgeState::Running => title,
+            }
+        }
     };
-    let title = super::team::title(&edge.text);
-    match edge.state {
-        EdgeState::Done => format!("Done: {title}"),
-        EdgeState::Failed => format!("Failed: {title}"),
-        EdgeState::Sent | EdgeState::Running => title,
+    match &agent.waits_for {
+        Some(file) => format!("Waiting for {}. {task}", super::team::title(file)),
+        None => task,
     }
 }
 
@@ -131,21 +137,31 @@ fn task_line(graph: &TeamGraph, agent: &GraphNode) -> String {
 mod tests {
     use super::*;
     use crate::protocol::ProjectId;
-    use crate::team::{GraphEdge, TaskSource};
+    use crate::team::{GraphEdge, NodeKind, TaskSource};
 
     fn agent(id: &str, label: &str, status: AgentStatus) -> GraphNode {
         GraphNode {
             id: id.into(),
-            kind: NodeKind::Agent,
-            parent: Some("group-codex".into()),
+            kind: NodeKind::Lead,
+            parent: Some("master".into()),
             label: label.into(),
             harness: "codex".into(),
             status: Some(status),
             status_label: None,
             account: None,
-            agents: None,
+            branch: None,
             terminal: None,
             questions: None,
+            agent: None,
+            pane: None,
+            presence: None,
+            waiting: None,
+            waits_for: None,
+            owner_questions: 0,
+            no_worktree: false,
+            hookless: false,
+            message_note: None,
+            started_ms: None,
         }
     }
 
@@ -158,6 +174,8 @@ mod tests {
             text: text.into(),
             state,
             reply: None,
+            lead: None,
+            agent_label: None,
         }
     }
 
@@ -166,6 +184,10 @@ mod tests {
             project_id: ProjectId::new("tidepool").unwrap(),
             nodes: agents,
             edges,
+            messages: Vec::new(),
+            overlaps: Vec::new(),
+            relations: Vec::new(),
+            master_live_terminal: true,
         }))
     }
 
@@ -213,6 +235,34 @@ mod tests {
                 "  Done: Write the usage page",
             ]
         );
+    }
+
+    /// OS-8 Wait is visible in the TUI as in the app: an agent waiting for a file leads its
+    /// task line with the file, and one waiting for none shows its task alone.
+    #[test]
+    fn an_agent_waiting_for_a_file_leads_its_task_line_with_the_file() {
+        let waiting = GraphNode {
+            waits_for: Some("src/a.rs".into()),
+            ..agent("team-1", "Ada (@charts)", AgentStatus::Idle)
+        };
+        let graph = team(
+            vec![waiting],
+            vec![edge(2, "team-1", EdgeState::Running, "Draw the chart")],
+        );
+        let Load::Ready(read) = &graph else {
+            panic!("the graph is read");
+        };
+        assert_eq!(
+            task_line(read, &read.nodes[0]),
+            "Waiting for src/a.rs. Draw the chart"
+        );
+        let rows = text(&activity_lines(&graph, 20, &Look::plain()));
+        assert!(rows[4].starts_with("  Waiting for src/a.rs."), "{rows:?}");
+        let free = GraphNode {
+            waits_for: None,
+            ..read.nodes[0].clone()
+        };
+        assert_eq!(task_line(read, &free), "Draw the chart");
     }
 
     #[test]

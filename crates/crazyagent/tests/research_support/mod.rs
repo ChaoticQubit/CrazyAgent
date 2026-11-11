@@ -201,28 +201,6 @@ pub fn claude() -> PathBuf {
         .expect("real claude binary required")
 }
 
-/// The runtime folder of a running engine where the owner signed in a
-/// managed account, and the project named by `variable` whose assigned pool
-/// holds it. Panics with the plain BLOCKED message and the steps the owner
-/// takes to unblock the paid run when either is not set.
-pub fn managed_project(variable: &str, harness: &str) -> (PathBuf, String) {
-    let blocked = || -> ! {
-        panic!(
-            "BLOCKED: no signed-in managed {harness} account. Start CrazyAgent's engine with --writable-settings, --codex-executable and --claude-executable, sign in to a managed {harness} account, assign its pool to a project, then run: CRAZYAGENT_MANAGED_RUNTIME=<engine runtime folder> {variable}=<that project id> cargo test --locked --offline -p crazyagent --test research_managed"
-        )
-    };
-    let runtime = std::env::var_os("CRAZYAGENT_MANAGED_RUNTIME").unwrap_or_else(|| blocked());
-    let project = std::env::var(variable).unwrap_or_else(|_| blocked());
-    let runtime = PathBuf::from(runtime)
-        .canonicalize()
-        .unwrap_or_else(|_| panic!("BLOCKED: CRAZYAGENT_MANAGED_RUNTIME does not name a folder"));
-    assert!(
-        runtime.join("engine.db").is_file(),
-        "BLOCKED: CRAZYAGENT_MANAGED_RUNTIME has no engine.db"
-    );
-    (runtime, project)
-}
-
 /// A real local model endpoint that accepts up to 64 connections, reads each
 /// request once and never answers, so an agent pointed at it keeps running
 /// until it is stopped. Returns the port and the serving thread.

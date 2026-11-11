@@ -36,6 +36,7 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
 const HOST_WAIT: Duration = Duration::from_secs(10);
 const RESTARTS_MAX: usize = LIST_MAX;
+const HOSTED_ENTRIES_MAX: i64 = 1024;
 #[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_runs(
     id TEXT PRIMARY KEY CHECK(length(id) = 32),
@@ -59,7 +60,7 @@ CREATE INDEX IF NOT EXISTS agent_runs_project ON agent_runs(project, started_ms)
 const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms,substr(spec,1,8)='{\"host\":'";
 
 fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
 }
 
 fn database<E>(_: E) -> LaunchError {
@@ -262,6 +263,7 @@ impl AgentSpec {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: self.sandbox_profile.clone(),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(self.run_time_secs),
@@ -304,6 +306,44 @@ struct HostedSpec {
     reference: String,
 }
 
+/// Finds, for each agent one engine part hosts in a project, the newest register entry
+/// recorded for it: the entry the owner's Stop and Restart act on. Reads at most the
+/// project's `HOSTED_ENTRIES_MAX` newest entries; a database the register never opened has
+/// none. Inputs: an engine database connection, the project and the host name. Output: the
+/// entry id keyed by the host's own reference.
+pub(crate) fn hosted_entries(
+    connection: &Connection,
+    project: &ProjectId,
+    host: &str,
+) -> rusqlite::Result<HashMap<String, String>> {
+    let mut entries = HashMap::new();
+    let opened: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !opened {
+        return Ok(entries);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,spec FROM agent_runs WHERE project=?1 AND substr(spec,1,8)='{\"host\":'
+         ORDER BY started_ms DESC, rowid DESC LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![project.as_str(), HOSTED_ENTRIES_MAX], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, spec) = row?;
+        if let Ok(spec) = serde_json::from_str::<HostedSpec>(&spec)
+            && spec.host == host
+        {
+            entries.entry(spec.reference).or_insert(id);
+        }
+    }
+    assert!(entries.len() <= HOSTED_ENTRIES_MAX as usize);
+    Ok(entries)
+}
+
 /// What the register shows for one agent that another engine part starts and drives,
 /// such as a team agent: its project, role, owner-facing label and harness, the host's
 /// name, the host's own reference for it, handed back with every owner restart, and the
@@ -337,8 +377,9 @@ pub struct HostedRestart {
 
 /// Something other than a hosted agent that holds an account's native profile while it
 /// runs, so a refused sign-out can name it and the owner can end it: a master
-/// conversation's turn, ended by closing that conversation, or a research job, ended by
-/// cancelling it.
+/// conversation's turn, ended by closing that conversation, a research job, ended by
+/// cancelling it, or processes a Full access agent left running, named by `report`,
+/// which signing the account out lets go of while they still run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Holder {
@@ -350,6 +391,9 @@ pub enum Holder {
         project: ProjectId,
         job: i64,
         title: String,
+    },
+    Leftover {
+        report: String,
     },
 }
 
@@ -940,6 +984,7 @@ impl Agents {
             Some(crate::launch_context::for_project(
                 &*self.db()?,
                 &spec.project,
+                crate::agent_git::Layout::Linked,
             )?)
         } else {
             None
@@ -1090,8 +1135,10 @@ impl Agents {
     }
 
     /// Stops every running hosted agent that signs in with one account and waits, at most
-    /// `HOST_WAIT` in all, for their hosts to end them. Input: the account. Output: those
-    /// agents as they are after the wait.
+    /// `HOST_WAIT` in all, for their hosts to end them, then lets go of the holds Full
+    /// access stops keep on it, theirs included, as the owner chose to sign it out while
+    /// what those name may still run. Input: the account. Output: those agents as they are
+    /// after the wait.
     pub fn stop_using(&self, account: &CredentialRef) -> Result<Vec<AgentView>, LaunchError> {
         let hosted = self.hosted_using(account)?;
         for (_, control) in &hosted {
@@ -1101,6 +1148,7 @@ impl Agents {
         for (id, control) in &hosted {
             self.await_host(id, control, deadline);
         }
+        crate::harnesses::leftovers::release(account);
         hosted.iter().map(|(id, _)| self.view(id)).collect()
     }
 
@@ -1116,17 +1164,29 @@ impl Agents {
         }
     }
 
-    /// The holders of one account's profile other than hosted agents, newest first, at
-    /// most `LIST_MAX`. Input: the account. Output: the holders.
+    /// The holders of one account's profile other than hosted agents, newest first, then
+    /// what Full access agents left running, at most `LIST_MAX`. Input: the account.
+    /// Output: the holders.
     pub fn holders(&self, account: &CredentialRef) -> Vec<Holder> {
-        let holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
-        holds
+        let mut holders: Vec<Holder> = self
+            .holds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .values()
             .rev()
             .filter(|(held, _)| held == account)
             .map(|(_, holder)| holder.clone())
             .take(LIST_MAX)
-            .collect()
+            .collect();
+        let room = LIST_MAX - holders.len();
+        holders.extend(
+            crate::harnesses::leftovers::held_by(account)
+                .into_iter()
+                .take(room)
+                .map(|report| Holder::Leftover { report }),
+        );
+        assert!(holders.len() <= LIST_MAX);
+        holders
     }
 
     fn hosted_using(
@@ -1492,12 +1552,16 @@ fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
 }
 
 /// Opens an agent output log read-only to probe its lock, refusing a link, anything but
-/// a regular file and a file another user owns. Input: the log path. Output: the open.
+/// a regular file and a file another user owns, and never waiting on a FIFO or device
+/// placed at its name. Input: the log path. Output: the open.
 #[cfg(unix)]
 fn log_probe(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .ok()

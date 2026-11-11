@@ -7,20 +7,29 @@ const READ_ONLY_ENGINE_BASE: &str = "CRAZYAGENT_TEST_READ_ONLY_ENGINE_BASE";
 /// A harness standing in for Codex that leaves what a shell tool can leave: a process in
 /// its own session that writes `detached` in the agent's temp folder once its session has
 /// started and then sleeps `seconds`. The harness waits for that file, then sleeps the same
-/// time when it `stays`, or exits. Takes the seconds and whether it stays. Returns the script.
+/// time when it `stays`, or exits. Its sleeps run under [`sleep_marker`], the harness's own
+/// path, so only this run's processes name it. Takes the seconds and whether it stays.
+/// Returns the script.
 fn detaching_harness(seconds: u32, stays: bool) -> String {
+    let sleep = format!("exec {{ q(/bin/sleep) }} qq($ARGV[0]-sleep), q({seconds})");
     let then = if stays {
-        format!("exec /bin/sleep {seconds}")
+        format!(r#"exec /usr/bin/perl -e '{sleep}' "$0""#)
     } else {
         "exit 0".to_owned()
     };
     format!(
         r#"#!/bin/sh
-/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "$ENV{{TMPDIR}}/detached") or exit 1; close($file); exec q(/bin/sleep {seconds})' < /dev/null > /dev/null 2>&1 &
+/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, ">", "$ENV{{TMPDIR}}/detached") or exit 1; close($file); {sleep}' "$0" < /dev/null > /dev/null 2>&1 &
 while [ ! -e "$TMPDIR/detached" ]; do /bin/sleep 0.05; done
 {then}
 "#
     )
+}
+
+/// The command text both sleeps of the [`detaching_harness`] in `base` run under: the
+/// harness's own path, unique to the run. Takes the base. Returns the text.
+fn sleep_marker(base: &Path) -> String {
+    format!("{}-sleep", read_only_place(base).3.to_str().unwrap())
 }
 
 /// The engine database, research state folder, read folder and harness of the read-only run
@@ -83,6 +92,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
             prompt: "Describe this repository.",
             account: &account,
             wall_time: Duration::from_secs(60),
+            output_tokens: None,
         },
         stop,
     )
@@ -104,34 +114,47 @@ fn running_naming(needle: &str, count: usize) -> Vec<(i32, String)> {
 
 #[test]
 fn a_stopped_read_only_run_leaves_nothing_its_harness_detached_into_its_own_session() {
-    const SLEEP: &str = "sleep 3311";
+    let mut bystander = crate::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("3311")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
     let base = read_only_base(&detaching_harness(3311, true));
+    let marker = sleep_marker(base.path());
     let stopping = AtomicBool::new(false);
     let ending = std::thread::scope(|scope| {
         let run = scope
             .spawn(|| read_only_run(base.path(), &|| stopping.load(Ordering::Relaxed)).unwrap());
-        running_naming(SLEEP, 2);
+        running_naming(&marker, 2);
         stopping.store(true, Ordering::Relaxed);
         run.join().unwrap()
     });
+    let survivors = detached_survivors(Instant::now() + Duration::from_secs(2), &[&marker]);
+    let spared = bystander.try_wait().unwrap();
+    let _ = bystander.kill();
+    bystander.wait().unwrap();
     assert_eq!(ending, ReadOnlyEnding::Stopped);
+    assert_eq!(survivors, []);
     assert_eq!(
-        detached_survivors(Instant::now() + Duration::from_secs(2), &[SLEEP]),
-        []
+        spared, None,
+        "a process of this user that only shares the sleep length was not started by the run"
     );
 }
 
 #[test]
 fn a_read_only_run_whose_harness_exits_leaves_nothing_it_detached() {
-    const SLEEP: &str = "sleep 3312";
     let base = read_only_base(&detaching_harness(3312, false));
+    let marker = sleep_marker(base.path());
     let ending = read_only_run(base.path(), &|| false).unwrap();
     assert!(
         !matches!(ending, ReadOnlyEnding::TimedOut | ReadOnlyEnding::Stopped),
         "{ending:?}"
     );
     assert_eq!(
-        detached_survivors(Instant::now() + Duration::from_secs(2), &[SLEEP]),
+        detached_survivors(Instant::now() + Duration::from_secs(2), &[&marker]),
         []
     );
 }
@@ -141,12 +164,12 @@ fn a_read_only_run_whose_harness_exits_leaves_nothing_it_detached() {
 /// once its harness and the detached process both run.
 #[test]
 fn a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached() {
-    const SLEEP: &str = "sleep 3313";
     if let Some(base) = std::env::var_os(READ_ONLY_ENGINE_BASE) {
         let ending = read_only_run(Path::new(&base), &|| false);
         panic!("the engine under test was not killed: {ending:?}");
     }
     let base = read_only_base(&detaching_harness(3313, true));
+    let marker = sleep_marker(base.path());
     let module = module_path!().split_once("::").unwrap().1;
     let test =
         format!("{module}::a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached");
@@ -157,33 +180,33 @@ fn a_read_only_run_whose_engine_dies_leaves_nothing_its_harness_detached() {
             .stdin(Stdio::null()),
     )
     .unwrap();
-    running_naming(SLEEP, 2);
+    running_naming(&marker, 2);
     let exited = engine.try_wait().unwrap();
     engine.kill().unwrap();
     engine.wait().unwrap();
     assert_eq!(exited, None);
     assert_eq!(
-        detached_survivors(Instant::now() + Duration::from_secs(5), &[SLEEP]),
+        detached_survivors(Instant::now() + Duration::from_secs(5), &[&marker]),
         []
     );
 }
 
 #[test]
 fn a_read_only_run_whose_warden_was_killed_fails_with_its_cleanup_uncertain_and_leaves_nothing() {
-    const SLEEP: &str = "sleep 3314";
     let base = read_only_base(&detaching_harness(3314, true));
+    let marker = sleep_marker(base.path());
     let (_, _, _, harness) = read_only_place(base.path());
     let needle = harness.to_str().unwrap().to_owned();
     let stopping = AtomicBool::new(false);
     let ending = std::thread::scope(|scope| {
         let run = scope.spawn(|| read_only_run(base.path(), &|| stopping.load(Ordering::Relaxed)));
-        running_naming(SLEEP, 2);
+        running_naming(&marker, 2);
         let killed = crate::sandbox::warden::fixture::kill_wardens_of(&needle);
         assert_eq!(killed.len(), 1, "one warden per run");
         stopping.store(true, Ordering::Relaxed);
         run.join().unwrap()
     });
-    let left = detached_survivors(Instant::now() + Duration::from_secs(2), &[SLEEP]);
+    let left = detached_survivors(Instant::now() + Duration::from_secs(2), &[&marker]);
     assert!(
         matches!(ending, Err(RunError::Uncertain("warden_unconfirmed"))),
         "{ending:?}"

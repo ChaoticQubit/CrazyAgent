@@ -2,6 +2,7 @@ use super::*;
 
 use std::os::unix::fs::PermissionsExt;
 
+#[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt;
 
 const CHILD: &str = include_str!("../../tests/fixtures/agent_child.py");
@@ -97,6 +98,7 @@ pub(crate) fn until(what: &str, mut check: impl FnMut() -> bool) {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn pids(root: &Path, name: &str) -> (i32, i32) {
     let path = root.join("work").join(name).join("pids.json");
     until("the child to write its pids", || path.is_file());
@@ -107,6 +109,7 @@ pub(crate) fn pids(root: &Path, name: &str) -> (i32, i32) {
     )
 }
 
+#[cfg(target_os = "macos")]
 pub(crate) fn alive(pid: i32) -> bool {
     rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
 }
@@ -169,6 +172,7 @@ fn escaping_engine_process() {
     std::process::exit(0);
 }
 
+#[cfg(target_os = "macos")]
 fn crash(root: &Path, test: &str) -> Vec<String> {
     let status = crate::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
@@ -185,6 +189,7 @@ fn crash(root: &Path, test: &str) -> Vec<String> {
 /// Crashes an engine whose one agent started a child in a new session that keeps the
 /// agent's output log, then kills the agent's own group so only that child holds it.
 /// Input: the case root. Output: the agent id and the escaped child's pid.
+#[cfg(target_os = "macos")]
 fn escaped_after_crash(root: &Path) -> (String, i32) {
     let ids = crash(root, "agents::tests::escaping_engine_process");
     let (pid, grandchild) = pids(root, "escaping");
@@ -201,12 +206,14 @@ fn escaped_after_crash(root: &Path) -> (String, i32) {
     (ids[0].clone(), escaped)
 }
 
+#[cfg(target_os = "macos")]
 fn escaped(root: &Path, name: &str) -> i32 {
     let path = root.join("work").join(name).join("escaped.json");
     let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
     value["pid"].as_i64().unwrap() as i32
 }
 
+#[cfg(target_os = "macos")]
 fn gone_within(pid: i32, wait: Duration) -> bool {
     let deadline = Instant::now() + wait;
     while alive(pid) && Instant::now() < deadline {
@@ -215,12 +222,16 @@ fn gone_within(pid: i32, wait: Duration) -> bool {
     !alive(pid)
 }
 
+#[cfg(target_os = "macos")]
 fn end_escaped(pid: i32) {
     if let Some(pid) = rustix::process::Pid::from_raw(pid) {
         let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
     }
 }
 
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn stopping_an_agent_also_ends_a_child_that_left_its_group_but_holds_its_log() {
     let case = Case::new();
@@ -249,6 +260,9 @@ fn stopping_an_agent_also_ends_a_child_that_left_its_group_but_holds_its_log() {
     });
 }
 
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group() {
     let case = Case::new();
@@ -290,6 +304,9 @@ fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group
     assert_eq!(stopped.reason, None);
 }
 
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn a_reattached_agent_whose_log_was_replaced_is_not_signalled_and_not_called_stopped() {
     let case = Case::new();
@@ -328,6 +345,9 @@ fn only_other_write_holders_are_read_from_lsof_and_a_listing_without_this_engine
     assert!(listed_writers(&format!("p{own}\nf7\nar\nn/elsewhere\n")).is_none());
 }
 
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
     let case = Case::new();
@@ -391,6 +411,7 @@ fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_clo
     agents.stop(killed).unwrap();
 }
 
+#[cfg(target_os = "macos")]
 fn serve(
     hosted: Hosted,
     request: LaunchRequest,
@@ -433,6 +454,9 @@ fn serve(
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the supervisor's stop, process groups and listing only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_stopping_one_agent_ends_its_whole_process_group_and_leaves_the_others_running() {
     let case = Case::new();
@@ -489,6 +513,9 @@ fn wiring_stopping_one_agent_ends_its_whole_process_group_and_leaves_the_others_
 /// replies, including the turn end after an interrupt, so this checks only that the
 /// owner's interrupt reaches one agent and its turn bookkeeping.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_interrupt_ends_only_the_current_turn_of_one_agent() {
     let case = Case::new();
@@ -527,6 +554,9 @@ fn wiring_interrupt_ends_only_the_current_turn_of_one_agent() {
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the supervisor's restart bookkeeping and fresh process only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_restart_keeps_the_agent_and_starts_a_fresh_process_with_its_first_task() {
     let case = Case::new();
@@ -563,6 +593,9 @@ fn wiring_restart_keeps_the_agent_and_starts_a_fresh_process_with_its_first_task
     );
 }
 
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn an_agent_that_ends_leaves_no_runtime_folder_behind() {
     let case = Case::new();
@@ -595,6 +628,9 @@ fn an_agent_that_ends_leaves_no_runtime_folder_behind() {
     assert!(!root.join(AGENTS).join(&halted.id).exists());
 }
 
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn opening_the_register_removes_runtime_folders_of_agents_that_no_longer_run() {
     let case = Case::new();
@@ -625,6 +661,9 @@ fn opening_the_register_removes_runtime_folders_of_agents_that_no_longer_run() {
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies and exit, so this checks only how the supervisor records an exit.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_an_agent_that_exits_by_itself_is_shown_as_exited_never_running() {
     let case = Case::new();
@@ -651,6 +690,9 @@ fn wiring_an_agent_that_exits_by_itself_is_shown_as_exited_never_running() {
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the supervisor's close and next start only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_closing_the_engine_stops_its_agents_and_says_so_after_the_next_start() {
     let case = Case::new();
@@ -685,6 +727,9 @@ fn wiring_closing_the_engine_stops_its_agents_and_says_so_after_the_next_start()
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the supervisor's key handling across restarts only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_a_keyed_agent_cannot_restart_once_its_key_is_gone() {
     let case = Case::new();
@@ -728,6 +773,9 @@ fn wiring_a_keyed_agent_cannot_restart_once_its_key_is_gone() {
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the supervisor's reattachment after an engine crash only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
     let case = Case::new();
@@ -810,6 +858,9 @@ fn wiring_after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_mar
 /// Wiring test: tests/fixtures/agent_child.py stands in for Claude Code and invents its
 /// replies, so this checks the hosted-agent controls of the supervisor only.
 /// Real codex and Claude Code: agents_live.rs and the harness_launch.rs live tests.
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
 #[test]
 fn wiring_a_hosted_agent_is_listed_and_obeys_the_owners_stop_interrupt_and_restart() {
     let case = Case::new();
@@ -1078,4 +1129,28 @@ fn holders_of_an_account_are_named_until_their_hold_ends() {
     assert_eq!(agents.holders(&account("claude-account-d")).len(), 1);
     drop(elsewhere);
     assert!(agents.holders(&account("claude-account-d")).is_empty());
+}
+
+#[test]
+fn an_output_log_that_is_a_fifo_is_no_probe_and_is_not_waited_on() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let plain = folder.path().join("output.log");
+    std::fs::write(&plain, "line\n").unwrap();
+    assert!(log_probe(&plain).is_some());
+    let fifo = folder.path().join("planted.log");
+    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
+        .unwrap();
+    assert!(made.success());
+    let (sent, probed) = std::sync::mpsc::channel();
+    let path = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = sent.send(log_probe(&path).is_some());
+    });
+    let answer = probed.recv_timeout(std::time::Duration::from_secs(5));
+    let _writer = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(&fifo);
+    assert_eq!(answer, Ok(false), "the probe waited on the FIFO");
 }

@@ -260,3 +260,31 @@ fn secrets_are_visible_ascii_bounded_and_redacted() {
     assert!(parts(&crate::protocol::CredentialRef::new("no-colon").unwrap()).is_err());
     assert!(parts(&crate::protocol::CredentialRef::new("a:b:c").unwrap()).is_err());
 }
+
+#[test]
+fn a_bearer_token_of_up_to_16_kib_is_held_but_the_keychain_refuses_to_store_it() {
+    let tokens = crate::credentials::TOKEN_BYTES_MAX;
+    let longest = SecretString::bearer(vec![b'z'; tokens]).unwrap();
+    assert_eq!(longest.expose().len(), tokens);
+    for bad in [Vec::new(), b"has space".to_vec(), vec![b'a'; tokens + 1]] {
+        assert_eq!(
+            SecretString::bearer(bad).unwrap_err().0,
+            "credential_secret_invalid"
+        );
+    }
+    let scratch = Scratch::new();
+    let service = scratch.service("github");
+    let long = SecretString::bearer(vec![b'z'; crate::credentials::SECRET_BYTES_MAX + 1]).unwrap();
+    assert_eq!(
+        scratch.store.put(&service, "token", &long).unwrap_err().0,
+        "credential_secret_invalid"
+    );
+    assert_eq!(
+        scratch
+            .store
+            .get(&reference(&service, "token").unwrap())
+            .unwrap_err()
+            .0,
+        "credential_missing"
+    );
+}

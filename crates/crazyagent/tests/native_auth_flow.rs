@@ -899,13 +899,13 @@ async fn stale_source_hash_rejects_all_four_commands_without_effects() {
             client
                 .read_native_auth(query(&basis, "stale-read", "missing"))
                 .await,
-            "native_profile_source_conflict",
+            "native_auth_operation_missing",
         );
         assert_error(
             client
                 .cancel_native_auth(cancel(&basis, "stale-cancel", "missing"))
                 .await,
-            "native_profile_source_conflict",
+            "native_auth_operation_missing",
         );
         assert_error(
             client.logout_native_auth(logout(&basis, "stale-out")).await,

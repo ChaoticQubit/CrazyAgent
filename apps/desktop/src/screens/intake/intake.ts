@@ -1,12 +1,14 @@
-import { receiptState, type StoredSetup } from "../../api-projects";
+import { ADD_WARNINGS, measuredLine } from "../../api-intake";
+import type { Result } from "../../api";
+import { receiptState, type KeptFile, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, OnboardingStep,
-  OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, SetupStatus,
+  AddFolderMode, AddOverride, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IcloudProgress, IntentReceipt,
+  MappingFacts, MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import type { IconName, Tone } from "../../ui";
 import { displayText } from "../conversation";
-import { draftOf, formatBytes, type ProjectDraft } from "../new-project/wizard";
+import { draftOf, formatBytes, researchChoices, type ProjectDraft } from "../new-project/wizard";
 import { folderLabel } from "../project/overview";
 import { localClock } from "../project/research";
 
@@ -15,6 +17,7 @@ export const FOUND_POLL_MS = 3000;
 export const ONBOARDING_POLL_MS = 2000;
 export const GITHUB_POLL_MS = 3000;
 export const SETUP_POLL_MS = 2000;
+export const SETUP_POLL_MAX_MS = 30000;
 export const REPO_PAGES_MAX = 100;
 
 export type FoundAction = "setup" | "continue" | "open" | "remove" | null;
@@ -101,12 +104,14 @@ export function joinPath(root: string, name: string): string {
 export type AddWay = "here" | AddFolderMode;
 
 /** Says what using the folder where it is, Move or Copy does; Copy shows the size first and warns
- * above 1 GB. Inputs: the way, the folder size or null while it is read, and the projects folder.
- * Output: the sentence and whether it is a warning. */
-export function sizeLine(mode: AddWay, bytes: number | null, home: string): { text: string; warn: boolean } {
+ * above 1 GB or when the folder could not be measured. Inputs: the way, the folder size or null,
+ * the projects folder and whether the size read finished without a size. Output: the sentence and
+ * whether it is a warning. */
+export function sizeLine(mode: AddWay, bytes: number | null, home: string, unmeasured = false): { text: string; warn: boolean } {
   const where = folderLabel(home);
   if (mode === "here") return { text: "Sets it up where it is. Nothing is moved or copied.", warn: false };
   if (mode === "move") return { text: `Moves the folder into ${where}. It won't stay at its old place.`, warn: false };
+  if (bytes === null && unmeasured) return { text: `CrazyAgent couldn't measure this folder. A copy puts all of it into ${where}; the original stays where it is.`, warn: true };
   if (bytes === null) return { text: "Checking the folder size...", warn: false };
   if (bytes > COPY_WARN_BYTES) {
     return { text: `This copies ${formatBytes(bytes)} into ${where}. That takes a while and uses as much disk again. Using it where it is needs no copy.`, warn: true };
@@ -120,6 +125,245 @@ export function sizeLine(mode: AddWay, bytes: number | null, home: string): { te
 export function worktreesLine(count: number): string {
   const many = count !== 1;
   return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
+}
+
+/** How often Add folder reads the running iCloud download's progress. */
+export const ICLOUD_PROGRESS_MS = 1000;
+
+/** What Add folder says once the owner stopped an iCloud download. */
+export const ICLOUD_STOPPED = "The download stopped. Nothing was moved or copied.";
+
+/** How a watched iCloud download ended: on its own, after Stop download, or after the owner left Add folder. */
+export type IcloudEnding = "go" | "stopped" | "left";
+
+/** One running iCloud download as Add folder watches it. Each tick reads its progress and, once the
+ * owner stopped it or left the page, asks the engine to stop again, since a stop sent before the
+ * engine took the download is not seen. Inputs: the stop and progress calls and the tick in ms.
+ * Output: `stop`, `leave`, and `end`, which ends the ticks and says how the download ended. */
+export function icloudRun(cancel: () => void, read: () => void, everyMs: number) {
+  if (!Number.isSafeInteger(everyMs) || everyMs < 1) throw new Error(`iCloud tick must be a whole number of ms, got ${everyMs}`);
+  let ending: IcloudEnding = "go";
+  let ended = false;
+  const timer = setInterval(() => {
+    if (ending !== "go") cancel();
+    if (ending !== "left") read();
+  }, everyMs);
+  const halt = (why: IcloudEnding) => {
+    if (ended || ending === "left") return;
+    ending = why;
+    cancel();
+  };
+  return {
+    stop: () => halt("stopped"),
+    leave: () => halt("left"),
+    end: (): IcloudEnding => {
+      if (ended) throw new Error("an iCloud download ends once");
+      ended = true;
+      clearInterval(timer);
+      return ending;
+    },
+  };
+}
+
+/** What Add folder does once an iCloud download returns: the add goes on only when the download
+ * finished and the owner neither stopped it nor left the page. Inputs: how it ended and the
+ * download's result. Output: add, nothing (the page is gone), or the sentence to show. */
+export function icloudOutcome(ending: IcloudEnding, result: Result<number>): { next: "add" } | { next: "none" } | { next: "say"; text: string } {
+  if (ending === "left") return { next: "none" };
+  if (result.kind === "not_ready") return { next: "say", text: "Downloading from iCloud isn't in this build." };
+  if (ending === "go") return result.kind === "ok" ? { next: "add" } : { next: "say", text: result.message };
+  const ended = result.kind === "ok" || result.code === "home_icloud_not_downloaded";
+  return { next: "say", text: ended ? ICLOUD_STOPPED : result.message };
+}
+
+/** How many of a folder's files the size read found only in iCloud. Input: the read, if any.
+ * Output: the count, 0 while it is not read or could not be measured. */
+export function icloudPlaceholders(size: Loaded<FolderSize> | null): number {
+  const count = size?.kind === "ok" ? size.value.placeholders ?? 0 : 0;
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error(`iCloud placeholder count must be a whole number, got ${count}`);
+  return count;
+}
+
+/** Says how many of a folder's files are only in iCloud and that CrazyAgent downloads them first.
+ * Input: the count, or null when only the engine's refusal said some are. Output: one sentence. */
+export function icloudCountLine(placeholders: number | null): string {
+  if (placeholders !== null && (!Number.isSafeInteger(placeholders) || placeholders < 1)) {
+    throw new Error(`an iCloud question needs at least one file, got ${placeholders}`);
+  }
+  const files = placeholders === null ? "Some files are" : placeholders === 1 ? "1 file is" : `${placeholders} files are`;
+  return `${files} only in iCloud; CrazyAgent downloads them first (needs internet, can take a while).`;
+}
+
+/** Says that a Move takes the folder out of iCloud on the owner's other Macs: iCloud Desktop for a
+ * folder in ~/Desktop, iCloud Documents for one in ~/Documents, iCloud Drive otherwise.
+ * Input: the absolute folder. Output: one sentence. */
+export function icloudMoveLine(source: string): string {
+  const parts = source.split("/");
+  const place = parts[1] !== "Users" || parts.length < 5 ? "iCloud Drive"
+    : parts[3] === "Desktop" ? "iCloud Desktop" : parts[3] === "Documents" ? "iCloud Documents" : "iCloud Drive";
+  return `Moving takes the folder out of ${place} on your other Macs too.`;
+}
+
+/** The running iCloud download's status line. Input: the last progress read, or null before the
+ * first. Output: one sentence, with the counts once the engine has them. */
+export function icloudProgressLine(progress: IcloudProgress | null): string {
+  if (progress === null || progress.total === 0) return "Downloading from iCloud...";
+  if (progress.done > progress.total) throw new Error(`iCloud progress done ${progress.done} is past total ${progress.total}`);
+  return `Downloading from iCloud: ${progress.done} of ${progress.total} files`;
+}
+
+/** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */
+export const WAYS_CHECKING = "Move and Copy are offered once CrazyAgent has checked this folder's git links.";
+
+/** Whether Add folder offers Move and Copy: once the folder read has finished, whatever it found,
+ * since what it found is asked about before anything moves. Input: the folder read, if any.
+ * Output: true once a folder is picked and its read is not loading. */
+export function waysOffered(size: Loaded<FolderSize> | null): boolean {
+  return size !== null && size.kind !== "loading";
+}
+
+/** Why Add folder offers no Move or Copy for a picked folder. Input: the folder read, if any.
+ * Output: the reason lines; one only while the read is still checking. */
+export function waysWithheld(size: Loaded<FolderSize> | null): string[] {
+  return size?.kind === "loading" ? [WAYS_CHECKING] : [];
+}
+
+/** The way Add folder uses: the chosen one, or Use where it is while Move and Copy wait for the
+ * folder read. Inputs: the chosen way and the folder read. Output: the way to show and add with. */
+export function addWay(mode: AddWay, size: Loaded<FolderSize> | null): AddWay {
+  return mode !== "here" && !waysOffered(size) ? "here" : mode;
+}
+
+/** Something about a folder the owner is asked about before a Move or Copy goes ahead. */
+export type AnywayIssue =
+  | "large"
+  | "too_many"
+  | "unreadable"
+  | "worktrees"
+  | "linked_worktree"
+  | "submodule"
+  | "git_data_unread"
+  | "linked_checkout"
+  | "no_git"
+  | "git_unread";
+
+const ISSUE_ORDER: AnywayIssue[] = ["large", "too_many", "unreadable", "worktrees", "linked_worktree", "submodule", "git_data_unread", "linked_checkout", "no_git", "git_unread"];
+
+const MOVE_LINK_ISSUES: AnywayIssue[] = ["worktrees", "linked_worktree", "submodule", "git_data_unread"];
+
+const REFUSED_ISSUES: Record<string, AnywayIssue> = {
+  home_copy_linked_checkout: "linked_checkout",
+  home_copy_too_large: "too_many",
+};
+
+/** The issue a Move of a folder with git links outside it is asked about: the link the read
+ * named, or linked worktrees when the read did not name one. Input: the folder read, if any.
+ * Output: the issue. */
+function moveLinkIssue(read: FolderSize | null): AnywayIssue {
+  switch (read?.git_link) {
+    case "linked_worktree":
+      return "linked_worktree";
+    case "submodule":
+      return "submodule";
+    case "unreadable":
+      return "git_data_unread";
+    default:
+      return "worktrees";
+  }
+}
+
+/** What the owner is asked about before a Move or Copy of a picked folder: what its read found
+ * for that way, plus the issue of a soft refusal the engine sent back. A Move on the same disk is
+ * a rename, so size matters only to a Copy or a Move that may cross disks. Inputs: the way, the
+ * folder read and the refusal code, if any. Output: the issues in a fixed order, none while the
+ * read is loading. */
+export function anywayIssues(way: AddFolderMode, size: Loaded<FolderSize> | null, refused: string | null): AnywayIssue[] {
+  if (size === null || size.kind === "loading") return [];
+  const found = new Set<AnywayIssue>();
+  const read = size.kind === "ok" ? size.value : null;
+  if (refused === "home_move_worktrees") found.add(moveLinkIssue(read));
+  else if (refused !== null && Object.hasOwn(REFUSED_ISSUES, refused)) found.add(REFUSED_ISSUES[refused]);
+  if (read === null || typeof read.movable !== "boolean" || typeof read.copyable !== "boolean") found.add("git_unread");
+  else if (way === "move" && !read.movable) found.add(moveLinkIssue(read));
+  else if (way === "copy" && !read.copyable) found.add("linked_checkout");
+  if (read?.git === false) found.add("no_git");
+  if (read?.size_problem === "folder_size_unreadable") found.add("unreadable");
+  const copies = way === "copy" || read?.same_volume !== true;
+  if (copies && (read?.size_problem === "folder_size_timeout" || read?.size_problem === "folder_size_too_large")) found.add("large");
+  if (copies && read?.size_problem === "folder_size_too_large") found.add("too_many");
+  if (copies && typeof read?.bytes === "number" && read.bytes > COPY_WARN_BYTES) found.add("large");
+  return ISSUE_ORDER.filter((issue) => found.has(issue));
+}
+
+/** The overrides Move anyway or Copy anyway sends: one for each issue the engine itself refuses,
+ * never for one the owner was not shown. Inputs: the way, the issues and the folder read.
+ * Output: the overrides, in the engine's order. */
+export function anywayOverrides(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AddOverride[] {
+  const unmeasured = size?.kind === "ok" && size.value.size_problem === "folder_size_timeout";
+  const overrides: AddOverride[] = [];
+  if (way === "move" && issues.some((issue) => MOVE_LINK_ISSUES.includes(issue))) overrides.push("worktrees");
+  if (way === "copy" && issues.includes("linked_checkout")) overrides.push("linked_checkout");
+  if (issues.includes("too_many") || (issues.includes("large") && unmeasured)) overrides.push("too_large");
+  return overrides;
+}
+
+const REFUSAL_OVERRIDES: Record<string, AddOverride> = {
+  home_move_worktrees: "worktrees",
+  home_copy_linked_checkout: "linked_checkout",
+  home_copy_too_large: "too_large",
+};
+
+/** Whether an engine refusal of a Move or Copy turns into the question for that issue: only a
+ * soft refusal whose override was not already sent, so the owner is never asked twice about one
+ * issue. Inputs: the refusal code and the overrides sent. Output: true to ask. */
+export function asksAgain(code: string, sent: AddOverride[]): boolean {
+  return Object.hasOwn(REFUSAL_OVERRIDES, code) && !sent.includes(REFUSAL_OVERRIDES[code]);
+}
+
+/** One warning block of the Move anyway or Copy anyway question: whether it is about losing
+ * data, its lines in the owner's words, and the folders it names. */
+export interface AnywayWarning {
+  loss: boolean;
+  lines: string[];
+  paths: string[];
+}
+
+/** The warnings the question shows: data loss blocks first (a copy sharing another checkout's
+ * git data, a moved worktree whose git data its repository can prune, apps still using the folder,
+ * a copy across disks, a very large or deep folder, unreadable files), then the other effects (the
+ * old place, git worktrees with their folders, the folder being a submodule, git data not read, no
+ * git, git not read, a quick rename). Inputs: the way, the issues and the folder read. Output: the
+ * blocks in that order. */
+export function anywayWarnings(way: AddFolderMode, issues: AnywayIssue[], size: Loaded<FolderSize> | null): AnywayWarning[] {
+  const read = size?.kind === "ok" ? size.value : null;
+  const moving = way === "move";
+  const copyLine = moving ? ADD_WARNINGS.across_disks : ADD_WARNINGS.copy_all;
+  const block = (loss: boolean, lines: string[], paths: string[] = []): AnywayWarning => ({ loss, lines, paths });
+  const loss: AnywayWarning[] = issues.includes("linked_checkout") ? [block(true, [ADD_WARNINGS.linked_checkout])] : [];
+  if (issues.includes("linked_worktree")) loss.push(block(true, [ADD_WARNINGS.linked_worktree]));
+  if (moving) loss.push(block(true, [ADD_WARNINGS.close_apps]));
+  let copying = false;
+  if (issues.includes("large")) {
+    loss.push(block(true, [ADD_WARNINGS.large, typeof read?.bytes === "number" ? measuredLine(read.bytes) : ADD_WARNINGS.unmeasured, copyLine]));
+    copying = true;
+  }
+  if (issues.includes("too_many")) {
+    loss.push(block(true, [...(copying ? [] : [copyLine]), ADD_WARNINGS.too_many]));
+    copying = true;
+  }
+  if (moving && !copying && read?.same_volume === false) {
+    loss.push(block(true, [ADD_WARNINGS.across_disks]));
+    copying = true;
+  }
+  if (issues.includes("unreadable")) loss.push(block(true, [moving ? ADD_WARNINGS.unreadable : ADD_WARNINGS.unreadable_copy]));
+  const effects: AnywayWarning[] = moving ? [block(false, [ADD_WARNINGS.old_place])] : [];
+  if (issues.includes("worktrees")) effects.push(block(false, [ADD_WARNINGS.worktrees], read?.worktree_paths ?? []));
+  if (issues.includes("submodule")) effects.push(block(false, [ADD_WARNINGS.submodule]));
+  if (issues.includes("git_data_unread")) effects.push(block(false, [ADD_WARNINGS.git_data_unread]));
+  if (issues.includes("no_git")) effects.push(block(false, [ADD_WARNINGS.no_git]));
+  if (issues.includes("git_unread")) effects.push(block(false, [ADD_WARNINGS.git_unread]));
+  if (moving && !copying && read?.same_volume === true) effects.push(block(false, [ADD_WARNINGS.same_disk]));
+  return [...loss, ...effects];
 }
 
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it
@@ -137,6 +381,22 @@ export function deviceLine(expiresS: number, startedMs: number, nowMs: number): 
  * is signed in, and now in milliseconds. Output: true while the status should be polled. */
 export function devicePolling(device: { code: { expires_s: number }; started: number } | null, signedIn: boolean, nowMs: number): boolean {
   return device !== null && !signedIn && !deviceLine(device.code.expires_s, device.started, nowMs).expired;
+}
+
+/** Lets one call of an async read run at a time: a call made while one is still running reads
+ * nothing and gives null, so a double click can't read the same page twice. A failed read
+ * frees the guard like a finished one. Input: the read. Output: the guarded read. */
+export function oneAtATime<A extends unknown[], T>(read: (...args: A) => Promise<T>): (...args: A) => Promise<T | null> {
+  let running = false;
+  return async (...args: A) => {
+    if (running) return null;
+    running = true;
+    try {
+      return await read(...args);
+    } finally {
+      running = false;
+    }
+  };
 }
 
 /** Allows only a GitHub page over https as the device sign-in page.
@@ -171,13 +431,21 @@ export function repoMeta(repo: GitHubRepo): string {
   return `${repo.private ? "Private" : "Public"}, ${formatBytes(repo.size_kb * 1024)}, branch ${displayText(repo.default_branch)}`;
 }
 
-/** Badge word, tone and failure line for one onboarding step; a step waiting out a paused pool
- * names when the pause ends in local time. Inputs: the step and whether the setup is already saved,
- * when a step that never started was skipped. Output: the status word, its tone and the reason when
- * it failed. */
-export function stepView(step: OnboardingStep, finished = false): { word: string; tone: Tone; line: string | null } {
+/** Says which mapping try runs and for how many whole minutes, and why the try before it failed.
+ * Inputs: the try and the time now in ms. Output: one line. */
+function tryLine(progress: MappingTry, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - progress.started_ms) / 60000);
+  const head = `Mapping, try ${progress.number} of ${progress.tries}, ${minutes < 1 ? "under 1 min" : `${minutes} min`}.`;
+  return progress.earlier ? `${head} Try ${progress.number - 1} failed: ${displayText(progress.earlier)}` : head;
+}
+
+/** Badge word, tone and line for one onboarding step; a step waiting out a paused pool names when
+ * the pause ends in local time, and a running mapping step its try. Inputs: the step, whether the
+ * setup is already saved, when a step that never started was skipped, the mapping try and the time
+ * now in ms. Output: the status word, its tone and the try or the reason when it failed. */
+export function stepView(step: OnboardingStep, finished = false, progress: MappingTry | null = null, now = Date.now()): { word: string; tone: Tone; line: string | null } {
   switch (step.kind) {
-    case "running": return { word: "Working", tone: "info", line: null };
+    case "running": return { word: "Working", tone: "info", line: progress ? tryLine(progress, now) : null };
     case "done": return { word: "Done", tone: "ok", line: null };
     case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." };
     case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." };
@@ -215,23 +483,70 @@ export function missingLabels(missing: string[]): string[] {
 
 /** Starts the review form from the mapping agent's draft, keeping the saved pool and team. A
  * missing or blank proposed name falls back to the saved name, since the reply comes from another
- * process. Inputs: the onboarding view and the saved setup. Output: the form draft. */
+ * process. Roadmap planning starts on until the setup is first saved, then shows the saved choice.
+ * Inputs: the onboarding view and the saved setup. Output: the form draft. */
 export function onboardingDraft(view: OnboardingView, stored: StoredSetup): ProjectDraft {
+  const saved = draftOf(stored);
   return {
-    ...draftOf(stored),
+    ...saved,
     name: (view.name ?? "").trim() || stored.name,
     about: view.draft.about,
     stack: [...view.draft.tech_stack],
     platforms: [...view.draft.platforms],
-    research: [...view.draft.research],
+    research: researchChoices(view.draft.research).research,
+    roadmap: view.finished ? saved.roadmap : true,
   };
 }
 
-/** Tells whether the graph and mapping steps have stopped changing or the setup is already saved.
+/** What the mapping read in the project's own documents: per research kind the files that already
+ * hold it, the roadmap files, and the other project documents, each path made safe to show. A
+ * roadmap planning group counts as roadmap files, each shown once, as the engine links it as the
+ * roadmap. Input: the mapping facts. Output: { research, documents, roadmap }. */
+export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[]; roadmap: string[] } {
+  const research: Partial<Record<ResearchKind, string[]>> = {};
+  const roadmap = [...(facts.roadmap ?? [])];
+  for (const found of facts.research ?? []) {
+    if (found.kind === "roadmap_planning") roadmap.push(...found.files.filter((path) => !roadmap.includes(path)));
+    else research[found.kind] = found.files.map(displayText);
+  }
+  return { research, documents: (facts.documents ?? []).map(displayText), roadmap: roadmap.map(displayText) };
+}
+
+/** The most repository files one project links, as the engine's links store bounds them. */
+export const LINKS_MAX = 32;
+
+/** The repository files a first confirm links, each with the group it was found under: the
+ * mapping's roadmap files unless the owner turned "roadmap" off, a roadmap planning group's
+ * files with them under their own kind, then each research kind's files unless the owner
+ * turned that kind off, each once per group and at most LINKS_MAX, as the mapping wrote them.
+ * A file found under two groups goes only with the groups left on, so the engine links it as
+ * nothing the owner turned off. Null once the setup is saved or when
+ * the mapping found no file, so the engine leaves the links alone. Inputs: the onboarding view
+ * and the turned-off keys ("roadmap" or a research kind). Output: the files or null. */
+export function confirmKept(view: OnboardingView, dropped: readonly string[]): KeptFile[] | null {
+  const kept: KeptFile[] = [];
+  const keep = (paths: readonly string[], research: KeptFile["research"]) => {
+    for (const path of paths) {
+      if (kept.length < LINKS_MAX && !kept.some((file) => file.path === path && file.research === research)) kept.push({ path, research });
+    }
+  };
+  const found = [...(view.facts.roadmap ?? []), ...(view.facts.research ?? []).flatMap((item) => item.files)];
+  if (view.finished || found.length === 0) return null;
+  const groups = view.facts.research ?? [];
+  if (!dropped.includes("roadmap")) {
+    keep(view.facts.roadmap ?? [], null);
+    for (const item of groups) if (item.kind === "roadmap_planning") keep(item.files, item.kind);
+  }
+  for (const item of groups) if (item.kind !== "roadmap_planning" && !dropped.includes(item.kind)) keep(item.files, item.kind);
+  return kept;
+}
+
+/** Tells whether the mapping step has stopped changing or the setup is already saved. A failed
+ * graph does not settle it: the mapping agent still runs after it.
  * Input: the onboarding view. Output: true when polling can stop. */
 export function settled(view: OnboardingView): boolean {
   const done = (step: OnboardingStep) => step.kind === "done" || step.kind === "failed";
-  return view.finished || done(view.mapping) || (view.graph.kind === "failed" && view.mapping.kind === "waiting");
+  return view.finished || done(view.mapping);
 }
 
 /** Says whether the owner can confirm yet and what to do.
@@ -240,9 +555,26 @@ export function confirmReady(view: OnboardingView): { ready: boolean; line: stri
   if (view.finished) return { ready: true, line: "This project is set up. Change anything below, then save." };
   if (view.mapping.kind === "done") return { ready: true, line: "Check the answers, fill in anything missing, then confirm." };
   if (view.mapping.kind === "failed") return { ready: true, line: "The mapping agent stopped. Fill in the form yourself, then confirm." };
-  if (view.graph.kind === "failed") return { ready: true, line: "The code graph couldn't be built. Fill in the form yourself, then confirm." };
+  if (view.graph.kind === "failed") return { ready: false, line: "The code graph couldn't be built. The mapping agent still reads the project; the form fills in when it finishes." };
   if (!["done", "off", "not_installed"].includes(view.graph.kind)) return { ready: false, line: "Building the code graph. The form fills in when the mapping agent finishes." };
   return { ready: false, line: "The mapping agent is reading the project. The form fills in when it finishes." };
+}
+
+/** Whether the review offers the mapping's answers for a setup saved without them: the setup is
+ * saved and the engine kept the mapping's draft as `proposed` with an About or a tech stack.
+ * Input: the onboarding view. Output: true when "Use the mapping's answers" shows. */
+export function offerProposed(view: OnboardingView): boolean {
+  const proposed = view.proposed ?? null;
+  return view.finished && proposed !== null && (proposed.about.trim() !== "" || proposed.tech_stack.length > 0);
+}
+
+/** The form's draft with the mapping's About, tech stack and platforms when the review offers
+ * them, every other answer the owner gave, saved or not, kept; any other draft as it is.
+ * Input: the draft on screen and the onboarding view. Output: the draft the form shows. */
+export function withProposed(draft: ProjectDraft, view: OnboardingView): ProjectDraft {
+  if (!offerProposed(view) || !view.proposed) return draft;
+  const { about, tech_stack, platforms } = view.proposed;
+  return { ...draft, about, stack: [...tech_stack], platforms: [...platforms] };
 }
 
 /** Reads a Start setup receipt. Input: the receipt. Output: started with the project id, rejected
@@ -278,11 +610,13 @@ export function dependencyView(dependency: Dependency): { title: string; about: 
 }
 
 /** Badge word, tone and detail line for a default-pack entry state.
- * Input: the state. Output: the fixed word, its tone and one line or null. */
-export function packStateView(state: PackState): { word: string; tone: Tone; line: string | null } {
+ * Inputs: the state and, for an installed entry, why the engine refused its hooks.
+ * Output: the fixed word, its tone and one line or null. */
+export function packStateView(state: PackState, hooksRefused: string | null = null): { word: string; tone: Tone; line: string | null } {
+  const hooks = hooksRefused ? `Hooks not added: ${displayText(hooksRefused)}` : null;
   switch (state.state) {
-    case "on": return { word: "On", tone: "ok", line: null };
-    case "off": return { word: "Off", tone: "neutral", line: null };
+    case "on": return { word: "On", tone: "ok", line: hooks };
+    case "off": return { word: "Off", tone: "neutral", line: hooks };
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     default: return { word: "Not installed", tone: "neutral", line: null };
@@ -343,14 +677,14 @@ export function approvalLine(pack: PackEntry[], ticked: string[]): string | null
   return `Continuing lets your agents run these MCP servers: ${servers.join(", ")}. You can turn any of them off later.`;
 }
 
-/** Tells whether setup is still working. Input: the status. Output: true while it runs or
- * anything is installing. */
 /** Tells whether the engine is still checking any tool's version, so setup reads again.
  * Input: the status. Output: true while a tool shows Checking. */
 export function toolsChecking(status: SetupStatus): boolean {
   return status.dependencies.some((item) => item.state.state === "checking");
 }
 
+/** Tells whether setup is still working. Input: the status. Output: true while it runs or
+ * anything is installing. */
 export function setupBusy(status: SetupStatus): boolean {
   return status.running || status.dependencies.some((item) => item.state.state === "installing") || status.pack.some((item) => item.state.state === "installing");
 }
@@ -362,6 +696,34 @@ export function setupProgress(status: SetupStatus, ticked: string[]): { done: nu
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
   const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
+}
+
+/** What the setup screen knows from its reads: the setup the loader last read, the newest setup
+ * to show, how many reads failed in a row since, and the last failure's sentence. */
+export interface SetupReads {
+  seen: SetupStatus | null;
+  latest: SetupStatus | null;
+  failures: number;
+  line: string;
+}
+
+export const SETUP_READS: SetupReads = { seen: null, latest: null, failures: 0, line: "" };
+
+/** Folds one setup read into what the screen knows. A newly read setup replaces the shown one and
+ * clears the failures; a read in flight or the loader showing its last read again changes nothing;
+ * a failed read keeps the shown setup, counts and says why. Inputs: what the screen knew and the
+ * read. Output: what it knows now, a new object whenever the read changed it. */
+export function foldSetupRead(known: SetupReads, read: Loaded<SetupStatus>): SetupReads {
+  if (read.kind === "loading") return known;
+  if (read.kind === "ok") return read.value === known.seen ? known : { seen: read.value, latest: read.value, failures: 0, line: "" };
+  const reason = read.kind === "error" ? read.message : "Tool setup isn't in this build.";
+  return { ...known, failures: known.failures + 1, line: `Couldn't refresh setup progress: ${reason}` };
+}
+
+/** How long the setup screen waits before reading again, doubling after each failed read up to
+ * `SETUP_POLL_MAX_MS`. Input: the failed reads in a row. Output: the wait in milliseconds. */
+export function setupPollMs(failures: number): number {
+  return Math.min(SETUP_POLL_MS * 2 ** Math.min(Math.max(failures, 0), 5), SETUP_POLL_MAX_MS);
 }
 
 const TOOLS: DependencyName[] = ["tmux", "uv", "graphify"];

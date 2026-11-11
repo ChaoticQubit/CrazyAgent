@@ -1,6 +1,7 @@
-use crate::config::ModelAccess;
+use crate::config::{ModelAccess, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome};
+use crate::storage::versioned;
 use crate::usage::{AccountLimits, LimitWindow};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,8 @@ pub const RESERVE_PERCENT_MAX: u8 = 99;
 pub const SCOPED_STRATEGIES_MAX: usize = 4096;
 /// The most per-account plans the engine keeps.
 pub const ACCOUNT_PLANS_MAX: usize = 4096;
+/// The most bytes of rows one page of the schedule read carries, well inside one owner reply.
+const PAGE_BYTES_MAX: usize = 30_000;
 
 /// How a pool orders the accounts that can take work (DEC-096 item 8).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +54,63 @@ impl Strategy {
         Self::ALL
             .into_iter()
             .find(|strategy| strategy.code() == code)
+    }
+}
+
+/// How much less weekly use, in tenths of a percent, a Balanced pool's top account needs
+/// before work that already runs on another account moves to it. Readings closer than
+/// this pass each other with every turn, so they move nothing.
+pub const MOVE_MARGIN_PERMILLE: i64 = 50;
+
+/// The least time, in seconds, between two moves of one project's live master.
+pub const MOVE_DWELL_SECS: u64 = 15 * 60;
+
+/// What a live master does once its pool's account order puts another account ahead of
+/// the one it started on (DEC-139): keep that account until its next start, or move to
+/// the top account at its next idle point.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiveMasterAccount {
+    #[default]
+    Keep,
+    MoveWhenIdle,
+}
+
+impl LiveMasterAccount {
+    /// Every choice in the order the owner sees them.
+    pub const ALL: [Self; 2] = [Self::Keep, Self::MoveWhenIdle];
+
+    /// The plain name the owner sees.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Keep => "Keep start account",
+            Self::MoveWhenIdle => "Move when idle",
+        }
+    }
+
+    /// One plain line on what the choice does, shown beside it.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::Keep => "A live master stays on the account it started on until it restarts.",
+            Self::MoveWhenIdle => concat!(
+                "An idle live master moves to its pool's top account once that account is ",
+                "clearly first (under Balanced: at least 5 points less weekly use), at most ",
+                "once every 15 minutes. The conversation carries over, as a summary unless ",
+                "both accounts are subscriptions."
+            ),
+        }
+    }
+
+    /// The stored code of this choice.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::MoveWhenIdle => "move_when_idle",
+        }
+    }
+
+    fn parse(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|choice| choice.code() == code)
     }
 }
 
@@ -126,15 +186,19 @@ pub struct AccountEntry {
     pub plan: AccountPlan,
 }
 
-/// Every stored scheduling choice: the app default strategy, pool strategies, project
-/// overrides and account plans, each list sorted by id.
+/// Every stored scheduling choice: the app default strategy, what a live master does when
+/// its account is no longer first, pool strategies, project overrides and account plans,
+/// each list sorted by id, and the version an owner change names.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     pub strategy: Strategy,
+    #[serde(default)]
+    pub live_master: LiveMasterAccount,
     pub pools: Vec<ScopedStrategy>,
     pub projects: Vec<ScopedStrategy>,
     pub accounts: Vec<AccountEntry>,
+    pub version: u64,
 }
 
 impl Schedule {
@@ -163,6 +227,61 @@ impl Schedule {
             .find(|entry| &entry.connection == connection)
             .map_or_else(AccountPlan::default, |entry| entry.plan)
     }
+
+    /// Applies one change as the engine stores it, so a view can build the next change on
+    /// the last one before the schedule is read back: a strategy of none or a default plan
+    /// removes the row, each list stays sorted by id and the version moves past the one the
+    /// change names. Takes the change.
+    pub fn update(&mut self, change: &ScheduleChange) {
+        self.version += 1;
+        match change {
+            ScheduleChange::AppStrategy { strategy } => self.strategy = *strategy,
+            ScheduleChange::LiveMaster { choice } => self.live_master = *choice,
+            ScheduleChange::PoolStrategy { pool, strategy } => {
+                set_scoped(&mut self.pools, pool, *strategy);
+            }
+            ScheduleChange::ProjectStrategy { project, strategy } => {
+                set_scoped(&mut self.projects, project, *strategy);
+            }
+            ScheduleChange::Account { connection, plan } => {
+                self.accounts
+                    .retain(|entry| &entry.connection != connection);
+                if *plan != AccountPlan::default() {
+                    let at = self
+                        .accounts
+                        .partition_point(|entry| entry.connection.as_str() < connection.as_str());
+                    self.accounts.insert(
+                        at,
+                        AccountEntry {
+                            connection: connection.clone(),
+                            plan: *plan,
+                        },
+                    );
+                }
+                assert_eq!(self.plan(connection), *plan);
+            }
+        }
+    }
+}
+
+/// Stores or removes one pool or project strategy in a list sorted by id.
+/// Takes the list, the id and the strategy, none to remove it.
+fn set_scoped(list: &mut Vec<ScopedStrategy>, id: &CredentialRef, strategy: Option<Strategy>) {
+    list.retain(|entry| &entry.id != id);
+    if let Some(strategy) = strategy {
+        let at = list.partition_point(|entry| entry.id.as_str() < id.as_str());
+        list.insert(
+            at,
+            ScopedStrategy {
+                id: id.clone(),
+                strategy,
+            },
+        );
+    }
+    assert_eq!(
+        list.iter().filter(|entry| &entry.id == id).count(),
+        usize::from(strategy.is_some())
+    );
 }
 
 /// One owner change to the scheduling choices. A pool or project strategy of none and a
@@ -172,6 +291,9 @@ impl Schedule {
 pub enum ScheduleChange {
     AppStrategy {
         strategy: Strategy,
+    },
+    LiveMaster {
+        choice: LiveMasterAccount,
     },
     PoolStrategy {
         pool: CredentialRef,
@@ -222,30 +344,67 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 rank INTEGER,
                 reserve_percent INTEGER NOT NULL,
                 pin TEXT
+            );
+            CREATE TABLE IF NOT EXISTS account_live_master (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                choice TEXT NOT NULL
             );",
         )
         .map_err(error)
 }
 
-/// Applies one owner scheduling change inside the engine transaction.
-/// Takes the transaction, the current model access and the change. Returns Applied, or a
-/// rejection for an unknown pool or connection, a value out of range or a full table.
+/// Applies one owner scheduling change inside the engine transaction when the schedule is
+/// still at the version the owner's screen showed. Removing a row needs no known pool,
+/// connection or project, so a row whose target is gone can still be deleted. Takes the
+/// transaction, the current model access, the change and that version. Returns Applied, or
+/// a rejection for a row kept for an unknown pool, connection or project, a value out of
+/// range, a full table or `stale_revision`.
 pub fn apply(
     tx: &Transaction<'_>,
     access: &ModelAccess,
     change: &ScheduleChange,
+    version: u64,
 ) -> Result<Outcome, EngineError> {
     if let Err(refusal) = change.validate() {
         return Ok(rejected(&refusal.0));
+    }
+    let item = versioned::account_schedule_item();
+    let unknown = match change {
+        ScheduleChange::PoolStrategy { pool, strategy } => (strategy.is_some()
+            && !access.pools.iter().any(|known| &known.id == pool))
+        .then_some("pool_not_found"),
+        ScheduleChange::ProjectStrategy { project, strategy } => (strategy.is_some()
+            && !project_known(tx, project.as_str())?)
+        .then_some("project_not_found"),
+        ScheduleChange::Account { connection, plan } => (*plan != AccountPlan::default()
+            && !access
+                .connections
+                .iter()
+                .any(|known| &known.id == connection))
+        .then_some("connection_not_found"),
+        _ => None,
+    };
+    if let Some(code) = unknown {
+        return Ok(rejected(code));
+    }
+    if versioned::current(tx, &item)?.version != version {
+        return Ok(rejected(versioned::STALE_CODE));
     }
     match change {
         ScheduleChange::AppStrategy { strategy } => {
             set_strategy(tx, "app", "", Some(*strategy))?;
         }
+        ScheduleChange::LiveMaster { choice } => {
+            let changed = tx
+                .execute(
+                    "INSERT INTO account_live_master(id,choice) VALUES (1,?1)
+                     ON CONFLICT(id) DO UPDATE SET choice=excluded.choice",
+                    [choice.code()],
+                )
+                .map_err(error)?;
+            assert_eq!(changed, 1);
+        }
         ScheduleChange::PoolStrategy { pool, strategy } => {
-            if !access.pools.iter().any(|known| &known.id == pool) {
-                return Ok(rejected("pool_not_found"));
-            }
             if !set_strategy(tx, "pool", pool.as_str(), *strategy)? {
                 return Ok(rejected("account_schedule_full"));
             }
@@ -256,18 +415,17 @@ pub fn apply(
             }
         }
         ScheduleChange::Account { connection, plan } => {
-            if !access
-                .connections
-                .iter()
-                .any(|known| &known.id == connection)
-            {
-                return Ok(rejected("connection_not_found"));
-            }
             if !set_plan(tx, connection, plan)? {
                 return Ok(rejected("account_schedule_full"));
             }
         }
     }
+    let written = versioned::owner_write(tx, &item, version)?;
+    assert_eq!(
+        written.ok(),
+        Some(version + 1),
+        "the schedule version read in this transaction is still current"
+    );
     Ok(Outcome::Applied)
 }
 
@@ -366,15 +524,52 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .map_err(error)
 }
 
-/// Reads every stored scheduling choice. Takes the engine connection; a database
-/// without the scheduling tables holds no choices yet.
+/// Whether a project is still registered. Takes the store and the project id. Returns the
+/// answer or any SQLite failure.
+fn project_known(connection: &Connection, project: &str) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Reads what a live master does when its account is no longer first. Takes the engine
+/// connection; a database without the row, or without its table, holds the default.
+/// Returns the choice; a stored value this engine cannot read is an
+/// `account_schedule_record` failure.
+pub fn live_master(connection: &Connection) -> Result<LiveMasterAccount, EngineError> {
+    if !table_exists(connection, "account_live_master")? {
+        return Ok(LiveMasterAccount::default());
+    }
+    let code: Option<String> = connection
+        .query_row(
+            "SELECT choice FROM account_live_master WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    code.map_or(Ok(LiveMasterAccount::default()), |code| {
+        LiveMasterAccount::parse(&code).ok_or_else(|| error("account_schedule_record"))
+    })
+}
+
+/// Reads every stored scheduling choice and the schedule's version. Takes the engine
+/// connection; a database without the scheduling tables holds no choices yet.
 /// Returns the schedule with lists sorted by id; a stored value this engine cannot read
 /// is an `account_schedule_record` failure.
 pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
+    let version = versioned::current(connection, &versioned::account_schedule_item())?.version;
     if !table_exists(connection, "account_strategies")?
         || !table_exists(connection, "account_plans")?
     {
-        return Ok(Schedule::default());
+        return Ok(Schedule {
+            version,
+            ..Schedule::default()
+        });
     }
     let bound = i64::try_from(SCOPED_STRATEGIES_MAX * 2 + 1).map_err(error)?;
     let mut statement = connection
@@ -391,7 +586,11 @@ pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let mut schedule = Schedule::default();
+    let mut schedule = Schedule {
+        version,
+        live_master: live_master(connection)?,
+        ..Schedule::default()
+    };
     for (scope, id, code) in rows {
         let strategy = Strategy::parse(&code).ok_or_else(|| error("account_schedule_record"))?;
         match scope.as_str() {
@@ -448,6 +647,176 @@ pub fn load(connection: &Connection) -> Result<Schedule, EngineError> {
     assert!(schedule.projects.len() <= SCOPED_STRATEGIES_MAX);
     assert!(schedule.accounts.len() <= ACCOUNT_PLANS_MAX);
     Ok(schedule)
+}
+
+/// One of the schedule's three row lists, in the order the paged schedule read walks them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleList {
+    Pools,
+    Projects,
+    Accounts,
+}
+
+/// Where the next page of the schedule read starts: after row `after` of list `list`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleCursor {
+    pub list: ScheduleList,
+    pub after: CredentialRef,
+}
+
+/// The room one page of the schedule read has used, the last row it took and whether a
+/// row no longer fits.
+struct Page<'a> {
+    cursor: Option<&'a ScheduleCursor>,
+    bytes: usize,
+    last: Option<ScheduleCursor>,
+    full: bool,
+}
+
+impl Page<'_> {
+    /// Takes the rows of one list past the cursor while the page has room for them.
+    /// Inputs: the list, its rows sorted by id and how to read a row's id.
+    /// Output: the rows taken; once a row does not fit, the page is full.
+    fn take<T: Serialize>(
+        &mut self,
+        list: ScheduleList,
+        rows: Vec<T>,
+        id: impl Fn(&T) -> &CredentialRef,
+    ) -> Result<Vec<T>, EngineError> {
+        let mut taken = Vec::new();
+        for row in rows {
+            if self.full {
+                break;
+            }
+            let key = (list, id(&row));
+            if self
+                .cursor
+                .is_some_and(|cursor| key <= (cursor.list, &cursor.after))
+            {
+                continue;
+            }
+            let size = serde_json::to_vec(&row).map_err(error)?.len() + 1;
+            if self.bytes + size > PAGE_BYTES_MAX {
+                self.full = true;
+                break;
+            }
+            self.bytes += size;
+            self.last = Some(ScheduleCursor {
+                list,
+                after: key.1.clone(),
+            });
+            taken.push(row);
+        }
+        Ok(taken)
+    }
+}
+
+/// Reads one page of the stored scheduling choices, so a schedule larger than one owner
+/// reply is read whole over several: the app strategy and, past `cursor`, the pool
+/// strategies, project overrides and account plans in that order, each sorted by id.
+/// Takes the engine connection and the cursor, none for the first page.
+/// Returns the page and the cursor of the next one while rows remain.
+pub fn load_page(
+    connection: &Connection,
+    cursor: Option<&ScheduleCursor>,
+) -> Result<(Schedule, Option<ScheduleCursor>), EngineError> {
+    let all = load(connection)?;
+    let mut page = Page {
+        cursor,
+        bytes: 0,
+        last: None,
+        full: false,
+    };
+    let schedule = Schedule {
+        strategy: all.strategy,
+        live_master: all.live_master,
+        pools: page.take(ScheduleList::Pools, all.pools, |row| &row.id)?,
+        projects: page.take(ScheduleList::Projects, all.projects, |row| &row.id)?,
+        accounts: page.take(ScheduleList::Accounts, all.accounts, |row| &row.connection)?,
+        version: all.version,
+    };
+    assert!(page.bytes <= PAGE_BYTES_MAX);
+    assert!(!page.full || page.last.is_some());
+    Ok((schedule, if page.full { page.last } else { None }))
+}
+
+/// Deletes the pool strategies and account plans whose pool or connection the model access
+/// no longer holds, as after the owner removed one, so no row outlives its target, and
+/// moves the schedule's version once when a row went. Takes the engine transaction and the
+/// new model access. Returns any SQLite failure.
+pub fn forget_removed(tx: &Transaction<'_>, access: &ModelAccess) -> Result<(), EngineError> {
+    if !table_exists(tx, "account_strategies")? || !table_exists(tx, "account_plans")? {
+        return Ok(());
+    }
+    let pools: BTreeSet<&str> = access.pools.iter().map(|pool| pool.id.as_str()).collect();
+    let connections: BTreeSet<&str> = access
+        .connections
+        .iter()
+        .map(|connection| connection.id.as_str())
+        .collect();
+    let mut removed = 0;
+    for (stored, delete, known) in [
+        (
+            "SELECT id FROM account_strategies WHERE scope='pool'",
+            "DELETE FROM account_strategies WHERE scope='pool' AND id=?1",
+            &pools,
+        ),
+        (
+            "SELECT connection FROM account_plans",
+            "DELETE FROM account_plans WHERE connection=?1",
+            &connections,
+        ),
+    ] {
+        let ids: Vec<String> = tx
+            .prepare(stored)
+            .map_err(error)?
+            .query_map([], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?;
+        for id in ids.iter().filter(|id| !known.contains(id.as_str())) {
+            removed += tx.execute(delete, [id]).map_err(error)?;
+        }
+    }
+    if removed > 0 {
+        move_version_after_removal(tx)?;
+    }
+    Ok(())
+}
+
+/// Deletes the strategy override of a project being removed, so no row outlives it, and
+/// moves the schedule's version when there was one. Takes the engine transaction and the
+/// project id. Returns any SQLite failure.
+pub fn forget_project(tx: &Transaction<'_>, project: &str) -> Result<(), EngineError> {
+    if table_exists(tx, "account_strategies")?
+        && tx
+            .execute(
+                "DELETE FROM account_strategies WHERE scope='project' AND id=?1",
+                [project],
+            )
+            .map_err(error)?
+            > 0
+    {
+        move_version_after_removal(tx)?;
+    }
+    Ok(())
+}
+
+/// Moves the schedule's version after a removal deleted rows, so a screen still showing
+/// them reads the schedule again and a save from it is refused as stale. Takes the engine
+/// transaction. Returns any SQLite failure.
+fn move_version_after_removal(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let item = versioned::account_schedule_item();
+    let version = versioned::current(tx, &item)?.version;
+    let moved = versioned::owner_write(tx, &item, version)?;
+    assert_eq!(
+        moved.ok(),
+        Some(version + 1),
+        "the version was read in this transaction"
+    );
+    Ok(())
 }
 
 /// Why the schedule leaves an account out of the accounts that can take work now, with
@@ -626,6 +995,30 @@ impl Choice {
             index,
         )
     }
+
+    /// Tells whether `top` is clearly ahead of `held`, the account work already runs on, so
+    /// that work may move to it: the held account is left out; a Use last pin or a reached
+    /// limit puts it behind; the strategy's own order does, which under Balanced needs a
+    /// weekly reading for both and weekly use lower by `MOVE_MARGIN_PERMILLE`, never the
+    /// 5-hour use alone; or the owner's rank does once the strategy sees them level. Fewer
+    /// live agents and pool order never count. Takes the two candidates. Returns the answer.
+    pub fn clearly_before(&self, top: &Candidate, held: &Candidate) -> bool {
+        if self.exclusion(held).is_some() {
+            return true;
+        }
+        let (top, held) = (self.key(top, 0), self.key(held, 0));
+        if (top.0, top.1) != (held.0, held.1) {
+            return (top.0, top.1) < (held.0, held.1);
+        }
+        let ((top_unknown, top_use, _), (held_unknown, held_use, _)) = (top.2, held.2);
+        match self.strategy {
+            Strategy::Balanced if (top_unknown, top_use) != (held_unknown, held_use) => {
+                !top_unknown && !held_unknown && held_use - top_use >= MOVE_MARGIN_PERMILLE
+            }
+            Strategy::UseItOrLoseIt if top.2 != held.2 => top.2 < held.2,
+            _ => top.3 < held.3,
+        }
+    }
 }
 
 /// The limit 5-hour and weekly windows reach under an account's plan: a full 5-hour
@@ -648,9 +1041,28 @@ fn limit_reached(
         })
 }
 
+/// Why a ready account stands where it does: the first field of the real sort key that
+/// sets it apart from the account above it, so the words cannot drift from the order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OrderWhy {
+    UseLast,
+    LimitReported,
+    NoReading,
+    ResetsSoonest { resets_ms: i64 },
+    ResetsLater { resets_ms: i64 },
+    LeastUsed,
+    MoreUsed,
+    MoreFiveHourUsed,
+    Ranked { rank: u16 },
+    Unranked,
+    TiedRank { rank: Option<u16> },
+    TiedOrder,
+}
+
 /// Where one account stands in its pool's ranking now: next in line, with its weekly
-/// reset and the weekly percent it may still use before its reserve, or held with why
-/// and until when, in ms since the epoch.
+/// reset, the weekly percent it may still use before its reserve and why it stands there,
+/// or held with why and until when, in ms since the epoch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Standing {
@@ -658,7 +1070,10 @@ pub enum Standing {
         weekly_resets_ms: Option<i64>,
         weekly_left_percent: Option<u8>,
         use_last: bool,
+        why: OrderWhy,
     },
+    NotSignedIn,
+    SignInUnconfirmed,
     Paused {
         until_ms: i64,
     },
@@ -678,37 +1093,72 @@ pub enum Standing {
 pub struct RankedAccount {
     pub connection: CredentialRef,
     pub standing: Standing,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_for: Vec<ProjectHold>,
 }
 
+/// A hold one project put on an account after a limit its own agent reported
+/// (SECAUDIT-RATELIMIT-FORGE). Every other project still uses the account, so the ranking keeps
+/// its place and shows the hold beside it: the project, its name or its id, and the hold's end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectHold {
+    pub project: String,
+    pub name: String,
+    pub until_ms: i64,
+}
+
+/// The most project holds one account shows. One hold per project at most, so this only bites
+/// past that many projects held on one account at once.
+const HOLDS_SHOWN_MAX: usize = 64;
+
 /// One pool's ranking: the strategy that orders it, the accounts work would try now in
-/// that order, then every held account in pool order.
+/// that order, then every held account in pool order, and how many of the pool's projects
+/// set their own order, which this ranking does not show.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolRanking {
     pub pool: CredentialRef,
     pub strategy: Strategy,
     pub accounts: Vec<RankedAccount>,
+    pub own_order_projects: u32,
 }
 
 /// Ranks every pool's accounts with the same choice team, research and master work make
-/// (DEC-096 item 8): a paused account is held, the rest go through `Choice::order`. Live
-/// load and the account work already runs on only break ties, so they are left out.
-/// Takes the engine connection, model access and clock. Returns one ranking per pool.
+/// (DEC-096 item 8): an account the pick's own sign-in check refuses, or a paused one, is held,
+/// the rest go through `Choice::order`, each with why it stands where it does. Live load and the
+/// account work already runs on only break ties, so they are left out.
+/// Takes the owner read's transaction, model access and clock. Returns one ranking per pool.
 pub fn ranking(
-    connection: &Connection,
+    tx: &Transaction<'_>,
     access: &ModelAccess,
     now_ms: i64,
 ) -> Result<Vec<PoolRanking>, EngineError> {
-    let pauses = table_exists(connection, "team_paused_accounts")?;
+    let pauses = table_exists(tx, "team_paused_accounts")?;
+    let holds = (
+        table_exists(tx, "team_project_pauses")?,
+        table_exists(tx, "projects")?,
+    );
+    let sign_ins = table_exists(tx, "native_auth_operations")?;
+    let run = active_run(tx)?;
     let mut pools = Vec::with_capacity(access.pools.len());
     for pool in &access.pools {
-        let choice = Choice::read(connection, access, None, &[&pool.id], now_ms)?;
+        let choice = Choice::read(tx, access, None, &[&pool.id], now_ms)?;
         let mut held = Vec::new();
         let mut candidates = Vec::new();
         let mut places = Vec::new();
         for (index, member) in pool.members.iter().enumerate() {
-            match paused_until(connection, pauses, member, now_ms)? {
-                Some(until_ms) => held.push((index, Standing::Paused { until_ms })),
+            let held_now = if choice.schedule.plan(member).pin == Some(Pin::NeverUse) {
+                None
+            } else if let Some(standing) = sign_in_hold(tx, sign_ins, run.as_ref(), access, member)?
+            {
+                Some(standing)
+            } else {
+                paused_until(tx, pauses, member, now_ms)?
+                    .map(|until_ms| Standing::Paused { until_ms })
+            };
+            match held_now {
+                Some(standing) => held.push((index, standing)),
                 None => {
                     candidates.push(Candidate {
                         connection: member.clone(),
@@ -720,14 +1170,18 @@ pub fn ranking(
             }
         }
         let order = choice.order(&candidates);
-        let mut accounts: Vec<RankedAccount> = order
-            .ready
-            .iter()
-            .map(|&at| RankedAccount {
+        let mut accounts = Vec::with_capacity(pool.members.len());
+        let mut above = None;
+        for &at in &order.ready {
+            let key = choice.key(&candidates[at], at);
+            let why = choice.why(&key, above.as_ref());
+            accounts.push(RankedAccount {
                 connection: candidates[at].connection.clone(),
-                standing: choice.next(&candidates[at]),
-            })
-            .collect();
+                standing: choice.next(&candidates[at], why),
+                held_for: Vec::new(),
+            });
+            above = Some(key);
+        }
         held.extend(
             order
                 .excluded
@@ -738,15 +1192,83 @@ pub fn ranking(
         accounts.extend(held.into_iter().map(|(index, standing)| RankedAccount {
             connection: pool.members[index].clone(),
             standing,
+            held_for: Vec::new(),
         }));
         assert_eq!(accounts.len(), pool.members.len());
+        for account in &mut accounts {
+            account.held_for = project_holds(tx, holds, &account.connection, now_ms)?;
+        }
         pools.push(PoolRanking {
             pool: pool.id.clone(),
             strategy: choice.strategy,
             accounts,
+            own_order_projects: u32::try_from(
+                choice
+                    .schedule
+                    .projects
+                    .iter()
+                    .filter(|scoped| pool.projects.contains(&scoped.id))
+                    .count(),
+            )
+            .map_err(error)?,
         });
     }
     Ok(pools)
+}
+
+/// Reads the engine run the real pick proves a sign-in against. Takes the store. Returns its
+/// stamp, or none while no run is active, when the pick takes no managed account either.
+fn active_run(
+    connection: &Connection,
+) -> Result<Option<crate::engine::owner::HostStamp>, EngineError> {
+    if !table_exists(connection, "owner_meta")? {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+            [],
+            |row| {
+                Ok(crate::engine::owner::HostStamp {
+                    db_instance: row.get(0)?,
+                    engine_epoch: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(error)
+}
+
+/// Says how the real pick's sign-in check holds this member, if it does. A native managed
+/// account is not signed in when its latest sign-in did not end authenticated or a provider
+/// rejected it. One whose sign-in stands but fails `native_sign_in`, as a doubted sign-in, a
+/// profile a check still holds or a sign-in proved under an earlier run does, needs a check.
+/// Takes the read's transaction, whether it has sign-ins at all, the active run, the model
+/// access and the member. Returns the held standing, or none when the pick can take it.
+fn sign_in_hold(
+    tx: &Transaction<'_>,
+    sign_ins: bool,
+    run: Option<&crate::engine::owner::HostStamp>,
+    access: &ModelAccess,
+    member: &CredentialRef,
+) -> Result<Option<Standing>, EngineError> {
+    if !sign_ins {
+        return Ok(None);
+    }
+    let Some(model) = access.connections.iter().find(|item| &item.id == member) else {
+        return Ok(None);
+    };
+    if !matches!(model.auth, ModelAuthentication::NativeManaged { .. }) {
+        return Ok(None);
+    }
+    if !crate::storage::latest_sign_in_authenticated(tx, model)?
+        || crate::model_gateway::sign_in_rejected(tx, model)?
+    {
+        return Ok(Some(Standing::NotSignedIn));
+    }
+    let proved =
+        run.is_some_and(|run| crate::storage::native_sign_in(tx, run, model, None).is_ok());
+    Ok((!proved).then_some(Standing::SignInUnconfirmed))
 }
 
 fn paused_until(
@@ -768,8 +1290,90 @@ fn paused_until(
         .map_err(error)
 }
 
+/// Reads the unended holds projects put on one account, soonest end first, at most
+/// `HOLDS_SHOWN_MAX`. Takes the store, whether the hold and project tables exist, the account
+/// and the clock. Returns each hold named by its project's name, or by its id when the project
+/// has no name or is gone.
+fn project_holds(
+    connection: &Connection,
+    (holds, projects): (bool, bool),
+    member: &CredentialRef,
+    now_ms: i64,
+) -> Result<Vec<ProjectHold>, EngineError> {
+    if !holds {
+        return Ok(Vec::new());
+    }
+    let sql = if projects {
+        "SELECT h.project, COALESCE(NULLIF(CASE WHEN json_valid(p.body) THEN
+             CASE WHEN json_type(p.body,'$.spec.name')='text'
+             THEN json_extract(p.body,'$.spec.name') END END, ''), h.project), h.until_ms
+         FROM team_project_pauses h LEFT JOIN projects p ON p.id=h.project
+         WHERE h.connection=?1 AND h.until_ms>?2 ORDER BY h.until_ms, h.project LIMIT ?3"
+    } else {
+        "SELECT project, project, until_ms FROM team_project_pauses
+         WHERE connection=?1 AND until_ms>?2 ORDER BY until_ms, project LIMIT ?3"
+    };
+    let limit = i64::try_from(HOLDS_SHOWN_MAX).map_err(error)?;
+    let mut statement = connection.prepare(sql).map_err(error)?;
+    statement
+        .query_map(params![member.as_str(), now_ms, limit], |row| {
+            Ok(ProjectHold {
+                project: row.get(0)?,
+                name: row.get(1)?,
+                until_ms: row.get(2)?,
+            })
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)
+}
+
 impl Choice {
-    fn next(&self, candidate: &Candidate) -> Standing {
+    /// Says why a ready account follows the one above it: the first field of its sort key
+    /// that sets it apart. Takes its sort key and the key above it, if any. Returns the reason.
+    fn why(&self, key: &SortKey, above: Option<&SortKey>) -> OrderWhy {
+        assert!(
+            above.is_none_or(|row| row < key),
+            "the order sorted by these keys"
+        );
+        let (use_last, doubtful, primary, rank, ..) = *key;
+        if use_last {
+            return OrderWhy::UseLast;
+        }
+        if doubtful {
+            return OrderWhy::LimitReported;
+        }
+        if primary.0 {
+            return OrderWhy::NoReading;
+        }
+        let tie = || match above {
+            Some(row) if row.3 != rank => OrderWhy::TiedRank {
+                rank: (rank != u16::MAX).then_some(rank),
+            },
+            _ => OrderWhy::TiedOrder,
+        };
+        match self.strategy {
+            Strategy::ManualRank if rank == u16::MAX => OrderWhy::Unranked,
+            Strategy::ManualRank => OrderWhy::Ranked { rank },
+            Strategy::UseItOrLoseIt => match above {
+                None => OrderWhy::ResetsSoonest {
+                    resets_ms: primary.1,
+                },
+                Some(row) if row.2.1 < primary.1 => OrderWhy::ResetsLater {
+                    resets_ms: primary.1,
+                },
+                Some(_) => tie(),
+            },
+            Strategy::Balanced => match above {
+                None => OrderWhy::LeastUsed,
+                Some(row) if row.2.1 < primary.1 => OrderWhy::MoreUsed,
+                Some(row) if row.2.2 < primary.2 => OrderWhy::MoreFiveHourUsed,
+                Some(_) => tie(),
+            },
+        }
+    }
+
+    fn next(&self, candidate: &Candidate, why: OrderWhy) -> Standing {
         let plan = self.schedule.plan(&candidate.connection);
         let (_, weekly) = self.windows(candidate);
         Standing::Next {
@@ -780,6 +1384,7 @@ impl Choice {
                 room.floor() as u8
             }),
             use_last: plan.pin == Some(Pin::UseLast),
+            why,
         }
     }
 
@@ -798,4 +1403,4 @@ impl Choice {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

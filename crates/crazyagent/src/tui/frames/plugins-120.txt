@@ -16,6 +16,8 @@
     postgres-local          ! Needs approval        uvx mcp-server-postgres                                             
     figma                   ✗ Can't start           https://mcp.figma.com/mcp                                           
                                                                                                                         
+  Hooks  0                                                                                                              
+  No hooks yet. Press h to add a plugin folder's hooks.                                                                 
                                                                                                                         
                                                                                                                         
                                                                                                                         
@@ -31,6 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
-                                                                                                                        
- a Add skill   m Add MCP server   Space On or off   Enter Details   i Import   d Remove   Shift-←→ Sections      ? Help 
+ a Add skill   m Add MCP server   h Add hooks   Space On or off   Enter Details   i Import   l Tools   d Remove  ? Help 

@@ -1,6 +1,7 @@
-import { nextGeneration } from "../../api";
+import { listAccounts, nextGeneration } from "../../api";
 import type { Result } from "../../api";
-import { useEffect, useRef, useState } from "react";
+import { useLoad } from "../../state";
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { formatRoute } from "../../ui";
 import { cancelMasterTurn, endMaster, failureCopy, openMasterProject, readMaster, readMasterTurns, receiptState, sendToMaster, startMaster } from "../../api-projects";
 import type { IntentReceipt, MasterState, MasterTurn } from "../../engine-client";
@@ -11,13 +12,29 @@ import { useTeamGraph } from "../team";
 import { Console, type ConsoleLine } from "./console";
 import { agentMentions } from "./console-model";
 import { useProjectFiles } from "./project-files";
-import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
+import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, activityLines, changesLine, delegating, engineLine, masterMissingLine, masterStatus, openedTicket, replyingTurn, resendText, restartForSettings, sendFailureLine, taskLines, thinkingLine, turnLine, turnSettled } from "./research";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { Menu, type Tone } from "../../ui";
-import { SessionsBar, ownerText, withOwnerLines } from "./sessions";
+import { Button, Drawer, Menu, type Tone } from "../../ui";
+import { ACCESS_UNREADABLE, LiveTerminalSetting, MasterIdleSetting, OnSwitchSetting, ReaskSetting, SettingGroup, SettingRow, type SettingGroupInfo } from "../team/controls";
+import { DeliverySetting, QuestionsSetting, coordination } from "../team/coordination";
+import { AccountSetting, MasterHarnessSetting, useTeam } from "../team/setup-rows";
+import { ApplySwitch } from "./settings";
+import { SessionsBar, ownerText, switchDivider, withOwnerLines } from "./sessions";
+import { TOO_LONG, conversationLines, useSessionMessages } from "./session-messages";
 
 const READ_ONLY = "Read-only: the master runs live in its terminal now.";
+
+function assert(condition: boolean, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+/** What the Master settings button takes from the drawer above it: the action that opens the
+ * drawer and the id the button wears so closing the drawer can find it. A button with no
+ * drawer above it fails when clicked. */
+const MasterSettingsHost = createContext<{ open: () => void; button?: string }>({
+  open: () => assert(false, "the Master settings button needs MasterSettingsDrawer above it"),
+});
 const sentByProject = new Map<string, Record<string, string>>();
 const sentAtByProject = new Map<string, Record<string, number>>();
 
@@ -67,31 +84,43 @@ export function queuedLines(queued: string | null, openFailed: boolean): Console
   ];
 }
 
-/** The console lines of the master conversation: each turn's opening (the owner's message as
- * this window sent it or as read back from the engine, the engine's line for a turn it asked
- * for, or a placeholder for a message whose text is not read yet), the reply or the turn's
- * status line, its task and account lines, then the messages this window sent that no turn
- * shows yet. Inputs: the turns, the texts this window sent by turn id, when each was sent,
- * the current time and the owner lines read back by input cursor. Output: the lines in
- * order, each with an id that stays the same while it is shown. */
-export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {}): ConsoleLine[] {
+/** The console lines of one master turn: its opening (the owner's message as this window
+ * sent it or as read back from the engine, the engine's line for a turn it asked for, or a
+ * placeholder for a message whose text is not read yet), the reply or the turn's status
+ * line (a running turn's with its activity behind Show activity), then its task, changes
+ * and account lines. Inputs: the turn, the texts this window sent by turn id, when each was
+ * sent, the current time, the owner lines read back by input cursor and the owner's account
+ * names for the account lines. Output: the lines, each with an id that stays the same while
+ * it is shown. */
+export function turnLines(turn: MasterTurn, sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {},
+  accounts: { id: string; name: string }[] = []): ConsoleLine[] {
   const lines: ConsoleLine[] = [];
-  for (const turn of turns) {
-    const engine = engineLine(turn);
-    const id = `${turn.id}-owner`;
-    const owner = ownerText(turn, sent, held);
-    lines.push(owner !== undefined ? { id, kind: "owner", text: owner }
-      : { id, kind: "engine", text: engine ?? `Your message ${turn.ordinal} (its text stays in the window that sent it)` });
-    if (turn.reply) lines.push({ id: `${turn.id}-reply`, kind: "reply", text: turn.reply.text });
-    else {
-      const failed = turnSettled(turn) && turn.phase !== "succeeded";
-      lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine", text: turn.phase === "running" ? thinkingLine(sentAt?.[turn.id], now) : turnLine(turn) });
-    }
-    taskLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-task-${index}`, kind: "delegate", text }));
-    const changes = changesLine(turn);
-    if (changes !== null) lines.push({ id: `${turn.id}-changes`, kind: "tool", text: changes });
-    accountLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
+  const engine = engineLine(turn);
+  const id = `${turn.id}-owner`;
+  const owner = ownerText(turn, sent, held);
+  lines.push(owner !== undefined ? { id, kind: "owner", text: owner }
+    : { id, kind: "engine", text: engine ?? `Your message ${turn.ordinal} (its text stays in the window that sent it)` });
+  if (turn.reply) lines.push({ id: `${turn.id}-reply`, kind: "reply", text: turn.reply.text });
+  else {
+    const failed = turnSettled(turn) && turn.phase !== "succeeded";
+    const running = turn.phase === "running";
+    const activity = running ? activityLines(turn.activity, now) : [];
+    lines.push({ id: `${turn.id}-status`, kind: failed ? "error" : "engine",
+      text: running ? thinkingLine(sentAt?.[turn.id] ?? turn.attempt?.selected_at_ms, now, turn.activity) : turnLine(turn),
+      ...(activity.length > 0 ? { activity } : {}) });
   }
+  taskLines(turn).forEach((text, index) => lines.push({ id: `${turn.id}-task-${index}`, kind: "delegate", text }));
+  const changes = changesLine(turn);
+  if (changes !== null) lines.push({ id: `${turn.id}-changes`, kind: "tool", text: changes });
+  accountLines(turn, accounts).forEach((text, index) => lines.push({ id: `${turn.id}-account-${index}`, kind: "engine", text }));
+  return lines;
+}
+
+/** The console lines of the messages this window sent that no turn shows yet: each message
+ * and a line saying the master is thinking. Inputs: the turns, the sent texts by turn id,
+ * when each was sent and the current time. Output: the lines. */
+export function unseenLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number): ConsoleLine[] {
+  const lines: ConsoleLine[] = [];
   for (const [id, text] of Object.entries(sent)) {
     if (turns.some((turn) => turn.id === id)) continue;
     lines.push({ id: `${id}-owner`, kind: "owner", text }, { id: `${id}-status`, kind: "engine", text: thinkingLine(sentAt?.[id], now) });
@@ -99,8 +128,21 @@ export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, 
   return lines;
 }
 
+/** The console lines of the master's turns alone: each turn's lines in order, then the
+ * messages this window sent that no turn shows yet. Inputs: the turns, the texts this window
+ * sent by turn id, when each was sent, the current time, the owner lines read back by
+ * input cursor and the owner's account names for the account lines. Output: the lines in
+ * order. */
+export function consoleLines(turns: readonly MasterTurn[], sent: Record<string, string>, sentAt: Record<string, number> | undefined, now: number, held: Record<string, string> = {},
+  accounts: { id: string; name: string }[] = []): ConsoleLine[] {
+  return [...turns.flatMap((turn) => turnLines(turn, sent, sentAt, now, held, accounts)), ...unseenLines(turns, sent, sentAt, now)];
+}
+
 /** Conversation tab: the project's master conversation as a terminal-style console with `/`
- * commands and `@` tags for the team's agents. Inputs: the project data and whether the
+ * commands and `@` tags for the team's agents. The conversation is the session's one stored
+ * conversation: the turns of this master with their state, and between them what a live
+ * terminal master said in the same session and the divider of each master switch; before
+ * the stored messages are read, or without them, it is the turns alone. Inputs: the project data and whether the
  * conversation is only read, as the one from before a live master. Output: the console and,
  * unless read-only, the conversation's actions; it polls every two seconds while a reply is
  * still coming. */
@@ -121,6 +163,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const current = useRef(data.id);
   current.current = data.id;
   const [graph] = useTeamGraph(data.id);
+  const [accounts] = useLoad(listAccounts, [], "accounts");
   const [tag, setTag] = useState<string | null>(null);
   const files = useProjectFiles(data.id, readOnly ? null : tag);
   const setup = valueOf(data.setup);
@@ -132,6 +175,8 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const handedOff = delegating(turns);
   const noPool = needsPool || (data.pools?.kind === "ok" && data.assigned === null);
   const status = noPool ? "Needs a pool" : masterStatus(session, turns);
+  const mark = `${turns.length}:${turns.filter(turnSettled).length}`;
+  const stored = useSessionMessages(ticket, session?.session_id ?? null, mark, true);
 
   const setSent = (next: Record<string, string>) => {
     sentByProject.set(data.id, next);
@@ -258,10 +303,17 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const masterLine = setup ? `Master: ${harnessName(harnesses, setup.team.master)}, Default model, Tools ${setup.team.master_tools ? "on" : "off"}` : "Master";
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
-  const told = [...consoleLines(turns, sent, sentAtByProject.get(data.id), now, held), ...queuedLines(queued, openFailed && !ticket)];
-  const lines: ConsoleLine[] = told.length > 0 ? told : [{ id: "empty", kind: "engine", text: readOnly
+  const sentAt = sentAtByProject.get(data.id);
+  const accountNames = accounts.kind === "ok" ? accounts.value : [];
+  const spoken = stored.whole && stored.rows.length > 0
+    ? [...conversationLines(stored.rows, turns, (turn) => turnLines(turn, sent, sentAt, now, held, accountNames)), ...unseenLines(turns, sent, sentAt, now)]
+    : consoleLines(turns, sent, sentAt, now, held, accountNames);
+  const told = [...(stored.capped ? [{ id: "messages-too-long", kind: "engine" as const, text: TOO_LONG }] : []), ...spoken, ...queuedLines(queued, openFailed && !ticket)];
+  const switched = readOnly ? switchDivider(data.team.result) : null;
+  const lines: ConsoleLine[] = [...(told.length > 0 ? told : [{ id: "empty", kind: "engine" as const, text: readOnly
     ? "No earlier conversation. Messages sent to the master before it ran live stay here to read."
-    : `No messages yet. Ask the master anything about ${data.name || "this project"}. It has read the brief, documents and research.` }];
+    : `No messages yet. Ask the master anything about ${data.name || "this project"}. It has read the brief, documents and research.` }]),
+  ...(switched ? [{ id: "harness-switch", kind: "engine" as const, text: switched }] : [])];
   const agents = agentMentions(graph.shown?.kind === "ok" ? graph.shown.value.nodes : []);
   const gate = sendGate({ readOnly, ticket, openFailed, working, waiting, notReady, queued: queued !== null });
   const offer = (text: string) => {
@@ -281,12 +333,13 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
     {!readOnly && <div className="pj-convo-head">
       <span>{masterLine}</span>
       <span className="pj-row"><Badge word={status} tone={tones[status] ?? "neutral"} />
+        <MasterSettingsButton />
         <Menu label="Conversation actions" items={[
           ...(active && !working ? [{ label: "End conversation", icon: "circle-stop" as const, onSelect: () => void end() }] : []),
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
     </div>}
-    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} onSwitched={() => { setSent({}); return refresh(); }} />}
+    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} mark={mark} harnesses={harnesses} onSwitched={() => { setSent({}); return refresh(); }} />}
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     {!readOnly && <>
       {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>
@@ -303,4 +356,80 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
       canSend={gate !== "hold"} status={readOnly ? READ_ONLY : waiting ? "Thinking..." : undefined}
       onSend={offer} onStop={() => void stopReply()} onNavigate={(route) => data.navigate(formatRoute(route).slice(1))} />
   </div>;
+}
+
+const MASTER_GROUPS: readonly SettingGroupInfo[] = [
+  { id: "master", title: "Master", icon: "brain", rows: ["Harness", "Account", "Live terminal"] },
+  { id: "conversation", title: "Conversation", icon: "message-square", rows: ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"] },
+  { id: "messages", title: "Messages", icon: "send", rows: ["Sub-agent questions go to", "Messages to Claude Code agents", "Re-ask a sub-agent's empty reply"] },
+  { id: "access", title: "Access", icon: "shield-check", rows: ["Full access"] },
+];
+
+/** The master's settings in the Agent settings layout, grouped as the approved mockup's drawer
+ * shows them: Master (its harness and account, picked in place and saved as project Settings
+ * saves them), Conversation, Messages and Access (Full access, kept in Agent settings). The
+ * shared rows save exactly as they do in Agent settings. Inputs: the project data, whether its
+ * master runs in a live terminal and what to do before a button leaves the drawer for another
+ * page. Output: the groups, or the team read's state. */
+export function MasterSettings({ data, liveHarness, onLeave = () => {} }: { data: ProjectData; liveHarness: boolean; onLeave?: () => void }) {
+  const harnessRows = useTeam(data);
+  const team = data.team.result;
+  if (team === undefined) return <p className="pj-muted" role="status">Loading...</p>;
+  if (team.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
+  if (team.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team)}</p>;
+  const status = team.value;
+  const claude = coordination(status).harnesses.find((row) => row.harness === "claude-code");
+  const base = `/projects/${encodeURIComponent(data.id)}`;
+  const prefix = `master-set-${data.id}`;
+  const go = (path: string) => { onLeave(); data.navigate(path); };
+  const [masterGroup, talk, messages, access] = MASTER_GROUPS;
+  return <div className="set-groups">
+    <SettingGroup group={masterGroup} prefix={prefix} level={3}>
+      <MasterHarnessSetting rows={harnessRows} data={data} label="Harness" id={`${prefix}-harness`} helper="A change reaches the running master as Apply a master harness change says." />
+      <AccountSetting data={data} id={`${prefix}-account`} />
+      <LiveTerminalSetting projectId={data.id} status={status} reload={data.reloadTeam} liveHarness={liveHarness} />
+    </SettingGroup>
+    <SettingGroup group={talk} prefix={prefix} level={3}>
+      <OnSwitchSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      <MasterIdleSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      <SettingRow label="Apply a master harness change"><ApplySwitch data={data} /></SettingRow>
+    </SettingGroup>
+    <SettingGroup group={messages} prefix={prefix} level={3}>
+      <QuestionsSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+      {claude && <DeliverySetting projectId={data.id} row={claude} status={status} reload={data.reloadTeam} />}
+      <ReaskSetting projectId={data.id} status={status} reload={data.reloadTeam} />
+    </SettingGroup>
+    <SettingGroup group={access} prefix={prefix} level={3}>
+      <SettingRow label="Full access">
+        <span className="set-label">Full access</span>
+        <span className="set-ctl"><Button size="small" onClick={() => go(`${base}/agents?section=access`)}>Change in Agent settings</Button></span>
+        <span className="tg-terminal-note">{status.master_lands === "merges" ? "Full access: the master resolves conflicts and merges into main itself."
+          : status.master_lands === "waits" ? "Full access: the master resolves conflicts, then waits for your Accept."
+            : status.access_unreadable ? ACCESS_UNREADABLE
+              : "Not at Full access: the master's conflict fixes wait for your Accept."}</span>
+      </SettingRow>
+    </SettingGroup>
+  </div>;
+}
+
+/** Holds the project's Master settings drawer above the view that opens it, so a setting that
+ * swaps that view leaves the drawer and the owner's place in it alone, and closing the drawer
+ * returns to the button of the view now shown (DEC-117 Q4). Inputs: the project data, whether
+ * its master runs in a live terminal and the view. Output: the view and its drawer. */
+export function MasterSettingsDrawer({ data, liveHarness, children }: { data: ProjectData; liveHarness: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const button = useId();
+  return <MasterSettingsHost.Provider value={{ open: () => setOpen(true), button }}>
+    {children}
+    <Drawer open={open} title="Master settings" onClose={() => setOpen(false)} returnFocus={() => document.getElementById(button)}>
+      <MasterSettings data={data} liveHarness={liveHarness} onLeave={() => setOpen(false)} />
+    </Drawer>
+  </MasterSettingsHost.Provider>;
+}
+
+/** The Master settings button of a conversation head; it opens the drawer held above the
+ * view. Output: the button. */
+export function MasterSettingsButton() {
+  const host = useContext(MasterSettingsHost);
+  return <Button id={host.button} size="small" icon="settings" onClick={host.open}>Master settings</Button>;
 }

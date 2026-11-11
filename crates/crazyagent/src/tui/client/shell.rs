@@ -152,7 +152,7 @@ impl NativeOwner {
                 .count()
         });
         let suggestions = controller
-            .project_memories(project.clone(), None)
+            .all_project_memories(project.clone())
             .await
             .map_or(0, |entries| {
                 entries
@@ -227,20 +227,6 @@ impl NativeOwner {
     }
 }
 
-/// A fresh pool id from its name: `pool-<letters>-<random hex>`.
-/// Input: the pool name. Output: the id, or the plain problem code.
-fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
-    let stem: String = name
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .take(24)
-        .flat_map(|character| character.to_lowercase())
-        .collect();
-    let nonce = crate::engine::owner::random_id().map_err(|error| bounded_problem(&error.0))?;
-    CredentialRef::new(format!("pool-{stem}-{nonce}"))
-        .map_err(|error| bounded_problem(&error.to_string()))
-}
-
 /// Reads every saved pool, following engine pages.
 /// Inputs: the owner controller and the lost-connection flag. Output: the
 /// pools with the settings version of the last page, or the problem code.
@@ -293,18 +279,20 @@ async fn pool_basis(
     Err("pool_read_failed".into())
 }
 
-/// Builds the model access edit for one pool change.
-/// Inputs: the change and every saved pool. Output: the edit, or the plain
-/// problem code.
+/// Builds the model access edit for one pool change. An update applies only what the
+/// owner changed since opening the form onto the pool as it is now, so a change saved
+/// elsewhere in between is kept. Inputs: the change and every saved pool, freshly read.
+/// Output: the edit, or the plain problem code.
 fn pool_edit(change: PoolChange, pools: &[AccountPool]) -> Result<ModelAccessEdit, String> {
     Ok(match change {
         PoolChange::Create {
+            id,
             name,
             members,
             quota,
         } => ModelAccessEdit::CreatePool {
             pool: AccountPool {
-                id: new_pool_id(&name)?,
+                id,
                 name: Some(name),
                 members,
                 projects: Vec::new(),
@@ -318,18 +306,56 @@ fn pool_edit(change: PoolChange, pools: &[AccountPool]) -> Result<ModelAccessEdi
             name,
             members,
             quota,
+            opened_name,
+            opened_members,
+            opened_quota,
         } => {
             let mut pool = pools
                 .iter()
                 .find(|pool| pool.id == id)
                 .cloned()
                 .ok_or_else(|| "pool_not_found".to_string())?;
-            pool.name = Some(name);
-            pool.members = members;
-            pool.provider_quota_policy = quota;
+            let removed = |member: &CredentialRef| {
+                opened_members.contains(member) && !members.contains(member)
+            };
+            let mut merged: Vec<CredentialRef> = pool
+                .members
+                .iter()
+                .filter(|member| !removed(member))
+                .cloned()
+                .collect();
+            for member in &members {
+                if !opened_members.contains(member) && !merged.contains(member) {
+                    merged.push(member.clone());
+                }
+            }
+            if merged.len() > crate::config::POOL_MEMBERS_MAX {
+                return Err("pool_member_limit".into());
+            }
+            if name.trim() != opened_name.trim()
+                || pool.name.as_deref().is_none_or(|now| now.trim().is_empty())
+            {
+                pool.name = Some(name);
+            }
+            if quota != opened_quota {
+                pool.provider_quota_policy = quota;
+            }
+            pool.members = merged;
             ModelAccessEdit::ReplacePool { pool }
         }
-        PoolChange::Remove { id } => ModelAccessEdit::RemovePool { id },
+        PoolChange::Remove {
+            id,
+            opened_projects,
+        } => {
+            let pool = pools
+                .iter()
+                .find(|pool| pool.id == id)
+                .ok_or_else(|| "pool_not_found".to_string())?;
+            if pool.projects.len() != opened_projects {
+                return Err("pool_users_changed".into());
+            }
+            ModelAccessEdit::RemovePool { id }
+        }
         PoolChange::Assign { pool, project } => ModelAccessEdit::AssignProjectPool {
             project: CredentialRef::new(project.as_str())
                 .map_err(|_| "project_ref_invalid".to_string())?,
@@ -531,6 +557,9 @@ pools = [
                 name: "Renamed".into(),
                 members: vec![reference("local-b")],
                 quota: ProviderQuotaPolicy::Strict,
+                opened_name: String::new(),
+                opened_members: vec![reference("local-a")],
+                opened_quota: ProviderQuotaPolicy::default(),
             },
             &pools,
         )
@@ -550,10 +579,72 @@ pools = [
                     name: "Gone".into(),
                     members: vec![],
                     quota: ProviderQuotaPolicy::BoundedAttempt,
+                    opened_name: "Gone".into(),
+                    opened_members: vec![],
+                    opened_quota: ProviderQuotaPolicy::BoundedAttempt,
                 },
                 &pools,
             ),
             Err("pool_not_found".into())
+        );
+    }
+
+    #[test]
+    fn an_update_applies_only_the_owner_change_onto_the_pool_as_it_is_now() {
+        let refs = |ids: &[&str]| ids.iter().map(|id| reference(id)).collect::<Vec<_>>();
+        let mut now = pool("pool-a", &["demo"], &["project_leader"]);
+        now.name = Some("Renamed elsewhere".into());
+        now.members = refs(&["local-a", "local-c"]);
+        now.provider_quota_policy = ProviderQuotaPolicy::Strict;
+        let pools = vec![now];
+        let update = |name: &str, members: &[&str], quota| PoolChange::Update {
+            id: reference("pool-a"),
+            name: name.into(),
+            members: refs(members),
+            quota,
+            opened_name: "Main".into(),
+            opened_members: refs(&["local-a", "local-b"]),
+            opened_quota: ProviderQuotaPolicy::BoundedAttempt,
+        };
+        let replaced = |change| match pool_edit(change, &pools) {
+            Ok(ModelAccessEdit::ReplacePool { pool }) => pool,
+            other => panic!("an update builds one replace edit, got {other:?}"),
+        };
+
+        let added = replaced(update(
+            "Main",
+            &["local-a", "local-b", "local-d"],
+            ProviderQuotaPolicy::BoundedAttempt,
+        ));
+        assert_eq!(
+            added.members,
+            refs(&["local-a", "local-c", "local-d"]),
+            "an account removed elsewhere stays out and one added elsewhere stays in"
+        );
+        assert_eq!(added.name.as_deref(), Some("Renamed elsewhere"));
+        assert_eq!(added.provider_quota_policy, ProviderQuotaPolicy::Strict);
+        assert_eq!(added.projects, refs(&["demo"]));
+        assert_eq!(added.roles, refs(&["project_leader"]));
+
+        let removed = replaced(update("Mine", &["local-b"], ProviderQuotaPolicy::Strict));
+        assert_eq!(removed.members, refs(&["local-c"]));
+        assert_eq!(removed.name.as_deref(), Some("Mine"));
+        assert_eq!(removed.provider_quota_policy, ProviderQuotaPolicy::Strict);
+
+        let mut full = pools.clone();
+        full[0].members = (0..crate::config::POOL_MEMBERS_MAX)
+            .map(|index| reference(&format!("seat-{index:02}")))
+            .collect();
+        assert_eq!(
+            pool_edit(
+                update(
+                    "Main",
+                    &["local-a", "local-b", "local-d"],
+                    ProviderQuotaPolicy::BoundedAttempt
+                ),
+                &full,
+            ),
+            Err("pool_member_limit".into())
         );
     }
 
@@ -651,6 +742,43 @@ pools = [
     }
 
     #[tokio::test]
+    async fn a_pool_delete_confirmed_before_a_project_took_the_pool_is_refused() {
+        let (mut live, _) = Live::start().await;
+        let project = live.create_project("late-user").await;
+        assert_eq!(
+            live.edit(PoolChange::Assign {
+                pool: Some(reference("pool-b")),
+                project: project.clone(),
+            })
+            .await,
+            Ok(())
+        );
+        assert_eq!(
+            live.edit(PoolChange::Remove {
+                id: reference("pool-b"),
+                opened_projects: 0,
+            })
+            .await,
+            Err("pool_users_changed".into()),
+            "the confirmation showed no project, so the delete is refused"
+        );
+        assert_eq!(
+            live.scopes().await,
+            vec![scope("pool-a", &[]), scope("pool-b", &["late-user"])]
+        );
+        assert_eq!(
+            live.edit(PoolChange::Remove {
+                id: reference("pool-b"),
+                opened_projects: 1,
+            })
+            .await,
+            Ok(())
+        );
+        assert_eq!(live.scopes().await, vec![scope("pool-a", &[])]);
+        live.close().await;
+    }
+
+    #[tokio::test]
     async fn assigning_a_pool_moves_the_project_and_engine_refusals_are_reported() {
         let (mut live, _) = Live::start().await;
         let project = live.create_project("assign-demo").await;
@@ -710,6 +838,7 @@ pools = [
         assert_eq!(
             live.edit(PoolChange::Remove {
                 id: reference("pool-b"),
+                opened_projects: 1,
             })
             .await,
             Ok(())

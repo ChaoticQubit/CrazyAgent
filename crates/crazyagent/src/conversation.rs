@@ -230,14 +230,14 @@ pub(crate) fn apply(
     }
     let count: i64 = tx
         .query_row(
-            "SELECT COUNT(*) FROM (SELECT 1 FROM conversation_entries WHERE project=?1 LIMIT 1024)",
+            "SELECT COUNT(*) FROM (SELECT 1 FROM conversation_entries c WHERE c.project=?1 AND NOT EXISTS(SELECT 1 FROM master_turns t WHERE t.input=c.event_cursor) LIMIT 1024)",
             [project.as_str()],
             |r| r.get(0),
         )
         .map_err(error)?;
     if count >= ENTRIES_MAX as i64 {
         tx.execute(
-            "DELETE FROM conversation_entries WHERE project=?1 AND event_cursor=(SELECT event_cursor FROM conversation_entries WHERE project=?1 AND NOT (kind='brief' AND brief_version=(SELECT MAX(brief_version) FROM conversation_entries WHERE project=?1 AND kind='brief')) ORDER BY event_cursor LIMIT 1)",
+            "DELETE FROM conversation_entries WHERE project=?1 AND event_cursor=(SELECT c.event_cursor FROM conversation_entries c WHERE c.project=?1 AND NOT (c.kind='brief' AND c.brief_version=(SELECT MAX(brief_version) FROM conversation_entries WHERE project=?1 AND kind='brief')) AND NOT EXISTS(SELECT 1 FROM master_turns t WHERE t.input=c.event_cursor) ORDER BY c.event_cursor LIMIT 1)",
             [project.as_str()],
         )
         .map_err(error)?;

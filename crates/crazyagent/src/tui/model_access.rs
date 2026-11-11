@@ -114,7 +114,7 @@ enum RecordAction {
 }
 
 pub(super) struct State {
-    native_auth: native_auth::State,
+    pub(super) native_auth: native_auth::State,
     profile: account_profile::Profile,
     managed_setup: Option<managed_setup::Setup>,
     pool_setup: Option<pool_setup::Setup>,
@@ -215,8 +215,15 @@ impl State {
         self.assert_consistent();
     }
 
+    /// Tells whether an owner change of this screen awaits its outcome. A sign-in still
+    /// open holds only its own account, so it is not one; see `signing_in`.
     pub fn has_pending(&self) -> bool {
-        self.pending.is_some() || self.native_auth.has_pending() || self.profile.has_pending()
+        self.pending.is_some() || self.profile.has_pending()
+    }
+
+    /// Tells whether a native sign-in is still running or its outcome is not confirmed.
+    pub fn signing_in(&self) -> bool {
+        self.native_auth.has_pending()
     }
 
     pub fn loading(&self) -> bool {
@@ -238,6 +245,7 @@ impl State {
             return Ok(Some(Job::ClaudeCode(Box::new(job))));
         }
         self.native_auth.poll_pending(std::time::Instant::now());
+        self.native_auth.recheck(self.basis.as_ref());
         if let Some(job) = self.native_auth.request() {
             return Ok(Some(Job::NativeAuth(Box::new(job))));
         }
@@ -538,6 +546,11 @@ impl State {
                     self.needs_page = true;
                 }
             }
+            UiEvent::Character('c') if self.native_auth.stuck(self.basis.as_ref()).is_some() => {
+                self.native_auth
+                    .clear(self.identity.clone(), self.basis.as_ref())?;
+                self.notice = self.native_auth.notice().to_owned();
+            }
             UiEvent::Character('x') => {
                 self.form = None;
                 self.notice = "Retained form explicitly discarded".into();
@@ -719,6 +732,13 @@ impl State {
             return Err("Wait for the current metadata read".into());
         }
         edit.validate().map_err(|error| error.to_string())?;
+        if self
+            .native_auth
+            .open_account()
+            .is_some_and(|open| edit.touches(open))
+        {
+            return Err(self.native_auth.open_refusal(Some(&basis)).into());
+        }
         let generation = self.advance()?;
         let submission = Submission {
             basis,
@@ -750,8 +770,14 @@ impl State {
                 self.apply_profile_capabilities(submission, result);
             }
             Event::NativeAuth(event) => {
+                let said = self.native_auth.notice().to_owned();
                 self.native_auth.apply(*event)?;
-                self.notice = "Native authentication observation updated; metadata retained".into();
+                if self.native_auth.is_open() {
+                    self.notice =
+                        "Native authentication observation updated; metadata retained".into();
+                } else if self.native_auth.notice() != said {
+                    self.notice = self.native_auth.notice().to_owned();
+                }
             }
             Event::Read {
                 identity,

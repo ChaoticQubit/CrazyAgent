@@ -2,11 +2,13 @@ use crate::protocol::{
     ControllerEpoch, FRAME_BYTES_MAX, PROTOCOL_VERSION, RequestId, encode_frame,
 };
 use crazyagent::adapters::NativeAction;
+use crazyagent::file_identity::same_files;
+use crazyagent::file_lock::HeldLock;
 use crazyagent::worker_dispatch::{
     AdmissionCheckOffer, DeniedReceipt, FenceOrder, FenceReceipt,
     RunnerBootIdentity as RunnerIdentity, RunnerReady,
 };
-use rustix::fs::{FlockOperation, Mode, OFlags, flock, open, openat};
+use rustix::fs::{FlockOperation, Mode, OFlags, open, openat};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -61,6 +63,7 @@ enum Record {
 
 struct Journal {
     file: File,
+    _lock: HeldLock,
     directory: File,
     root: PathBuf,
     bytes: u64,
@@ -70,7 +73,7 @@ struct Journal {
 impl Journal {
     fn open(directory: &File, root: &Path) -> io::Result<(Self, Vec<Record>)> {
         let mut file = private_file(directory, "control.log")?;
-        flock(&file, FlockOperation::NonBlockingLockExclusive)?;
+        let lock = HeldLock::take(file.try_clone()?, FlockOperation::NonBlockingLockExclusive)?;
         let mut bytes = Vec::new();
         Read::take(&mut file, JOURNAL_BYTES_MAX + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > JOURNAL_BYTES_MAX {
@@ -80,6 +83,7 @@ impl Journal {
         directory.sync_all()?;
         let journal = Self {
             file,
+            _lock: lock,
             directory: directory.try_clone()?,
             root: root.to_owned(),
             bytes: bytes.len() as u64,
@@ -691,16 +695,16 @@ pub async fn run(root: &Path) -> io::Result<()> {
     let _bootstrap = crazyagent::engine::owner::runner_bootstrap(root).map_err(invalid)?;
     let lock = private_file(&directory, "owner.lock")
         .map_err(|error| invalid(format!("runner_lock_file: {error}")))?;
-    flock(&lock, FlockOperation::NonBlockingLockExclusive)
+    let _lock = HeldLock::take(lock, FlockOperation::NonBlockingLockExclusive)
         .map_err(|error| invalid(format!("runner_lock: {error}")))?;
     let (journal, records) = Journal::open(&directory, root)?;
     let mut state = State::new(journal, records)?;
     let path = root.join("control.sock");
     if std::fs::symlink_metadata(&path).is_ok() {
-        let (device, inode) = state
+        let recorded = state
             .endpoint
             .ok_or_else(|| invalid("unrecognized_control_endpoint"))?;
-        remove_endpoint(&path, device, inode)?;
+        remove_endpoint(&path, recorded)?;
     }
     let listener = crate::spawn_gate::bind_unix(&path)
         .map_err(|error| invalid(format!("runner_bind: {error}")))?;
@@ -712,22 +716,26 @@ pub async fn run(root: &Path) -> io::Result<()> {
         device: metadata.dev(),
         inode: metadata.ino(),
     }) {
-        remove_endpoint(&path, metadata.dev(), metadata.ino())?;
+        remove_endpoint(&path, (metadata.dev(), metadata.ino()))?;
         return Err(error);
     }
     let state = Arc::new(Mutex::new(state));
     let result = serve(listener, state).await;
-    remove_endpoint(&path, metadata.dev(), metadata.ino())?;
+    remove_endpoint(&path, (metadata.dev(), metadata.ino()))?;
     result
 }
 
-fn remove_endpoint(path: &PathBuf, device: u64, inode: u64) -> io::Result<()> {
+/// Removes the control socket a runner recorded, while it is still that socket under the
+/// crate's file identity rule, so a socket a run left before its volume was renumbered at
+/// mount is still removed. Inputs: the socket path and its recorded (device, inode).
+/// Output: done, `endpoint_identity_changed`, or the I/O error.
+fn remove_endpoint(path: &PathBuf, recorded: (u64, u64)) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_socket() || metadata.dev() != device || metadata.ino() != inode {
+    let live = (metadata.dev(), metadata.ino());
+    if !metadata.file_type().is_socket() || !same_files(&[recorded], &[live]) {
         return Err(invalid("endpoint_identity_changed"));
     }
-    assert_eq!(metadata.dev(), device);
-    assert_eq!(metadata.ino(), inode);
+    assert_eq!(live.1, recorded.1);
     std::fs::remove_file(path)
 }
 

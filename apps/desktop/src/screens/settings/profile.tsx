@@ -1,19 +1,26 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { applyTheme, readTheme, useAppSession, type ThemeChoice } from "../../state";
-import { Button, LoadError, NotReady, Notice, Panel, Segmented, Skeleton } from "../../ui";
+import { applyTheme, readQuestionsShown, readTerminalInput, readTheme, saveQuestionsShown, saveTerminalInput, useAppSession, type ThemeChoice } from "../../state";
+import type { QuestionsShown } from "../../api-questions";
+import { QuestionsShownSetting } from "../project/question-popup";
+import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
+import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type ProfileDraft, type ProfileErrors } from "../first-run";
 
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
-  return <Panel title="Appearance">
-    <div className="field">
-      <span className="field-label">Theme</span>
+  const [input, setInput] = useState<InputChoice>(readTerminalInput);
+  const [questions, setQuestions] = useState<QuestionsShown>(readQuestionsShown);
+  return <SettingSection title="Appearance">
+    <SettingLine label="Theme" help="System follows your Mac. This choice is kept in this app only.">
       <Segmented label="Theme" value={theme} onValue={(value) => { setTheme(value); applyTheme(value); }} options={[
         { value: "system", label: "System", icon: "monitor" }, { value: "light", label: "Light", icon: "sun" }, { value: "dark", label: "Dark", icon: "moon" },
       ]} />
-      <p className="helper">System follows your Mac. This choice is kept in this app only.</p>
-    </div>
-  </Panel>;
+    </SettingLine>
+    <SettingLine label="Terminal input" help="Where you type to the master and every agent, on every screen: straight into the terminal, in a message box under it that sends your text as one message, or both. Kept in this app only.">
+      <Segmented label="Terminal input" value={input} onValue={(value) => { setInput(value); saveTerminalInput(value); }} options={INPUT_CHOICES} />
+    </SettingLine>
+    <QuestionsShownSetting value={questions} onValue={(value) => { setQuestions(value); saveQuestionsShown(value); }} />
+  </SettingSection>;
 }
 
 /** Settings, Profile: the Welcome fields saved with Save changes (only after a change), plus
@@ -41,16 +48,19 @@ export function ProfileSettings() {
     session.showToast("Profile saved.");
   }
   return <div className="stack">
+    <div className="settings-top"><div><h2>Profile</h2><p>Agents read this before they work for you.</p></div></div>
     {session.profile.kind === "loading" ? <Skeleton shape="line" count={6} />
       : session.profile.kind === "not_ready" ? <NotReady what="Your profile" compact />
       : session.profile.kind === "error" ? <LoadError message="Couldn't load your profile." onRetry={() => void session.refreshProfile()} />
-      : <Panel title="Profile">
-        <form className="form" aria-label="Profile" noValidate onSubmit={(event) => void submit(event)}>
-          <ProfileFields draft={draft} onDraft={setDraft} errors={errors} />
-          {failure && <Notice tone="danger" alert>{failure}</Notice>}
-          <span><Button type="submit" variant="primary" disabled={!changed} pending={saving} pendingLabel="Saving...">Save changes</Button></span>
+      : <SettingSection title="Profile">
+        <form aria-label="Profile" noValidate onSubmit={(event) => void submit(event)}>
+          <ProfileFields draft={draft} onDraft={setDraft} errors={errors} rows />
+          <div className="set-body">
+            {failure && <Notice tone="danger" alert>{failure}</Notice>}
+            <span><Button type="submit" variant="primary" disabled={!changed} pending={saving} pendingLabel="Saving...">Save changes</Button></span>
+          </div>
         </form>
-      </Panel>}
+      </SettingSection>}
     <Appearance />
   </div>;
 }

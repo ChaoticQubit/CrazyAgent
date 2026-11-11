@@ -363,8 +363,8 @@
   "host_files": [
     {
       "path": "scripts/rcli/host.ts",
-      "sha256": "986a82c3fcffbf17e010a0037dfd29b8564cc5cabcd7bdeca0a56dfb5e56ba0b",
-      "bytes": 1416
+      "sha256": "9a67143ddd76e94a2baf8ef16224bbe4f84a994cdb72aa9783ee20b819261c66",
+      "bytes": 1503
     },
     {
       "path": "scripts/rcli/host.test.ts",
@@ -373,8 +373,8 @@
     },
     {
       "path": "scripts/rcli/host.construction.test.ts",
-      "sha256": "e9f5d0280bd1f2c69ff30af0aaf7c307e35717ab490473d732f1fbf6cbdd88ba",
-      "bytes": 5075
+      "sha256": "a0a34053503e066da927142f9e2797a14950ddee5a10151dfa69dcfa35e27fa6",
+      "bytes": 5671
     },
     {
       "path": "scripts/rcli/entry.ts",
@@ -383,8 +383,8 @@
     },
     {
       "path": "scripts/rcli/host.runtime.ts",
-      "sha256": "9f0715a3cceb790a48251338b0c5fe3450bec10388fc6b71e8825e5b1706a4b4",
-      "bytes": 11573
+      "sha256": "be8349514636df2a4d17a4e4035165e16f4b0d3c77f854e8b5590848665ef00f",
+      "bytes": 13665
     },
     {
       "path": "scripts/rcli/host.codec.ts",
@@ -398,8 +398,8 @@
     },
     {
       "path": "scripts/rcli/host.messages.ts",
-      "sha256": "e253176a555593df126d0b886ac9b1c9bd2c93e3135cc609500d51cd0e981aa3",
-      "bytes": 6852
+      "sha256": "45f3889f53c39850e9609a560f36236734199aa9f6e55a58741a5ef9b68959b6",
+      "bytes": 8136
     },
     {
       "path": "scripts/rcli/host.observations.ts",

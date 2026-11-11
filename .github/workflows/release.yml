@@ -20,6 +20,12 @@ env:
   ARTIFACT_SIGNING_CLIENT_VERSION: "1.0.146"
   ARTIFACT_SIGNING_CLIENT_SHA256: 7761e5d8f31e54b764da21d33cd8b0a2940e1b05526c7dfcb5e94b0431426f70
   BUN_DARWIN_X64_SHA256: 62660e6438eb872278877acca77e1152d5d031324df368d4a81b428211489d2d
+  BUN_DARWIN_ARM64_SHA256: 80afd4c069b46a6fa8f3ec520bebc750a7843e4a8d5b9583d29ad436c00a3403
+  NODE_DARWIN_ARM64_SHA256: 1901d539912c02afa10d1cc126943a8855a7eedebe830119463470db5e6c59e8
+  RUSTC_DARWIN_ARM64_SHA256: 738e3f60114b20550fcf4f8a57c9cea0544239f214709f45594ff3fde327f577
+  CARGO_DARWIN_ARM64_SHA256: de51d4fade4f31ad8ec405261cc96bedc000d905f98980027610d6e288dbe21b
+  RUST_STD_DARWIN_ARM64_SHA256: 2de831ef563ce772519a4d18ba2659f0f7428d497ef66dad24b5a35e8f8cd177
+  RUST_STD_DARWIN_X64_SHA256: 48b9835058a8baa4ff5e4387f3772c572a017a2b13393c46e151615c54e322e9
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
 
@@ -41,6 +47,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -51,6 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REF_TYPE" = tag ]; then
+            git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/master || { echo "::error::tag $REF_NAME points at a commit master does not hold; push master first"; exit 1; }
             version="$(node scripts/release/version.mjs stable "$REF_NAME")"
             channel=stable
             tag="$REF_NAME"
@@ -73,25 +81,23 @@ jobs:
 
   build:
     needs: [prepare, ci]
-    timeout-minutes: 150
+    environment: release
+    timeout-minutes: 300
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: [self-hosted, macOS, badal]
+          - runner: macos-15
             target: aarch64-apple-darwin
             os: macos
-          - runner: [self-hosted, macOS, badal]
+          - runner: macos-15
             target: x86_64-apple-darwin
             os: macos
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             os: linux
-          - runner: windows-2022
-            target: x86_64-pc-windows-msvc
-            os: windows
     runs-on: ${{ matrix.runner }}
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
@@ -117,22 +123,78 @@ jobs:
           ref: ${{ env.RCLI_SOURCE_REVISION }}
           path: .local-state/tools/rcli-source
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+      - if: runner.environment == 'github-hosted'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - id: bun
+        if: runner.environment == 'github-hosted' && matrix.os != 'macos'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
+      - name: Install pinned Node on the owner's runner
+        if: runner.environment != 'github-hosted'
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the release runner on badal must be native macOS arm64"; exit 1; }
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-release/node/$NODE_VERSION/arm64"
+          work="$RUNNER_TEMP/node-arm64"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          if [ -f "$prefix/node.tar.gz" ]; then
+            cp "$prefix/node.tar.gz" "$work/node.tar.gz"
+          fi
+          if ! echo "$NODE_DARWIN_ARM64_SHA256  $work/node.tar.gz" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/node.tar.gz" "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-darwin-arm64.tar.gz"
+            echo "$NODE_DARWIN_ARM64_SHA256  $work/node.tar.gz" | shasum -a 256 -c -
+            cp "$work/node.tar.gz" "$prefix/node.tar.gz.$$"
+            mv "$prefix/node.tar.gz.$$" "$prefix/node.tar.gz"
+          fi
+          tar -xzf "$work/node.tar.gz" -C "$work" --strip-components 1
+          test "$("$work/bin/node" --version)" = "v$NODE_VERSION"
+          test "$("$work/bin/node" -p process.arch)" = arm64
+          echo "$work/bin" >> "$GITHUB_PATH"
+      - id: bun-arm64
+        name: Install pinned arm64 bun for macOS
+        if: matrix.os == 'macos'
+        run: |
+          set -euo pipefail
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the macOS release runner must be native macOS arm64"; exit 1; }
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-release/bun/$BUN_VERSION/arm64"
+          work="$RUNNER_TEMP/bun-arm64"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work/bin"
+          if [ -f "$prefix/bun.zip" ]; then
+            cp "$prefix/bun.zip" "$work/bun.zip"
+          fi
+          if ! echo "$BUN_DARWIN_ARM64_SHA256  $work/bun.zip" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-darwin-aarch64.zip"
+            echo "$BUN_DARWIN_ARM64_SHA256  $work/bun.zip" | shasum -a 256 -c -
+            cp "$work/bun.zip" "$prefix/bun.zip.$$"
+            mv "$prefix/bun.zip.$$" "$prefix/bun.zip"
+          fi
+          unzip -q "$work/bun.zip" -d "$work"
+          install -m 0755 "$work/bun-darwin-aarch64/bun" "$work/bin/bun"
+          test "$("$work/bin/bun" --version)" = "$BUN_VERSION"
+          test "$("$work/bin/bun" -e 'console.log(process.arch)')" = arm64
+          echo "bun-path=$work/bin/bun" >> "$GITHUB_OUTPUT"
+          echo "$work/bin" >> "$GITHUB_PATH"
       - id: bun-x64
         name: Install x86_64 bun for the Intel rcli host
         if: matrix.target == 'x86_64-apple-darwin'
         run: |
           set -euo pipefail
-          arch -x86_64 /usr/bin/true || { echo "::error::Rosetta 2 is required to build the x86_64 rcli host; install it with: softwareupdate --install-rosetta --agree-to-license"; exit 1; }
-          prefix="$RUNNER_TOOL_CACHE/bun/$BUN_VERSION/x64"
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::Rosetta 2 is required to build the x86_64 rcli host; install it with: softwareupdate --install-rosetta --agree-to-license"
+              exit 1
+            fi
+            sudo softwareupdate --install-rosetta --agree-to-license
+            arch -x86_64 /usr/bin/true
+          fi
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-release/bun/$BUN_VERSION/x64"
           work="$RUNNER_TEMP/bun-x64"
           rm -rf "$work"
           mkdir -p "$prefix" "$work/bin"
@@ -151,6 +213,7 @@ jobs:
           test "$("$work/bin/bun" -e 'console.log(process.arch)')" = x64
           echo "bun-path=$work/bin/bun" >> "$GITHUB_OUTPUT"
       - name: Install Rust toolchain
+        if: runner.environment == 'github-hosted'
         run: |
           set -euo pipefail
           if ! command -v rustup >/dev/null && [ -x "$HOME/.cargo/bin/rustup" ]; then
@@ -160,12 +223,87 @@ jobs:
           command -v rustup >/dev/null || { echo "::error::rustup is not installed for the runner user; install it from https://rustup.rs and restart the runner service"; exit 1; }
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
           echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-      - name: Install Linux build packages
-        if: matrix.os == 'linux'
+      - name: Install pinned Rust on the owner's runner
+        if: runner.environment != 'github-hosted'
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential file patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
+          [ "$(uname -s)/$(uname -m)" = Darwin/arm64 ] || { echo "::error::the release runner on badal must be native macOS arm64"; exit 1; }
+          dir="$(dirname "$GITHUB_WORKSPACE")"
+          while :; do
+            for config in "$dir/.cargo/config.toml" "$dir/.cargo/config"; do
+              if [ -e "$config" ]; then
+                echo "::error::Cargo reads $config from outside the checkout; remove it from the runner, a release never builds with settings CI could leave behind"
+                exit 1
+              fi
+            done
+            if [ "$dir" = / ]; then break; fi
+            dir="$(dirname "$dir")"
+          done
+          prefix="$RUNNER_TOOL_CACHE/crazyagent-release/rust/$RUST_TOOLCHAIN"
+          work="$RUNNER_TEMP/rust"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          components=("rustc aarch64-apple-darwin $RUSTC_DARWIN_ARM64_SHA256" "cargo aarch64-apple-darwin $CARGO_DARWIN_ARM64_SHA256" "rust-std aarch64-apple-darwin $RUST_STD_DARWIN_ARM64_SHA256")
+          if [ "$TARGET" = x86_64-apple-darwin ]; then components+=("rust-std x86_64-apple-darwin $RUST_STD_DARWIN_X64_SHA256"); fi
+          for component in "${components[@]}"; do
+            read -r name triple sha <<< "$component"
+            archive="$name-$RUST_TOOLCHAIN-$triple.tar.xz"
+            if [ -f "$prefix/$archive" ]; then
+              cp "$prefix/$archive" "$work/$archive"
+            fi
+            if ! echo "$sha  $work/$archive" | shasum -a 256 -s -c - 2>/dev/null; then
+              curl -fsSL --proto '=https' --tlsv1.2 -o "$work/$archive" "https://static.rust-lang.org/dist/$archive"
+              echo "$sha  $work/$archive" | shasum -a 256 -c -
+              cp "$work/$archive" "$prefix/$archive.$$"
+              mv "$prefix/$archive.$$" "$prefix/$archive"
+            fi
+            tar -xJf "$work/$archive" -C "$work"
+            "$work/$name-$RUST_TOOLCHAIN-$triple/install.sh" --prefix="$work" --disable-ldconfig > /dev/null
+          done
+          export PATH="$work/bin:$PATH"
+          test "$(command -v rustc)" = "$work/bin/rustc"
+          test "$(command -v cargo)" = "$work/bin/cargo"
+          case "$(rustc --version)" in "rustc $RUST_TOOLCHAIN "*) ;; *) echo "::error::the pinned rustc reports $(rustc --version)"; exit 1 ;; esac
+          case "$(cargo --version)" in "cargo $RUST_TOOLCHAIN "*) ;; *) echo "::error::the pinned cargo reports $(cargo --version)"; exit 1 ;; esac
+          test -d "$(rustc --print sysroot)/lib/rustlib/$TARGET/lib"
+          echo "$work/bin" >> "$GITHUB_PATH"
+      - name: Install Linux build packages
+        if: matrix.os == 'linux'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          ubuntu_hosts=(azure.archive.ubuntu.com archive.ubuntu.com security.ubuntu.com)
+          unresolved() {
+            local host
+            for host in "${ubuntu_hosts[@]}"; do
+              getent hosts "$host" >/dev/null || printf '%s ' "$host"
+            done
+          }
+          lost=$(unresolved)
+          if [ -n "$lost" ]; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::the runner DNS does not resolve ${lost}and CI changes no DNS setting on a self-hosted runner; fix the runner's DNS"
+              exit 1
+            fi
+            link=$(ip route show default | awk '{print $5; exit}')
+            [ -n "$link" ] || { echo "::error::the runner DNS does not resolve ${lost}and the runner has no default route"; exit 1; }
+            echo "::warning::the runner DNS does not resolve ${lost% }; asking 1.1.1.1 and 8.8.8.8 on $link instead"
+            sudo resolvectl dns "$link" 1.1.1.1 8.8.8.8
+            sudo resolvectl flush-caches
+            lost=$(unresolved)
+            [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
+          fi
+          if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
+              exit 1
+            fi
+            echo "::warning::the runner Ubuntu mirror list failed; trying archive.ubuntu.com and security.ubuntu.com directly"
+            printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            sudo apt-get "${apt_options[@]}" update --error-on=any
+          fi
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends build-essential file patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
       - name: Install SQLite for Windows
         if: matrix.os == 'windows'
         run: |
@@ -175,23 +313,18 @@ jobs:
             echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
             echo "VCPKGRS_TRIPLET=x64-windows-static-md"
           } >> "$GITHUB_ENV"
-      - if: runner.environment == 'github-hosted'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: release-${{ matrix.target }}-rust-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
       - name: Use a clean Rust build folder
         if: runner.environment != 'github-hosted'
         run: |
           set -euo pipefail
           rm -rf "$RUNNER_TEMP/crazyagent-release"
           mkdir -p "$RUNNER_TEMP/crazyagent-release/target" "$RUNNER_TEMP/crazyagent-release/cargo-home"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crazyagent-release/target" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=$RUNNER_TEMP/crazyagent-release/cargo-home" >> "$GITHUB_ENV"
+          {
+            echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crazyagent-release/target"
+            echo "CARGO_HOME=$RUNNER_TEMP/crazyagent-release/cargo-home"
+            echo "BUN_INSTALL_CACHE_DIR=$RUNNER_TEMP/crazyagent-release/bun-cache"
+            echo "npm_config_cache=$RUNNER_TEMP/crazyagent-release/npm-cache"
+          } >> "$GITHUB_ENV"
       - name: Set release version
         run: node scripts/release/version.mjs set "$VERSION"
       - name: Install desktop dependencies
@@ -200,7 +333,7 @@ jobs:
       - name: Install rcli source dependencies
         working-directory: .local-state/tools/rcli-source
         env:
-          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun.outputs.bun-path }}
+          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}
         run: '"$BUN_PATH" install --frozen-lockfile --ignore-scripts'
       - name: Build command line binaries
         run: |
@@ -211,7 +344,7 @@ jobs:
           fi
       - name: Build rcli host
         env:
-          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun.outputs.bun-path }}
+          BUN_PATH: ${{ steps.bun-x64.outputs.bun-path || steps.bun-arm64.outputs.bun-path || steps.bun.outputs.bun-path }}
         run: |
           set -euo pipefail
           exe=""
@@ -382,6 +515,29 @@ jobs:
           path: signing/
           if-no-files-found: error
           retention-days: 7
+      - name: Delete every release file this job made on the owner's runner
+        if: always() && runner.environment != 'github-hosted'
+        run: |
+          set -uo pipefail
+          for folder in "$RUNNER_TOOL_CACHE" "$RUNNER_TEMP"; do
+            case "$folder" in /?*) ;; *) echo "::error::the runner folder $folder is not an absolute path; nothing deleted"; exit 1 ;; esac
+          done
+          case "$GITHUB_WORKSPACE" in "$(dirname "$RUNNER_TEMP")"/?*) ;; *) echo "::error::the checkout $GITHUB_WORKSPACE is not inside the runner's work folder; nothing deleted"; exit 1 ;; esac
+          free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
+          echo "runner tool cache volume: $(free_gib) GiB free after the build"
+          tools=(crazyagent-release)
+          temp=(crazyagent-release node-arm64 bun-arm64 bun-x64 rust rcli apple macos-tmp)
+          made=()
+          for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
+          for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done
+          while IFS= read -r -d '' entry; do made+=("$entry"); done < <(find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -print0)
+          left=()
+          for path in "${made[@]}"; do
+            rm -rf "$path" 2>/dev/null || { chmod -R u+w "$path" 2>/dev/null; rm -rf "$path"; }
+            if [ -e "$path" ] || [ -L "$path" ]; then left+=("$path"); fi
+          done
+          echo "runner tool cache volume: $(free_gib) GiB free after the cleanup"
+          if [ "${#left[@]}" -gt 0 ]; then echo "::error::still on the runner: ${left[*]}"; exit 1; fi
 
   publish:
     needs: [prepare, build]
@@ -426,7 +582,7 @@ jobs:
           done
           cat notes.txt
       - name: Write update manifests and checksums
-        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --notes "$(cat notes.txt)"
+        run: node scripts/release/manifest.mjs --dir dist --version "$VERSION" --channel "$CHANNEL" --commit "$GITHUB_SHA" --base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" --notes "$(cat notes.txt)" --targets aarch64-apple-darwin,x86_64-apple-darwin,x86_64-unknown-linux-gnu
       - name: Publish dev prerelease
         if: needs.prepare.outputs.channel == 'dev'
         env:

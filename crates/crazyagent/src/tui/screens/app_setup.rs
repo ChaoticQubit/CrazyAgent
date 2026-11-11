@@ -1,8 +1,16 @@
 use super::settings_accounts::{send, settings_event};
 use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
+use crate::cleanup_settings::{CleanupMode, CleanupSettings, DAYS_MAX, DAYS_MIN};
 use crate::github::{GitHubMethod, GitHubStatus};
+use crate::master_step_limit::{MasterStepSettings, StepLimit};
+use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
+use crate::quit_settings::{
+    HOURS_DEFAULT, HOURS_MAX, HOURS_MIN, LeftRunning, OnQuit, QuitSettings,
+};
+use crate::sandbox::LinuxSockets;
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::pack::entry_title;
 use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, known_reason};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
@@ -29,13 +37,151 @@ const TOOL_WIDTH: usize = 16;
 const NAME_WIDTH: usize = 26;
 const KIND_WIDTH: usize = 10;
 const LICENSE_WIDTH: usize = 12;
-const LABEL_WIDTH: usize = 15;
+const LABEL_WIDTH: usize = 17;
 const FIELD_WIDTH: usize = 72;
 const WINDOW_MIN: usize = 3;
 const NOT_READY_TEXT: &str =
     "Not ready yet. Setup comes with the setup and default skills and plugins update.";
 const FIRST_RUN_TEXT: &str = "CrazyAgent needs a few tools on this computer and starts every project with the skills and plugins below. Untick anything you don't want.";
 const SETTINGS_TEXT: &str = "The tools CrazyAgent needs on this computer, the skills and plugins every project starts with, the projects home folder and your GitHub account.";
+const SOCKETS_TEXT: &str = "Linux limited-network sockets: how an agent limited to its model reaches the network when CrazyAgent runs on Linux.";
+const SOCKETS_CHOICES: [LinuxSockets; 3] = [
+    LinuxSockets::TcpOnly,
+    LinuxSockets::Refuse,
+    LinuxSockets::TcpPorts,
+];
+
+const CLEANUP_TEXT: &str =
+    "Finished agents: when CrazyAgent removes a finished agent's worktree on its own.";
+const CLEANUP_NOTE: &str = "Only the worktree goes: the code checkout and its build files. The agent's conversations, history, logs and messages stay. An agent whose work has not landed stays, and Clean up shows why.";
+const CLEANUP_CHOICES: [CleanupMode; 3] = [
+    CleanupMode::AfterDays,
+    CleanupMode::OnceLanded,
+    CleanupMode::Manual,
+];
+const DAYS_TEXT: &str = "Enter a whole number of days from 1 to 365.";
+const DAYS_DIGITS_MAX: usize = 3;
+const QUIT_TEXT: &str = "When CrazyAgent quits: what happens to team agents that are running.";
+const QUIT_CHOICES: [OnQuit; 2] = [OnQuit::KeepRunning, OnQuit::Stop];
+const LEFT_TEXT: &str =
+    "Left running: how long agents left running wait for CrazyAgent to open again.";
+const LEFT_RUNNING_NOTE: &str = "An agent still running when the time is up ends with its terminal. Opening CrazyAgent before then takes it over. The limit also covers agents left behind when CrazyAgent did not quit cleanly.";
+const LEFT_CHOICES: [LeftRunning; 2] = [LeftRunning::AfterHours, LeftRunning::Never];
+const HOURS_TEXT: &str = "Enter a whole number of hours from 1 to 168.";
+const STEPS_TEXT: &str = "Master step limit: the most steps a project's master takes in one turn.";
+const STEPS_NOTE: &str = "A step is one round of the master's work in a turn: it uses its tools, reads the results and decides what to do next. A turn that reaches the limit stops and says: Stopped after N steps; reply with 'continue' to go on. Its edits so far are kept. The limit covers a Claude master with tools on; a Codex master counts no steps.";
+const TIME_TEXT: &str = "Master time limit: the longest a project's master works on one turn.";
+const TIME_NOTE: &str = "A turn that reaches the limit stops and says: Stopped after N minutes; reply with 'continue' to go on. Its edits so far are kept. With no limit a turn runs until the master replies or you stop it. The limit covers every master: Claude, Codex and rcli.";
+const HOURS_DIGITS_MAX: usize = 3;
+
+/// The title of one finished agents option, the same words as the desktop Settings.
+/// Inputs: the mode and the days the first option waits. Output: the title, such as
+/// "3 days after the agent finishes".
+pub(in crate::tui) fn cleanup_title(mode: CleanupMode, days: u16) -> String {
+    match mode {
+        CleanupMode::AfterDays if days == 1 => "1 day after the agent finishes".to_owned(),
+        CleanupMode::AfterDays => format!("{days} days after the agent finishes"),
+        CleanupMode::OnceLanded => "Once its work lands".to_owned(),
+        CleanupMode::Manual => "Only when I click Clean up".to_owned(),
+    }
+}
+
+/// Reads the typed days as the engine takes them. Input: the typed text. Output: the whole
+/// number of days from 1 to 365, or None for anything else.
+fn cleanup_days(typed: &str) -> Option<u16> {
+    whole_number(typed, DAYS_DIGITS_MAX, DAYS_MIN..=DAYS_MAX)
+}
+
+/// Reads the typed hours as the engine takes them. Input: the typed text. Output: the whole
+/// number of hours from 1 to 168, or None for anything else.
+fn quit_hours(typed: &str) -> Option<u16> {
+    whole_number(typed, HOURS_DIGITS_MAX, HOURS_MIN..=HOURS_MAX)
+}
+
+/// Reads a typed whole number in a range. Inputs: the typed text, the most digits and the
+/// range. Output: the number, or None for blank, signed, decimal or out of range text.
+fn whole_number(typed: &str, digits: usize, range: std::ops::RangeInclusive<u16>) -> Option<u16> {
+    let typed = typed.trim();
+    if typed.is_empty() || typed.len() > digits || !typed.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let value: u16 = typed.parse().ok()?;
+    range.contains(&value).then_some(value)
+}
+
+/// The title of one quit option and what it does, the same words as the desktop Settings.
+/// Input: the option. Output: the title and its sentence.
+pub(in crate::tui) fn on_quit_words(on_quit: OnQuit) -> (&'static str, &'static str) {
+    match on_quit {
+        OnQuit::KeepRunning => (
+            "Keep team agents running",
+            "They go on with their work, and CrazyAgent takes them over when it opens again.",
+        ),
+        OnQuit::Stop => (
+            "Stop team agents",
+            "Each agent stops as Stop would, and its task goes back to the queue.",
+        ),
+    }
+}
+
+/// The title of one time limit option for agents left running, the same words as the
+/// desktop Settings. Inputs: the option and the hours the first one waits. Output: the
+/// title, such as "24 hours after CrazyAgent quits".
+pub(in crate::tui) fn left_running_title(left_running: LeftRunning, hours: u16) -> String {
+    match left_running {
+        LeftRunning::AfterHours if hours == 1 => "1 hour after CrazyAgent quits".to_owned(),
+        LeftRunning::AfterHours => format!("{hours} hours after CrazyAgent quits"),
+        LeftRunning::Never => "No limit, until CrazyAgent opens again".to_owned(),
+    }
+}
+
+/// The title of one master step limit option and what it does, the same words as the
+/// desktop Settings. Input: the option. Output: the title and the sentence.
+pub(in crate::tui) fn step_limit_words(limit: StepLimit) -> (&'static str, &'static str) {
+    match limit {
+        StepLimit::NoLimit => (
+            "No limit",
+            "A turn runs until the master replies or its time is up.",
+        ),
+        StepLimit::Steps50 => ("50 steps", "A turn stops after 50 steps."),
+        StepLimit::Steps100 => ("100 steps", "A turn stops after 100 steps."),
+        StepLimit::Steps200 => ("200 steps", "A turn stops after 200 steps."),
+    }
+}
+
+/// The title of one master time limit option and what it does, the same words as the
+/// desktop Settings. Input: the option. Output: the title and the sentence.
+pub(in crate::tui) fn time_limit_words(limit: TimeLimit) -> (&'static str, &'static str) {
+    match limit {
+        TimeLimit::NoLimit => (
+            "No limit",
+            "A turn runs until the master replies or you stop it.",
+        ),
+        TimeLimit::Minutes10 => ("10 min", "A turn stops after 10 minutes."),
+        TimeLimit::Minutes30 => ("30 min", "A turn stops after 30 minutes."),
+        TimeLimit::Minutes60 => ("60 min", "A turn stops after 60 minutes."),
+    }
+}
+
+/// The plain title and explanation of one Linux sockets option, as Settings shows it.
+/// Input: the option. Output: the title and the sentence naming what it allows and risks.
+pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
+    match sockets {
+        LinuxSockets::TcpOnly => (
+            "TCP only, names looked up over TCP (recommended)",
+            "Only TCP to the model's ports; names are looked up over TCP. A harness whose resolver ignores RES_OPTIONS, such as a musl build, cannot look names up, so it does not start. Wrappers are judged by their first file, a script by its interpreter, so one that starts a musl program still starts, then cannot look names up.",
+        ),
+        LinuxSockets::Refuse => (
+            "Do not start limited-network agents",
+            "No agent limited to its model starts on Linux, so the master is unavailable there.",
+        ),
+        LinuxSockets::TcpPorts => (
+            "TCP ports only",
+            "Only the model's TCP ports are limited. Hosts and UDP are not limited: UDP, ping and other sockets reach any host.",
+        ),
+    }
+}
 
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
@@ -48,6 +194,19 @@ pub fn setup_plain(code: &str) -> String {
             "CrazyAgent is not connected to the engine right now."
         }
         "home_path_invalid" => "Use a full folder path, such as /Users/you/Projects.",
+        "cleanup_settings_invalid" => {
+            "The stored finished agents setting is not one this version knows."
+        }
+        "quit_settings_invalid" => "The stored quitting setting is not one this version knows.",
+        "master_step_settings_invalid" => {
+            "The stored master step limit is not one this version knows."
+        }
+        "master_time_settings_invalid" => {
+            "The stored master time limit is not one this version knows."
+        }
+        crate::storage::versioned::STALE_CODE => {
+            "The pack changed in another window, so this was not saved. The list shows it now."
+        }
         "owner_outcome_unknown_reconcile_same_identity" => {
             "CrazyAgent did not answer in time. Try again."
         }
@@ -151,6 +310,30 @@ enum Ask {
         path: String,
         size: Option<Result<u64, String>>,
     },
+    Sockets {
+        choice: usize,
+    },
+    Cleanup {
+        choice: usize,
+    },
+    CleanupDays(TextField),
+    QuitChoice {
+        choice: usize,
+    },
+    QuitLimit {
+        on_quit: OnQuit,
+        choice: usize,
+    },
+    QuitHours {
+        on_quit: OnQuit,
+        field: TextField,
+    },
+    Steps {
+        choice: usize,
+    },
+    Time {
+        choice: usize,
+    },
 }
 
 enum Sent {
@@ -162,16 +345,23 @@ enum Sent {
 /// skills and plugins pack, with ticks. First run shows it after the projects
 /// home folder: Enter installs and continues to Home, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
-/// remove, the projects home folder and the GitHub account.
+/// remove, the projects home folder, the GitHub account, the Linux sockets
+/// setting, when finished agents' worktrees go, what quitting does to team agents and
+/// the master step limit.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
     home: Load<ProjectsHome>,
     github: Load<GitHubStatus>,
+    sandbox: Load<SandboxSettings>,
+    cleanup: Load<CleanupSettings>,
+    quit: Load<QuitSettings>,
+    steps: Load<MasterStepSettings>,
+    time: Load<MasterTimeSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 3],
+    reading: [bool; 8],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -182,17 +372,23 @@ impl AppSetup {
     /// A setup page with nothing loaded yet.
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
-    /// home and the GitHub account.
+    /// home, the GitHub account, the sandbox settings, the finished agents
+    /// setting, the quitting setting and the master step and time limits.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
             setup: Load::Idle,
             home: Load::Idle,
             github: Load::Idle,
+            sandbox: Load::Idle,
+            cleanup: Load::Idle,
+            quit: Load::Idle,
+            steps: Load::Idle,
+            time: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 3],
+            reading: [false; 8],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -204,6 +400,13 @@ impl AppSetup {
         match &self.setup {
             Load::Ready(status) => &status.pack,
             _ => &[],
+        }
+    }
+
+    fn pack_version(&self) -> u64 {
+        match &self.setup {
+            Load::Ready(status) => status.version,
+            _ => 0,
         }
     }
 
@@ -257,6 +460,26 @@ impl AppSetup {
             self.github = Load::Loading;
         }
         self.read(2, AppSetupJob::GitHub, ctx);
+        if matches!(self.sandbox, Load::Idle) {
+            self.sandbox = Load::Loading;
+        }
+        self.read(3, AppSetupJob::Sandbox, ctx);
+        if matches!(self.cleanup, Load::Idle) {
+            self.cleanup = Load::Loading;
+        }
+        self.read(4, AppSetupJob::Cleanup, ctx);
+        if matches!(self.quit, Load::Idle) {
+            self.quit = Load::Loading;
+        }
+        self.read(5, AppSetupJob::Quit, ctx);
+        if matches!(self.steps, Load::Idle) {
+            self.steps = Load::Loading;
+        }
+        self.read(6, AppSetupJob::MasterSteps, ctx);
+        if matches!(self.time, Load::Idle) {
+            self.time = Load::Loading;
+        }
+        self.read(7, AppSetupJob::MasterTime, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -288,7 +511,11 @@ impl AppSetup {
             let on = entry.state == PackState::Off;
             let done = format!("{title} is {}.", if on { "on" } else { "off" });
             let job = AppSetupJob::Pack {
-                change: PackChange::Switch { id: entry.id, on },
+                change: PackChange::Switch {
+                    id: entry.id,
+                    on,
+                    version: self.pack_version(),
+                },
                 generation: ctx.next_generation(),
             };
             self.change(job, Sent::Done(done), ctx);
@@ -425,7 +652,12 @@ impl AppSetup {
                 ctx.say(Message::success(&done, ""));
                 self.reload(ctx);
             }
-            Err(code) => ctx.say(Message::error(&setup_plain(code), "")),
+            Err(code) => {
+                ctx.say(Message::error(&setup_plain(code), ""));
+                if code == crate::storage::versioned::STALE_CODE {
+                    self.reload(ctx);
+                }
+            }
         }
     }
 
@@ -462,6 +694,426 @@ impl AppSetup {
             field.set(&tilde(path, ctx));
         }
         self.ask = Some(Ask::HomePath(field));
+    }
+
+    fn ask_sockets(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.sandbox else {
+            ctx.say(Message::warning(
+                "The Linux sockets setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = SOCKETS_CHOICES
+            .iter()
+            .position(|sockets| *sockets == settings.linux_sockets)
+            .expect("every option is listed");
+        self.ask = Some(Ask::Sockets { choice });
+    }
+
+    fn set_sockets(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < SOCKETS_CHOICES.len());
+        let linux_sockets = SOCKETS_CHOICES[choice];
+        if matches!(&self.sandbox, Load::Ready(settings) if settings.linux_sockets == linux_sockets)
+        {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
+        let job = AppSetupJob::SetSandbox {
+            settings: SandboxSettings { linux_sockets },
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn ask_cleanup(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.cleanup else {
+            ctx.say(Message::warning(
+                "The finished agents setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = CLEANUP_CHOICES
+            .iter()
+            .position(|mode| *mode == settings.mode)
+            .expect("every option is listed");
+        self.ask = Some(Ask::Cleanup { choice });
+    }
+
+    fn pick_cleanup(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < CLEANUP_CHOICES.len());
+        let Load::Ready(current) = &self.cleanup else {
+            ctx.say(Message::warning(
+                "The finished agents setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let (mode, days) = (CLEANUP_CHOICES[choice], current.days);
+        if mode != CleanupMode::AfterDays {
+            self.set_cleanup(CleanupSettings { mode, days }, ctx);
+            return;
+        }
+        let mut field =
+            TextField::new("Days after the agent finishes", DAYS_DIGITS_MAX).placeholder("1");
+        field.set(&days.to_string());
+        self.ask = Some(Ask::CleanupDays(field));
+    }
+
+    fn submit_days(&mut self, field: TextField, ctx: &mut Ctx) {
+        let Some(days) = cleanup_days(field.value()) else {
+            ctx.say(Message::error(DAYS_TEXT, ""));
+            self.ask = Some(Ask::CleanupDays(field));
+            return;
+        };
+        let mode = CleanupMode::AfterDays;
+        self.set_cleanup(CleanupSettings { mode, days }, ctx);
+    }
+
+    fn set_cleanup(&mut self, settings: CleanupSettings, ctx: &mut Ctx) {
+        assert!((DAYS_MIN..=DAYS_MAX).contains(&settings.days));
+        if matches!(&self.cleanup, Load::Ready(current) if *current == settings) {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let title = cleanup_title(settings.mode, settings.days);
+        let job = AppSetupJob::SetCleanup {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(format!("Finished agents: {title}.")), ctx);
+    }
+
+    fn cleanup_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.cleanup {
+            Load::Ready(settings) => Line::raw(cleanup_title(settings.mode, settings.days)),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn cleanup_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let muted = |text: &str| -> Vec<Line<'static>> {
+            wrap(text, limit)
+                .into_iter()
+                .map(|part| styled(part, Role::Muted, theme))
+                .collect()
+        };
+        let days = match &self.cleanup {
+            Load::Ready(settings) => settings.days,
+            _ => DAYS_MIN,
+        };
+        let mut lines = muted(CLEANUP_TEXT);
+        for (index, mode) in CLEANUP_CHOICES.iter().enumerate() {
+            let mark = if index == choice { "> " } else { "  " };
+            lines.push(join([
+                Line::raw(mark),
+                styled(cleanup_title(*mode, days), Role::Heading, theme),
+            ]));
+        }
+        lines.extend(muted(CLEANUP_NOTE));
+        lines
+    }
+
+    fn ask_quit(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.quit else {
+            ctx.say(Message::warning(
+                "The quitting setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = QUIT_CHOICES
+            .iter()
+            .position(|on_quit| *on_quit == settings.on_quit)
+            .expect("every option is listed");
+        self.ask = Some(Ask::QuitChoice { choice });
+    }
+
+    fn pick_quit(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < QUIT_CHOICES.len());
+        let Load::Ready(current) = &self.quit else {
+            ctx.say(Message::warning(
+                "The quitting setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let limit = LEFT_CHOICES
+            .iter()
+            .position(|left_running| *left_running == current.left_running)
+            .expect("every option is listed");
+        self.ask = Some(Ask::QuitLimit {
+            on_quit: QUIT_CHOICES[choice],
+            choice: limit,
+        });
+    }
+
+    fn pick_limit(&mut self, on_quit: OnQuit, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < LEFT_CHOICES.len());
+        let Load::Ready(current) = &self.quit else {
+            ctx.say(Message::warning(
+                "The quitting setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let (left_running, hours) = (LEFT_CHOICES[choice], current.hours);
+        if left_running != LeftRunning::AfterHours {
+            let settings = QuitSettings {
+                on_quit,
+                left_running,
+                hours,
+            };
+            self.set_quit(settings, ctx);
+            return;
+        }
+        let mut field = TextField::new("Hours after CrazyAgent quits", HOURS_DIGITS_MAX)
+            .placeholder(&HOURS_DEFAULT.to_string());
+        field.set(&hours.to_string());
+        self.ask = Some(Ask::QuitHours { on_quit, field });
+    }
+
+    fn submit_hours(&mut self, on_quit: OnQuit, field: TextField, ctx: &mut Ctx) {
+        let Some(hours) = quit_hours(field.value()) else {
+            ctx.say(Message::error(HOURS_TEXT, ""));
+            self.ask = Some(Ask::QuitHours { on_quit, field });
+            return;
+        };
+        let settings = QuitSettings {
+            on_quit,
+            left_running: LeftRunning::AfterHours,
+            hours,
+        };
+        self.set_quit(settings, ctx);
+    }
+
+    fn set_quit(&mut self, settings: QuitSettings, ctx: &mut Ctx) {
+        assert!((HOURS_MIN..=HOURS_MAX).contains(&settings.hours));
+        if matches!(&self.quit, Load::Ready(current) if *current == settings) {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!(
+            "When quitting: {}. Left running: {}.",
+            on_quit_words(settings.on_quit).0,
+            left_running_title(settings.left_running, settings.hours)
+        );
+        let job = AppSetupJob::SetQuit {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn quit_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.quit {
+            Load::Ready(settings) => Line::raw(on_quit_words(settings.on_quit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn quit_rows(&self, ask: &Ask, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let choice_line = |picked: bool, title: String| {
+            let mark = if picked { "> " } else { "  " };
+            join([Line::raw(mark), styled(title, Role::Heading, theme)])
+        };
+        let mut lines = Vec::new();
+        match ask {
+            Ask::QuitChoice { choice } => {
+                lines.extend(muted(QUIT_TEXT, 0));
+                for (index, on_quit) in QUIT_CHOICES.iter().enumerate() {
+                    let (title, detail) = on_quit_words(*on_quit);
+                    lines.push(choice_line(index == *choice, title.to_owned()));
+                    lines.extend(muted(detail, 4));
+                }
+            }
+            Ask::QuitLimit { choice, .. } => {
+                let hours = match &self.quit {
+                    Load::Ready(settings) => settings.hours,
+                    _ => HOURS_DEFAULT,
+                };
+                lines.extend(muted(LEFT_TEXT, 0));
+                for (index, left_running) in LEFT_CHOICES.iter().enumerate() {
+                    let title = left_running_title(*left_running, hours);
+                    lines.push(choice_line(index == *choice, title));
+                }
+                lines.extend(muted(LEFT_RUNNING_NOTE, 0));
+            }
+            _ => {}
+        }
+        lines
+    }
+
+    fn ask_steps(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.steps else {
+            ctx.say(Message::warning(
+                "The master step limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = StepLimit::ALL
+            .iter()
+            .position(|limit| *limit == settings.limit)
+            .expect("every option is listed");
+        assert!(choice < StepLimit::ALL.len());
+        self.ask = Some(Ask::Steps { choice });
+    }
+
+    fn set_steps(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < StepLimit::ALL.len());
+        let settings = MasterStepSettings {
+            limit: StepLimit::ALL[choice],
+        };
+        let Load::Ready(current) = &self.steps else {
+            ctx.say(Message::warning(
+                "The master step limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        if *current == settings {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Master step limit: {}.", step_limit_words(settings.limit).0);
+        let job = AppSetupJob::SetMasterSteps {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn steps_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.steps {
+            Load::Ready(settings) => Line::raw(step_limit_words(settings.limit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn steps_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < StepLimit::ALL.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let mut lines = muted(STEPS_TEXT, 0);
+        for (index, option) in StepLimit::ALL.iter().enumerate() {
+            let (title, detail) = step_limit_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            let title = styled(title, Role::Heading, theme);
+            lines.push(join([Line::raw(mark), title]));
+            lines.extend(muted(detail, 4));
+        }
+        lines.extend(muted(STEPS_NOTE, 0));
+        assert!(lines.len() > 2 * StepLimit::ALL.len());
+        lines
+    }
+
+    fn ask_time(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.time else {
+            ctx.say(Message::warning(
+                "The master time limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = TimeLimit::ALL
+            .iter()
+            .position(|limit| *limit == settings.limit)
+            .expect("every option is listed");
+        assert!(choice < TimeLimit::ALL.len());
+        self.ask = Some(Ask::Time { choice });
+    }
+
+    fn set_time(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < TimeLimit::ALL.len());
+        let settings = MasterTimeSettings {
+            limit: TimeLimit::ALL[choice],
+        };
+        let Load::Ready(current) = &self.time else {
+            ctx.say(Message::warning(
+                "The master time limit is not known yet.",
+                "",
+            ));
+            return;
+        };
+        if *current == settings {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Master time limit: {}.", time_limit_words(settings.limit).0);
+        let job = AppSetupJob::SetMasterTime {
+            settings,
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
+    fn time_value(&self, ctx: &Ctx) -> Line<'static> {
+        match &self.time {
+            Load::Ready(settings) => Line::raw(time_limit_words(settings.limit).0),
+            Load::NotReady => styled("Not ready yet", Role::Muted, &ctx.theme),
+            Load::Failed(code) => status(
+                &format!("Failed to read it. {}", setup_plain(code)),
+                &ctx.theme,
+                ctx.glyphs,
+            ),
+            Load::Idle | Load::Loading => ctx.loading("Loading"),
+        }
+    }
+
+    fn time_rows(&self, choice: usize, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        assert!(choice < TimeLimit::ALL.len());
+        let theme = &ctx.theme;
+        let muted = |text: &str, inset: usize| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(inset).max(1))
+                .into_iter()
+                .map(|part| styled(format!("{}{part}", " ".repeat(inset)), Role::Muted, theme))
+                .collect()
+        };
+        let mut lines = muted(TIME_TEXT, 0);
+        for (index, option) in TimeLimit::ALL.iter().enumerate() {
+            let (title, detail) = time_limit_words(*option);
+            let mark = if index == choice { "> " } else { "  " };
+            let title = styled(title, Role::Heading, theme);
+            lines.push(join([Line::raw(mark), title]));
+            lines.extend(muted(detail, 4));
+        }
+        lines.extend(muted(TIME_NOTE, 0));
+        assert!(lines.len() > 2 * TimeLimit::ALL.len());
+        lines
     }
 
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
@@ -542,7 +1194,10 @@ impl AppSetup {
                 Key::Char('y') => {
                     let done = format!("Removed {id}.");
                     let job = AppSetupJob::Pack {
-                        change: PackChange::Remove { id },
+                        change: PackChange::Remove {
+                            id,
+                            version: self.pack_version(),
+                        },
                         generation: ctx.next_generation(),
                     };
                     self.change(job, Sent::Done(done), ctx);
@@ -557,6 +1212,114 @@ impl AppSetup {
                 }
                 Key::Char('n') | Key::Esc => {}
                 _ => self.ask = Some(Ask::SignOut),
+            },
+            Ask::Sockets { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Sockets {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Sockets {
+                        choice: (choice + 1).min(SOCKETS_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_sockets(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Sockets { choice }),
+            },
+            Ask::Cleanup { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Cleanup {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Cleanup {
+                        choice: (choice + 1).min(CLEANUP_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.pick_cleanup(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Cleanup { choice }),
+            },
+            Ask::Steps { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Steps {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Steps {
+                        choice: (choice + 1).min(StepLimit::ALL.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_steps(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Steps { choice }),
+            },
+            Ask::Time { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Time {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Time {
+                        choice: (choice + 1).min(TimeLimit::ALL.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_time(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Time { choice }),
+            },
+            Ask::CleanupDays(mut field) => match key {
+                Key::Esc => {}
+                Key::Enter => self.submit_days(field, ctx),
+                other => {
+                    field.key(other);
+                    self.ask = Some(Ask::CleanupDays(field));
+                }
+            },
+            Ask::QuitChoice { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::QuitChoice {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::QuitChoice {
+                        choice: (choice + 1).min(QUIT_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.pick_quit(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::QuitChoice { choice }),
+            },
+            Ask::QuitLimit { on_quit, choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::QuitLimit {
+                        on_quit,
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::QuitLimit {
+                        on_quit,
+                        choice: (choice + 1).min(LEFT_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.pick_limit(on_quit, choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::QuitLimit { on_quit, choice }),
+            },
+            Ask::QuitHours { on_quit, mut field } => match key {
+                Key::Esc => {}
+                Key::Enter => self.submit_hours(on_quit, field, ctx),
+                other => {
+                    field.key(other);
+                    self.ask = Some(Ask::QuitHours { on_quit, field });
+                }
             },
         }
     }
@@ -607,6 +1370,13 @@ impl AppSetup {
                     }),
                 );
             }
+        }
+        for note in &setup.notes {
+            lines.extend(
+                wrap(&setup_reason(note), limit.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|part| join([Line::raw("  "), styled(part, Role::Warning, theme)])),
+            );
         }
         lines
     }
@@ -702,6 +1472,22 @@ impl AppSetup {
                 .map(|part| styled(part, Role::Muted, theme)),
             );
         }
+        for entry in self.entries() {
+            if let Some(reason) = &entry.hooks_refused {
+                lines.extend(
+                    wrap(
+                        &format!(
+                            "{} hooks were not added: {}",
+                            entry_title(&entry.id),
+                            setup_reason(reason)
+                        ),
+                        limit,
+                    )
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
+                );
+            }
+        }
         let servers: Vec<&str> = self
             .entries()
             .iter()
@@ -728,7 +1514,10 @@ impl AppSetup {
         lines
     }
 
-    fn account_rows(&self, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// Lists the projects home, GitHub and app-wide setting rows of Settings. Takes the
+    /// line width, whether each setting's explaining note goes under it, and the context.
+    /// Returns the rows; a GitHub problem is listed with or without notes.
+    fn account_rows(&self, limit: usize, notes: bool, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
         let label = |text: &str, value: Line<'static>| {
@@ -784,13 +1573,55 @@ impl AppSetup {
             Load::Idle | Load::Loading => ctx.loading("Loading"),
         };
         lines.push(label("GitHub", github));
+        let gap = " ".repeat(LABEL_WIDTH);
+        let under = |text: &str| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(LABEL_WIDTH).max(1))
+                .into_iter()
+                .map(|part| join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)]))
+                .collect()
+        };
         if let Some(problem) = problem {
-            let gap = " ".repeat(LABEL_WIDTH);
-            lines.extend(
-                wrap(&problem, limit.saturating_sub(LABEL_WIDTH).max(1))
-                    .into_iter()
-                    .map(|part| join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])),
-            );
+            lines.extend(under(&problem));
+        }
+        let note =
+            |text: &str| -> Vec<Line<'static>> { if notes { under(text) } else { Vec::new() } };
+        let (sockets, detail) = match &self.sandbox {
+            Load::Ready(settings) => {
+                let (title, detail) = sockets_words(settings.linux_sockets);
+                (Line::raw(title), Some(detail))
+            }
+            Load::NotReady => (styled("Not ready yet", Role::Muted, theme), None),
+            Load::Failed(code) => (
+                status(
+                    &format!("Failed to read it. {}", setup_plain(code)),
+                    theme,
+                    glyphs,
+                ),
+                None,
+            ),
+            Load::Idle | Load::Loading => (ctx.loading("Loading"), None),
+        };
+        lines.push(label("Linux sockets", sockets));
+        if let Some(detail) = detail {
+            lines.extend(note(detail));
+        }
+        lines.push(label("Finished agents", self.cleanup_value(ctx)));
+        if matches!(self.cleanup, Load::Ready(_)) {
+            lines.extend(note(CLEANUP_NOTE));
+        }
+        lines.push(label("When quitting", self.quit_value(ctx)));
+        if let Load::Ready(settings) = &self.quit {
+            let title = left_running_title(settings.left_running, settings.hours);
+            lines.push(label("Left running", Line::raw(title)));
+            lines.extend(note(LEFT_RUNNING_NOTE));
+        }
+        lines.push(label("Master steps", self.steps_value(ctx)));
+        if matches!(self.steps, Load::Ready(_)) {
+            lines.extend(note(STEPS_NOTE));
+        }
+        lines.push(label("Master time", self.time_value(ctx)));
+        if matches!(self.time, Load::Ready(_)) {
+            lines.extend(note(TIME_NOTE));
         }
         lines
     }
@@ -819,6 +1650,52 @@ impl AppSetup {
                 lines.extend(field_lines);
                 lines.extend(sentence(
                     "Changing the home moves nothing by itself; you choose next.",
+                ));
+            }
+            Some(Ask::Sockets { choice }) => {
+                lines.extend(
+                    wrap(SOCKETS_TEXT, limit)
+                        .into_iter()
+                        .map(|part| styled(part, Role::Muted, theme)),
+                );
+                for (index, sockets) in SOCKETS_CHOICES.iter().enumerate() {
+                    let (title, detail) = sockets_words(*sockets);
+                    let mark = if index == *choice { "> " } else { "  " };
+                    lines.push(join([
+                        Line::raw(mark),
+                        styled(title, Role::Heading, theme),
+                    ]));
+                    lines.extend(
+                        wrap(detail, limit.saturating_sub(4).max(1))
+                            .into_iter()
+                            .map(|part| styled(format!("    {part}"), Role::Muted, theme)),
+                    );
+                }
+            }
+            Some(Ask::Cleanup { choice }) => lines.extend(self.cleanup_rows(*choice, limit, ctx)),
+            Some(Ask::Steps { choice }) => lines.extend(self.steps_rows(*choice, limit, ctx)),
+            Some(Ask::Time { choice }) => lines.extend(self.time_rows(*choice, limit, ctx)),
+            Some(Ask::CleanupDays(field)) => {
+                let (field_lines, at) =
+                    field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
+                let top = lines.len() as u16;
+                cursor = at.map(|at| Position::new(at.x, at.y + top));
+                lines.extend(field_lines);
+                lines.extend(sentence(
+                    "Days from 1 to 365. CrazyAgent removes a finished agent's worktree that many days after it finishes.",
+                ));
+            }
+            Some(ask @ (Ask::QuitChoice { .. } | Ask::QuitLimit { .. })) => {
+                lines.extend(self.quit_rows(ask, limit, ctx))
+            }
+            Some(Ask::QuitHours { field, .. }) => {
+                let (field_lines, at) =
+                    field.lines(limit.min(FIELD_WIDTH), true, theme, ctx.glyphs);
+                let top = lines.len() as u16;
+                cursor = at.map(|at| Position::new(at.x, at.y + top));
+                lines.extend(field_lines);
+                lines.extend(sentence(
+                    "Hours from 1 to 168. An agent still running that many hours after CrazyAgent quits ends with its terminal.",
                 ));
             }
             Some(Ask::HomeChoice {
@@ -898,25 +1775,59 @@ impl AppSetup {
             top.push(self.pack_heading(limit, ctx));
             bottom.extend(self.pack_notes(limit, ctx));
         }
-        if !self.first_run {
-            bottom.extend(self.account_rows(limit, ctx));
-        }
         let (asked, at) = self.ask_rows(limit, ctx);
+        let asking = !asked.is_empty();
+        let window_min = if ready.is_some() && !asking {
+            WINDOW_MIN
+        } else {
+            0
+        };
+        if !self.first_run {
+            let full = self.account_rows(limit, true, ctx);
+            let used = top.len() + bottom.len() + asked.len() + window_min;
+            if used + full.len() <= height {
+                bottom.extend(full);
+            } else {
+                let lean = self.account_rows(limit, false, ctx);
+                assert!(lean.len() <= full.len());
+                bottom.extend(lean);
+            }
+        }
         let asked_from = bottom.len();
         bottom.extend(asked);
         if ready.is_some() {
             let window = height
                 .saturating_sub(top.len() + bottom.len())
-                .max(WINDOW_MIN);
-            rows = self.pack_rows(limit, window, ctx);
+                .max(window_min);
+            if window > 0 {
+                rows = self.pack_rows(limit, window, ctx);
+            }
         }
-        let cursor =
-            at.map(|at| Position::new(at.x, at.y + (top.len() + rows.len() + asked_from) as u16));
+        let ask_top = top.len() + rows.len() + asked_from;
         let mut lines = top;
         lines.extend(rows);
         lines.extend(bottom);
+        let skip = if asking {
+            ask_skip(lines.len(), ask_top, height)
+        } else {
+            0
+        };
+        lines.drain(..skip);
+        let cursor = at.map(|at| Position::new(at.x, at.y + (ask_top - skip) as u16));
         (lines, cursor)
     }
+}
+
+/// Counts the body lines left out above an open ask, so the ask is drawn whole at the bottom
+/// of the body, or from its first line when it alone is taller than the body. Takes the
+/// body's line count, the index of the ask's first line and the body height. Returns the
+/// count, never past the ask's first line.
+fn ask_skip(lines: usize, ask_top: usize, height: usize) -> usize {
+    assert!(ask_top < lines);
+    let skip = lines.saturating_sub(height).min(ask_top);
+    assert!(skip <= ask_top);
+    assert!(lines - skip <= height || skip == ask_top);
+    skip
 }
 
 impl Screen for AppSetup {
@@ -928,7 +1839,7 @@ impl Screen for AppSetup {
         }
     }
 
-    fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+    fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         match &self.ask {
             Some(Ask::HomePath(_)) => return vec![hint("Enter", "Next"), hint("Esc", "Cancel")],
             Some(Ask::HomeChoice { .. }) => {
@@ -940,6 +1851,29 @@ impl Screen for AppSetup {
             }
             Some(Ask::Remove { .. }) => return vec![hint("y", "Remove"), hint("n", "Keep")],
             Some(Ask::SignOut) => return vec![hint("y", "Sign out"), hint("n", "Stay signed in")],
+            Some(Ask::CleanupDays(_) | Ask::QuitHours { .. }) => {
+                return vec![hint("Enter", "Save"), hint("Esc", "Cancel")];
+            }
+            Some(
+                ask @ (Ask::Sockets { .. }
+                | Ask::Cleanup { .. }
+                | Ask::QuitChoice { .. }
+                | Ask::QuitLimit { .. }
+                | Ask::Steps { .. }
+                | Ask::Time { .. }),
+            ) => {
+                let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+                let enter = if matches!(ask, Ask::QuitChoice { .. }) {
+                    "Next"
+                } else {
+                    "Save"
+                };
+                return vec![
+                    hint(&arrows, "Choose"),
+                    hint("Enter", enter),
+                    hint("Esc", "Cancel"),
+                ];
+            }
             None => {}
         }
         let mut hints = Vec::new();
@@ -975,6 +1909,11 @@ impl Screen for AppSetup {
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
             }
+            hints.push(hint("l", "Linux sockets"));
+            hints.push(hint("f", "Finished agents"));
+            hints.push(hint("q", "Quitting"));
+            hints.push(hint("m", "Master steps"));
+            hints.push(hint("t", "Master time"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -983,7 +1922,10 @@ impl Screen for AppSetup {
     }
 
     fn typing(&self) -> bool {
-        matches!(self.ask, Some(Ask::HomePath(_)))
+        matches!(
+            self.ask,
+            Some(Ask::HomePath(_) | Ask::CleanupDays(_) | Ask::QuitHours { .. })
+        )
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1027,13 +1969,33 @@ impl Screen for AppSetup {
                 self.ask_sign_out(ctx);
                 Flow::Handled
             }
+            Key::Char('l') if !self.first_run => {
+                self.ask_sockets(ctx);
+                Flow::Handled
+            }
+            Key::Char('f') if !self.first_run => {
+                self.ask_cleanup(ctx);
+                Flow::Handled
+            }
+            Key::Char('q') if !self.first_run => {
+                self.ask_quit(ctx);
+                Flow::Handled
+            }
+            Key::Char('m') if !self.first_run => {
+                self.ask_steps(ctx);
+                Flow::Handled
+            }
+            Key::Char('t') if !self.first_run => {
+                self.ask_time(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 3];
+            self.reading = [false; 8];
             self.sent = None;
             return Flow::Handled;
         }
@@ -1043,8 +2005,32 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
-            AppSetupEvent::PackChanged(result) | AppSetupEvent::HomeSet(result) => {
-                self.changed(result, ctx)
+            AppSetupEvent::PackChanged(result)
+            | AppSetupEvent::HomeSet(result)
+            | AppSetupEvent::SandboxSet(result)
+            | AppSetupEvent::CleanupSet(result)
+            | AppSetupEvent::QuitSet(result)
+            | AppSetupEvent::MasterStepsSet(result)
+            | AppSetupEvent::MasterTimeSet(result) => self.changed(result, ctx),
+            AppSetupEvent::Sandbox(result) => {
+                self.reading[3] = false;
+                self.sandbox = loaded(result);
+            }
+            AppSetupEvent::Cleanup(result) => {
+                self.reading[4] = false;
+                self.cleanup = loaded(result);
+            }
+            AppSetupEvent::Quit(result) => {
+                self.reading[5] = false;
+                self.quit = loaded(result);
+            }
+            AppSetupEvent::MasterSteps(result) => {
+                self.reading[6] = false;
+                self.steps = loaded(result);
+            }
+            AppSetupEvent::MasterTime(result) => {
+                self.reading[7] = false;
+                self.time = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -1092,6 +2078,11 @@ impl Screen for AppSetup {
             || matches!(self.setup, Load::Loading)
             || matches!(self.home, Load::Loading)
             || matches!(self.github, Load::Loading)
+            || matches!(self.sandbox, Load::Loading)
+            || matches!(self.cleanup, Load::Loading)
+            || matches!(self.quit, Load::Loading)
+            || matches!(self.steps, Load::Loading)
+            || matches!(self.time, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

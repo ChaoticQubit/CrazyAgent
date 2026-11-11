@@ -13,9 +13,9 @@ use std::process::{ChildStdin, ChildStdout};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 #[cfg(unix)]
-use std::sync::mpsc::sync_channel;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
 #[cfg(unix)]
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{channel, sync_channel};
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
@@ -156,14 +156,24 @@ fn read_lines(stdout: ChildStdout, send: SyncSender<Line>) {
     }
 }
 
+/// Writes each queued message to the server's input until a write fails, on its own
+/// thread, so a server that stops reading blocks only this writer and never the check's
+/// deadline; stopping the server's process group ends a blocked write. Inputs: the input
+/// and the queue. Output: none; the input closes when it returns.
 #[cfg(unix)]
-fn send(stdin: &mut ChildStdin, message: &Value) -> Result<(), &'static str> {
+fn write_lines(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>) {
+    for line in lines {
+        if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn send(writer: &Sender<Vec<u8>>, message: &Value) -> Result<(), &'static str> {
     let mut line = serde_json::to_vec(message).map_err(|_| "server_cant_start")?;
     line.push(b'\n');
-    stdin
-        .write_all(&line)
-        .and_then(|()| stdin.flush())
-        .map_err(|_| "server_exited")
+    writer.send(line).map_err(|_| "server_exited")
 }
 
 #[cfg(unix)]
@@ -197,12 +207,17 @@ fn answer(receive: &Receiver<Line>, id: u64, deadline: Instant) -> Result<Value,
 
 #[cfg(unix)]
 fn talk(
-    mut stdin: ChildStdin,
+    stdin: ChildStdin,
     receive: &Receiver<Line>,
     deadline: Instant,
 ) -> Result<Vec<String>, &'static str> {
+    let (writer, lines) = channel::<Vec<u8>>();
+    std::thread::Builder::new()
+        .name("crazyagent-mcp-write".into())
+        .spawn(move || write_lines(stdin, lines))
+        .map_err(|_| "server_cant_start")?;
     send(
-        &mut stdin,
+        &writer,
         &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
             "protocolVersion": "2025-06-18",
             "capabilities": {},
@@ -211,7 +226,7 @@ fn talk(
     )?;
     answer(receive, 1, deadline)?;
     send(
-        &mut stdin,
+        &writer,
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     )?;
     let mut tools = Vec::new();
@@ -222,7 +237,7 @@ fn talk(
             None => json!({}),
         };
         send(
-            &mut stdin,
+            &writer,
             &json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params}),
         )?;
         let result = answer(receive, id, deadline)?;
@@ -356,6 +371,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!alive(pid), "the server's child process must stop too");
+    }
+
+    #[test]
+    fn a_server_that_stops_reading_cannot_hold_the_check_past_its_time() {
+        let root = tempfile::tempdir().unwrap();
+        let server = fixture(root.path());
+        let pidfile = root.path().join("deaf.pid");
+        let (done, finished) = std::sync::mpsc::channel();
+        let (command, path) = (server.to_str().unwrap().to_owned(), pidfile.clone());
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let checked = check_stdio(
+                &command,
+                &["deaf".into(), path.display().to_string()],
+                &[],
+                Duration::from_millis(1500),
+            );
+            let _ = done.send((checked, started.elapsed()));
+        });
+        let answer = finished.recv_timeout(Duration::from_secs(20));
+        let Ok((checked, elapsed)) = answer else {
+            panic!("a server that stopped reading held the check past its time");
+        };
+        assert_eq!(checked.unwrap_err(), "server_check_timeout");
+        assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let gone = Instant::now() + Duration::from_secs(3);
+        while alive(pid) && Instant::now() < gone {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(pid), "the deaf server must be stopped");
     }
 
     /// A server checked inside the agent boundary, as plugin checks run command servers,

@@ -34,10 +34,13 @@ crazyagent = { path = "../../../crates/crazyagent" }
 getrandom = "=0.4.3"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
-tauri = { version = "=2.12.4", features = [] }
+tauri = { version = "=2.12.4", features = ["unstable"] }
+tauri-plugin-notification = "=2.7.0"
 tauri-plugin-updater = "=2.14.0"
 tauri-plugin-wdio-webdriver = { version = "=1.5.0", optional = true }
 tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
+tauri = { version = "=2.12.4", features = ["test"] }
+rusqlite = { version = "=0.40.2", default-features = false, features = ["backup"] }
 tempfile = "=3.27.0"

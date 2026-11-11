@@ -96,6 +96,22 @@ fn attention_rank(status: AccountStatus) -> u8 {
     }
 }
 
+/// Ids of the pools an account is in, in pool order, which tell apart pools that share a
+/// name. Inputs: the account id and the context. Output: the ids.
+pub fn pool_ids(id: &CredentialRef, ctx: &Ctx) -> Vec<CredentialRef> {
+    ctx.store
+        .pools
+        .ready()
+        .map(|pools| {
+            pools
+                .iter()
+                .filter(|pool| pool.members.iter().any(|member| &member.id == id))
+                .map(|pool| pool.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Names of the pools an account is in, in pool order.
 /// Inputs: the account id and the context. Output: the names.
 pub fn pool_names(id: &CredentialRef, ctx: &Ctx) -> Vec<String> {
@@ -1042,7 +1058,7 @@ impl AccountDetails {
     }
 
     fn used_by(&self, ctx: &Ctx) -> String {
-        let pools = pool_names(&self.account.id, ctx);
+        let pools = pool_ids(&self.account.id, ctx);
         let projects: Vec<String> = ctx
             .store
             .projects
@@ -1050,7 +1066,11 @@ impl AccountDetails {
             .map(|cards| {
                 cards
                     .iter()
-                    .filter(|card| card.pool.as_ref().is_some_and(|pool| pools.contains(pool)))
+                    .filter(|card| {
+                        card.pool_id
+                            .as_ref()
+                            .is_some_and(|pool| pools.contains(pool))
+                    })
                     .map(|card| card.name.clone())
                     .collect()
             })

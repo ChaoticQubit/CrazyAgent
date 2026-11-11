@@ -1,26 +1,43 @@
 use crate::pools::PoolSummary;
 use crate::protocol::CredentialRef;
 use crate::scheduling::{
-    AccountPlan, Pin, PoolRanking, RANK_MAX, RESERVE_PERCENT_MAX, Schedule, ScheduleChange,
-    Standing, Strategy,
+    AccountPlan, LiveMasterAccount, Pin, PoolRanking, RANK_MAX, RESERVE_PERCENT_MAX, Schedule,
+    ScheduleChange, Standing, Strategy,
 };
-use crate::tui::client::settings::SettingsJob;
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Modal, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::Request;
+use crate::tui::seam::{AccountRow, account_label};
 use ratatui::text::Line;
 
 const RESERVE_STEP: u8 = 5;
 const NAME_WIDTH: usize = 28;
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MODAL_WIDTH: u16 = 76;
+
+/// The room for one line of a choice's help text: the modal less its border, its padding
+/// and the four spaces the help is set in by.
+const DETAIL_WIDTH: usize = MODAL_WIDTH as usize - 8;
 
 /// The account choice editor over one pool, shown as a modal on Settings, Pools: row 0 is
 /// the app strategy, row 1 the pool's own strategy and each later row one member's rank,
-/// reserve and pin. Each change goes to the engine at once.
+/// reserve and pin. The app-wide Live master account choice (DEC-139) shows under the
+/// strategies with its help wrapped to the box, and changes with `m` from any row. Each
+/// change goes to the engine at once.
 pub struct ChoiceEditor {
     pub pool: CredentialRef,
     pub row: usize,
+}
+
+/// The Live master account choice after the given one, wrapping to the first.
+/// Takes the current choice. Returns the choice to save.
+pub fn next_live_master(current: LiveMasterAccount) -> LiveMasterAccount {
+    let all = LiveMasterAccount::ALL;
+    let at = all
+        .iter()
+        .position(|choice| *choice == current)
+        .expect("every choice is listed");
+    all[(at + 1) % all.len()]
 }
 
 /// The next strategy in the picker. Takes the current one, the direction and whether the
@@ -123,6 +140,7 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
             weekly_resets_ms,
             weekly_left_percent,
             use_last,
+            ..
         } => {
             let line = match (weekly_resets_ms, weekly_left_percent) {
                 (Some(resets), Some(left)) => format!("resets {}, {left}% left", at(resets)),
@@ -135,6 +153,8 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
                 line
             }
         }
+        Standing::NotSignedIn => "not signed in".to_owned(),
+        Standing::SignInUnconfirmed => "sign-in needs a check".to_owned(),
         Standing::Paused { until_ms } => format!("paused until {}", at(until_ms)),
         Standing::NeverUse => "never use".to_owned(),
         Standing::FiveHourCap {
@@ -154,12 +174,27 @@ pub fn standing_line(standing: &Standing, now_ms: i64, offset: i64) -> String {
     }
 }
 
+/// Names one pool account as Accounts does. Takes the account's id, its provider word when
+/// it is a member of the pool, and the owner's account rows. Returns the account's words
+/// ([`account_label`]: the name, with the id after a name two accounts share) or, while no
+/// name is known, the provider word and the id, or the id alone.
+fn shown_name(id: &CredentialRef, provider: Option<&str>, accounts: &[AccountRow]) -> String {
+    account_label(id.as_str(), accounts).unwrap_or_else(|| {
+        provider.map_or_else(
+            || id.as_str().to_owned(),
+            |provider| format!("{provider} {}", id.as_str()),
+        )
+    })
+}
+
 /// The "Next accounts" lines for one pool: each account work would try now, numbered in
-/// order, then each held account with why. Takes the pool, its ranking read, now and
-/// the UTC offset. Returns the lines.
+/// order, then each held account with why, each followed by one line per project that holds
+/// it. Takes the pool, its ranking read, the owner's account rows for the names, now and the
+/// UTC offset. Returns the lines.
 pub fn ranking_lines(
     pool: &PoolSummary,
     ranking: Option<&Result<Vec<PoolRanking>, String>>,
+    accounts: &[AccountRow],
     now_ms: i64,
     offset: i64,
 ) -> Vec<String> {
@@ -181,14 +216,15 @@ pub fn ranking_lines(
     };
     let mut place = 0;
     for account in &found.accounts {
-        let name = pool
+        let member = pool
             .members
             .iter()
-            .find(|member| member.id == account.connection)
-            .map_or_else(
-                || account.connection.as_str().to_owned(),
-                |member| format!("{} {}", member.provider, member.id.as_str()),
-            );
+            .find(|member| member.id == account.connection);
+        let name = shown_name(
+            &account.connection,
+            member.map(|member| member.provider.as_str()),
+            accounts,
+        );
         let mark = if matches!(account.standing, Standing::Next { .. }) {
             place += 1;
             format!("{place:>2}.")
@@ -200,6 +236,13 @@ pub fn ranking_lines(
             clipped(&name, NAME_WIDTH - 4),
             standing_line(&account.standing, now_ms, offset)
         ));
+        lines.extend(account.held_for.iter().map(|hold| {
+            format!(
+                "    Held for {} until {}",
+                clipped(&hold.name, NAME_WIDTH).trim_end(),
+                at_text(hold.until_ms, now_ms, offset)
+            )
+        }));
     }
     if found.accounts.is_empty() {
         lines.push("  No accounts in this pool.".into());
@@ -230,19 +273,18 @@ impl ChoiceEditor {
     }
 
     /// Handles one key: arrows move and change, `<` and `>` move a reserve, `p` cycles a
-    /// pin and Esc closes. Takes the key, the stored schedule, the pool and the context.
-    /// Returns false when the editor closes; a change is queued for the engine.
+    /// pin and `m` changes the Live master account choice. Takes the key, the schedule with
+    /// every change sent so far, and the pool.
+    /// Returns the change the key makes, for the caller to apply and send to the engine.
     pub fn key(
         &mut self,
         key: &Key,
         schedule: &Schedule,
         pool: &PoolSummary,
-        ctx: &mut Ctx,
-    ) -> bool {
+    ) -> Option<ScheduleChange> {
         let rows = 2 + pool.members.len();
         self.row = self.row.min(rows - 1);
-        let change = match key {
-            Key::Esc => return false,
+        match key {
             Key::Up => {
                 self.row = self.row.saturating_sub(1);
                 None
@@ -260,16 +302,11 @@ impl ChoiceEditor {
                 pin: next_pin(plan.pin),
                 ..plan
             }),
+            Key::Char('m') => Some(ScheduleChange::LiveMaster {
+                choice: next_live_master(schedule.live_master),
+            }),
             _ => None,
-        };
-        if let Some(change) = change {
-            let generation = ctx.next_generation();
-            ctx.request(Request::Settings(Box::new(SettingsJob::SetSchedule {
-                change,
-                generation,
-            })));
         }
-        true
     }
 
     fn shift(
@@ -319,6 +356,7 @@ impl ChoiceEditor {
         ctx: &Ctx,
     ) -> (Modal, Vec<Hint>) {
         let mark = |row: usize| if row == self.row { "> " } else { "  " };
+        let accounts = ctx.store.accounts.ready().map_or(&[][..], Vec::as_slice);
         let app = schedule.strategy;
         let own = pool_strategy(schedule, &pool.id);
         let mut body = vec![
@@ -337,14 +375,22 @@ impl ChoiceEditor {
                     |own| own.label().to_owned()
                 )
             )),
-            Line::default(),
+            Line::raw(format!(
+                "  {}{}",
+                clipped("Live master account", NAME_WIDTH),
+                schedule.live_master.label()
+            )),
         ];
+        for line in crate::tui::text::wrap(schedule.live_master.detail(), DETAIL_WIDTH) {
+            body.push(Line::raw(format!("    {line}")));
+        }
+        body.push(Line::default());
         for (index, member) in pool.members.iter().enumerate() {
             body.push(Line::raw(format!(
                 "{}{}{}",
                 mark(index + 2),
                 clipped(
-                    &format!("{} {}", member.provider, member.id.as_str()),
+                    &shown_name(&member.id, Some(&member.provider), accounts),
                     NAME_WIDTH
                 ),
                 plan_line(&schedule.plan(&member.id))
@@ -355,6 +401,7 @@ impl ChoiceEditor {
             ranking_lines(
                 pool,
                 ranking,
+                accounts,
                 crate::tui::clock::now_ms(),
                 crate::tui::clock::local_offset(),
             )
@@ -364,7 +411,7 @@ impl ChoiceEditor {
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         (
             Modal {
-                width: 76,
+                width: MODAL_WIDTH,
                 title: format!("Account choice: {}", pool.name),
                 body,
                 top: None,
@@ -373,6 +420,7 @@ impl ChoiceEditor {
                 hint(&arrows, "Order or rank"),
                 hint("< >", "Reserve"),
                 hint("p", "Pin"),
+                hint("m", "Live master account"),
                 hint("Esc", "Close"),
             ],
         )

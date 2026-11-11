@@ -29,21 +29,31 @@ impl NativeBridge {
             .map_err(|error| caused("owner_read_failed", &error.0))
     }
 
-    /// Sends one scheduling change, such as a pool strategy or an account's reserve.
-    /// Takes the change and the client generation.
-    /// Returns the actual commit receipt; a value out of range is a plain failure.
+    /// Sends one scheduling change, such as a pool strategy or an account's reserve. Its
+    /// freshness read is the small owner profile, never the whole schedule, so a schedule
+    /// larger than one reply can still be changed and shrunk.
+    /// Takes the change, the schedule version the screen showed and the client generation.
+    /// Returns the actual commit receipt; a value out of range is a plain failure and a
+    /// schedule changed since is the plain rejection `stale_revision`.
     pub async fn set_account_schedule(
         &mut self,
         change: ScheduleChange,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
         change
             .validate()
             .map_err(|error| caused("account_schedule_invalid", &error.0))?;
-        self.account_schedule().await?;
         self.controller()?
-            .begin_mutation(OwnerMutation::AccountSchedule { change }, generation)
+            .owner_profile()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::AccountSchedule { change, version },
+                generation,
+            )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }

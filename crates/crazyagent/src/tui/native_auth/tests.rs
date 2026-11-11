@@ -13,6 +13,7 @@ use crate::engine::owner::{
 use crate::protocol::{ConfigId, CredentialRef, RequestId};
 use crate::tui::app::{App, Focus, UiEvent};
 use crate::tui::client::{Connection, OwnerEvent};
+use crate::tui::test_home::ENGINE_WAIT;
 use crate::tui::{key_event, model_access, views};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const CATALOG: &str = r#"
-timeout_ms = 1000
+timeout_ms = 10000
 [model_access]
 accounts = ["account-codex", "account-claude", "account-api", "account-local"]
 [[model_access.connections]]
@@ -91,6 +92,15 @@ impl Case {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
         let project = root.path().join("project.toml");
+        assert_eq!(
+            u128::from(
+                crate::config::resolve_config_bytes(CATALOG, "")
+                    .unwrap()
+                    .settings
+                    .timeout_ms
+            ),
+            ENGINE_WAIT.as_millis()
+        );
         std::fs::write(&global, CATALOG).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
@@ -114,13 +124,9 @@ impl Case {
     }
 
     async fn controller(&self) -> OwnerController {
-        OwnerController::attach(
-            self.root.path(),
-            OwnerClientKind::Tui,
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap()
+        OwnerController::attach(self.root.path(), OwnerClientKind::Tui, ENGINE_WAIT)
+            .await
+            .unwrap()
     }
 
     async fn selected(&self, id: &str) -> (model_access::Basis, ModelConnection) {
@@ -223,7 +229,7 @@ struct Ui {
 
 impl Ui {
     async fn new(case: &Case) -> Self {
-        let client = Client::new(case.root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+        let client = Client::new(case.root.path().join("e.sock"), ENGINE_WAIT).unwrap();
         let mut ui = Self {
             connection: Connection::connect_paired(client).unwrap(),
             app: App::new(),
@@ -237,7 +243,7 @@ impl Ui {
     }
 
     async fn owner_event(&mut self) -> OwnerEvent {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + ENGINE_WAIT;
         loop {
             if let Some(event) = self.connection.poll_owner().unwrap() {
                 return event;
@@ -251,7 +257,7 @@ impl Ui {
     }
 
     async fn drain(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + ENGINE_WAIT;
         loop {
             while let Some(event) = self.connection.poll_owner().unwrap() {
                 self.app.apply_owner(event).unwrap();
@@ -1354,6 +1360,73 @@ async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_b
     .await;
 }
 
+/// Unit input: a synthetic holder list into the real reducer and label. A sign-out refused
+/// because a Full access agent left processes running names them plainly, offers to sign
+/// out anyway, and that action releases the account.
+#[tokio::test]
+async fn unit_refused_logout_names_what_full_access_left_running_and_signs_out_anyway() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = unit_inspected(basis, connection);
+        advance(&mut state, 4);
+        state.reduce(&UiEvent::Submit).unwrap();
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let logout = state.request().unwrap();
+        state
+            .apply(Event {
+                job: logout,
+                result: Err("native_profile_in_use".into()),
+            })
+            .unwrap();
+        let using = state.request().unwrap();
+        let report = "Full access cannot stop what the agent started outside its terminal; still running: 4242 node. Its account stays held until they end or you sign it out";
+        let leftover = crate::agents::Holder::Leftover {
+            report: report.into(),
+        };
+        state
+            .apply(Event {
+                job: using,
+                result: Ok(Output::Using(crate::agents::AccountUse {
+                    agents: Vec::new(),
+                    holders: vec![leftover.clone()],
+                })),
+            })
+            .unwrap();
+        let shown = state.render(false);
+        assert!(shown.contains(&format!("In use by: {report}")), "{shown}");
+        assert!(shown.contains("> Back |   Sign out anyway"), "{shown}");
+        let research = crate::agents::Holder::Research {
+            project: crate::protocol::ProjectId::new("beta").unwrap(),
+            job: 7,
+            title: "Market research".into(),
+        };
+        assert_eq!(
+            super::release_label(&crate::agents::AccountUse {
+                agents: Vec::new(),
+                holders: vec![research, leftover],
+            }),
+            "Stop agents and sign out"
+        );
+
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let release = state.request().unwrap();
+        assert!(matches!(release.command, Command::Release));
+        state
+            .apply(Event {
+                job: release,
+                result: Ok(Output::Using(crate::agents::AccountUse::default())),
+            })
+            .unwrap();
+        assert!(matches!(
+            state.request().unwrap().command,
+            Command::Logout(_)
+        ));
+    })
+    .await;
+}
+
 /// Unit input: synthetic holder lists into the real reducer and label. A refused sign-out
 /// names a master conversation and a research job with their projects, and the one owner
 /// action is named by what it ends.
@@ -1431,6 +1504,463 @@ async fn unit_refused_logout_names_a_master_conversation_and_a_research_job_and_
             state.request().unwrap().command,
             Command::Logout(_)
         ));
+    })
+    .await;
+}
+
+async fn stuck_sign_in(case: &Case, ui: &mut Ui) {
+    ui.connections(1).await;
+    ui.key(KeyCode::F(2));
+    let inspected = ui.auth().await;
+    ui.apply(inspected);
+    let lock = crate::landing::open(case.root.path()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    ui.key(KeyCode::Enter);
+    let started = ui.auth().await;
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(
+        started.result.as_ref().err().map(String::as_str),
+        Some("native_auth_outcome_unknown_read_same_operation")
+    );
+    ui.apply(started);
+    ui.key(KeyCode::Esc);
+}
+
+#[tokio::test]
+async fn real_unconfirmed_sign_in_leaves_other_owner_changes_open() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        stuck_sign_in(&case, &mut ui).await;
+        assert!(!ui.app.model_access.has_pending(), "{}", ui.render(160, 50));
+    })
+    .await;
+}
+
+async fn remove_elsewhere(case: &Case, id: &str) {
+    let mut other =
+        OwnerController::attach(case.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
+    let read = other.read(record_query(id)).await.unwrap();
+    let OwnerData::ModelAccessRecord { source_hash, .. } = read.data else {
+        panic!("actual connection record required");
+    };
+    other
+        .begin_mutation(
+            crate::engine::owner::OwnerMutation::ModelAccess {
+                expected_config_id: read.config_id,
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::RemoveConnectedAccount { id: reference(id) },
+            },
+            1,
+        )
+        .unwrap();
+    let removed = other.send_pending().await.unwrap();
+    assert!(matches!(
+        removed,
+        crate::engine::owner::OwnerResponse::Applied { operation }
+            if operation.result == crate::engine::owner::OwnerResult::Applied
+    ));
+}
+
+#[tokio::test]
+async fn real_clear_stuck_sign_in_ends_it_once_the_engine_answers_for_it() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        stuck_sign_in(&case, &mut ui).await;
+        assert!(ui.app.model_access.signing_in());
+        assert!(
+            ui.render(160, 50).contains("c clears a stuck sign-in"),
+            "{}",
+            ui.render(160, 50)
+        );
+        remove_elsewhere(&case, "b-claude").await;
+        ui.key(KeyCode::Char('c'));
+        let cleared = ui.auth().await;
+        assert_eq!(
+            cleared.result.as_ref().err().map(String::as_str),
+            Some("native_auth_operation_missing")
+        );
+        ui.apply(cleared);
+        assert!(!ui.app.model_access.signing_in());
+        assert!(
+            ui.render(160, 50).contains("Stuck sign-in cleared"),
+            "{}",
+            ui.render(160, 50)
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_panel_reads_its_sign_in_after_another_account_changed() {
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = State::default();
+        state.open(basis.clone(), connection.clone()).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let started = ui.exchange(state.request().unwrap()).await;
+        assert_unavailable(real_reply(&started), "a-codex");
+        let operation = real_reply(&started).fact.operation_id.clone();
+        state.apply(started).unwrap();
+        remove_elsewhere(&case, "b-claude").await;
+        let (edited, current) = case.selected("a-codex").await;
+        assert_ne!(edited.config_id, basis.config_id);
+        assert_eq!(current, connection);
+        state.open(edited, current).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        advance(&mut state, 2);
+        assert_eq!(state.reduce(&UiEvent::Submit), Ok(true));
+        let read = state.request().expect("the panel reads its own sign-in");
+        let Command::Read(query) = &read.command else {
+            panic!("read required")
+        };
+        assert_eq!(query.operation_id, operation);
+        assert_eq!(query.scope, scope(&basis, &connection));
+        let answered = ui.exchange(read).await;
+        assert_eq!(real_reply(&answered).fact.operation_id, operation);
+        state.apply(answered).unwrap();
+        assert_eq!(state.operation_id(), Some(&operation));
+        assert!(state.request().is_none());
+    })
+    .await;
+}
+
+/// Registers a Claude login that runs until the row creates its stop file, so a row ends a
+/// running sign-in without signalling anything. Input: the case. Output: the file the login
+/// writes once it runs and the stop file it waits for.
+async fn stoppable_claude(case: &Case) -> (PathBuf, PathBuf) {
+    let running = case.root.path().join("login-running");
+    let stop = case.root.path().join("login-stop");
+    let script = case.root.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\ni=0\nwhile [ ! -e '{}' ] && [ \"$i\" -lt 300 ]; do /bin/sleep 0.1; i=$((i+1)); done\nexit 1\n",
+            running.display(),
+            stop.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let host = PathBuf::from(
+        std::env::var_os("CRAZYAGENT_TEST_NATIVE_AUTH_HOST")
+            .expect("the test run supplies the built crazyagent custodian executable path"),
+    );
+    let mut service = case.service.lock().await;
+    let service = service.as_mut().unwrap();
+    service.register_native_auth_host(&host).unwrap();
+    service.register_claude_executable(&script).unwrap();
+    (running, stop)
+}
+
+/// Waits for the stand-in login to run. Input: the file it writes. Output: none; panics past
+/// the bound.
+async fn login_started(running: &std::path::Path) {
+    for _ in 0..100 {
+        if std::fs::read_to_string(running)
+            .unwrap_or_default()
+            .ends_with('\n')
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the stand-in login never started");
+}
+
+/// Starts a Claude sign-in on b-claude through the real panel and closes the panel with the
+/// login still running. Inputs: the UI and the file the login writes. Output: none.
+async fn running_sign_in(ui: &mut Ui, running: &std::path::Path) {
+    ui.connections(1).await;
+    ui.key(KeyCode::F(2));
+    let inspected = ui.auth().await;
+    ui.apply(inspected);
+    ui.key(KeyCode::Enter);
+    let started = ui.auth().await;
+    ui.apply(started);
+    login_started(running).await;
+    ui.key(KeyCode::Esc);
+    assert!(ui.app.model_access.signing_in());
+}
+
+/// The engine ends a sign-in whose own account was removed at its custodian's next check, so
+/// the panel's read lands before or after that end. Before it, the sign-in shows stuck and c
+/// clears it once it ends; after it, nothing is left stuck. Both are what the owner should see.
+#[tokio::test]
+async fn real_sign_in_whose_own_account_was_removed_elsewhere_shows_stuck_and_c_clears_it_once_it_ends()
+ {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        let healthy = ui.render(160, 50);
+        assert!(!healthy.contains("c clears a stuck sign-in"), "{healthy}");
+        remove_elsewhere(&case, "b-claude").await;
+        ui.connections(0).await;
+        let seen = ui.render(160, 50);
+        if !ui.app.model_access.signing_in() {
+            std::fs::write(&stop, "").unwrap();
+            assert!(!seen.contains("c clears a stuck sign-in"), "{seen}");
+            return;
+        }
+        assert!(seen.contains("c clears a stuck sign-in"), "{seen}");
+        ui.key(KeyCode::Char('c'));
+        let waiting = ui.auth().await;
+        let answer = waiting.result.as_ref().err().map(String::as_str);
+        assert!(
+            answer == Some("native_profile_source_conflict")
+                || answer.is_some_and(crate::engine::owner::ends_operation),
+            "{answer:?}"
+        );
+        ui.apply(waiting);
+        std::fs::write(&stop, "").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while ui.app.model_access.signing_in() {
+            assert!(Instant::now() < deadline, "c never cleared the sign-in");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            ui.key(KeyCode::Char('c'));
+            let answer = ui.auth().await;
+            ui.apply(answer);
+        }
+        let cleared = ui.render(160, 50);
+        assert!(cleared.contains("Stuck sign-in cleared"), "{cleared}");
+    })
+    .await;
+}
+
+/// Changes a connection's model from another owner client, so the entry a sign-in was bound
+/// to is replaced. Inputs: the case and the connection id. Output: none; panics unless the
+/// change applied.
+async fn replace_elsewhere(case: &Case, id: &str) {
+    let mut other =
+        OwnerController::attach(case.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
+    let read = other.read(record_query(id)).await.unwrap();
+    let OwnerData::ModelAccessRecord {
+        source_hash,
+        record: ModelAccessRecord::Connection { mut connection },
+        ..
+    } = read.data
+    else {
+        panic!("actual connection record required");
+    };
+    connection.model.id = "model-replaced".into();
+    other
+        .begin_mutation(
+            crate::engine::owner::OwnerMutation::ModelAccess {
+                expected_config_id: read.config_id,
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::ReplaceConnection { connection },
+            },
+            1,
+        )
+        .unwrap();
+    let replaced = other.send_pending().await.unwrap();
+    assert!(matches!(
+        replaced,
+        crate::engine::owner::OwnerResponse::Applied { operation }
+            if operation.result == crate::engine::owner::OwnerResult::Applied
+    ));
+}
+
+/// The engine ends a sign-in whose own account was replaced at its custodian's next check, so
+/// the panel's read lands before or after that end: a sign-in it still holds shows stuck, and
+/// one the engine ended shows nothing stuck.
+#[tokio::test]
+async fn real_sign_in_whose_own_account_was_replaced_elsewhere_shows_stuck_with_its_panel_closed() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        replace_elsewhere(&case, "b-claude").await;
+        ui.connections(1).await;
+        let seen = ui.render(160, 50);
+        std::fs::write(&stop, "").unwrap();
+        assert_eq!(
+            seen.contains("c clears a stuck sign-in"),
+            ui.app.model_access.signing_in(),
+            "{seen}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_running_sign_in_stays_healthy_after_another_account_was_removed_elsewhere() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        running_sign_in(&mut ui, &running).await;
+        remove_elsewhere(&case, "a-codex").await;
+        ui.connections(0).await;
+        let screen = ui.render(160, 50);
+        assert!(!screen.contains("c clears a stuck sign-in"), "{screen}");
+        assert!(ui.app.model_access.signing_in());
+        std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_panel_refuses_a_running_sign_in_whose_own_account_was_replaced_and_marks_it_stuck() {
+    run(|case| async move {
+        let (running, stop) = stoppable_claude(&case).await;
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("b-claude").await;
+        let mut state = State::default();
+        state.open(basis.clone(), connection.clone()).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let started = ui.exchange(state.request().unwrap()).await;
+        state.apply(started).unwrap();
+        login_started(&running).await;
+        assert!(state.has_pending());
+        assert!(state.stuck(Some(&basis)).is_none());
+        replace_elsewhere(&case, "b-claude").await;
+        let (edited, current) = case.selected("b-claude").await;
+        assert_ne!(current, connection);
+        state.open(edited.clone(), current).unwrap();
+        let inspect = state.request().unwrap();
+        state.apply(ui.exchange(inspect).await).unwrap();
+        advance(&mut state, 1);
+        assert_eq!(
+            state.reduce(&UiEvent::Submit),
+            Err(
+                "This account changed after its sign-in started; close this panel, then c clears the stuck sign-in"
+                    .to_owned()
+            )
+        );
+        assert!(state.request().is_none());
+        assert_eq!(
+            state.stuck(Some(&edited)).map(|found| found.id.as_str()),
+            Some("b-claude")
+        );
+        std::fs::write(&stop, "").unwrap();
+    })
+    .await;
+}
+
+/// Shapes a reply into a sign-in still awaiting the owner. Input: the reply. Output: none.
+fn unit_still_awaiting(reply: &mut NativeAuthReply) {
+    reply.fact.phase = NativeAuthPhase::AwaitingOwner;
+    reply.account = None;
+}
+
+/// A sign-in awaiting the owner with its panel closed, a recheck started on a moved config and
+/// the reply to that read. Inputs: the basis, the connection and the reply's shape. Output: the
+/// state and the reply's event.
+fn unit_recheck(
+    basis: model_access::Basis,
+    connection: ModelConnection,
+    shape: impl FnOnce(&mut NativeAuthReply),
+) -> (State, Event) {
+    let (mut state, job) = unit_started(basis.clone(), connection);
+    let started = job.clone();
+    let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
+    unit_still_awaiting(&mut reply);
+    state
+        .apply(Event {
+            job,
+            result: Ok(Output::Auth(Box::new(reply))),
+        })
+        .unwrap();
+    state.hide().unwrap();
+    let mut moved = basis;
+    moved.config_id = ConfigId::new("other-config").unwrap();
+    assert!(state.recheck(Some(&moved)));
+    let read = state.request().unwrap();
+    let Command::Read(query) = &read.command else {
+        panic!("a recheck reads the held sign-in");
+    };
+    let mut answer = unit_signed_out_reply(&started, "unit@example.invalid");
+    answer.request_id = query.request_id.clone();
+    shape(&mut answer);
+    let event = Event {
+        job: read,
+        result: Ok(Output::Auth(Box::new(answer))),
+    };
+    (state, event)
+}
+
+#[tokio::test]
+async fn unit_healthy_recheck_leaves_the_notice_the_owner_was_reading() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("b-claude").await;
+        let (mut state, healthy) = unit_recheck(basis, connection, unit_still_awaiting);
+        state.notice = Cow::Borrowed("What the owner was reading");
+        state.apply(healthy).unwrap();
+        assert_eq!(state.notice.as_ref(), "What the owner was reading");
+        assert!(state.has_pending());
+    })
+    .await;
+}
+
+/// The line the owner reads on the page, with the panel closed: a healthy recheck leaves it,
+/// and a result that changes the sign-in still reaches it.
+#[tokio::test]
+async fn unit_page_keeps_its_notice_through_a_healthy_recheck_and_shows_a_changed_result() {
+    const SAVED: &str = "Metadata saved; authentication and execution remain unavailable";
+    run(|case| async move {
+        let mut ui = Ui::new(&case).await;
+        let (basis, connection) = case.selected("b-claude").await;
+        let (state, healthy) = unit_recheck(basis.clone(), connection.clone(), unit_still_awaiting);
+        ui.app.model_access.native_auth = state;
+        ui.app.model_access.notice = SAVED.into();
+        ui.apply(healthy);
+        assert_eq!(ui.app.model_access.notice, SAVED);
+        let (state, ended) = unit_recheck(basis, connection, |_| {});
+        ui.app.model_access.native_auth = state;
+        ui.app.model_access.notice = SAVED.into();
+        ui.apply(ended);
+        assert_ne!(ui.app.model_access.notice, SAVED);
+        assert_eq!(
+            ui.app.model_access.notice,
+            ui.app.model_access.native_auth.notice()
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn unit_transient_error_on_a_recheck_leaves_a_running_sign_in_healthy() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("b-claude").await;
+        let (mut state, job) = unit_started(basis.clone(), connection);
+        let mut reply = unit_signed_out_reply(&job, "unit@example.invalid");
+        reply.fact.phase = NativeAuthPhase::AwaitingOwner;
+        reply.account = None;
+        state
+            .apply(Event {
+                job,
+                result: Ok(Output::Auth(Box::new(reply))),
+            })
+            .unwrap();
+        state.hide().unwrap();
+        assert!(state.has_pending());
+        let mut moved = basis.clone();
+        moved.config_id = ConfigId::new("other-config").unwrap();
+        assert!(state.stuck(Some(&moved)).is_none());
+        assert!(state.recheck(Some(&moved)));
+        let read = state.request().unwrap();
+        assert!(matches!(read.command, Command::Read(_)));
+        state
+            .apply(Event {
+                job: read,
+                result: Err("owner_request_timed_out".into()),
+            })
+            .unwrap();
+        assert!(
+            state.stuck(Some(&moved)).is_none(),
+            "a check that could not be answered says nothing about the sign-in"
+        );
+        assert!(state.has_pending());
     })
     .await;
 }

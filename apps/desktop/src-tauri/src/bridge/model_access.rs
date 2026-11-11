@@ -2,11 +2,12 @@ use super::*;
 use crazyagent::config::{ModelAccessEdit, ModelAuthentication, ModelConnection, ModelEndpoint};
 use crazyagent::engine::owner::{ModelAccessCollection, ModelAccessRecord, NativeAuthScope};
 use crazyagent::engine::owner::{ModelAccessCursor, OwnerReadReply};
-use crazyagent::protocol::CredentialRef;
+use crazyagent::protocol::{CredentialRef, RequestId};
 
 pub(super) struct Selection {
     generation: u64,
     state: OwnerReadReply,
+    attempt: Option<RequestId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,14 +41,73 @@ impl NativeBridge {
         ticket: &str,
     ) -> Result<(NativeAuthScope, ModelConnection), BridgeError> {
         let (scope, connection) = self.selected_model_connection(ticket)?;
-        if connection.protocol.as_str() != "native"
-            || !matches!(connection.endpoint, ModelEndpoint::Native {})
-            || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
-            || !matches!(connection.harness.as_str(), "codex" | "claude")
-        {
-            return Err(failure("native_profile_not_managed"));
-        }
+        managed(&connection)?;
         Ok((scope, connection))
+    }
+
+    /// The selected connection for a read, cancel or other request about the sign-in this
+    /// bridge holds. The ticket is accepted as `native_auth_selection` accepts it, or, once
+    /// other owner reads replaced the view it was read from, only while its selection is bound
+    /// to that held attempt for the same connection and profile; the engine still checks the
+    /// scope. Input: the ticket. Output: the scope and connection, or the refusal.
+    pub(super) fn held_auth_selection(
+        &self,
+        ticket: &str,
+    ) -> Result<(NativeAuthScope, ModelConnection), BridgeError> {
+        match self.native_auth_selection(ticket) {
+            Err(refused) if refused.code == "stale_model_access" => {
+                let (scope, connection) = self.bound_auth_selection(ticket).ok_or(refused)?;
+                managed(&connection)?;
+                Ok((scope, connection))
+            }
+            selected => selected,
+        }
+    }
+
+    /// Reads the ticket's selection when it is bound to the sign-in this bridge holds: same
+    /// connection id and profile, and the attempt the selection was read with or started.
+    /// Input: the ticket. Output: the scope from that selection and its connection, or none.
+    fn bound_auth_selection(&self, ticket: &str) -> Option<(NativeAuthScope, ModelConnection)> {
+        if !self.status().connected || self.status().pending {
+            return None;
+        }
+        let selected = self
+            .model_access
+            .as_ref()
+            .filter(|value| ticket.len() <= 20 && ticket == value.generation.to_string())?;
+        let attempt = selected.attempt.as_ref()?;
+        let OwnerData::ModelAccessRecord {
+            source_hash,
+            record: ModelAccessRecord::Connection { connection },
+            ..
+        } = &selected.state.data
+        else {
+            return None;
+        };
+        if self.held_attempt(connection).as_ref() != Some(attempt) {
+            return None;
+        }
+        let controller = self.controller.as_ref()?;
+        Some((
+            NativeAuthScope {
+                expected_database_instance: controller.identity().database_instance().into(),
+                connection: connection.id.clone(),
+                expected_config_id: selected.state.config_id.clone(),
+                expected_source_hash: source_hash.clone(),
+            },
+            connection.clone(),
+        ))
+    }
+
+    /// Binds the current selection to the sign-in attempt just started from its ticket, so
+    /// the ticket keeps reading and cancelling that attempt after other owner reads.
+    /// Input: the attempt id. Output: none.
+    pub(super) fn bind_attempt(&mut self, attempt: &RequestId) {
+        let selected = self
+            .model_access
+            .as_mut()
+            .expect("a sign-in starts only from a selected connection");
+        selected.attempt = Some(attempt.clone());
     }
 
     pub(super) fn selected_model_connection(
@@ -152,6 +212,7 @@ impl NativeBridge {
         self.model_access = Some(Selection {
             generation: self.generation,
             state,
+            attempt: None,
         });
         assert!(page.items.len() <= usize::from(PAGE_SIZE));
         assert!(page.fresh);
@@ -193,9 +254,14 @@ impl NativeBridge {
             fresh: true,
             record: record.clone(),
         })?;
+        let attempt = match record {
+            ModelAccessRecord::Connection { connection } => self.held_attempt(connection),
+            _ => None,
+        };
         self.model_access = Some(Selection {
             generation: self.generation,
             state,
+            attempt,
         });
         assert_eq!(detail.record.id(), &id);
         assert!(detail.fresh);
@@ -224,6 +290,7 @@ impl NativeBridge {
         })?;
         assert!(self.generation > 0);
         assert!(self.controller()?.view().is_some());
+        self.recheck_auth(&state.config_id).await;
         Ok(state)
     }
 
@@ -233,7 +300,8 @@ impl NativeBridge {
         edit: ModelAccessEdit,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_account_change(|stuck| edit.touches(stuck))
+            .await?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -318,6 +386,20 @@ impl NativeBridge {
         );
         self.deliver_intent(false).await
     }
+}
+
+/// Refuses a connection CrazyAgent does not manage a native sign-in for: only a native Codex
+/// or Claude connection whose sign-in is native managed. Input: the connection. Output: Ok,
+/// or `native_profile_not_managed`.
+fn managed(connection: &ModelConnection) -> Result<(), BridgeError> {
+    if connection.protocol.as_str() != "native"
+        || !matches!(connection.endpoint, ModelEndpoint::Native {})
+        || !matches!(connection.auth, ModelAuthentication::NativeManaged { .. })
+        || !matches!(connection.harness.as_str(), "codex" | "claude")
+    {
+        return Err(failure("native_profile_not_managed"));
+    }
+    Ok(())
 }
 
 fn record_collection(record: &ModelAccessRecord) -> ModelAccessCollection {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
 const PRODUCT = "CrazyAgent";
+const STDERR_TAIL = 2000;
 
 /** Release targets: operating system, the architecture word Tauri puts in bundle names, executable suffix. */
 export const TARGETS = Object.freeze({
@@ -56,10 +57,17 @@ async function isFile(path) {
 }
 
 function run(command, args, options = {}) {
-  const result = spawnSync(command, args, { stdio: ["ignore", "pipe", "pipe"], maxBuffer: 16 * 1024 * 1024, ...options });
-  if (result.error) throw result.error;
-  if (result.status !== 0) fail(`release_command_failed:${basename(command)}:${result.status}:${String(result.stderr).slice(-2000)}`);
-  return result;
+  return new Promise((succeed, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"], ...options });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => { stderr = (stderr + chunk).slice(-STDERR_TAIL); });
+    child.once("error", reject);
+    child.once("close", (status) => {
+      if (status === 0) succeed();
+      else reject(new Error(`release_command_failed:${basename(command)}:${status}:${stderr}`));
+    });
+  });
 }
 
 /**
@@ -111,9 +119,9 @@ export async function packageCli({ target, version, source, suffixed, out }) {
     }
     if (os === "windows") {
       const tar = process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe") : "tar";
-      run(tar, ["-a", "-c", "-f", archive, "-C", stage, ...members]);
+      await run(tar, ["-a", "-c", "-f", archive, "-C", stage, ...members]);
     } else {
-      run("tar", ["--no-xattrs", "-c", "-z", "-f", archive, "-C", stage, ...members], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+      await run("tar", ["--no-xattrs", "-c", "-z", "-f", archive, "-C", stage, ...members], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
     }
   } finally {
     await rm(stage, { recursive: true, force: true });
@@ -131,7 +139,7 @@ export async function signFile({ file, version, env = process.env, tauri = TAURI
   if (!env.TAURI_SIGNING_PRIVATE_KEY && !env.TAURI_SIGNING_PRIVATE_KEY_PATH) fail("release_signing_key_missing");
   const signature = `${file}.sig`;
   if (await isFile(signature)) fail(`release_asset_exists:${basename(signature)}`);
-  run(process.execPath, [tauri, "signer", "sign", "--app-version", version, file], { env });
+  await run(process.execPath, [tauri, "signer", "sign", "--app-version", version, file], { env });
   if (!(await isFile(signature))) fail("release_signature_not_written");
   return signature;
 }

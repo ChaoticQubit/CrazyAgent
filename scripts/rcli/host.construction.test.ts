@@ -23,7 +23,9 @@ function requireCleanAuthEnvironment(): void {
 async function admittedHome(): Promise<string> {
   const home = process.env.CRAZYAGENT_RCLI_CONSTRUCTION_HOME;
   if (!home || !isAbsolute(home)) {
-    throw new Error("construction_explicit_admitted_home_required");
+    throw new Error(
+      "BLOCKED: set CRAZYAGENT_RCLI_CONSTRUCTION_HOME to the absolute path of a private rcli home with provider credentials (construction_explicit_admitted_home_required)",
+    );
   }
   const metadata = await lstat(home);
   if (
@@ -65,6 +67,18 @@ test("actual Config rejects an empty authentication home precisely", async () =>
     expect(await readdir(cwd)).toEqual([".git"]);
   });
 }, 10_000);
+
+test("a missing admitted home is reported as a BLOCKED prerequisite, not as a failure of the code", async () => {
+  const saved = process.env.CRAZYAGENT_RCLI_CONSTRUCTION_HOME;
+  delete process.env.CRAZYAGENT_RCLI_CONSTRUCTION_HOME;
+  try {
+    await expect(admittedHome()).rejects.toThrow(/^BLOCKED: set CRAZYAGENT_RCLI_CONSTRUCTION_HOME /);
+  } finally {
+    if (saved !== undefined) {
+      process.env.CRAZYAGENT_RCLI_CONSTRUCTION_HOME = saved;
+    }
+  }
+});
 
 test("actual admitted Config and client construct a closed controller whose disposal detaches session listeners", async () => {
   requireCleanAuthEnvironment();

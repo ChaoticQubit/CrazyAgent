@@ -60,6 +60,25 @@ impl FileExt for std::fs::File {
 #[cfg(windows)]
 pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+/// The Windows open flag that lets a folder be opened as a handle.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// The Windows file attribute of a reparse point: a junction, a link or a mount point.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+/// What [`open_plain_beneath`] answers on Windows when the folder itself is a junction, a
+/// link or a mount point, so nothing below it is read. Callers that show a reason match it.
+#[cfg(windows)]
+pub(crate) const BENEATH_FOLDER_LINKED: &str = "beneath_folder_linked";
+
+/// What [`open_plain_beneath`] answers on Windows when a part below the folder is a
+/// junction, a link or a mount point, is no longer directly inside the part before it, or
+/// was opened under another name than the one asked for.
+#[cfg(windows)]
+pub(crate) const BENEATH_PATH_LINKED: &str = "beneath_path_linked";
+
 /// Reports whether the engine's effective user owns the file the metadata describes.
 /// Takes the metadata. Returns the Unix owner comparison; false where the platform has no
 /// Unix owner to compare, so an ownership check refuses rather than passes.
@@ -209,8 +228,24 @@ pub fn project_folder(stored: &str) -> Result<PathBuf, &'static str> {
 /// project folder. Inputs: the canonical project folder and the relative path.
 /// Output: the file's canonical path, or `context_item_not_openable`.
 pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static str> {
-    assert!(folder.is_absolute());
     let refused = "context_item_not_openable";
+    let extension = Path::new(relative)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    if !extension.is_some_and(|value| DOCUMENT_EXTENSIONS.contains(&value.as_str())) {
+        return Err(refused);
+    }
+    project_file(folder, relative).map_err(|_| refused)
+}
+
+/// Resolves one file inside a project folder for the owner's own editor, of any type:
+/// a relative path of plain parts, not a link, and a regular file still inside the folder.
+/// Inputs: the canonical folder and the relative path. Output: the file's canonical path,
+/// `project_file_missing` when nothing is there, or `project_file_not_openable`.
+pub fn project_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static str> {
+    assert!(folder.is_absolute());
+    let refused = "project_file_not_openable";
     let path = Path::new(relative);
     if relative.is_empty()
         || relative.len() > OPEN_PATH_BYTES_MAX
@@ -220,15 +255,14 @@ pub fn context_file(folder: &Path, relative: &str) -> Result<PathBuf, &'static s
     {
         return Err(refused);
     }
-    let extension = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase);
-    if !extension.is_some_and(|value| DOCUMENT_EXTENSIONS.contains(&value.as_str())) {
-        return Err(refused);
-    }
     let joined = folder.join(path);
-    let metadata = std::fs::symlink_metadata(&joined).map_err(|_| refused)?;
+    let metadata = match std::fs::symlink_metadata(&joined) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("project_file_missing");
+        }
+        Err(_) => return Err(refused),
+    };
     if !metadata.file_type().is_file() {
         return Err(refused);
     }
@@ -260,7 +294,7 @@ pub fn read_plain_file(path: &Path, limit: u64) -> Option<String> {
 /// Opens a path to read without following a link in its last part and without waiting
 /// for a FIFO writer. Takes the path. Returns the open file or the I/O error.
 #[cfg(unix)]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
     std::fs::OpenOptions::new()
@@ -269,10 +303,181 @@ fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Opens a path below a folder the engine holds one part at a time, following no link in
+/// any part from that folder down, so a folder an agent swapped for a link is refused, not
+/// followed. Each part on the way opens as a folder and the last with `last`. Inputs: the
+/// folder, opened by its path, the plain names below it and the last part's flags. Output:
+/// the descriptor, or `EINVAL` for a part that is not a plain name.
+#[cfg(unix)]
+pub(crate) fn open_beneath(
+    base: &Path,
+    below: &Path,
+    last: rustix::fs::OFlags,
+) -> rustix::io::Result<std::os::fd::OwnedFd> {
+    use rustix::fs::{Mode, OFlags};
+    const FOLDER: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+    let parts = below
+        .components()
+        .map(|part| match part {
+            Component::Normal(name) => Ok(name),
+            _ => Err(rustix::io::Errno::INVAL),
+        })
+        .collect::<rustix::io::Result<Vec<_>>>()?;
+    let mut opened = rustix::fs::open(base, FOLDER, Mode::empty())?;
+    for (index, name) in parts.iter().enumerate() {
+        let flags = if index + 1 == parts.len() {
+            last
+        } else {
+            FOLDER
+        };
+        opened = rustix::fs::openat(&opened, *name, flags, Mode::empty())?;
+    }
+    Ok(opened)
+}
+
+/// Opens a file below a folder the engine holds to read, with no link followed from that
+/// folder down and no FIFO waited on ([`open_beneath`]). On Windows every part opens as
+/// itself ([`open_real_beneath`]), so a junction, link or mount point in any part, the
+/// folder itself included, is refused wherever it leads, inside the folder or out of it.
+/// Inputs: the folder and the path below it, plain names only. Output: the open file or the
+/// I/O error.
+pub(crate) fn open_plain_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::OFlags;
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        Ok(std::fs::File::from(open_beneath(base, below, flags)?))
+    }
+    #[cfg(windows)]
+    {
+        let plain = below
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)));
+        if !plain || below.as_os_str().is_empty() {
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        open_real_beneath(base, below)
+    }
+}
+
+/// The Windows way of [`open_plain_beneath`]: opens the folder and then each name below it
+/// as itself, never as a link's target, and goes on only while the opened thing is no
+/// reparse point, its real place, read from its handle, is directly inside the real place
+/// of the one before ([`name_child`]) and that place ends in the asked name
+/// ([`name_ends_in`]). A part swapped between two opens so gives nothing, and neither does
+/// a name Windows matches another way: an 8.3 short name, or a spelling with an ending dot
+/// or space. Inputs: the folder and at least one plain name below it. Output: the open
+/// file, `BENEATH_FOLDER_LINKED` when the folder itself is a reparse point,
+/// `BENEATH_PATH_LINKED` for a part below it, or the I/O error.
+#[cfg(windows)]
+fn open_real_beneath(base: &Path, below: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    let refused =
+        |code: &'static str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, code);
+    let folder = |path: &Path| {
+        std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    };
+    let mut held = folder(base)?;
+    if reparse_point(&held)? {
+        return Err(refused(BENEATH_FOLDER_LINKED));
+    }
+    let mut place = crazyagent_win_sandbox::final_name(&held)?;
+    let mut path = base.to_path_buf();
+    let mut parts = below.components().peekable();
+    assert!(parts.peek().is_some(), "a path below a folder has a name");
+    while let Some(part) = parts.next() {
+        assert!(matches!(part, Component::Normal(_)), "plain names only");
+        path.push(part);
+        let opened = if parts.peek().is_some() {
+            folder(&path)?
+        } else {
+            open_plain(&path)?
+        };
+        let found = crazyagent_win_sandbox::final_name(&opened)?;
+        let asked: Vec<u16> = part.as_os_str().encode_wide().collect();
+        let own = name_child(&place, &found) && name_ends_in(&found, &asked);
+        if reparse_point(&opened)? || !own {
+            return Err(refused(BENEATH_PATH_LINKED));
+        }
+        (held, place) = (opened, found);
+    }
+    Ok(held)
+}
+
+/// Tells whether an open file or folder is a reparse point: a junction, a link or a mount
+/// point, opened as itself. Takes the open handle. Returns the answer or the I/O error.
+#[cfg(windows)]
+fn reparse_point(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::fs::MetadataExt;
+    Ok(file.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
+/// Tells whether a real place is directly inside a folder's real place: below it
+/// ([`name_under`]) by exactly one name, with no further `\`. Inputs: the folder's name and
+/// the found name, as the device names Windows gives for open handles, in UTF-16 units.
+/// Output: the answer.
+#[cfg(any(windows, test))]
+fn name_child(folder: &[u16], found: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let start = folder.strip_suffix(&[SEPARATOR]).unwrap_or(folder).len() + 1;
+    let child = name_under(folder, found) && !found[start..].contains(&SEPARATOR);
+    assert!(!child || found.len() > start);
+    child
+}
+
+/// Tells whether a real place ends in the asked name: its last name, the units after its
+/// last `\`, is the asked name unit for unit, with ASCII letters taken in any case. A name
+/// Windows matched another way, an 8.3 short name or a spelling whose ending dot or space
+/// it drops, is never the asked name; a name that differs only in the case of a letter
+/// outside ASCII is refused too. Inputs: the found name, as the device name Windows gives
+/// for an open handle, and the asked name, both in UTF-16 units. Output: the answer.
+#[cfg(any(windows, test))]
+fn name_ends_in(found: &[u16], asked: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let last = found
+        .rsplit(|unit| *unit == SEPARATOR)
+        .next()
+        .unwrap_or(found);
+    let fold =
+        |unit: &u16| u8::try_from(*unit).map_or(*unit, |byte| u16::from(byte.to_ascii_lowercase()));
+    let same = !asked.is_empty()
+        && last.len() == asked.len()
+        && last
+            .iter()
+            .zip(asked)
+            .all(|(have, want)| fold(have) == fold(want));
+    assert!(!same || !asked.contains(&SEPARATOR));
+    same
+}
+
+/// Tells whether a real place lies below a folder's real place, both as the device names
+/// Windows gives for open handles: the folder's name, then a `\`, then at least one more
+/// unit. Names are compared unit for unit, so a sibling whose name only starts with the
+/// folder's, the folder itself and an empty folder name are never below. Inputs: the
+/// folder's name and the found name, in UTF-16 units. Output: the answer.
+#[cfg(any(windows, test))]
+fn name_under(folder: &[u16], found: &[u16]) -> bool {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let folder = folder.strip_suffix(&[SEPARATOR]).unwrap_or(folder);
+    let under = !folder.is_empty()
+        && found.len() > folder.len() + 1
+        && found.starts_with(folder)
+        && found[folder.len()] == SEPARATOR;
+    assert!(!under || found.len() >= 3);
+    under
+}
+
 /// Opens a path to read as the reparse point itself, never a link's target.
 /// Takes the path. Returns the open file or the I/O error.
 #[cfg(windows)]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
@@ -389,6 +594,9 @@ fn explorer(target: &OsStr, select: bool) -> Result<Command, &'static str> {
 }
 
 #[cfg(test)]
+mod beneath_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -480,6 +688,62 @@ mod tests {
             read.recv_timeout(std::time::Duration::from_secs(5)),
             Ok(None),
             "a FIFO is refused without waiting for a writer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_project_file_for_the_editor_is_any_regular_file_inside_the_folder_and_never_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let folder = home.join("notes");
+        std::fs::create_dir_all(folder.join("src/nested")).unwrap();
+        std::fs::write(folder.join("src/app.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(folder.join("run.command"), "#!/bin/sh\n").unwrap();
+        std::fs::write(home.join("outside.rs"), "kept outside").unwrap();
+        std::os::unix::fs::symlink(home.join("outside.rs"), folder.join("src/escape.rs")).unwrap();
+        std::os::unix::fs::symlink(&home, folder.join("up")).unwrap();
+        assert_eq!(
+            project_file(&folder, "src/app.rs"),
+            Ok(folder.join("src/app.rs"))
+        );
+        assert_eq!(
+            project_file(&folder, "run.command"),
+            Ok(folder.join("run.command")),
+            "the owner's editor only reads it, so any type opens"
+        );
+        assert_eq!(
+            project_file(&folder, "src/added.rs"),
+            Err("project_file_missing")
+        );
+        for refused in [
+            "src/escape.rs",
+            "up/outside.rs",
+            "src/nested",
+            "../outside.rs",
+            "src/../../outside.rs",
+            "/etc/hosts",
+            "",
+        ] {
+            assert_eq!(
+                project_file(&folder, refused),
+                Err("project_file_not_openable"),
+                "{refused}"
+            );
+        }
+        let long = "a/".repeat(OPEN_PATH_BYTES_MAX / 2 + 1);
+        assert_eq!(
+            project_file(&folder, &long),
+            Err("project_file_not_openable")
+        );
+        assert_eq!(
+            context_file(&folder, "src/app.rs"),
+            Err("context_item_not_openable"),
+            "context files keep their document types"
+        );
+        assert_eq!(
+            context_file(&folder, "src/escape.rs"),
+            Err("context_item_not_openable")
         );
     }
 

@@ -6,7 +6,7 @@ use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
 use crate::tui::model_access::{BOUNDED_QUOTA, STRICT_QUOTA, provider_quota_policy_name};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
-use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request};
+use crate::tui::seam::{AccountRow, Arrival, PoolChange, Request, account_label, new_pool_id};
 use crate::tui::text::{cells, join, list_row, restyle, row, status, styled, thumb, with_bar};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{TextField, buttons, checkbox};
@@ -20,6 +20,7 @@ const FILTER_CHARS_MAX: usize = 100;
 const FIELD_WIDTH_MAX: usize = 64;
 const WIDTHS: [usize; 3] = [30, 17, 22];
 const ROWS_MIN: usize = 3;
+const LANDED_EARLIER: &str = "Your first try saved this pool without your later changes.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -48,6 +49,9 @@ pub struct PoolEditor {
     selected_only: bool,
     saving: bool,
     start: (String, BTreeSet<CredentialRef>, ProviderQuotaPolicy),
+    create_id: Option<CredentialRef>,
+    creates_sent: u32,
+    checking: bool,
 }
 
 impl PoolEditor {
@@ -86,6 +90,9 @@ impl PoolEditor {
             selected_only: false,
             saving: false,
             start,
+            create_id: None,
+            creates_sent: 0,
+            checking: false,
         }
     }
 
@@ -222,15 +229,83 @@ impl PoolEditor {
                 name,
                 members,
                 quota: self.quota,
+                opened_name: self.start.0.clone(),
+                opened_members: self.start.1.iter().cloned().collect(),
+                opened_quota: self.start.2,
             },
-            None => PoolChange::Create {
-                name,
-                members,
-                quota: self.quota,
-            },
+            None => {
+                let id = match self
+                    .create_id
+                    .clone()
+                    .map_or_else(|| new_pool_id(&name), Ok)
+                {
+                    Ok(id) => id,
+                    Err(code) => {
+                        ctx.say(Message::error(
+                            plain_problem(&code).unwrap_or("Could not save the pool."),
+                            "Press Enter to try again.",
+                        ));
+                        return;
+                    }
+                };
+                self.create_id = Some(id.clone());
+                self.creates_sent = self.creates_sent.saturating_add(1);
+                PoolChange::Create {
+                    id,
+                    name,
+                    members,
+                    quota: self.quota,
+                }
+            }
         };
         self.saving = true;
         ctx.request(Request::EditPool { change });
+    }
+
+    /// Compares the pool an earlier try saved without its reply with the form, once the
+    /// pools are read again: the same pool counts as saved; otherwise the editor now edits
+    /// that pool, names what it is missing and keeps the form for Enter to save it.
+    /// Takes the context. Returns Back when saved, else Handled.
+    fn check_landed(&mut self, ctx: &mut Ctx) -> Flow {
+        let stored = self.id.as_ref().and_then(|id| {
+            ctx.store
+                .pools
+                .ready()
+                .and_then(|pools| pools.iter().find(|pool| &pool.id == id))
+        });
+        let Some(stored) = stored else {
+            ctx.say(Message::error(
+                "Could not read the pool your first try saved.",
+                "Press Enter to save the form again.",
+            ));
+            return Flow::Handled;
+        };
+        let members: BTreeSet<CredentialRef> = stored
+            .members
+            .iter()
+            .map(|member| member.id.clone())
+            .collect();
+        let missing: Vec<&str> = [
+            (stored.name != self.name.value().trim(), "name"),
+            (members != self.members, "accounts"),
+            (stored.provider_quota_policy != self.quota, "quota policy"),
+        ]
+        .into_iter()
+        .filter_map(|(differs, part)| differs.then_some(part))
+        .collect();
+        self.start = (stored.name.clone(), members, stored.provider_quota_policy);
+        if missing.is_empty() {
+            ctx.say(Message::success("Pool saved.", ""));
+            return Flow::Back;
+        }
+        ctx.say(Message::warning(
+            LANDED_EARLIER,
+            &format!(
+                "Not saved yet: {}. Press Enter to save them.",
+                missing.join(", ")
+            ),
+        ));
+        Flow::Handled
     }
 
     fn step_focus(&mut self, forward: bool) {
@@ -332,6 +407,7 @@ impl PoolEditor {
             }
         };
         let view = self.view(ctx);
+        let all = ctx.store.accounts.ready().map_or(&[][..], Vec::as_slice);
         if view.is_empty() {
             let text = if total == 0 {
                 "No accounts yet. Add one in Settings, Accounts."
@@ -350,7 +426,11 @@ impl PoolEditor {
                     cells(
                         &WIDTHS,
                         vec![
-                            Line::raw(checkbox(self.members.contains(&account.id), &account.name)),
+                            Line::raw(checkbox(
+                                self.members.contains(&account.id),
+                                &account_label(account.id.as_str(), all)
+                                    .unwrap_or_else(|| account.name.clone()),
+                            )),
                             Line::raw(format!(
                                 "{} {}",
                                 glyphs.provider(&account.provider),
@@ -379,6 +459,14 @@ impl PoolEditor {
     }
 }
 
+/// Says the pool was saved, rereads the pools and leaves the editor.
+/// Takes the context. Returns Back.
+fn saved(ctx: &mut Ctx) -> Flow {
+    ctx.say(Message::success("Pool saved.", ""));
+    ctx.request(Request::Pools);
+    Flow::Back
+}
+
 impl Screen for PoolEditor {
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Pools".into(), self.title().into()]
@@ -393,7 +481,7 @@ impl Screen for PoolEditor {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        if self.saving {
+        if self.saving || self.checking {
             return Flow::Handled;
         }
         match (self.focus, key) {
@@ -480,11 +568,15 @@ impl Screen for PoolEditor {
         match arrival {
             Arrival::PoolEdited(result) if self.saving => {
                 self.saving = false;
+                let landed =
+                    self.creates_sent > 1 && matches!(result, Err(code) if code == "pool_exists");
                 match result {
-                    Ok(()) => {
-                        ctx.say(Message::success("Pool saved.", ""));
+                    Ok(()) => saved(ctx),
+                    Err(_) if landed => {
+                        self.id = self.create_id.take();
+                        self.checking = true;
                         ctx.request(Request::Pools);
-                        Flow::Back
+                        Flow::Handled
                     }
                     Err(code) if code == "pool_name_bounds" => {
                         self.name.error = plain_problem(code).map(Into::into);
@@ -492,6 +584,9 @@ impl Screen for PoolEditor {
                         Flow::Handled
                     }
                     Err(code) => {
+                        if code == "pool_exists" {
+                            self.create_id = None;
+                        }
                         ctx.say(Message::error(
                             plain_problem(code).unwrap_or("Could not save the pool."),
                             "Press Enter to try again.",
@@ -499,6 +594,10 @@ impl Screen for PoolEditor {
                         Flow::Handled
                     }
                 }
+            }
+            Arrival::Pools(_) if self.checking => {
+                self.checking = false;
+                self.check_landed(ctx)
             }
             _ => Flow::Handled,
         }
@@ -615,7 +714,7 @@ impl Screen for PoolEditor {
     }
 
     fn busy(&self, ctx: &Ctx) -> bool {
-        self.saving || matches!(ctx.store.accounts, Load::Idle | Load::Loading)
+        self.saving || self.checking || matches!(ctx.store.accounts, Load::Idle | Load::Loading)
     }
 
     fn draft(&self) -> bool {
@@ -753,6 +852,7 @@ mod tests {
                         name,
                         members,
                         quota,
+                        ..
                     },
             }) => {
                 assert_eq!(name, "Build team");
@@ -815,11 +915,19 @@ mod tests {
                         name,
                         members,
                         quota,
+                        opened_name,
+                        opened_members,
+                        opened_quota,
                     },
             }) => {
                 assert_eq!(sent, id);
                 assert_eq!(name, "Main 2");
                 assert_eq!(members, vec![account(2).id]);
+                assert_eq!(
+                    (opened_name.as_str(), opened_members, opened_quota),
+                    ("Main", vec![account(2).id], ProviderQuotaPolicy::Strict),
+                    "the update carries the form as it was opened"
+                );
                 assert_eq!(
                     quota,
                     ProviderQuotaPolicy::Strict,
@@ -852,6 +960,7 @@ mod tests {
                         name,
                         members,
                         quota,
+                        ..
                     },
             }) => {
                 assert_eq!(name, "Review team");

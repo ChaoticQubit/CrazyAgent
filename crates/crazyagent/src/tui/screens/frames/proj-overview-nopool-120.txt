@@ -1,6 +1,6 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ⧉ Context   ☰ Settings
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ≟ Questions   ⧉ Context   ☰ Settings
 ──━━━━━━━━━━────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Fieldnotes Mobile                                                                       ~/projects/fieldnotes-mobile
   Offline field notes for ecologists.

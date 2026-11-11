@@ -13,11 +13,11 @@
   Esc keeps this draft    │ Work to start   Market research, Competitor research, Front-end design
   and goes home.          │ Pool            Main
                           │ Team            Codex leads. Codex x3. Tools on.
+                          │ Agent access    < Own branch >
                           │
                           │ Research starts right away. You can close CrazyAgent and agents keep working.
                           │
                           │ [ Back ]   [> Create project ]
-                          │
                           │
                           │
                           │

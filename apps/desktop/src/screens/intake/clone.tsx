@@ -6,7 +6,7 @@ import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, PageHeader, SearchField, SecretField, Skeleton, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
-import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, devicePolling, gitHubPage, repoMatches, repoMeta } from "./intake";
+import { GITHUB_POLL_MS, REPO_PAGES_MAX, accountLine, deviceLine, devicePolling, gitHubPage, oneAtATime, repoMatches, repoMeta } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -63,14 +63,15 @@ export function GitHubSignInView({ device, now, busy, problem, tokenOpen, tokenR
 
 /** The signed-in account's repositories with a search and Clone on each.
  * Inputs: the GitHub status, the repositories read so far, the search text and its handler, whether
- * more pages exist and the Show more handler, the repository being cloned and the Clone handler.
- * Output: the list. */
-export function RepoListView({ status, repos, query, onQuery, more, onMore, cloning, onClone }: {
+ * more pages exist, whether the next page is loading and the Show more handler, the repository being
+ * cloned and the Clone handler. Output: the list. */
+export function RepoListView({ status, repos, query, onQuery, more, loadingMore, onMore, cloning, onClone }: {
   status: GitHubStatus;
   repos: Loaded<GitHubRepo[]>;
   query: string;
   onQuery: (query: string) => void;
   more: boolean;
+  loadingMore: boolean;
   onMore: () => void;
   cloning: string | null;
   onClone: (repo: GitHubRepo) => void;
@@ -87,11 +88,13 @@ export function RepoListView({ status, repos, query, onQuery, more, onMore, clon
         : shown.length === 0 ? <p className="pj-muted">No repositories match "{query.trim()}".</p>
         : <ul className="in-list">{shown.map((repo) => <li className="in-row" key={repo.full_name}>
           <span className="in-row-main"><span className="pj-row"><Icon name={repo.private ? "lock" : "globe"} size={14} /><strong className="pj-mono">{displayText(repo.full_name)}</strong></span>
-            <span className="pj-small pj-secondary">{repoMeta(repo)}</span></span>
-          <Button size="small" icon="git-branch" pending={cloning === repo.full_name} pendingLabel="Cloning..." disabled={cloning !== null && cloning !== repo.full_name}
+            {repo.refused ? <span className="pj-small pj-error">{intakeCopy(repo.refused)}</span>
+              : <span className="pj-small pj-secondary">{repoMeta(repo)}</span>}</span>
+          <Button size="small" icon="git-branch" pending={cloning === repo.full_name} pendingLabel="Cloning..."
+            disabled={Boolean(repo.refused) || (cloning !== null && cloning !== repo.full_name)}
             onClick={() => onClone(repo)}>Clone</Button>
         </li>)}</ul>}
-      {more && <span><Button variant="quiet" onClick={onMore}>Show more</Button></span>}
+      {more && <span><Button variant="quiet" pending={loadingMore} pendingLabel="Loading more..." onClick={onMore}>Show more</Button></span>}
     </>}
   </section>;
 }
@@ -165,6 +168,8 @@ export function CloneFromGitHub() {
   const [repos, setRepos] = useState<Loaded<GitHubRepo[]>>({ kind: "loading" });
   const [next, setNext] = useState<number | null>(null);
   const [pages, setPages] = useState(0);
+  const [readMore] = useState(() => oneAtATime(loadGitHubRepos));
+  const [loadingMore, setLoadingMore] = useState(false);
   const [query, setQuery] = useState("");
   const [cloning, setCloning] = useState<string | null>(null);
   const signedIn = status.kind === "ok" && status.value.signed_in;
@@ -186,7 +191,10 @@ export function CloneFromGitHub() {
 
   const more = async () => {
     if (next === null) return;
-    const result = await loadGitHubRepos(next);
+    setLoadingMore(true);
+    const result = await readMore(next);
+    if (result === null) return;
+    setLoadingMore(false);
     if (result.kind !== "ok") { failed(result, "Listing more repositories"); return; }
     setRepos((old) => old.kind === "ok" ? { kind: "ok", value: [...old.value, ...result.value.repos] } : old);
     setNext(result.value.next);
@@ -194,7 +202,7 @@ export function CloneFromGitHub() {
   };
 
   const clone = async (repo: GitHubRepo) => {
-    if (cloning) return;
+    if (cloning || repo.refused) return;
     setCloning(repo.full_name);
     setProblem("");
     const result = await cloneRepo(repo.full_name);
@@ -212,7 +220,7 @@ export function CloneFromGitHub() {
     {status.kind === "ok" && !status.value.signed_in && <GitHubSignIn status={status.value} reloadStatus={reloadStatus} />}
     {status.kind === "ok" && status.value.signed_in && <>
       <RepoListView status={status.value} repos={repos} query={query} onQuery={setQuery} more={next !== null && pages < REPO_PAGES_MAX}
-        onMore={() => void more()} cloning={cloning} onClone={(repo) => void clone(repo)} />
+        loadingMore={loadingMore} onMore={() => void more()} cloning={cloning} onClone={(repo) => void clone(repo)} />
       {problem && <p className="pj-error" role="alert">{problem}</p>}
     </>}
   </div>;

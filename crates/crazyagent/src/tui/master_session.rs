@@ -14,10 +14,11 @@ use crate::master_session::{
     MasterSessionPhase, MasterSessionView, MasterTurnPhase, MasterTurnView,
     RcliProfileRegistration, RcliProfileRegistrationMetadata,
 };
-use crate::master_sessions::MasterSessionSummary;
+use crate::master_sessions::{MasterSessionSummary, SessionMessage};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId, SessionId};
 use crate::routing::{ResourceBudget, RouteRequest};
 use crate::tui::screens::project_master::TURNS_SHOWN_MAX as INPUTS_SHOWN_MAX;
+use crate::tui::seam::{AccountRow, account_label};
 use std::time::{Duration, Instant};
 
 const DIMENSIONS: [&str; 7] = [
@@ -29,6 +30,28 @@ const DIMENSIONS: [&str; 7] = [
     "wall_time_ms",
     "spend_microunits",
 ];
+
+/// The lead of the owner's line when a New session waiting for the current settings ends
+/// unsent; the reason follows it (NT2-L1).
+pub(super) const RENEWAL_NOT_STARTED: &str = "New session not started.";
+
+/// Why a New session waiting for the current settings ended unsent when the owner left its
+/// project while they were read.
+const RENEWAL_LEFT: &str = "You left the project before the settings were read.";
+
+/// What the owner reads when New session is pressed again while the last one is still under
+/// way: reading the current settings, being sent or waiting for the engine (P2).
+pub(super) const NEW_SESSION_STARTING: &str = "A new session is already starting.";
+
+/// What the owner reads when New session is pressed while another master step, such as a
+/// sent message, a session switch or a stop, is still under way (P2 r1, TUIP2-L1).
+const LAST_STEP_UNDER_WAY: &str =
+    "Your last request is still being handled. Press n again when it is done.";
+
+/// Why a New session waiting for the current settings ended unsent when the engine
+/// connection changed while they were read.
+const RENEWAL_DROPPED: &str =
+    "The connection to the engine changed before the settings were read. Press n to try again.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
@@ -60,11 +83,113 @@ pub(super) enum Job {
         confirmation: Option<Box<Confirmation>>,
         sessions: bool,
         known: Vec<Cursor>,
+        before: Option<u64>,
+        opened: Option<(SessionId, Option<u64>)>,
     },
     Mutation {
         submission: Submission,
         delivery: MutationDelivery,
     },
+}
+
+/// The most stored messages one read asks the engine for.
+const MESSAGES_PER_READ: u8 = crate::master_sessions::MESSAGES_PAGE_MAX;
+/// The most stored messages of the session in view the client holds.
+const MESSAGES_HELD_MAX: usize = 1024;
+
+/// One read of the stored messages of the session in view: its newest page with the cursor
+/// of the page before it, and the older page the client asked for, with the cursor it
+/// asked below and the cursor of the page before that one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredRead {
+    newest: Vec<SessionMessage>,
+    newest_next: Option<u64>,
+    older: Option<(u64, Vec<SessionMessage>, Option<u64>)>,
+}
+
+/// The stored messages the client holds for the session in view, oldest first, whatever
+/// master ran them. `older` is the cursor of the next older page to read, absent once the
+/// session's first message is held. `read` says a read of `session` arrived.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Stored {
+    session: Option<SessionId>,
+    rows: Vec<SessionMessage>,
+    older: Option<u64>,
+    read: bool,
+}
+
+impl Stored {
+    /// Takes one read for a session. A read for another session, one whose newest page
+    /// does not reach the held rows, or one that finds no row held starts the held rows
+    /// again from that page. A row with
+    /// a held sequence number replaces the held one, since a terminal turn's owner row
+    /// gains its words when the turn ends. An older page counts only when it was asked
+    /// below the cursor still held. Inputs: the session and the read.
+    fn take(&mut self, session: &SessionId, read: StoredRead) {
+        let gap = read.newest.first().is_some_and(|first| {
+            self.rows
+                .last()
+                .is_some_and(|last| first.seq > last.seq + 1)
+        });
+        let fresh =
+            self.session.as_ref() != Some(session) || gap || !self.read || self.rows.is_empty();
+        if fresh {
+            *self = Self {
+                session: Some(session.clone()),
+                rows: Vec::new(),
+                older: read.newest_next,
+                read: true,
+            };
+        }
+        let mut rows = std::mem::take(&mut self.rows);
+        if let Some((before, older, next)) = read.older
+            && !fresh
+            && self.older == Some(before)
+        {
+            rows.extend(older);
+            self.older = next;
+        }
+        rows.extend(read.newest);
+        rows.sort_by_key(|row| row.seq);
+        rows.reverse();
+        rows.dedup_by_key(|row| row.seq);
+        rows.reverse();
+        if rows.len() > MESSAGES_HELD_MAX {
+            rows.drain(..rows.len() - MESSAGES_HELD_MAX);
+            self.older = Some(rows[0].seq);
+        }
+        assert!(rows.windows(2).all(|pair| pair[0].seq < pair[1].seq));
+        assert!(rows.len() <= MESSAGES_HELD_MAX);
+        self.rows = rows;
+    }
+
+    /// The cursor of the older page the next read asks for. Output: none once the first
+    /// message is held or the client holds as many rows as it keeps.
+    fn wanted(&self) -> Option<u64> {
+        if self.rows.len() < MESSAGES_HELD_MAX {
+            self.older
+        } else {
+            None
+        }
+    }
+
+    /// The rows held for `session`, oldest first, and whether they start at its first
+    /// message. Input: the session. Output: none before a read of that session arrived.
+    fn held(&self, session: &SessionId) -> Option<(&[SessionMessage], bool)> {
+        (self.read && self.session.as_ref() == Some(session))
+            .then(|| (self.rows.as_slice(), self.older.is_none()))
+    }
+
+    /// Every stored message of `session`, oldest first. Input: the session in view.
+    /// Output: the rows, or none unless the client holds that session from its first
+    /// message on.
+    fn whole(&self, session: &SessionId) -> &[SessionMessage] {
+        if self.read && self.older.is_none() && self.session.as_ref() == Some(session) {
+            &self.rows
+        } else {
+            &[]
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -104,6 +229,8 @@ pub(super) struct View {
     input: Option<ConversationEntry>,
     inputs: Vec<ConversationEntry>,
     sessions: Option<Vec<MasterSessionSummary>>,
+    stored: Option<StoredRead>,
+    opened: Option<(SessionId, StoredRead)>,
 }
 
 struct Form {
@@ -144,6 +271,8 @@ pub(super) struct State {
     forms: Vec<Form>,
     catalog: Option<Catalog>,
     catalog_attempted: bool,
+    renewal: Option<bool>,
+    renewal_problem: Option<String>,
     view: Option<View>,
     flight: Option<Context>,
     next_read: Instant,
@@ -152,6 +281,10 @@ pub(super) struct State {
     home_confirmation: Option<RcliProfileRegistration>,
     registered_home: Option<RegisteredHome>,
     sessions_shown: bool,
+    stored: Stored,
+    opened: Option<SessionId>,
+    opened_stored: Stored,
+    accounts: Vec<AccountRow>,
     pub notice: String,
 }
 
@@ -165,6 +298,8 @@ impl Default for State {
             forms: Vec::new(),
             catalog: None,
             catalog_attempted: false,
+            renewal: None,
+            renewal_problem: None,
             view: None,
             flight: None,
             next_read: Instant::now(),
@@ -173,6 +308,10 @@ impl Default for State {
             home_confirmation: None,
             registered_home: None,
             sessions_shown: false,
+            stored: Stored::default(),
+            opened: None,
+            opened_stored: Stored::default(),
+            accounts: Vec::new(),
             notice: "Current master metadata unavailable; inspect Settings; Ctrl-R reconnects"
                 .into(),
         }
@@ -180,6 +319,12 @@ impl Default for State {
 }
 
 impl State {
+    /// Keeps the owner's account rows, so the classic master view names each account in a
+    /// turn line as Accounts does. Input: the rows from a full account read. Output: none.
+    pub fn name_accounts(&mut self, accounts: Vec<AccountRow>) {
+        self.accounts = accounts;
+    }
+
     /// The current master transcript, read-only, for the Project screen.
     /// Input: none. Output: the session, its turns and the latest owner input
     /// once a read arrived; None before the first read.
@@ -213,6 +358,14 @@ impl State {
                 .ok_or("Master view generation exhausted")?;
             self.view = None;
             self.flight = None;
+            self.drop_renewal(
+                if self.project == project {
+                    RENEWAL_DROPPED
+                } else {
+                    RENEWAL_LEFT
+                }
+                .into(),
+            );
             self.next_read = Instant::now();
             if self.identity != identity {
                 self.catalog = None;
@@ -227,6 +380,7 @@ impl State {
 
     pub fn access(&mut self) {
         self.home_confirmation = None;
+        self.drop_renewal(RENEWAL_DROPPED.into());
         self.catalog = None;
         self.catalog_attempted = false;
         self.view = None;
@@ -598,14 +752,41 @@ impl State {
         })
     }
 
-    fn enqueue(&mut self, action: MasterOwnerAction, generation: u64) -> Result<(), String> {
-        if !self.ready || self.pending.is_some() || self.job.is_some() {
+    /// Tells whether a New session the owner asked for is still under way: waiting for the
+    /// current settings, queued, sent or waiting for the engine's read after its receipt.
+    /// Input: none. Output: true while one is.
+    fn renewing(&self) -> bool {
+        let new = |submission: &Submission| {
+            matches!(submission.action, MasterOwnerAction::NewSession { .. })
+        };
+        self.renewal.is_some()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| new(&pending.submission))
+            || match &self.job {
+                Some(Job::Mutation { submission, .. }) => new(submission),
+                Some(Job::Read {
+                    confirmation: Some(confirmation),
+                    ..
+                }) => new(&confirmation.submission),
+                _ => false,
+            }
+    }
+
+    fn intent_free(&self) -> Result<(), String> {
+        if !self.ready || self.pending.is_some() || self.job.is_some() || self.renewal.is_some() {
             return Err(concat!(
                 "Master owner intent pending or unavailable; ",
                 "draft and exact identity retained; Ctrl-R recovers"
             )
             .into());
         }
+        Ok(())
+    }
+
+    fn enqueue(&mut self, action: MasterOwnerAction, generation: u64) -> Result<(), String> {
+        self.intent_free()?;
         let submission = Submission {
             identity: self
                 .identity
@@ -694,31 +875,71 @@ impl State {
     }
 
     /// Parks the live session and opens a fresh one in one engine step, with the backend,
-    /// pool, account, sandbox and allowance of the session the view shows. Input: whether a
-    /// running reply may be stopped, set only after the owner confirms a
-    /// `master_turn_running` refusal. Output: the intent is queued, or why it cannot be.
+    /// pool, account, sandbox and allowance of the session the view shows, on the settings
+    /// as they are now: the current catalog is read first, since another client may have
+    /// changed them (N-T2). Input: whether a running reply may be stopped, set only after the
+    /// owner confirms a `master_turn_running` refusal. Output: the intent is waiting for the
+    /// catalog, or why it cannot be.
     pub fn new_session(&mut self, cancel_running: bool) -> Result<(), String> {
-        let session = self
+        if !self.ready {
+            return Err("Waiting for actual master state; Ctrl-R reconnects".into());
+        }
+        if self
             .view
             .as_ref()
-            .filter(|_| self.ready)
             .and_then(|view| view.session.as_ref())
-            .ok_or("No master session yet; send a message to start one")?;
-        let (config_id, source_hash) = match &self.catalog {
-            Some(catalog) => (catalog.config_id.clone(), catalog.source_hash.clone()),
-            None => {
-                let (config_id, source_hash) = session.binding();
-                (config_id.clone(), source_hash.to_owned())
-            }
+            .is_none()
+        {
+            return self.open();
+        }
+        if self.renewing() {
+            return Err(NEW_SESSION_STARTING.into());
+        }
+        if self.pending.is_some() || self.job.is_some() {
+            return Err(LAST_STEP_UNDER_WAY.into());
+        }
+        self.intent_free()?;
+        self.renewal = Some(cancel_running);
+        self.catalog = None;
+        self.catalog_attempted = false;
+        self.notice = "Reading the current settings for the new session".into();
+        Ok(())
+    }
+
+    /// Queues the New session the owner asked for on the catalog just read, with the
+    /// selection of the session the view shows. Input: whether a running reply may be
+    /// stopped. Output: the intent is queued, or why it cannot be.
+    fn renew(&mut self, cancel_running: bool) -> Result<(), String> {
+        let (Some(session), Some(catalog)) = (
+            self.view.as_ref().and_then(|view| view.session.as_ref()),
+            self.catalog.as_ref(),
+        ) else {
+            return Err("No live master session to replace; Ctrl-R refreshes".into());
         };
         let action = MasterOwnerAction::NewSession {
             project_id: session.project_id.clone(),
-            expected_config_id: config_id,
-            expected_source_hash: source_hash,
+            expected_config_id: catalog.config_id.clone(),
+            expected_source_hash: catalog.source_hash.clone(),
             selection: Box::new(session.selection.clone()),
             cancel_running,
         };
         self.enqueue(action, self.generation)
+    }
+
+    /// Ends a New session waiting for the current settings without sending it, and keeps
+    /// why for the notice and for the page to say once (NT2-L1). Input: the reason, a
+    /// sentence. Output: none; nothing changes when no New session waits.
+    fn drop_renewal(&mut self, reason: String) {
+        if self.renewal.take().is_some() {
+            self.notice = format!("{RENEWAL_NOT_STARTED} {reason}");
+            self.renewal_problem = Some(reason);
+        }
+    }
+
+    /// Takes why the last waiting New session ended unsent, once, so the page says it.
+    /// Input: none. Output: the reason, or None when there is nothing new to say.
+    pub fn take_renewal_problem(&mut self) -> Option<String> {
+        self.renewal_problem.take()
     }
 
     /// Makes a parked session live again, parking the live one, in one engine step.
@@ -745,6 +966,44 @@ impl State {
         self.enqueue(action, self.generation)
     }
 
+    /// Deletes a session that is not live: the engine removes its stored turns and the
+    /// harness transcript in its master's private home. Input: a session from the Sessions
+    /// list. Output: the intent is queued, or why it cannot be.
+    pub fn delete_session(&mut self, session_id: &SessionId) -> Result<(), String> {
+        let project = self
+            .project
+            .clone()
+            .filter(|_| self.ready)
+            .ok_or("Waiting for actual master state; Ctrl-R reconnects")?;
+        let listed = self
+            .sessions()
+            .and_then(|sessions| sessions.iter().find(|item| &item.session_id == session_id))
+            .ok_or("That session is not in the Sessions list")?;
+        if listed.phase == MasterSessionPhase::Configured {
+            return Err("The live session cannot be deleted".into());
+        }
+        let action = MasterOwnerAction::DeleteSession {
+            project_id: project,
+            session_id: session_id.clone(),
+        };
+        self.enqueue(action, self.generation)
+    }
+
+    /// Tells whether the live session has no owner turn yet: the master shows a live
+    /// session the engine's Sessions list leaves out. Output: false before a list read.
+    pub fn live_session_unused(&self) -> bool {
+        let Some(view) = self.view.as_ref() else {
+            return false;
+        };
+        let (Some(session), Some(listed)) = (view.session.as_ref(), view.sessions.as_ref()) else {
+            return false;
+        };
+        session.phase == MasterSessionPhase::Configured
+            && listed
+                .iter()
+                .all(|item| item.session_id != session.session_id)
+    }
+
     /// Shows or hides the Sessions list. While shown, each master read also reads the
     /// project's sessions. Input: whether the list is shown.
     pub fn show_sessions(&mut self, shown: bool) {
@@ -760,6 +1019,35 @@ impl State {
         self.view
             .as_ref()
             .map_or(&[], |view| view.inputs.as_slice())
+    }
+
+    /// The stored messages of the session in view, oldest first, whatever master ran them:
+    /// the one-turn master's turns, what a live terminal master said and the divider of each
+    /// master switch. Output: empty before the client holds the session from its first
+    /// message on, and for a session with no stored message.
+    pub fn messages(&self) -> &[SessionMessage] {
+        match self.view.as_ref().and_then(|view| view.session.as_ref()) {
+            Some(session) => self.stored.whole(&session.session_id),
+            None => &[],
+        }
+    }
+
+    /// Opens one session of the project for reading its stored messages, or closes the one
+    /// open. While one is open each master read also reads its messages, newest first, then
+    /// one older page a read. Input: the session, or none to close.
+    pub fn open_messages(&mut self, session: Option<SessionId>) {
+        if self.opened != session {
+            self.opened = session;
+            self.opened_stored = Stored::default();
+            self.next_read = Instant::now();
+        }
+    }
+
+    /// The stored messages held for the session the owner opened, oldest first, and
+    /// whether they start at its first message. Output: none while no session is open or
+    /// before its first read arrived.
+    pub fn opened_messages(&self) -> Option<(&[SessionMessage], bool)> {
+        self.opened_stored.held(self.opened.as_ref()?)
     }
 
     /// The project's sessions as last read, live one included, newest activity first.
@@ -822,7 +1110,10 @@ impl State {
             project,
             generation: self.generation,
         };
-        if self.is_open() && !self.catalog_attempted && self.pending.is_none() {
+        if (self.is_open() || self.renewal.is_some())
+            && !self.catalog_attempted
+            && self.pending.is_none()
+        {
             self.catalog_attempted = true;
             self.flight = Some(context.clone());
             return Some(Job::Catalog { context });
@@ -848,6 +1139,11 @@ impl State {
             confirmation: confirmation.map(Box::new),
             sessions: self.sessions_shown,
             known,
+            before: self.stored.wanted(),
+            opened: self
+                .opened
+                .clone()
+                .map(|session| (session, self.opened_stored.wanted())),
         })
     }
 
@@ -876,6 +1172,7 @@ impl State {
         }
         self.flight = None;
         if !self.matches(&context) {
+            self.drop_renewal(RENEWAL_DROPPED.into());
             return;
         }
         match result {
@@ -889,11 +1186,19 @@ impl State {
                     "native delivery/authentication remain unsupported"
                 )
                 .into();
+                if let Some(cancel_running) = self.renewal.take()
+                    && let Err(problem) = self.renew(cancel_running)
+                {
+                    self.notice = problem;
+                }
             }
             Err(problem) => {
                 self.catalog = None;
                 self.notice =
                     format!("Metadata unavailable: {problem}; inspect Settings; Ctrl-R refreshes");
+                self.drop_renewal(format!(
+                    "The current settings could not be read ({problem}). Press n to try again."
+                ));
             }
         }
         self.assert_consistent();
@@ -928,6 +1233,18 @@ impl State {
                 if current {
                     let mut view = *view;
                     view.inputs = shown_inputs(&view.turns, self.inputs(), view.inputs);
+                    match (view.session.as_ref(), view.stored.take()) {
+                        (Some(session), Some(read)) => {
+                            self.stored.take(&session.session_id, read);
+                        }
+                        (Some(_), None) => {}
+                        (None, _) => self.stored = Stored::default(),
+                    }
+                    if let Some((session, read)) = view.opened.take()
+                        && self.opened.as_ref() == Some(&session)
+                    {
+                        self.opened_stored.take(&session, read);
+                    }
                     self.view = Some(view);
                 }
                 if let Some(submission) = completed {
@@ -1227,7 +1544,7 @@ impl State {
                 self.setup_lines(&mut lines);
             }
         } else if let Some(view) = &self.view {
-            view.lines(&mut lines);
+            view.lines(&self.accounts, &mut lines);
         } else {
             lines.push("Waiting for actual master state; stored notes remain notes".into());
         }
@@ -1351,7 +1668,7 @@ impl State {
 }
 
 impl View {
-    fn lines(&self, lines: &mut Vec<String>) {
+    fn lines(&self, accounts: &[AccountRow], lines: &mut Vec<String>) {
         if let Some(session) = &self.session {
             lines.push(format!(
                 "Master: {:?} | {} | {} | pool {}",
@@ -1361,7 +1678,7 @@ impl View {
                 session.selection.pool_ref.as_str()
             ));
             for turn in &self.turns {
-                turn_lines(turn, lines);
+                turn_lines(turn, accounts, lines);
             }
         } else {
             lines.push(
@@ -1452,6 +1769,12 @@ impl View {
                                 .engine_request
                                 .as_ref()
                                 .is_some_and(|request| request.change_set == *change_set)
+                    })
+            }
+            MasterOwnerAction::DeleteSession { session_id, .. } => {
+                session.session_id != *session_id
+                    && self.sessions.as_ref().is_none_or(|listed| {
+                        listed.iter().all(|item| item.session_id != *session_id)
                     })
             }
             MasterOwnerAction::RegisterRcliProfile { registration } => {
@@ -1777,7 +2100,15 @@ pub(crate) fn turn_holds(current: Option<&RequestId>, turns: &[MasterTurnView]) 
     })
 }
 
-fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
+/// Adds one master turn's lines: its phase with why and the account it runs on, each account
+/// of the pool a blocked turn could not use, the engine's detail and the reply. An account
+/// goes by the name Accounts shows ([`account_label`]), by its id while no name is known,
+/// and never by its sign-in reference. Takes the turn, the owner's account rows and the
+/// lines to add to. Returns nothing.
+fn turn_lines(turn: &MasterTurnView, accounts: &[AccountRow], lines: &mut Vec<String>) {
+    let named = |id: &CredentialRef| {
+        account_label(id.as_str(), accounts).unwrap_or_else(|| id.as_str().to_owned())
+    };
     let phase = match turn.phase {
         MasterTurnPhase::Queued => "Queued",
         MasterTurnPhase::Blocked => "Blocked",
@@ -1802,19 +2133,15 @@ fn turn_lines(turn: &MasterTurnView, lines: &mut Vec<String>) {
     }
     if let Some(attempt) = &turn.attempt {
         line.push_str(" | on account ");
-        line.push_str(attempt.connection.account_ref.as_str());
+        line.push_str(&named(&attempt.connection.id));
     }
     lines.push(line);
     for account in &turn.accounts {
         lines.push(match &account.reason {
-            Some(reason) => format!(
-                "  {}: {}",
-                account.account_ref.as_str(),
-                reason_text(reason)
-            ),
+            Some(reason) => format!("  {}: {}", named(&account.connection), reason_text(reason)),
             None => format!(
                 "  {} is ready on {}: open a {} master to use it",
-                account.account_ref.as_str(),
+                named(&account.connection),
                 account.harness.as_str(),
                 account.harness.as_str()
             ),
@@ -1843,7 +2170,8 @@ pub(super) fn action_project(action: &MasterOwnerAction) -> &ProjectId {
         | MasterOwnerAction::Submit { project_id, .. }
         | MasterOwnerAction::Cancel { project_id, .. }
         | MasterOwnerAction::Close { project_id, .. }
-        | MasterOwnerAction::Resolve { project_id, .. } => project_id,
+        | MasterOwnerAction::Resolve { project_id, .. }
+        | MasterOwnerAction::DeleteSession { project_id, .. } => project_id,
         MasterOwnerAction::RegisterRcliProfile { registration } => {
             &registration.expected_session.project_id
         }
@@ -2144,6 +2472,8 @@ pub(super) async fn read_view(
     confirmation: Option<&Confirmation>,
     sessions: bool,
     known: &[Cursor],
+    before: Option<u64>,
+    opened: Option<&(SessionId, Option<u64>)>,
 ) -> Result<View, String> {
     let state = controller
         .read(OwnerRead::ProjectMaster {
@@ -2162,6 +2492,8 @@ pub(super) async fn read_view(
         input: None,
         inputs: Vec::new(),
         sessions: None,
+        stored: None,
+        opened: None,
     };
     if let Some(session) = &view.session {
         if session.project_id != context.project
@@ -2187,6 +2519,12 @@ pub(super) async fn read_view(
             (&view.revision, &state.config_id),
         )
         .await?;
+        view.stored = read_stored(controller, context, &session.session_id, before).await?;
+    }
+    if let Some((session_id, before)) = opened {
+        view.opened = read_stored(controller, context, session_id, *before)
+            .await?
+            .map(|read| (session_id.clone(), read));
     }
     if let Some(confirmation) = confirmation
         && let MasterOwnerAction::Submit { .. } = confirmation.submission.action
@@ -2204,6 +2542,72 @@ pub(super) async fn read_view(
         view.sessions = Some(read_sessions(controller, &context.project).await?);
     }
     Ok(view)
+}
+
+/// Reads the stored messages of one session of the project: its newest page, and the page
+/// below `before` when the client asks for older ones. Inputs: the controller, context,
+/// session id and the cursor. Output: the read; none when the engine gave no page, so the
+/// view shows its turns alone; or the problem of a page that is not of this session.
+async fn read_stored(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &SessionId,
+    before: Option<u64>,
+) -> Result<Option<StoredRead>, String> {
+    let Some((newest, newest_next)) = stored_page(controller, context, session, None).await? else {
+        return Ok(None);
+    };
+    let older = match before {
+        Some(before) => stored_page(controller, context, session, Some(before))
+            .await?
+            .map(|(rows, next)| (before, rows, next)),
+        None => None,
+    };
+    Ok(Some(StoredRead {
+        newest,
+        newest_next,
+        older,
+    }))
+}
+
+/// Reads one page of a session's stored messages. Inputs: the controller, context,
+/// session id and the sequence number to read below, or none for the newest page. Output:
+/// the rows, oldest first, with the cursor of the page before them; none when the read
+/// itself failed; or the problem of a reply that is not that page.
+async fn stored_page(
+    controller: &mut OwnerController,
+    context: &Context,
+    session: &SessionId,
+    before: Option<u64>,
+) -> Result<Option<(Vec<SessionMessage>, Option<u64>)>, String> {
+    let Ok(reply) = controller
+        .read(OwnerRead::ProjectMasterMessages {
+            project_id: context.project.clone(),
+            session_id: session.clone(),
+            before,
+            limit: MESSAGES_PER_READ,
+        })
+        .await
+    else {
+        return Ok(None);
+    };
+    let OwnerData::ProjectMasterMessages { page } = reply.data else {
+        return Err("master_messages_read_required".into());
+    };
+    let rising = page
+        .messages
+        .windows(2)
+        .all(|pair| pair[0].seq < pair[1].seq);
+    let below = before.is_none_or(|before| page.messages.iter().all(|row| row.seq < before));
+    if page.project_id != context.project
+        || &page.session_id != session
+        || page.messages.len() > usize::from(MESSAGES_PER_READ)
+        || !rising
+        || !below
+    {
+        return Err("master_messages_read_context".into());
+    }
+    Ok(Some((page.messages, page.next)))
 }
 
 /// Reads the owner's messages of the shown turns the client does not hold yet, so a
@@ -2484,20 +2888,36 @@ fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
 
 /// Builds the master Open action the TUI submits with its default choices for a project.
 /// Inputs: a connected owner controller and the project. Output: an Open action using the
-/// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
-/// account as the one tried first (the engine runs each turn on a ready account of that
-/// pool), the first allowed sandbox and the unit allowance; or a plain-language reason.
+/// first assigned, approved project_leader pool for the team plan's master harness, else for
+/// RCLI, then Codex, then Claude; its first account as the one tried first (the engine runs
+/// each turn on a ready account of that pool), the first allowed sandbox and the unit
+/// allowance; or a plain-language reason, or the engine's `engine_version_mismatch` code
+/// when a read hit one, so the desktop can say restart (PROTO-SKEW-MASTER-OPEN).
 pub async fn default_master_open(
     controller: &mut OwnerController,
     project_id: &ProjectId,
 ) -> Result<MasterOwnerAction, String> {
     let catalog = read_catalog(controller).await?;
     let budget = default_master_budget(&catalog.capacities);
-    for backend in [
+    let planned = controller
+        .project_setup(project_id.clone())
+        .await
+        .map_err(|error| match error.0.as_str() {
+            "engine_version_mismatch" => error.0,
+            _ => "The project's team plan could not be read".to_owned(),
+        })?
+        .and_then(|setup| crate::team::master_backend(&setup.team.master));
+    let order = [
         MasterBackend::Rcli,
         MasterBackend::Codex,
         MasterBackend::Claude,
-    ] {
+    ];
+    let backends = planned.into_iter().chain(
+        order
+            .into_iter()
+            .filter(|backend| Some(*backend) != planned),
+    );
+    for backend in backends {
         let mut form = Form {
             database: None,
             project: project_id.clone(),
@@ -2853,11 +3273,17 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::ApprovalRequired => "Needs your approval",
         MasterReason::RuntimeUnavailable => "Model runtime unavailable",
         MasterReason::CaptureIncomplete => "Reply was incomplete",
-        MasterReason::OutputLimit => "Reply was too long",
+        MasterReason::NoReply => "Ended without a reply",
+        MasterReason::StepLimit => "Stopped at its step limit; reply with 'continue' to go on",
+        MasterReason::TimeLimit => "Stopped at its time limit; reply with 'continue' to go on",
+        MasterReason::OutputLimit => "This turn's output was too large to keep",
         MasterReason::UnsupportedCapability => "This backend cannot run the master yet",
         MasterReason::RepositoryMissing => "This project has no repository yet",
         MasterReason::RepositoryConfigRefused => {
             "A Git setting in this project's repository runs commands or redirects Git"
+        }
+        MasterReason::InstructionsTooLarge => {
+            "App and project instructions are too long for a Claude master: shorten them on the Process page"
         }
         MasterReason::Cancelled => "Cancelled",
         MasterReason::Unknown => "Something went wrong",
@@ -2866,7 +3292,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
 
 #[cfg(test)]
 mod turn_line_tests {
-    use super::{turn_holds, turn_lines};
+    use super::{AccountRow, turn_holds, turn_lines};
     use crate::master_session::{
         MasterAccountState, MasterReason, MasterReply, MasterReplyProvenance, MasterTurnPhase,
         MasterTurnView,
@@ -2901,9 +3327,10 @@ mod turn_line_tests {
             cause: None,
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         let mut lines = Vec::new();
-        turn_lines(&turn, &mut lines);
+        turn_lines(&turn, &[], &mut lines);
         assert!(lines.last().unwrap().ends_with(&text), "{lines:?}");
     }
 
@@ -2925,6 +3352,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         let current = RequestId::new("turn-1").unwrap();
         assert!(!turn_holds(None, &[]));
@@ -2974,6 +3402,7 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
         };
         for (reason, cause, expected) in [
             (
@@ -2986,9 +3415,14 @@ mod turn_line_tests {
                 "master_runtime_binding",
                 "Turn 1: Blocked | Something went wrong (master_runtime_binding)",
             ),
+            (
+                MasterReason::InstructionsTooLarge,
+                "master_instructions_too_large",
+                "Turn 1: Blocked | App and project instructions are too long for a Claude master: shorten them on the Process page (master_instructions_too_large)",
+            ),
         ] {
             let mut lines = Vec::new();
-            turn_lines(&turn(reason, cause), &mut lines);
+            turn_lines(&turn(reason, cause), &[], &mut lines);
             assert_eq!(lines, vec![expected.to_owned()]);
         }
     }
@@ -3009,11 +3443,12 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         };
         let mut lines = Vec::new();
-        turn_lines(&turn, &mut lines);
+        turn_lines(&turn, &[], &mut lines);
         assert_eq!(
             lines,
             vec![
@@ -3026,7 +3461,7 @@ mod turn_line_tests {
             ..turn
         };
         let mut lines = Vec::new();
-        turn_lines(&changed, &mut lines);
+        turn_lines(&changed, &[], &mut lines);
         assert_eq!(
             lines,
             vec![
@@ -3087,17 +3522,36 @@ mod turn_line_tests {
             tasks: Vec::new(),
             changes: None,
             engine_request: None,
+            activity: Vec::new(),
             detail: None,
             cause: None,
         };
         let mut lines = Vec::new();
-        turn_lines(&running, &mut lines);
+        turn_lines(&running, &[], &mut lines);
         assert_eq!(
             lines,
-            vec!["Turn 2: Running | on account claude-account-b".to_string()]
+            vec!["Turn 2: Running | on account claude-b".to_string()],
+            "with no account rows the account goes by its id, not by its sign-in reference (OB-4)"
+        );
+        let row = |id: &str, name: &str| AccountRow {
+            id: CredentialRef::new(id).unwrap(),
+            name: name.into(),
+            provider: "Claude".into(),
+            status: "Signed in".into(),
+        };
+        let mut lines = Vec::new();
+        turn_lines(
+            &running,
+            &[row("claude-b", "Claude-ChaoticQubit")],
+            &mut lines,
+        );
+        assert_eq!(
+            lines,
+            vec!["Turn 2: Running | on account Claude-ChaoticQubit".to_string()],
+            "the classic view names the account as Accounts does (OB4-F2)"
         );
         let state = |account: &str, harness: &str, reason| MasterAccountState {
-            account_ref: CredentialRef::new(account).unwrap(),
+            account_ref: CredentialRef::new(format!("login-of-{account}")).unwrap(),
             connection: CredentialRef::new(account).unwrap(),
             harness: CredentialRef::new(harness).unwrap(),
             reason,
@@ -3122,7 +3576,7 @@ mod turn_line_tests {
             ..running
         };
         let mut lines = Vec::new();
-        turn_lines(&blocked, &mut lines);
+        turn_lines(&blocked, &[], &mut lines);
         assert_eq!(
             lines,
             vec![
@@ -3132,5 +3586,28 @@ mod turn_line_tests {
                 "  codex-account-c is ready on codex: open a codex master to use it".to_string(),
             ]
         );
+        assert!(
+            lines.iter().all(|line| !line.contains("login-of-")),
+            "no line shows a sign-in reference: {lines:?}"
+        );
+        let twins = [
+            row("claude-account-a", "Claude"),
+            row("claude-account-b", "Claude"),
+            row("codex-account-c", "Work ChatGPT"),
+        ];
+        let mut lines = Vec::new();
+        turn_lines(&blocked, &twins, &mut lines);
+        assert_eq!(
+            lines[1..],
+            [
+                "  Claude (claude-account-a): Not signed in: sign in to this account (Settings, 2 Connections, F2), then send again",
+                "  Claude (claude-account-b): Rate limited; try again shortly",
+                "  Work ChatGPT is ready on codex: open a codex master to use it",
+            ],
+            "two accounts of one name carry their ids; a name used once stays plain (OB4-F1)"
+        );
     }
 }
+
+#[cfg(test)]
+mod tests;

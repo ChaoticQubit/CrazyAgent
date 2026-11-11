@@ -10,12 +10,12 @@
   ▌ "Most l│   Tidepool / Conversation           Project tab        │           
   ▌ From Co│   Tidepool / Agents                 Project tab        │           
     Done ch│   Tidepool / Changes                Project tab        │           
-           │   Tidepool / Context                Project tab        │           
-  Work     │   Tidepool / Settings               Project tab        │           
-    ◔ Marke│                                                        │           
-    ≷ Compe│ Projects, tabs, settings, actions. Enter goes there.   │           
-    ▭ Front└────────────────────────────────────────────────────────┘           
-                                                                                
+           │   Tidepool / Questions              Project tab        │           
+  Work     │   Tidepool / Context                Project tab        │           
+    ◔ Marke│   Tidepool / Settings               Project tab        │           
+    ≷ Compe│                                                        │           
+    ▭ Front│ Projects, tabs, settings, actions. Enter goes there.   │           
+           └────────────────────────────────────────────────────────┘           
   Team  Codex leads. Claude Code x2, Codex x1. Tools on.                        
   Pool  Main  6 ready, 1 not signed in                                          
                                                                                 

@@ -10,13 +10,19 @@ use crate::team::TeamGraph;
 use crate::terminal::{AgentId, TerminalFrame};
 
 /// A pool change asked for in Settings, Pools or a Project. The engine side
-/// builds the exact pool records, keeping an existing pool's projects and roles.
+/// builds the exact pool records, keeping an existing pool's projects and roles;
+/// an update carries the form as the editor opened it, so only what the owner
+/// changed is applied onto the pool as it is when saved.
 /// Input: built by the pool list, the pool editor and the Project screen.
 /// Output: one model access edit; `Assign` gives the project exactly the chosen
-/// pool, or none, and `Remove` also takes the pool off every project using it.
+/// pool, or none, and `Remove` also takes the pool off every project using it; it
+/// carries how many projects its confirmation showed and is refused when that changed.
+/// `Create` carries the id its form drew once, so a retry of the same form never adds
+/// a second pool.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PoolChange {
     Create {
+        id: CredentialRef,
         name: String,
         members: Vec<CredentialRef>,
         quota: ProviderQuotaPolicy,
@@ -26,9 +32,13 @@ pub enum PoolChange {
         name: String,
         members: Vec<CredentialRef>,
         quota: ProviderQuotaPolicy,
+        opened_name: String,
+        opened_members: Vec<CredentialRef>,
+        opened_quota: ProviderQuotaPolicy,
     },
     Remove {
         id: CredentialRef,
+        opened_projects: usize,
     },
     Assign {
         pool: Option<CredentialRef>,
@@ -56,9 +66,57 @@ pub struct AccountRow {
     pub status: String,
 }
 
+/// The words an account goes by wherever a screen shows it outside its own row in Accounts:
+/// the name the owner gave it, with the account id after it when another account has the
+/// same name, so two accounts never read the same. Inputs: the account id and the owner's
+/// account rows. Output: the words, or none for an id with no row.
+pub fn account_label(id: &str, accounts: &[AccountRow]) -> Option<String> {
+    let own = accounts.iter().find(|account| account.id.as_str() == id)?;
+    let uses = accounts
+        .iter()
+        .filter(|account| account.name == own.name)
+        .count();
+    assert!(uses >= 1, "the account's own row has its name");
+    Some(account_words(own, uses > 1))
+}
+
+/// The words of every account at once ([`account_label`]), in one pass over the rows, for a
+/// screen that names many accounts. Input: the owner's account rows. Output: the words by
+/// account id.
+pub fn account_labels(accounts: &[AccountRow]) -> std::collections::HashMap<String, String> {
+    let mut uses: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for account in accounts {
+        *uses.entry(account.name.as_str()).or_default() += 1;
+    }
+    let labels: std::collections::HashMap<String, String> = accounts
+        .iter()
+        .map(|account| {
+            let shared = uses[account.name.as_str()] > 1;
+            (
+                account.id.as_str().to_owned(),
+                account_words(account, shared),
+            )
+        })
+        .collect();
+    assert!(labels.len() <= accounts.len());
+    labels
+}
+
+fn account_words(account: &AccountRow, shared: bool) -> String {
+    if shared {
+        format!("{} ({})", account.name, account.id.as_str())
+    } else {
+        account.name.clone()
+    }
+}
+
 /// The problem code a request gets while the engine has no support for it yet.
 /// Screens show "Not ready yet" for it instead of a failure.
 pub const NOT_READY: &str = "engine_support_not_ready";
+
+/// The problem code a request gets when the full request queue refused it, so it never
+/// reached the engine and nothing changed.
+pub const OWNER_BUSY: &str = "owner_busy";
 
 /// One engine request a screen asks the shell to send.
 /// Input: built by screens and queued with `Ctx::request`. Output: sent one at a
@@ -97,6 +155,10 @@ pub enum Request {
     TerminalAttach {
         agent: AgentId,
     },
+    TerminalAttachPane {
+        agent: AgentId,
+        pane: String,
+    },
     TerminalInput {
         agent: AgentId,
         bytes: Vec<u8>,
@@ -112,7 +174,11 @@ pub enum Request {
     Intake(Box<super::client::intake::IntakeJob>),
     Changes(Box<super::client::changes::ChangesQuery>),
     Process(Box<super::client::process::ProcessQuery>),
+    Recovery(Box<super::client::recovery::RecoveryQuery>),
+    Roadmap(Box<super::client::roadmap::RoadmapQuery>),
+    Questions(Box<super::client::questions::QuestionsQuery>),
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
+    Reveal(Box<super::client::ide::RevealQuery>),
     Reconnect,
 }
 
@@ -124,6 +190,7 @@ impl Request {
         matches!(
             self,
             Self::TerminalAttach { .. }
+                | Self::TerminalAttachPane { .. }
                 | Self::TerminalInput { .. }
                 | Self::TerminalResize { .. }
                 | Self::TerminalDetach { .. }
@@ -149,13 +216,18 @@ impl std::fmt::Debug for Request {
             Self::TeamGraph { .. } => "TeamGraph",
             Self::ProjectFiles { .. } => "ProjectFiles",
             Self::TerminalAttach { .. } => "TerminalAttach",
+            Self::TerminalAttachPane { .. } => "TerminalAttachPane",
             Self::TerminalInput { .. } => "TerminalInput",
             Self::TerminalResize { .. } => "TerminalResize",
             Self::TerminalDetach { .. } => "TerminalDetach",
             Self::Intake(_) => "Intake",
             Self::Changes(_) => "Changes",
             Self::Process(_) => "Process",
+            Self::Recovery(_) => "Recovery",
+            Self::Roadmap(_) => "Roadmap",
+            Self::Questions(_) => "Questions",
             Self::Cleanup(_) => "Cleanup",
+            Self::Reveal(_) => "Reveal",
             Self::Reconnect => "Reconnect",
         })
     }
@@ -296,9 +368,23 @@ pub struct Activity {
     pub notifications: usize,
 }
 
+/// A fresh pool id from its name: `pool-<letters>-<random hex>`.
+/// Input: the pool name. Output: the id, or `pool_id_unavailable`.
+pub fn new_pool_id(name: &str) -> Result<CredentialRef, String> {
+    let stem: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .flat_map(|character| character.to_lowercase())
+        .collect();
+    let nonce = crate::engine::owner::random_id().map_err(|_| "pool_id_unavailable".to_owned())?;
+    CredentialRef::new(format!("pool-{stem}-{nonce}")).map_err(|_| "pool_id_unavailable".into())
+}
+
 /// One project as Home shows it, built only from engine data.
 /// Input: the stored project, its setup and research jobs, and pool names.
-/// Output: the card fields in plain words.
+/// Output: the card fields in plain words, and the assigned pool's id, by which the
+/// pool screens find the projects of one pool, as two pools may share a name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectCard {
     pub id: ProjectId,
@@ -306,6 +392,7 @@ pub struct ProjectCard {
     pub about: String,
     pub platforms: Vec<Platform>,
     pub pool: Option<String>,
+    pub pool_id: Option<CredentialRef>,
     pub research: ResearchCounts,
     pub created_ms: Option<i64>,
     pub activity: Activity,
@@ -338,6 +425,7 @@ impl ProjectCard {
                 .map(|setup| setup.platforms.clone())
                 .unwrap_or_default(),
             pool,
+            pool_id: setup.and_then(|setup| setup.pool.clone()),
             research: ResearchCounts::of(jobs),
             created_ms: setup.map(|setup| setup.created_ms),
             activity: Activity::default(),

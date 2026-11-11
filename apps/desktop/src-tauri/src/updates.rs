@@ -6,7 +6,7 @@ use std::time::Duration;
 use tauri::ipc::Channel as Events;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::{Update, UpdaterExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, MutexGuard, Notify};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
@@ -50,11 +50,22 @@ pub struct InstallOutcome {
 }
 
 fn refused(code: &'static str) -> BridgeError {
-    BridgeError { code, cause: None }
+    BridgeError {
+        code,
+        cause: None,
+        account: None,
+    }
 }
 
 fn bridged(error: UpdateError) -> BridgeError {
     refused(error.code)
+}
+
+/// Takes the update lock without waiting, so a check, a channel switch, an install and an
+/// engine restart never overlap: an install stops and replaces the engine a restart would
+/// start. Input: the state. Output: the guard to keep for the whole step, or `busy`.
+pub fn hold(state: &UpdateState) -> Result<MutexGuard<'_, Option<Update>>, BridgeError> {
+    state.0.try_lock().map_err(|_| refused("busy"))
 }
 
 fn root() -> Result<PathBuf, BridgeError> {
@@ -80,7 +91,7 @@ pub fn set_channel<R: Runtime>(
     channel: &str,
 ) -> Result<UpdateSettings, BridgeError> {
     let channel = Channel::parse(channel).ok_or_else(|| refused("update_channel_invalid"))?;
-    let mut found = state.0.try_lock().map_err(|_| refused("busy"))?;
+    let mut found = hold(state)?;
     update::save_channel(&root()?, channel).map_err(bridged)?;
     *found = None;
     settings(app)
@@ -115,7 +126,7 @@ pub async fn check<R: Runtime>(
     app: &AppHandle<R>,
     state: &UpdateState,
 ) -> Result<Option<AvailableUpdate>, BridgeError> {
-    let mut found = state.0.try_lock().map_err(|_| refused("busy"))?;
+    let mut found = hold(state)?;
     let channel = update::read_channel(&root()?).map_err(bridged)?;
     let endpoint = channel
         .desktop_manifest_url()
@@ -181,7 +192,7 @@ pub async fn install(
     state: &UpdateState,
     events: Events<UpdateProgress>,
 ) -> Result<InstallOutcome, BridgeError> {
-    let mut found = state.0.try_lock().map_err(|_| refused("busy"))?;
+    let mut found = hold(state)?;
     let update = found
         .as_mut()
         .ok_or_else(|| refused("update_not_checked"))?;
@@ -223,11 +234,28 @@ pub async fn install(
     })
 }
 
-/// Links the bundled `crazyagent` onto the owner's PATH through
-/// `crazyagent service link-cli`. Output: the tool's own one-line report, or
-/// `update_link_cli_failed` / `sidecar_missing`.
+/// Links the bundled `crazyagent`, or its private copy when the app runs from an AppImage
+/// mount, onto the owner's PATH through `crazyagent service link-cli`. Output: the tool's
+/// own one-line report, or `update_link_cli_failed` / `sidecar_missing`.
 pub async fn link_cli() -> Result<String, BridgeError> {
     service(sidecar()?, "link-cli")
         .await
         .map_err(|_| refused("update_link_cli_failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_engine_restart_and_an_update_step_never_hold_the_update_lock_together() {
+        let state = UpdateState::default();
+        let restarting = hold(&state).expect("a free lock is taken");
+        assert_eq!(hold(&state).err().map(|refusal| refusal.code), Some("busy"));
+        drop(restarting);
+        let installing = hold(&state).expect("a released lock is taken again");
+        assert_eq!(hold(&state).err().map(|refusal| refusal.code), Some("busy"));
+        drop(installing);
+        assert!(hold(&state).is_ok());
+    }
 }

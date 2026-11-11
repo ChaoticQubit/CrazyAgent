@@ -209,6 +209,182 @@ fn a_custodian_check_waits_for_a_running_renewal_and_the_engine_admits_it_meanwh
 }
 
 #[test]
+fn a_sign_in_or_sign_out_never_runs_beside_a_renewal_that_outlived_its_lease() {
+    let mut case = UseCase::new();
+    for (index, name) in [(0, "sign-in"), (1, "refresh"), (2, "sign-out")] {
+        let lease = execution(&mut case);
+        let renewing = lease.hold_renewal(Duration::ZERO).unwrap();
+        drop(lease);
+        let custodian = |case: &UseCase| {
+            case.recapture().acquire_use_within(
+                &case.host,
+                &case.binding,
+                &request_id(name),
+                1,
+                purpose(index),
+                Some(Duration::from_millis(200)),
+            )
+        };
+        assert_eq!(
+            custodian(&case).err().map(|error| error.0).as_deref(),
+            Some("native_profile_in_use"),
+            "a {name} waits for the renewal to end"
+        );
+        drop(renewing);
+        let held = custodian(&case).unwrap();
+        assert_eq!(
+            held.hold_renewal(Duration::ZERO).err().unwrap().0,
+            "native_profile_renewal_busy",
+            "no renewal starts during a {name}"
+        );
+        drop(held);
+    }
+}
+
+/// RETIRE-UNLOCK-L1: a renewal refused after it took its shared lease on the account, here
+/// because the profile's home was swapped so the use no longer verifies, holds nothing once
+/// it returns, so a sign-out after the turn is not refused as in use.
+#[test]
+fn a_renewal_refused_after_its_lease_lock_leaves_the_account_free_for_a_sign_out() {
+    let mut case = UseCase::new();
+    let lease = execution(&mut case);
+    let swapped = case.profile().join("home-swapped");
+    std::fs::rename(case.home(), &swapped).unwrap();
+    std::fs::create_dir(case.home()).unwrap();
+    let refused = lease
+        .renewal(agent_copy::Harness::Codex, &case.root.path().join("codex"))
+        .err()
+        .map(|error| error.0);
+    assert!(refused.is_some(), "a use whose home was swapped is refused");
+    drop(lease);
+    std::fs::remove_dir(case.home()).unwrap();
+    std::fs::rename(&swapped, case.home()).unwrap();
+    let signing_out = case.recapture().acquire_use_within(
+        &case.host,
+        &case.binding,
+        &request_id("sign-out"),
+        1,
+        purpose(2),
+        Some(Duration::from_millis(200)),
+    );
+    assert!(
+        signing_out.is_ok(),
+        "{refused:?} left the account held: {:?}",
+        signing_out.err()
+    );
+}
+
+const RENEWING_ROOT: &str = "CRAZYAGENT_TEST_RENEWING_ROOT";
+
+/// Runs one Codex renewal of the profile under `RENEWING_ROOT` as an engine process of its
+/// own, which `a_renewal_left_by_an_engine_that_exits_keeps_the_renewal_lock_until_it_ends`
+/// kills mid-run. Does nothing when started without that folder.
+#[test]
+#[ignore = "helper: started and killed by a_renewal_left_by_an_engine_that_exits_keeps_the_renewal_lock_until_it_ends"]
+fn renewing_engine_process() {
+    let Some(root) = std::env::var_os(RENEWING_ROOT).map(PathBuf::from) else {
+        return;
+    };
+    let renewal = renewal::Renewal::of_profile(
+        agent_copy::Harness::Codex,
+        &root.join("codex-orphan"),
+        &root.join("profile"),
+    );
+    let stale = renewal.record().unwrap().expires;
+    let _ = renewal.renew(stale);
+}
+
+#[test]
+fn a_renewal_left_by_an_engine_that_exits_keeps_the_renewal_lock_until_it_ends() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    private_directory(&profile);
+    private_directory(&profile.join("home"));
+    private_file(&profile.join("home/auth.json"), &codex_auth(now() + 30));
+    let rotated = String::from_utf8(codex_auth(now() + 3 * 86_400))
+        .unwrap()
+        .replace("unit-refresh-secret", "unit-rotated-refresh")
+        .into_bytes();
+    private_file(&root.path().join("codex-orphan.rotated"), &rotated);
+    let harness = root.path().join("codex-orphan");
+    std::fs::write(
+        &harness,
+        "#!/bin/sh\necho $$ > \"$0.pid.part\"\nmv \"$0.pid.part\" \"$0.pid\"\ni=0\nwhile [ ! -f \"$0.go\" ] && [ $i -lt 400 ]; do /bin/sleep 0.05; i=$((i+1)); done\ncp \"$0.rotated\" \"$CODEX_HOME/auth.json\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let helper = format!(
+        "{}::renewing_engine_process",
+        module_path!().split_once("::").unwrap().1
+    );
+    let mut engine = crate::spawn_gate::spawn(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &helper, "--ignored", "--test-threads", "1"])
+            .env(RENEWING_ROOT, root.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let marker = root.path().join("codex-orphan.pid");
+    let started = Instant::now();
+    while !marker.is_file() {
+        if started.elapsed() > Duration::from_secs(20) {
+            let _ = engine.kill();
+            let _ = engine.wait();
+            panic!("the engine process never started its renewal");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let child = rustix::process::Pid::from_raw(
+        std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap(),
+    )
+    .unwrap();
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+    let folder = std::fs::File::open(&profile).unwrap();
+    assert!(
+        rustix::process::test_kill_process(child).is_ok(),
+        "the renewal ended with its engine"
+    );
+    assert_eq!(
+        renewal::hold(&folder, Duration::ZERO)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_renewal_busy"),
+        "a renewal left by an engine that exited holds no renewal lock, so a restarted engine can renew beside it"
+    );
+
+    private_file(&root.path().join("codex-orphan.go"), b"");
+    let ending = Instant::now();
+    while rustix::process::test_kill_process(child).is_ok() {
+        assert!(
+            ending.elapsed() < Duration::from_secs(10),
+            "the left renewal never finished"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let released = Instant::now();
+    while renewal::hold(&folder, Duration::ZERO).is_err() {
+        assert!(
+            released.elapsed() < Duration::from_secs(10),
+            "the renewal lock outlived the renewal that held it"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read(profile.join("home/auth.json")).unwrap(),
+        rotated,
+        "the account keeps the rotated refresh token"
+    );
+}
+
+#[test]
 fn one_renewal_runs_at_a_time_per_account() {
     let mut case = UseCase::new();
     let first = execution(&mut case);
@@ -223,15 +399,18 @@ fn one_renewal_runs_at_a_time_per_account() {
         "native_profile_renewal_busy"
     );
     let waiter = std::thread::spawn(move || {
-        let started = Instant::now();
         let held = second.hold_renewal(Duration::from_secs(20)).map(drop);
-        (started.elapsed(), held)
+        (Instant::now(), held)
     });
     std::thread::sleep(Duration::from_millis(400));
+    let released = Instant::now();
     drop(held);
-    let (waited, held) = waiter.join().unwrap();
+    let (taken, held) = waiter.join().unwrap();
     assert!(held.is_ok());
-    assert!(waited >= Duration::from_millis(400), "{waited:?}");
+    assert!(
+        taken >= released,
+        "the waiter took the lock before its release"
+    );
     drop(first);
 }
 

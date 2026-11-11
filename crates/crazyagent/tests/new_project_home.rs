@@ -6,7 +6,7 @@ use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, O
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::projects_home::{
     CRAZYAGENT_DIRECTORY, EXCLUDES, FoundState, LAYOUT, Registered, destination, folder_name,
-    forgotten, plain_problem, plan_trash, slug, state_folder,
+    forgotten, plain_problem, plan_delete, plan_trash, slug, state_folder,
 };
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use std::fs;
@@ -131,6 +131,80 @@ fn the_state_folder_is_crazyagent_when_present_and_never_a_link() {
 }
 
 #[test]
+fn delete_everything_takes_only_real_folders_strictly_inside_the_home() {
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    for folder in [
+        home.join("app").join("web"),
+        home.join("org").join("service-a"),
+        root.join("outside").join("inner"),
+    ] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    fs::write(home.join("notes.txt"), "x").unwrap();
+    symlink(root.join("outside"), home.join("leads-out")).unwrap();
+    symlink(home.join("app"), home.join("leads-in")).unwrap();
+
+    assert_eq!(
+        plan_delete(&home, &[home.join("org").join("service-a")]).unwrap(),
+        [home.join("org").join("service-a")],
+        "a project folder deeper than the home's top level is inside"
+    );
+    assert_eq!(
+        plan_delete(&home, &[home.join("app"), home.join("app").join("web")]).unwrap(),
+        [home.join("app")],
+        "a repository inside the project folder goes with it, moved once"
+    );
+    assert_eq!(
+        plan_delete(&home, &[home.join("app"), home.join("gone")]).unwrap(),
+        [home.join("app")],
+        "a folder already missing is skipped"
+    );
+    assert!(
+        plan_delete(&home, &[home.join("gone")]).unwrap().is_empty(),
+        "a project whose folders are all gone has nothing to move"
+    );
+    for (folders, why) in [
+        (
+            vec![home.join("leads-out")],
+            "a link inside the home that leads out",
+        ),
+        (
+            vec![home.join("leads-in")],
+            "a link, even one that stays inside",
+        ),
+        (
+            vec![home.join("leads-out").join("inner")],
+            "a folder reached through a link that leads out",
+        ),
+        (
+            vec![home.join("app").join("..").join("..").join("outside")],
+            "a path that climbs out with ..",
+        ),
+        (vec![home.clone()], "the projects home itself"),
+        (
+            vec![home.join("app"), root.join("outside")],
+            "a second repository outside the home",
+        ),
+        (vec![home.join("notes.txt")], "a file"),
+        (vec![PathBuf::from("app")], "a relative path"),
+    ] {
+        assert_eq!(
+            plan_delete(&home, &folders).unwrap_err().0,
+            "delete_outside_home",
+            "{why}"
+        );
+    }
+    assert!(plain_problem("delete_outside_home").is_some());
+    assert_eq!(
+        names(&home),
+        ["app", "leads-in", "leads-out", "notes.txt", "org"]
+    );
+    assert!(root.join("outside").join("inner").is_dir());
+}
+
+#[test]
 fn only_plain_unused_top_level_home_folders_can_be_deleted() {
     let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -150,6 +224,7 @@ fn only_plain_unused_top_level_home_folders_can_be_deleted() {
         project_id: ProjectId::new("used").unwrap(),
         name: "Used".into(),
         folder: home.join("used"),
+        repositories: vec![home.join("used")],
         onboarding: false,
     }];
     let text = |path: PathBuf| path.to_str().unwrap().to_owned();
@@ -583,4 +658,35 @@ async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
     assert!([Some(&first), Some(&second)].contains(&twin.project_id.as_ref()));
 
     engine.stop().await;
+}
+
+#[test]
+fn a_home_folder_holding_a_set_up_project_cannot_be_deleted() {
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    for folder in [home.join("org").join("service-a"), home.join("org-tools")] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let registered = [Registered {
+        project_id: ProjectId::new("service-a").unwrap(),
+        name: "Service A".into(),
+        folder: home.join("org").join("service-a"),
+        repositories: vec![home.join("org").join("service-a")],
+        onboarding: true,
+    }];
+    let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+    assert_eq!(
+        plan_trash(&home, &text(home.join("org")), &registered)
+            .unwrap_err()
+            .0,
+        "home_trash_still_set_up",
+        "a folder holding a set-up project stays"
+    );
+    assert_eq!(
+        plan_trash(&home, &text(home.join("org-tools")), &registered).unwrap(),
+        home.join("org-tools"),
+        "a name that only starts the same is another folder"
+    );
+    assert_eq!(names(&home), ["org", "org-tools"]);
 }

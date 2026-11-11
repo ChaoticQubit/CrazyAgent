@@ -151,12 +151,7 @@ pub fn fetch_git(setup: &Path, repo: &str, commit: &str) -> Result<PathBuf, Inst
     validate_git(repo, commit, None)?;
     let packs = setup.join("pack");
     private_folder(&packs)?;
-    let key: String = Sha256::digest(repo.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let target = packs.join(format!("{key}-{commit}"));
+    let target = checkout_folder(setup, repo, commit);
     if std::fs::symlink_metadata(&target).is_ok() {
         if head(setup, &target).as_deref() == Some(commit) && pristine(setup, &target) {
             return Ok(target);
@@ -192,6 +187,34 @@ pub fn fetch_git(setup: &Path, repo: &str, commit: &str) -> Result<PathBuf, Inst
         let _ = std::fs::remove_dir_all(&staging);
     }
     result.map(|()| target)
+}
+
+/// Names the folder a pinned git source is checked out in, `<setup>/pack/<repo key>-<commit>`,
+/// without fetching it. Inputs: the setup folder, repository URL and commit. Output: the path.
+pub fn checkout_folder(setup: &Path, repo: &str, commit: &str) -> PathBuf {
+    let key: String = Sha256::digest(repo.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    setup.join("pack").join(format!("{key}-{commit}"))
+}
+
+/// Names the plugin folder an entry's hooks come from: the hook folder this build ships for
+/// it once unpacked, else for a pinned git checkout the checkout itself, where a Claude Code
+/// plugin keeps its hooks. Inputs: the setup folder and the entry. Output: the folder, or
+/// none when neither is present.
+pub fn plugin_folder(setup: &Path, entry: &PackManifestEntry) -> Option<PathBuf> {
+    if let Some(folder) = crate::setup::bundled::hook_folder(setup, &entry.id) {
+        return Some(folder);
+    }
+    let PackSource::Git { repo, commit, .. } = &entry.source else {
+        return None;
+    };
+    let folder = checkout_folder(setup, repo, commit);
+    std::fs::symlink_metadata(&folder)
+        .is_ok_and(|metadata| metadata.is_dir())
+        .then_some(folder)
 }
 
 /// Finds the folder holding one entry's files: the pinned git checkout, or its `path`

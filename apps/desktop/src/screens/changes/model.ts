@@ -1,5 +1,5 @@
 import { changesRefusal } from "../../api-changes";
-import type { AcceptOutcome, ChangedFile, ChangeSet, FileStatus } from "../../api-changes";
+import type { AcceptOutcome, ChangedFile, ChangeSet, FileStatus, TargetBranches } from "../../api-changes";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
 
@@ -32,9 +32,13 @@ const MARKS: Record<string, string> = {
   mode: "File mode changed",
   attributes: ".gitattributes: changes how Git treats files",
   modules: ".gitmodules: changes the project's submodules",
+  owner_edited: "Edited by you",
+  ide_config: "IDE settings: changes how the IDE behaves in this project",
+  instructions: "Instruction file: changes what every agent of this project is told",
 };
 
 const MESSAGE_BYTES_MAX = 4096;
+const SUBJECT_CHARS_MAX = 48;
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
 
 /** Names the agent whose work a change set holds, a sub-agent by the engine's label such as
@@ -43,14 +47,37 @@ export function agentName(set: ChangeSet): string {
   return set.agent.kind === "master" ? "Master" : displayText(set.agent.label);
 }
 
+/** The first line of a change set's commit message, cut to a short subject, hidden
+ * characters shown as escapes. Input: the change set. Output: the subject, empty for an
+ * empty message. */
+export function subject(set: ChangeSet): string {
+  const chars = [...displayText(set.message.split("\n", 1)[0].trim())];
+  return chars.length > SUBJECT_CHARS_MAX ? `${chars.slice(0, SUBJECT_CHARS_MAX - 3).join("")}...` : chars.join("");
+}
+
+/** Names a change set as the owner reads it everywhere: "Change set #16 (Wren: checkout UI,
+ * 7 files)", or its agent alone for a set the engine has not numbered yet. Input: the
+ * change set. Output: the name. */
+export function changeSetName(set: ChangeSet): string {
+  if (set.number === undefined || set.number === null) return agentName(set);
+  const about = subject(set);
+  return `Change set #${set.number} (${agentName(set)}${about === "" ? "" : `: ${about}`}, ${plural(set.files, "file", "files")})`;
+}
+
 /** The size of a change set in files and lines. Input: the change set. Output: the line. */
 export function sizeLine(set: ChangeSet): string {
   return `${plural(set.files, "file", "files")}, ${plural(set.added, "line", "lines")} added, ${set.removed} removed`;
 }
 
-/** The status word and tone of a change set's state. Input: the change set. */
+/** The status word and tone of a change set's state, saying when the engine closed it
+ * because its work was landed or removed outside the app, and when its agent is fixing
+ * conflicts with main (OS-8). Input: the change set. */
 export function stateBadge(set: ChangeSet): { word: string; tone: Tone } {
-  return set.state === "updating" && set.waiting ? { word: "Updated, waiting for the agent", tone: "warn" } : STATES[set.state];
+  if (set.outside && set.state === "accepted") return { word: "Landed outside the app", tone: "ok" };
+  if (set.outside && set.state === "discarded") return { word: "Removed outside the app", tone: "neutral" };
+  if (set.state === "updating" && set.waiting) return { word: "Updated, waiting for the agent", tone: "warn" };
+  if (set.state === "updating" && set.conflicts.length > 0) return { word: "Agent is fixing conflicts with main", tone: "info" };
+  return STATES[set.state];
 }
 
 /** Says plainly that CrazyAgent did not check a change set. Input: the change set.
@@ -69,7 +96,7 @@ export function outcomeNote(set: ChangeSet): string | null {
 
 /** What the owner is reviewing of one change set: its id, the head its diff pages are read
  * at and that Accept and Discard send, whether that head moved on since the owner opened
- * it, and whether every page of the moved head was shown since. */
+ * it, and whether the end of the moved head's last page was on screen since. */
 export interface Review {
   id: string;
   head: string;
@@ -87,23 +114,31 @@ export function reviewOf(previous: Review | null, set: ChangeSet): Review {
   return previous;
 }
 
-/** Records that the last diff page read at `head` was shown. Inputs: the review and the
- * head that page was read at. Output: the review, unchanged for a page of another head. */
+/** Records that the end of the last diff page read at `head` was on screen. Inputs: the
+ * review and the head that page was read at. Output: the review, unchanged for a page of
+ * another head. */
 export function lastPageSeen(review: Review, head: string): Review {
   return review.head === head && !review.seenAll ? { ...review, seenAll: true } : review;
 }
 
+/** Marks the review moved and unread after a diff page was refused as moved on, so Accept
+ * and Discard wait for a read from the top even when the list then shows the same head
+ * again (RVA-L2). Input: the review. Output: the review, moved and unseen. */
+export function movedOn(review: Review): Review {
+  return { ...review, moved: true, seenAll: false };
+}
+
 /** Whether Accept and Discard may act on what the owner reviewed: not after the change set
- * moved on until every page of its new head was shown. Input: the review. Output: true when
- * they may act. */
+ * moved on until the end of its new head's last page was on screen. Input: the review.
+ * Output: true when they may act. */
 export function reviewed(review: Review): boolean {
   return !review.moved || review.seenAll;
 }
 
 /** The note shown while a change set moved on since the owner opened it and its new head is
- * not yet read to the last page. Input: the review. Output: the note, or null. */
+ * not yet read to the end of its last page. Input: the review. Output: the note, or null. */
 export function movedNote(review: Review): string | null {
-  return reviewed(review) ? null : "These changes moved on since you opened them. Review them again: Accept and Discard come back once you reach the last page.";
+  return reviewed(review) ? null : "These changes moved on since you opened them. Review them again: Accept and Discard come back once you scroll to the end of the last page.";
 }
 
 /** The actions a change set's state allows now. Inputs: the change set and now in
@@ -123,9 +158,12 @@ function restorable(set: ChangeSet, now: number): boolean {
   return set.restorable_until_ms !== null && set.restorable_until_ms > now;
 }
 
-/** Says until when discarded changes can be restored. Inputs: the change set and now in
- * milliseconds. Output: the note, or null for a change set that is not discarded. */
+/** Says until when discarded changes can be restored, or that work landed or removed
+ * outside the app needs nothing more. Inputs: the change set and now in milliseconds.
+ * Output: the note, or null for a change set that is neither discarded nor closed outside. */
 export function restoreNote(set: ChangeSet, now: number): string | null {
+  if (set.outside && set.state === "accepted") return "Your branch already has these changes. They were landed outside the app.";
+  if (set.outside && set.state === "discarded") return "The agent's copy of these changes was removed outside the app, so they cannot be restored.";
   if (set.state !== "discarded") return null;
   if (!restorable(set, now)) return "These changes can no longer be restored.";
   const until = new Date(set.restorable_until_ms ?? now).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
@@ -141,6 +179,14 @@ export function updatingNote(set: ChangeSet): string | null {
     : "The agent is resolving the conflicts with your branch. Review again when it finishes.";
 }
 
+/** Names the lockfiles the project's own tools rebuilt on the agent's work, while the
+ * change set waits for review. Input: the change set. Output: the note, or null when there
+ * are none or it is no longer waiting for review. */
+export function regeneratedNote(set: ChangeSet): string | null {
+  if (set.state !== "pending" || set.regenerated.length === 0) return null;
+  return `Rebuilt with this project's own tools to fit your branch: ${set.regenerated.map(displayText).join(", ")}. They ran on the agent's work, so review the result like the agent's own edits.`;
+}
+
 /** Names the files a conflicting change set clashes on. Input: the change set. Output:
  * the note, or null in any other state. */
 export function conflictNote(set: ChangeSet): string | null {
@@ -148,11 +194,44 @@ export function conflictNote(set: ChangeSet): string | null {
 }
 
 /** The owner's edited commit message as Accept sends it: line ends made \n, trimmed.
- * Input: the editor text. Output: the message, or null when it is empty or longer than
- * the engine takes. */
+ * Input: the editor text. Output: the message, or null when it is empty, longer than the
+ * engine takes or holds a character displayText would show as an escape. */
 export function commitMessage(text: string): string | null {
   const message = text.replace(/\r\n/g, "\n").trim();
-  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX ? message : null;
+  return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX && displayText(message) === message ? message : null;
+}
+
+/** Where an Accept lands and how the dialog says it: the picked branch to send, null when it
+ * is where the engine lands with no branch named, the team's Land on branch, else the
+ * checked-out one, and the sentence naming that branch, or the engine's sentence naming a
+ * missing Land on branch while none is picked. Inputs: the listed branches, null before they
+ * load, and the picked branch, empty for none. Output: the branch and sentence. */
+export function acceptTarget(branches: TargetBranches | null, target: string): { picked: string | null; text: string } {
+  const problem = branches?.land_on_problem ?? null;
+  if (problem !== null && target === "") return { picked: null, text: displayText(problem) };
+  const fallback = branches === null || problem !== null ? null : branches.land_on ?? branches.current;
+  const lands = target !== "" ? target : fallback;
+  const picked = branches !== null && target !== "" && target !== fallback ? target : null;
+  const where = lands === null
+    ? "They land as one commit on your project's Land on branch, under your own Git name."
+    : lands === branches?.current
+      ? `They land as one commit on ${displayText(lands)}, the branch checked out in your project folder, under your own Git name.`
+      : `They land as one commit on ${displayText(lands)}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are.`;
+  return { picked, text: `${where} CrazyAgent did not check them.` };
+}
+
+/** Whether the Accept dialog must wait for the owner to pick a branch: the Land on branch is
+ * missing, so no branch is where the changes land by default. Inputs: the listed branches,
+ * null before they load, and the picked branch, empty for none. Output: true to wait. */
+export function acceptBlocked(branches: TargetBranches | null, target: string): boolean {
+  return (branches?.land_on_problem ?? null) !== null && target === "";
+}
+
+/** One branch as the Accept dialog lists it, marked as the Land on branch and as checked out
+ * where it is. Inputs: the listed branches and the name. Output: the label. */
+export function branchLabel(branches: TargetBranches, name: string): string {
+  const marks = [name === branches.land_on ? "Land on" : null, name === branches.current ? "checked out" : null].filter((mark) => mark !== null);
+  return marks.length === 0 ? name : `${name} (${marks.join(", ")})`;
 }
 
 /** What a landed Accept did, in one sentence; a conflict is told by the change set's own
@@ -179,4 +258,20 @@ export function fileMarks(file: ChangedFile): string[] {
  * codes, become visible escapes; newlines and tabs stay. Input: the text. Output: the text. */
 export function diffText(text: string): string {
   return displayText(text);
+}
+
+/** Counts the change sets waiting for the owner: ready to review or conflicting with their
+ * branch. One its agent is updating waits on the agent instead. Input: the change sets.
+ * Output: the count. */
+export function waitingCount(sets: readonly ChangeSet[]): number {
+  return sets.filter((set) => set.state === "pending" || set.state === "conflict").length;
+}
+
+/** The line that tells the owner change sets wait where they are reviewed: Changes, or the
+ * IDE's Source Control once the IDE replaces Changes (DEC-097). Inputs: the count and the
+ * place. Output: the line, or null when none wait. */
+export function waitingLine(count: number, place: "changes" | "ide" = "changes"): string | null {
+  if (count <= 0) return null;
+  const where = place === "ide" ? "the IDE, under Source Control" : "Changes";
+  return count === 1 ? `1 change set is waiting for you in ${where}` : `${count} change sets are waiting for you in ${where}`;
 }

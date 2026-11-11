@@ -128,9 +128,11 @@ fn read_text(path: &Path) -> Result<String, EngineError> {
 }
 
 fn shown(name: &str) -> String {
-    name.chars()
+    let plain: String = name
+        .chars()
         .map(|c| if c.is_control() { '\u{fffd}' } else { c })
-        .collect()
+        .collect();
+    crate::memory::visible_text(&plain)
 }
 
 fn list(folder: &Path) -> Result<(Vec<SkillFile>, u32), EngineError> {
@@ -237,6 +239,8 @@ mod tests {
             on_here: None,
             source: "/picked/notes".into(),
             folder: folder.display().to_string(),
+            version: 0,
+            refused: None,
         }
     }
 

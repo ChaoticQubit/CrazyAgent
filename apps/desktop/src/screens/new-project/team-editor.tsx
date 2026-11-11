@@ -3,10 +3,10 @@ import { displayText } from "../conversation";
 import { Switch as ToggleSwitch, type IconName } from "../../ui";
 import type { PoolChoice, ResearchKind } from "../../api-projects";
 import {
-  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TEAM_FULL_NOTE, addHarnessRow, agentTotalText, anyHarnessNote, harnessChoices, harnessLabel,
-  poolFits, poolName, removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamFull, teamNotes,
+  HARNESS_AGENTS_MAX, SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TEAM_FULL_NOTE, addHarnessRow, agentTotalText, anyHarnessNote, entry, harnessChoices, harnessLabel,
+  masterNote, poolFits, poolName, removeHarnessRow, setAgents, setMaster, setRowHarness, setTools, teamErrors, teamFull, teamNotes,
 } from "./wizard";
-import type { TeamDraft } from "./wizard";
+import type { PickRole, TeamDraft } from "./wizard";
 
 export const RESEARCH_LABELS: Record<ResearchKind, string> = {
   market_research: "Market research",
@@ -32,14 +32,15 @@ export function harnessName(harnesses: HarnessEntry[] | null, id: string): strin
   return harnesses ? harnessLabel(harnesses, id) : KNOWN[id] ?? id;
 }
 
-function HarnessSelect({ id, value, harnesses, onChange, label }: {
-  id: string; value: string; harnesses: HarnessEntry[] | null; onChange: (value: string) => void; label: string;
+function HarnessSelect({ id, value, harnesses, onChange, label, role }: {
+  id: string; value: string; harnesses: HarnessEntry[] | null; onChange: (value: string) => void; label: string; role: PickRole;
 }) {
-  const choices = harnesses ? harnessChoices(harnesses) : Object.entries(KNOWN).map(([key, name]) => ({ id: key, label: name, group: "", disabled: false }));
+  const choices = harnesses ? harnessChoices(harnesses, role) : Object.entries(KNOWN).map(([key, name]) => ({ id: key, label: name, group: "", disabled: false }));
   const groups = [...new Set(choices.map((choice) => choice.group))];
-  const known = choices.some((choice) => choice.id === value);
-  return <select className="pj-select" id={id} aria-label={label} value={value} onChange={(event) => onChange(event.target.value)}>
-    {!known && <option value={value}>{harnessName(harnesses, value) || "Pick a harness"}</option>}
+  const shown = entry(harnesses, value)?.id ?? value;
+  const known = choices.some((choice) => choice.id === shown);
+  return <select className="pj-select" id={id} aria-label={label} value={shown} onChange={(event) => onChange(event.target.value)}>
+    {!known && <option value={shown}>{harnessName(harnesses, shown) || "Pick a harness"}</option>}
     {groups.map((group) => group
       ? <optgroup key={group} label={group}>{choices.filter((choice) => choice.group === group).map((choice) => <option key={choice.id} value={choice.id} disabled={choice.disabled}>{choice.label}</option>)}</optgroup>
       : choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>))}
@@ -64,8 +65,8 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
   const errors = teamErrors(team, harnesses);
   const notes = teamNotes(team, harnesses);
   const full = teamFull(team);
-  const master = harnesses?.find((harness) => harness.id === team.master);
-  const fixed = (id: string) => harnesses?.find((harness) => harness.id === id)?.tools.kind === "limited";
+  const master = entry(harnesses, team.master);
+  const fixed = (id: string) => entry(harnesses, id)?.tools.kind === "limited";
   const researchHarnesses = [...new Set((team.sub_harnesses.length ? team.sub_harnesses.map((slot) => slot.harness) : [team.master]).map((id) => harnessName(harnesses, id)))];
   return <div className="pj-stack">
     <section className="pj-stack-s" aria-labelledby={`${prefix}-master`}>
@@ -73,7 +74,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
       <div className="pj-team-master">
         <div className="pj-field">
           <label htmlFor={`${prefix}-master-harness`}>Harness</label>
-          <HarnessSelect id={`${prefix}-master-harness`} label="Master harness" value={team.master} harnesses={harnesses}
+          <HarnessSelect id={`${prefix}-master-harness`} label="Master harness" role="master" value={team.master} harnesses={harnesses}
             onChange={(value) => onChange(setMaster(team, value, harnesses))} />
         </div>
         <div className="pj-field">
@@ -83,6 +84,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
         </div>
       </div>
       {errors.master && <p className="pj-error" role="alert">{errors.master}</p>}
+      {masterNote(team, harnesses) && <p className="pj-note">{masterNote(team, harnesses)}</p>}
       {pool && master && !poolFits(master, pool.members) &&
         <p className="pj-note warn">{displayText(poolName(pool.pool))} has no account {master.name} can use. Add an account it can use to the pool, or pick another harness.</p>}
       <p className="pj-help">{pool ? `Uses an account from ${displayText(poolName(pool.pool))}.` : "Uses an account from the pool you choose."}</p>
@@ -94,7 +96,7 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
         {team.sub_harnesses.map((slot, index) => {
           const name = harnessName(harnesses, slot.harness);
           return <div className="pj-team-row" role="row" key={index}>
-            <span role="cell"><HarnessSelect id={`${prefix}-row-${index}`} label={`Harness for agent row ${index + 1}`} value={slot.harness} harnesses={harnesses}
+            <span role="cell"><HarnessSelect id={`${prefix}-row-${index}`} label={`Harness for agent row ${index + 1}`} role="agent" value={slot.harness} harnesses={harnesses}
               onChange={(value) => onChange(setRowHarness(team, index, value, harnesses))} /></span>
             <span role="cell" className="pj-stepper" aria-label={`Agents for ${name}`}>
               <button type="button" aria-label={`Fewer ${name} agents`} disabled={slot.agents <= 1} onClick={() => onChange(setAgents(team, index, slot.agents - 1))}>-</button>

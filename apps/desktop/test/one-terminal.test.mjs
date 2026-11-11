@@ -1,0 +1,272 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { bundle, withPage } from "./browser.mjs";
+
+const fixture = await bundle(new URL("./fixtures/one-terminal.mjs", import.meta.url).pathname);
+
+/** Mounts the Agents tab in a 1200x800 page with the engine answering attaches after
+ * `delayMs`, runs each step in turn (`["card", name]` clicks a graph card, `["waiting", name]`
+ * clicks Open terminal on a "Waiting on you" row in the toolbar's questions drawer), waiting for that agent's terminal to go live
+ * when `settle` is set, then waits for the page to settle. Inputs: the steps, the delay and
+ * whether to wait. Output: what the page and the engine show. */
+async function run(steps, delayMs, settle) {
+  return withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${delayMs})`);
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4 && document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, "the graph and the inbox drew");
+    for (const [kind, name] of steps) {
+      const step = kind === "card" ? `Fixture.click(${JSON.stringify(name)})` : `Fixture.openWaiting(${JSON.stringify(name)})`;
+      assert.equal(await evaluate(step), true, `${kind} ${name}`);
+      if (settle) {
+        assert.equal(await evaluate(`Fixture.until(() => Fixture.shown().panels.includes(${JSON.stringify(`${name} terminal`)}) && Fixture.shown().live >= 1)`), true, `${name} went live`);
+      }
+    }
+    const last = `${steps.at(-1)[1]} terminal`;
+    await evaluate(`Fixture.until(() => Fixture.shown().attaches.length === ${steps.length} && Fixture.shown().panels.includes(${JSON.stringify(last)}) && Fixture.shown().live > 0)`);
+    await evaluate(`new Promise((done) => setTimeout(done, ${delayMs + 300}))`);
+    return evaluate("Fixture.shown()");
+  });
+}
+
+test("clicking three agents in the graph leaves one terminal panel, for the last one, and one attached terminal client", async () => {
+  const seen = await run([["card", "Ada"], ["card", "Brook"], ["card", "Cove"]], 0, true);
+  assert.deepEqual(seen.panels, ["Cove terminal"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 1, JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, ["team-1", "team-2"], JSON.stringify(seen));
+});
+
+test("clicking three agents faster than the engine attaches still leaves one panel and one attached client", async () => {
+  const seen = await run([["card", "Ada"], ["card", "Brook"], ["card", "Cove"]], 400, false);
+  assert.deepEqual(seen.panels, ["Cove terminal"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 1, JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
+});
+
+test("a terminal opened from Waiting on you is the same one panel the graph swaps, so clicking two agents after it leaves one", async () => {
+  const seen = await run([["waiting", "Ada"], ["card", "Brook"], ["card", "Cove"]], 0, true);
+  assert.deepEqual(seen.panels, ["Cove terminal"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 1, JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-3"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, ["team-1", "team-2"], JSON.stringify(seen));
+});
+
+test("an agent waiting on you that the graph does not draw opens in the same one panel, and a graph click replaces it", async () => {
+  const seen = await run([["waiting", "Dune"], ["card", "Ada"]], 0, true);
+  assert.deepEqual(seen.panels, ["Ada terminal"], JSON.stringify(seen));
+  assert.equal(seen.xterms, 1, JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
+  assert.deepEqual(seen.detaches, ["team-5"], JSON.stringify(seen));
+});
+
+test("Open terminal in Waiting on you opens the one panel while the team graph is loading, failed, not in the build or empty", async () => {
+  for (const graph of ["pending", "error", "not_ready", "empty"]) {
+    const seen = await withPage(async ({ evaluate, send }) => {
+      await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+      await evaluate(fixture);
+      await evaluate(`Fixture.mount(0, ${JSON.stringify(graph)})`);
+      assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, `${graph}: the inbox read`);
+      assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, `${graph}: Open terminal on Ada`);
+      await evaluate("Fixture.until(() => Fixture.shown().panels.includes('Ada terminal') && Fixture.shown().live > 0)");
+      return evaluate("Fixture.shown()");
+    });
+    assert.deepEqual(seen.panels, ["Ada terminal"], `${graph}: ${JSON.stringify(seen)}`);
+    assert.equal(seen.xterms, 1, `${graph}: ${JSON.stringify(seen)}`);
+    assert.deepEqual(seen.clients, ["team-1"], `${graph}: ${JSON.stringify(seen)}`);
+  }
+});
+
+test("a panel opened from Waiting on you before the graph reads keeps its terminal and its draft once the graph draws that agent", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate('Fixture.saveInput("both")');
+    await evaluate("Fixture.mount(0, 'late')");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent === '2 ask you')"), true, "the inbox read");
+    assert.equal(await evaluate("Fixture.openWaiting('Ada')"), true, "Open terminal on Ada");
+    assert.equal(await evaluate("Fixture.until(() => Fixture.shown().live > 0 && document.querySelector('.tg-composer-input') !== null)"), true, "Ada's terminal went live");
+    assert.equal(await evaluate("Fixture.type('Keep the menu on the home page')"), true, "the owner typed a draft");
+    await evaluate("Fixture.release()");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
+    await evaluate("new Promise((done) => setTimeout(done, 300))");
+    return evaluate("Fixture.shown()");
+  });
+  assert.deepEqual(seen.panels, ["Ada terminal"], JSON.stringify(seen));
+  assert.equal(seen.draft, "Keep the menu on the home page", JSON.stringify(seen));
+  assert.deepEqual(seen.attaches, ["team-1"], `one attach, no remount: ${JSON.stringify(seen)}`);
+  assert.deepEqual(seen.detaches, [], JSON.stringify(seen));
+  assert.deepEqual(seen.clients, ["team-1"], JSON.stringify(seen));
+});
+
+test("the panel's Message puts the cursor in its Type to box, its Stop asks first, and Pause all beside Open all terminals pauses the team", async () => {
+  const steps = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate('Fixture.saveInput("both")');
+    await evaluate("Fixture.mount(0, 'ok', [Fixture.runningTask(7)])");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
+    assert.equal(await evaluate("Fixture.click('Ada')"), true, "card Ada");
+    assert.equal(await evaluate("Fixture.until(() => Fixture.shown().live > 0)"), true, "Ada's terminal went live");
+    const seen = {};
+    assert.equal(await evaluate("Fixture.press('.tg-terminal-head', 'Message')"), true, "Message in the panel head");
+    seen.message = await evaluate("Fixture.around()");
+    assert.equal(await evaluate("Fixture.press('.tg-terminal-head', 'Stop')"), true, "Stop in the panel head");
+    seen.stop = await evaluate("Fixture.around()");
+    assert.equal(await evaluate("Fixture.press('dialog[open]', 'Cancel')"), true, "Cancel the stop");
+    assert.equal(await evaluate("Fixture.press('.tg-head', 'Pause all')"), true, "Pause all in the graph head");
+    seen.pause = await evaluate("Fixture.around()");
+    assert.equal(await evaluate("Fixture.press('dialog[open]', 'Pause all agents')"), true, "confirm the pause");
+    await evaluate("Fixture.until(() => Fixture.around().notes.length > 0)");
+    seen.paused = await evaluate("Fixture.around()");
+    return seen;
+  });
+  assert.equal(steps.message.focused, "Type to Ada...", JSON.stringify(steps.message));
+  assert.equal(steps.stop.dialog?.title, "Stop Ada?", JSON.stringify(steps.stop));
+  const head = steps.pause.head;
+  assert.equal(head[head.indexOf("Open all terminals") - 1], "Pause all", `Pause all sits right before Open all terminals: ${JSON.stringify(head)}`);
+  const gap = steps.pause.headGaps[head.indexOf("Open all terminals")];
+  assert.ok(gap >= 0 && gap <= 16, `Pause all sits beside Open all terminals, not across the head: ${gap} px`);
+  assert.equal(steps.pause.dialog?.title, "Pause all agents?", JSON.stringify(steps.pause));
+  assert.match(steps.pause.dialog?.text ?? "", /1 running task stops\./u);
+  assert.deepEqual(steps.paused.cancels, [null], `one pause of every task: ${JSON.stringify(steps.paused)}`);
+  assert.deepEqual(steps.paused.notes, ["Paused. Running tasks are stopping and waiting tasks are cancelled."], JSON.stringify(steps.paused));
+});
+
+const TOOLBAR_NAMES = ["Team", "Agent settings", "Master and 3 agents · 3 of 3 agents working. 0 tasks live. · 2 ask you · Pool A: 0 accounts", "Running (0)", "All (0)", "Pause all", "Open all terminals"];
+
+/** Mounts the Agents tab 800 px high at the given width, 1200 by default, with a running task
+ * and a codex sub-agent harness, waits until the graph drew and the questions inbox read, runs
+ * the steps and returns what each step saw. Inputs: the steps as page expressions, by name,
+ * the team status changes, the view and the width. Output: what each returned. */
+async function agentsPage(steps, patch = {}, view = "{}", width = 1200) {
+  return withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    const status = { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }], ...patch };
+    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, ${view})`);
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4)"), true, "the graph drew");
+    await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent.includes('ask you'))");
+    const seen = {};
+    for (const [name, step] of steps) seen[name] = await evaluate(step);
+    return seen;
+  });
+}
+
+test("cards are the mockup's compact 176 by 96 four lines that fit, and a live label shows its words whole past its row", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(0, 'live')");
+    assert.equal(await evaluate("Fixture.until(() => document.querySelectorAll('.tg-card-open').length === 4 && document.querySelector('.tg-edge-label.live') !== null)"), true, "the graph drew");
+    return evaluate("Fixture.cards()");
+  });
+  for (const card of seen.cards) {
+    assert.deepEqual([card.w, card.h], [176, 96], JSON.stringify(card));
+    assert.equal(card.fits, true, `every line fits inside the card: ${JSON.stringify(card)}`);
+  }
+  const lines = Object.fromEntries(seen.cards.map((card) => [card.title, card.lines]));
+  assert.deepEqual(lines.Cove, ["tg-card-title", "tg-card-detail", "tg-card-branch", "tg-card-task"], "name, harness and account, branch, task");
+  assert.deepEqual(lines.Brook, ["tg-card-title", "tg-chips", "tg-card-task"], "a chip takes the harness line, the task line stays");
+  assert.equal(seen.live.text, "handing off: Write the label notes for the shop");
+  assert.equal(seen.live.cut, false, `the live label's words show whole: ${JSON.stringify(seen.live)}`);
+  assert.ok(seen.live.w > seen.live.row, `the live label reaches past its card-wide row: ${JSON.stringify(seen.live)}`);
+  assert.ok(seen.live.w <= 352, `at most two cards wide: ${JSON.stringify(seen.live)}`);
+});
+
+test("the Agents toolbar is one row: Team and Agent settings, the team line with the working line and the pool's accounts, Running and All with their counts, Pause all and Open all terminals", async () => {
+  const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]]);
+  assert.deepEqual(bar.names, TOOLBAR_NAMES, JSON.stringify(bar));
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+  assert.ok(bar.gap !== null && bar.gap <= 24, `the graph starts right under the row: ${bar.gap} px`);
+  assert.equal(bar.questions, false, "no Questions for you section on the page");
+});
+
+test("in the content width of the app's default window the Agents toolbar stays one row and its team line wraps inside it", async () => {
+  const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]], {}, "{}", 912);
+  assert.deepEqual(bar.names, TOOLBAR_NAMES, JSON.stringify(bar));
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+});
+
+test("when the team line wraps in the default window's content width, the view switch and Running and All stay centred with Pause all and Open all terminals", async () => {
+  const pool = "Shared design and engineering pool for the booking studio team accounts";
+  const { bar } = await agentsPage([["bar", "Fixture.toolbar()"]], {}, JSON.stringify({ pool }), 912);
+  assert.ok(bar.spread <= 1, `one centre: ${JSON.stringify(bar)}`);
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+});
+
+test("at the app's smallest content width, 492 px, a 64-character unbroken pool name wraps in the Agents toolbar and .main never scrolls sideways", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 492, height: 560, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    const status = { harnesses: [{ harness: "codex", role: "sub", agents_max: 2, tools: true, live: 1 }] };
+    await evaluate(`Fixture.mount(0, 'ok', [Fixture.runningTask(7)], ${JSON.stringify(status)}, ${JSON.stringify({ pool: "P".repeat(64) })})`);
+    assert.equal(await evaluate("Fixture.until(() => document.querySelector('.tg-asks')?.textContent.includes('ask you'))"), true, "the toolbar drew");
+    return evaluate("Fixture.toolbarFit()");
+  });
+  assert.equal(seen.sideways, 0, `.main does not scroll sideways: ${JSON.stringify(seen)}`);
+  assert.deepEqual(seen.past, [], `nothing in the row reaches past its edge: ${JSON.stringify(seen)}`);
+});
+
+test("Agent settings keeps the same toolbar row above its settings, and its N ask you opens the questions drawer", async () => {
+  const { bar } = await agentsPage([["bar", "Fixture.settingsBar()"]]);
+  assert.equal(bar.settings, true, `Agent settings shows, not the graph: ${JSON.stringify(bar)}`);
+  assert.deepEqual(bar.names, TOOLBAR_NAMES, JSON.stringify(bar));
+  assert.equal(bar.rows, 1, `one row: ${JSON.stringify(bar)}`);
+  assert.equal(bar.drawer, "Questions for you", JSON.stringify(bar));
+});
+
+test("under the graph the Team view keeps the team's agents, tasks, Hand a task, Stop all, wake rules and usage in a closed Agents and tasks fold", async () => {
+  const { parts } = await agentsPage([["parts", "Fixture.folds()"]]);
+  assert.deepEqual(parts.folds.find((fold) => fold.label === "Agents and tasks"), { label: "Agents and tasks", open: false }, JSON.stringify(parts));
+  assert.deepEqual(parts.parts, {
+    "Stop all": "Agents and tasks", "Start all again": null, "Team stopped": null, "Hand a task": "Agents and tasks", "Team agents": "Agents and tasks", "Team tasks": "Agents and tasks", "Wake rules": "Agents and tasks", "Usage": "Agents and tasks",
+  }, JSON.stringify(parts));
+});
+
+test("a stopped team says so above the graph with Start all again while the Agents and tasks fold stays closed, for the owner's stop and for the token budget", async () => {
+  for (const [patch, line] of [
+    [{ paused: true }, "Every agent of this project is stopped until you start them again."],
+    [{ paused: true, budget_reached: true }, "Every agent of this project is stopped: its agents used the token budget. Start them again, or raise the budget first."],
+  ]) {
+    const { parts } = await agentsPage([["parts", "Fixture.folds()"]], patch);
+    const shown = JSON.stringify(parts);
+    assert.deepEqual(parts.folds.find((fold) => fold.label === "Agents and tasks"), { label: "Agents and tasks", open: false }, shown);
+    assert.equal(parts.stopped, line, shown);
+    assert.equal(parts.parts["Team stopped"], "page", `the stopped line is outside the fold: ${shown}`);
+    assert.equal(parts.parts["Start all again"], "page", `Start all again is outside the fold: ${shown}`);
+    assert.equal(parts.startAboveGraph, true, `Start all again comes before the graph: ${shown}`);
+    assert.equal(parts.parts["Stop all"], null, `a stopped team offers Start all again, not Stop all: ${shown}`);
+    assert.equal(parts.parts["Hand a task"], "Agents and tasks", shown);
+  }
+});
+
+test("the urgent question toast's Open opens Questions for you on that question and Waiting on you's toast on the waiting agent, once, and the Agents tab alone opens no drawer", async () => {
+  const QUESTION = "Should the deposit be refunded when a class is cancelled?";
+  const questions = `[Fixture.question(41, "high", ${JSON.stringify(QUESTION)}), Fixture.question(42, "normal", "Which colour for the calendar?")]`;
+  const toFocus = ["focus", "Fixture.until(() => Fixture.focused().row !== null).then(() => Fixture.focused())"];
+  const urgent = await agentsPage([["drawer", "Fixture.until(() => Fixture.drawer() !== null).then(() => Fixture.drawer())"], toFocus], {}, `{ section: "questions", questions: ${questions} }`);
+  assert.equal(urgent.drawer?.title, "Questions for you (2)", JSON.stringify(urgent));
+  assert.ok(urgent.focus.row?.includes(QUESTION), `the keyboard is on the urgent question: ${JSON.stringify(urgent.focus)}`);
+  assert.equal(urgent.focus.hash, "#/projects/alpha/agents", "the drawer opens once: the address drops its section");
+  const waiting = await agentsPage([["drawer", "Fixture.until(() => Fixture.drawer() !== null).then(() => Fixture.drawer())"], toFocus], {}, `{ section: "waiting", questions: ${questions} }`);
+  assert.ok(waiting.focus.row?.includes("Ada") && waiting.focus.row.includes("A permission prompt waits in its terminal."), `the keyboard is on the waiting agent: ${JSON.stringify(waiting.focus)}`);
+  const plain = await agentsPage([["settled", "new Promise((done) => setTimeout(() => done(true), 300))"], ["drawer", "Fixture.drawer()"]], {}, `{ questions: ${questions} }`);
+  assert.equal(plain.drawer, null, "the Agents tab without a section keeps the drawer closed");
+});
+
+test("N ask you opens a drawer with Questions for you and Sub-agent events, and Open terminal there closes it and opens the one panel", async () => {
+  const seen = await agentsPage([
+    ["pressed", "Fixture.press('.tg-summary', '2 ask you')"],
+    ["drawer", "Fixture.until(() => Fixture.drawer() !== null).then(() => Fixture.drawer())"],
+    ["opened", "Fixture.openWaiting('Ada')"],
+    ["live", "Fixture.until(() => Fixture.shown().panels.includes('Ada terminal') && Fixture.shown().live > 0)"],
+    ["after", "Fixture.drawer()"],
+  ]);
+  assert.equal(seen.pressed, true, "2 ask you is a button in the team line");
+  assert.equal(seen.drawer?.title, "Questions for you", JSON.stringify(seen.drawer));
+  assert.deepEqual(seen.drawer?.sections, ["Questions for you", "Sub-agent events"], JSON.stringify(seen.drawer));
+  assert.equal(seen.opened, true, "Open terminal on Ada in the drawer");
+  assert.equal(seen.live, true, "Ada's terminal opened in the one panel");
+  assert.equal(seen.after, null, "the drawer closed");
+});

@@ -154,6 +154,7 @@ pub struct Home {
     filter: Option<TextField>,
     filtering: bool,
     was_done: Option<bool>,
+    owner_moved: bool,
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
 }
@@ -176,6 +177,7 @@ impl Home {
             filter: None,
             filtering: false,
             was_done: None,
+            owner_moved: false,
             folder: Load::Idle,
             found: Load::Idle,
         }
@@ -505,19 +507,8 @@ impl Home {
         );
         let corner = match (card.activity.notifications, card.activity.suggestions) {
             (0, 0) => styled(created, Role::Muted, theme),
-            (0, count) => styled(
-                format!(
-                    "{count} suggested memor{}",
-                    if count == 1 { "y" } else { "ies" }
-                ),
-                Role::Warning,
-                theme,
-            ),
-            (count, _) => styled(
-                format!(
-                    "{count} new team notification{}",
-                    if count == 1 { "" } else { "s" }
-                ),
+            (notifications, suggestions) => styled(
+                activity_corner(notifications, suggestions, limit - 2),
                 Role::Warning,
                 theme,
             ),
@@ -755,8 +746,108 @@ impl Home {
         }
     }
 
+    /// Handles one key on Home: the filter while it is typed, else the shortcuts, the panel
+    /// switch, the moves in the focused panel and Enter. Inputs: the key and the context.
+    /// Output: the flow the key leads to.
+    fn steer(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.filtering {
+            match key {
+                Key::Esc => {
+                    self.filter = None;
+                    self.filtering = false;
+                }
+                Key::Enter | Key::Down => {
+                    self.filtering = false;
+                    if self.filter.as_ref().is_some_and(TextField::is_empty) {
+                        self.filter = None;
+                    }
+                }
+                other => {
+                    if let Some(field) = &mut self.filter {
+                        field.key(other);
+                    }
+                    self.selected = 0;
+                    self.offset = 0;
+                }
+            }
+            return Flow::Handled;
+        }
+        let panel_visible = Self::panel_visible(ctx);
+        if !panel_visible {
+            self.panel = Panel::Projects;
+        }
+        match key {
+            Key::Char('n') => Flow::Open(Place::NewProject),
+            Key::Char('a') => Flow::Open(Place::AddProject),
+            Key::Char('f') => Flow::Open(Place::HomeFolder { first_run: false }),
+            Key::Char('s') => Flow::Open(Place::Settings(SettingsSection::Accounts)),
+            Key::Char('m') => Flow::Open(Place::Settings(SettingsSection::Memory)),
+            Key::Char('u') => Flow::Open(Place::Usage),
+            Key::Char('r') if matches!(ctx.store.projects, Load::Failed(_)) => {
+                ctx.request(Request::Projects);
+                Flow::Handled
+            }
+            Key::Char('/') if self.panel == Panel::Projects => {
+                self.filter
+                    .get_or_insert_with(|| TextField::new("Filter", FILTER_CHARS_MAX));
+                self.filtering = true;
+                Flow::Handled
+            }
+            Key::Esc if self.filter.is_some() => {
+                self.filter = None;
+                Flow::Handled
+            }
+            Key::Tab | Key::BackTab if panel_visible => {
+                self.panel = match self.panel {
+                    Panel::Projects => Panel::Setup,
+                    Panel::Setup => Panel::Projects,
+                };
+                Flow::Handled
+            }
+            Key::Up | Key::Down if self.panel == Panel::Setup => {
+                self.setup_selected = if matches!(key, Key::Down) {
+                    (self.setup_selected + 1).min(Self::items(ctx).len() - 1)
+                } else {
+                    self.setup_selected.saturating_sub(1)
+                };
+                Flow::Handled
+            }
+            Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
+                let count = self.entries(ctx).len();
+                if count == 0 {
+                    return Flow::Handled;
+                }
+                let page = Self::page(ctx);
+                self.selected = match key {
+                    Key::Up => self.selected.saturating_sub(1),
+                    Key::Down => (self.selected + 1).min(count - 1),
+                    Key::PageUp => self.selected.saturating_sub(page.saturating_sub(1).max(1)),
+                    Key::PageDown => (self.selected + page.saturating_sub(1).max(1)).min(count - 1),
+                    Key::Home => 0,
+                    _ => count - 1,
+                };
+                self.follow(ctx);
+                Flow::Handled
+            }
+            Key::Enter => self.open_selected(ctx),
+            _ => Flow::Ignored,
+        }
+    }
+
+    /// Where the owner is on Home: the focused panel, the picked card, the picked setup item
+    /// and whether the filter is typed. Input: none. Output: those four.
+    fn focus(&self) -> (Panel, usize, usize, bool) {
+        (
+            self.panel,
+            self.selected,
+            self.setup_selected,
+            self.filtering,
+        )
+    }
+
     /// Says "Setup done." with the accounts ready for agents when the last item
-    /// gets done, and focuses the panel on the first answer when something is left.
+    /// gets done, and focuses the panel on the first answer when something is left,
+    /// unless the owner already moved the focus or the selection on this Home.
     /// Input: the context, once pools, accounts and the tools check have answered.
     /// Output: none.
     fn notice(&mut self, ctx: &mut Ctx) {
@@ -770,7 +861,7 @@ impl Home {
             let line = setup.account_line(ctx.glyphs.ellipsis);
             ctx.say(Message::success("Setup done.", &line));
         }
-        if self.was_done.is_none() && !setup.done() {
+        if self.was_done.is_none() && !setup.done() && !self.owner_moved {
             self.panel = Panel::Setup;
         }
         self.was_done = Some(setup.done());
@@ -877,88 +968,13 @@ impl Screen for Home {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        if self.filtering {
-            match key {
-                Key::Esc => {
-                    self.filter = None;
-                    self.filtering = false;
-                }
-                Key::Enter | Key::Down => {
-                    self.filtering = false;
-                    if self.filter.as_ref().is_some_and(TextField::is_empty) {
-                        self.filter = None;
-                    }
-                }
-                other => {
-                    if let Some(field) = &mut self.filter {
-                        field.key(other);
-                    }
-                    self.selected = 0;
-                    self.offset = 0;
-                }
-            }
-            return Flow::Handled;
+        let before = self.focus();
+        let flow = self.steer(key, ctx);
+        if self.focus() != before {
+            self.owner_moved = true;
         }
-        let panel_visible = Self::panel_visible(ctx);
-        if !panel_visible {
-            self.panel = Panel::Projects;
-        }
-        match key {
-            Key::Char('n') => Flow::Open(Place::NewProject),
-            Key::Char('a') => Flow::Open(Place::AddProject),
-            Key::Char('f') => Flow::Open(Place::HomeFolder { first_run: false }),
-            Key::Char('s') => Flow::Open(Place::Settings(SettingsSection::Accounts)),
-            Key::Char('m') => Flow::Open(Place::Settings(SettingsSection::Memory)),
-            Key::Char('u') => Flow::Open(Place::Usage),
-            Key::Char('r') if matches!(ctx.store.projects, Load::Failed(_)) => {
-                ctx.request(Request::Projects);
-                Flow::Handled
-            }
-            Key::Char('/') if self.panel == Panel::Projects => {
-                self.filter
-                    .get_or_insert_with(|| TextField::new("Filter", FILTER_CHARS_MAX));
-                self.filtering = true;
-                Flow::Handled
-            }
-            Key::Esc if self.filter.is_some() => {
-                self.filter = None;
-                Flow::Handled
-            }
-            Key::Tab | Key::BackTab if panel_visible => {
-                self.panel = match self.panel {
-                    Panel::Projects => Panel::Setup,
-                    Panel::Setup => Panel::Projects,
-                };
-                Flow::Handled
-            }
-            Key::Up | Key::Down if self.panel == Panel::Setup => {
-                self.setup_selected = if matches!(key, Key::Down) {
-                    (self.setup_selected + 1).min(Self::items(ctx).len() - 1)
-                } else {
-                    self.setup_selected.saturating_sub(1)
-                };
-                Flow::Handled
-            }
-            Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End => {
-                let count = self.entries(ctx).len();
-                if count == 0 {
-                    return Flow::Handled;
-                }
-                let page = Self::page(ctx);
-                self.selected = match key {
-                    Key::Up => self.selected.saturating_sub(1),
-                    Key::Down => (self.selected + 1).min(count - 1),
-                    Key::PageUp => self.selected.saturating_sub(page.saturating_sub(1).max(1)),
-                    Key::PageDown => (self.selected + page.saturating_sub(1).max(1)).min(count - 1),
-                    Key::Home => 0,
-                    _ => count - 1,
-                };
-                self.follow(ctx);
-                Flow::Handled
-            }
-            Key::Enter => self.open_selected(ctx),
-            _ => Flow::Ignored,
-        }
+        assert!(self.setup_selected < Self::items(ctx).len());
+        flow
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
@@ -1083,6 +1099,38 @@ impl Screen for Home {
     }
 }
 
+/// The Home card's corner for unseen team notifications and suggested memories, both
+/// shown with notifications first; a card too narrow for "new team" drops those words so
+/// both counts still fit. Inputs: the two counts, not both 0, and the card width. Output:
+/// the text.
+fn activity_corner(notifications: usize, suggestions: usize, width: usize) -> String {
+    assert!(notifications > 0 || suggestions > 0);
+    let memories = (suggestions > 0).then(|| {
+        format!(
+            "{suggestions} suggested memor{}",
+            if suggestions == 1 { "y" } else { "ies" }
+        )
+    });
+    let corner = |team: &str| {
+        let notices = (notifications > 0).then(|| {
+            format!(
+                "{notifications} {team}notification{}",
+                if notifications == 1 { "" } else { "s" }
+            )
+        });
+        [notices, memories.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let long = corner("new team ");
+    if long.chars().count() <= width {
+        return long;
+    }
+    corner("")
+}
+
 #[cfg(test)]
 pub(in crate::tui) mod tests {
     use super::*;
@@ -1136,6 +1184,8 @@ pub(in crate::tui) mod tests {
                 .collect(),
             pack: Vec::new(),
             running: false,
+            notes: Vec::new(),
+            version: 0,
         }
     }
 
@@ -1164,6 +1214,51 @@ pub(in crate::tui) mod tests {
             provider: "Claude".into(),
             status: status.label().into(),
         }
+    }
+
+    /// A Home on an engine with no account and no pool whose setup check has not landed.
+    /// Input: none. Output: the shell on Home with its project list focused.
+    fn unchecked_home() -> Shell {
+        let mut ctx = ctx(80, 24);
+        ctx.store.projects = Load::Ready(Vec::new());
+        ctx.store.pools = Load::Ready(Vec::new());
+        ctx.store.accounts = Load::Ready(Vec::new());
+        let mut shell = Shell::with(ctx, Box::new(Home::new()));
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(footer.contains("Enter Open"), "{footer}");
+        shell
+    }
+
+    #[test]
+    fn with_no_key_pressed_home_moves_the_focus_to_setup_once_the_check_lands() {
+        let mut shell = unchecked_home();
+        shell.arrive(status(tools(&[])));
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(footer.contains("Enter Add an account"), "{footer}");
+    }
+
+    #[test]
+    fn a_key_that_moves_home_before_the_setup_check_lands_keeps_the_owner_s_focus() {
+        let mut shell = unchecked_home();
+        shell.key(Key::Tab);
+        shell.key(Key::Tab);
+        shell.arrive(status(tools(&[])));
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(
+            footer.contains("Enter Open"),
+            "the owner's Tab back to the projects holds: {footer}"
+        );
+
+        let mut shell = unchecked_home();
+        shell.key(Key::Char('/'));
+        shell.key(Key::Char('x'));
+        shell.arrive(status(tools(&[])));
+        shell.key(Key::Enter);
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(
+            footer.contains("Enter Open"),
+            "the filter the owner typed keeps the project list: {footer}"
+        );
     }
 
     #[test]

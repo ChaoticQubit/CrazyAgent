@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -25,6 +25,10 @@ test("elapsed time reads in seconds, minutes and hours", () => {
 test("research rows use the fixed status words and only real progress", () => {
   const now = 1_000 + 18 * 60_000;
   assert.deepEqual(research.researchRow(job("queued"), now), { title: "Market research", status: "Queued", tone: "neutral", progress: "Waiting to start", elapsed: "", report: false, active: true });
+  const requeued = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
+  assert.deepEqual(research.researchRow(job("queued", { error: requeued, started_ms: 1_000 }), now),
+    { title: "Market research", status: "Queued", tone: "neutral", progress: requeued, elapsed: "", report: false, active: true });
+  assert.equal(research.researchRow(job("queued", { error: "  " }), now).progress, "Waiting to start");
   assert.deepEqual(research.researchRow(job("needs_pool"), now), { title: "Market research", status: "Needs a pool", tone: "warn", progress: "Waiting for a pool", elapsed: "", report: false, active: false });
   assert.deepEqual(research.researchRow(job("needs_pool", { error: "No account in this project's pool can run this research" }), now),
     { title: "Market research", status: "Needs a pool", tone: "warn", progress: "No account in this project's pool can run this research", elapsed: "", report: false, active: false });
@@ -62,28 +66,6 @@ test("research polling continues only while something can still change", () => {
   assert.equal(research.shouldPoll([]), false);
 });
 
-test("recent activity is built from real job times, newest first, at most eight", () => {
-  const jobs = [
-    job("done", { kind_label: "Market research", started_ms: 2_000, finished_ms: 5_000, report_path: "context/research/market_research.md" }),
-    job("running", { id: 2, kind_label: "Design research", started_ms: 3_000 }),
-    job("failed", { id: 3, kind_label: "Competitor research", started_ms: 2_500, finished_ms: 4_000, error: "Agent output exceeded the limit" }),
-  ];
-  const activity = research.activity(jobs, "Harbor Notes", 1_000);
-  assert.deepEqual(activity.map((item) => item.text), [
-    "Market research saved market_research.md",
-    "Competitor research stopped: Agent output exceeded the limit",
-    "Design research started",
-    "Competitor research started",
-    "Market research started",
-    "You created Harbor Notes with 3 research tasks",
-  ]);
-  const many = research.activity(Array.from({ length: 10 }, (_, i) => job("running", { id: i, started_ms: 2_000 + i })), "x", 1);
-  assert.equal(many.length, 11);
-  assert.equal(many[0].at, 2_009);
-  assert.equal(many[10].at, 1);
-  assert.equal(research.ACTIVITY_ROWS, 8);
-});
-
 test("relative time reads like the design", () => {
   const now = 10 * 86_400_000;
   assert.equal(research.ago(now - 20_000, now), "Just now");
@@ -101,6 +83,15 @@ test("project folders and attached documents are shown under the home folder wit
   assert.equal(homePath("/Users/mira/Docs/field-interviews.md"), "~/Docs/field-interviews.md");
   assert.equal(homePath("/Users/mira"), "~");
   assert.equal(homePath("/Volumes/Work/notes.md"), "/Volumes/Work/notes.md");
+});
+
+test("the Overview shows the saved About and the mapping's overview", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const html = renderToStaticMarkup(createElement(overview.OverviewFacts, { about: "A research reader.", overview: "# ScholarScope\n\nReads papers.\n" }));
+  assert.match(html, /A research reader\./);
+  assert.match(html, /Reads papers\./);
+  assert.equal(renderToStaticMarkup(createElement(overview.OverviewFacts, { about: "  ", overview: null })), "");
+  assert.doesNotMatch(renderToStaticMarkup(createElement(overview.OverviewFacts, { about: "", overview: "# Only\n\nThe overview.\n" })), /<h2[^>]*>About</);
 });
 
 test("master status words follow the design's fixed set", () => {
@@ -135,6 +126,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
   assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
     "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
+  assert.equal(research.turnLine(turn("failed", "instructions_too_large", "master_instructions_too_large")),
+    "The master stopped: the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again. (master_instructions_too_large)");
   for (const phase of ["failed", "blocked", "uncertain"]) {
     const line = research.turnLine(turn(phase, "unknown", null));
     assert.equal(line, `The master stopped. (${phase})`);
@@ -143,8 +136,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
 });
 
 test("a master turn names its account, and a turn no account could run names each one and why", () => {
-  const running = { id: "t2", ordinal: 2, phase: "running", reason: null, reply: null, attempt: { connection: { account_ref: "work-claude" } } };
-  assert.deepEqual(research.accountLines(running), ["On account work-claude"]);
+  const running = { id: "t2", ordinal: 2, phase: "running", reason: null, reply: null, attempt: { connection: { id: "claude-a", account_ref: "work-claude" } } };
+  assert.deepEqual(research.accountLines(running), ["On account claude-a"], "with no name known the account goes by its id, never by its sign-in reference");
   assert.deepEqual(research.accountLines({ id: "t1", ordinal: 1, phase: "queued", reason: null, reply: null }), []);
   const blocked = {
     id: "t3", ordinal: 3, phase: "blocked", reason: "readiness_unknown", reply: null, attempt: null,
@@ -157,19 +150,66 @@ test("a master turn names its account, and a turn no account could run names eac
   };
   assert.equal(research.turnLine(blocked), "No account in this master's pool can run it now. (readiness_unknown)");
   assert.deepEqual(research.accountLines(blocked), [
-    "work-claude: not signed in",
-    "home-claude: rate limited, paused for a few minutes",
-    "spare-claude: sign-in could not be renewed just now, available again in a minute",
-    "work-codex is ready on codex: change the master to codex to use it.",
+    "claude-a: not signed in",
+    "claude-b: rate limited, paused for a few minutes",
+    "claude-d: sign-in could not be renewed just now, available again in a minute",
+    "codex-c is ready on codex: change the master to codex to use it.",
   ]);
   assert.equal(research.masterStatus({ session_id: "s", phase: "configured", current_turn: null }, [blocked]), "Not signed in");
+  const names = [{ id: "claude-a", name: "Work Claude" }, { id: "codex-c", name: "Work Codex" }];
+  assert.deepEqual(research.accountLines({ ...running, attempt: { connection: { id: "claude-a", account_ref: "work-claude" } } }, names), ["On account Work Claude"],
+    "the account a turn runs on goes by its name (OB-4)");
+  assert.deepEqual(research.accountLines({ ...running, attempt: { connection: { id: "claude-z", account_ref: "gone-claude" } } }, names), ["On account claude-z"],
+    "an account with no name falls back to its id");
+  const told = research.accountLines(blocked, names);
+  assert.deepEqual(told, [
+    "Work Claude: not signed in",
+    "claude-b: rate limited, paused for a few minutes",
+    "claude-d: sign-in could not be renewed just now, available again in a minute",
+    "Work Codex is ready on codex: change the master to codex to use it.",
+  ]);
+  assert.ok(![...told, ...research.accountLines(blocked)].some((line) => /work-claude|home-claude|spare-claude|work-codex/u.test(line)), "no line shows a sign-in reference");
+});
+
+test("two accounts with the same name show their ids, an account with its own name does not (OB4-F1)", async () => {
+  const { accountLabels } = await import("../src/api.ts");
+  const accounts = [
+    { id: "claude-account-1a", name: "Claude" },
+    { id: "claude-account-2b", name: "Claude" },
+    { id: "chatgpt-account-3c", name: "Work ChatGPT" },
+  ];
+  assert.deepEqual([...accountLabels(accounts)], [
+    ["claude-account-1a", "Claude (claude-account-1a)"],
+    ["claude-account-2b", "Claude (claude-account-2b)"],
+    ["chatgpt-account-3c", "Work ChatGPT"],
+  ]);
+  assert.equal(accountLabels([]).size, 0);
+  assert.equal(research.accountName(accounts, "claude-account-2b"), "Claude (claude-account-2b)");
+  assert.equal(research.accountName(accounts, "chatgpt-account-3c"), "Work ChatGPT");
+  assert.equal(research.accountName(accounts, "gone"), "gone");
+  assert.equal(research.accountName(accounts.slice(1), "claude-account-2b"), "Claude", "a name used once stays plain");
+  const blocked = {
+    id: "t3", ordinal: 3, phase: "blocked", reason: "rate_limited", reply: null, attempt: null,
+    accounts: [
+      { account_ref: "claude-login-1a", connection: "claude-account-1a", harness: "claude", reason: "rate_limited" },
+      { account_ref: "claude-login-2b", connection: "claude-account-2b", harness: "claude", reason: "readiness_unknown" },
+    ],
+  };
+  assert.deepEqual(research.accountLines(blocked, accounts), [
+    "Claude (claude-account-1a): rate limited, paused for a few minutes",
+    "Claude (claude-account-2b): not signed in",
+  ], "a blocked turn tells two accounts of one name apart");
 });
 
 test("a project page for an unknown engine renders its loading shell without bridge effects", async () => {
   const page = await import("../src/screens/project/index.tsx");
-  const markup = renderToStaticMarkup(createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
+  const { SessionContext, useSession } = await import("../src/state.ts");
+  function InApp() {
+    return createElement(SessionContext.Provider, { value: useSession() }, createElement(page.ProjectPage, { id: "p-1", tab: "overview" }));
+  }
+  const markup = renderToStaticMarkup(createElement(InApp));
   assert.match(markup, /role="tablist"/);
-  for (const tab of ["Overview", "Conversation", "Agents", "Changes", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
+  for (const tab of ["Overview", "Conversation", "Agents", "Changes", "Questions", "Context", "Settings"]) assert.match(markup, new RegExp(`>${tab}<`));
   assert.match(markup, /id="tab-overview" role="tab" class="tab" href="#\/projects\/p-1\/overview" aria-selected="true" tabindex="0"><svg[\s\S]*?<\/svg>Overview</);
   assert.match(markup, /role="tabpanel" aria-labelledby="tab-overview"/);
   assert.doesNotMatch(markup, /<h1><div/);
@@ -242,6 +282,7 @@ test("deleting a context file uses the engine path and never the brief", () => {
   assert.equal(research.deletable({ path: "context/research/market_research.md", kind: "research", bytes: 1 }), true);
   assert.equal(research.deletable({ path: "context/documents/hours.csv", kind: "document", bytes: 1 }), true);
   assert.equal(research.deletable({ path: "context/brief.md", kind: "brief", bytes: 1 }), false);
+  assert.equal(research.deletable({ path: "repo/docs/market.md", kind: "research", bytes: 1, linked: true }), false, "a file linked from the repo is the owner's own file");
   assert.equal(research.deleteQuestion("context/research/market_research.md"), "Delete market_research.md?");
 });
 
@@ -293,6 +334,15 @@ test("a failed research row shows its plain reason and Try again", async () => {
   assert.equal(markup.match(/>Try again</g)?.length, 1);
 });
 
+test("the Overview shows Recent activity first, then Research and the Roadmap line under it, as the mockup does", async () => {
+  const overview = await import("../src/screens/project/overview.tsx");
+  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData([job("done")]) }));
+  const at = (pattern) => markup.search(pattern);
+  assert.ok(at(/>Recent activity</) > 0, "Recent activity shows");
+  assert.ok(at(/<h2 id="pj-research">Research<\/h2>/) > at(/>Recent activity</), "Research comes after Recent activity");
+  assert.ok(at(/<h2 id="pj-roadmap">Roadmap<\/h2>/) > at(/<h2 id="pj-research">Research<\/h2>/), "the Roadmap line comes after Research");
+});
+
 test("a stopped or failed master turn offers its own message to send again", () => {
   const turn = (ordinal, phase) => ({ id: `t${ordinal}`, ordinal, phase, reason: null, reply: phase === "succeeded" ? { text: "hi" } : null });
   assert.equal(research.resendText([turn(1, "succeeded"), turn(2, "failed")], { t1: "first", t2: "second" }), "second");
@@ -306,7 +356,30 @@ test("a stopped or failed master turn offers its own message to send again", () 
   const crashed = { ...turn(1, "uncertain"), reason: "capture_incomplete" };
   assert.equal(research.resendText([crashed], { t1: "first" }), "first", "a turn the harness left uncertain offers Send again (LB-19)");
   assert.equal(research.turnLine(crashed), "The master stopped: its reply was cut off. (capture_incomplete)", "the line names what happened");
-  assert.equal(research.replyingTurn([crashed]), null, "no Stop for a turn that already ended");
+  const silent = { ...turn(1, "failed"), reason: "no_reply", cause: "master_empty_reply" };
+  assert.equal(research.turnLine(silent), "The master stopped: it ended its turn without writing a reply. (master_empty_reply)", "a turn that ended with no reply text is not called cut off (OB-5)");
+  for (const steps of [50, 100, 200]) {
+    const limited = { ...turn(1, "failed"), reason: "step_limit", cause: `master_step_limit_${steps}` };
+    assert.equal(research.turnLine(limited), `Stopped after ${steps} steps; reply with 'continue' to go on. (master_step_limit_${steps})`, "a turn stopped at its step limit names the steps and how to go on (OB-5b)");
+    assert.equal(research.stepsOfCause(limited.cause), steps);
+  }
+  for (const cause of ["master_step_limit_24", "master_step_limit_", "master_step_limit_500", "master_capture_incomplete", null, undefined]) {
+    assert.equal(research.stepsOfCause(cause), null, `${cause} names no step limit`);
+  }
+  const unnamed = { ...turn(1, "failed"), reason: "step_limit", cause: null };
+  assert.equal(research.turnLine(unnamed), "The master stopped: it used every step its limit allows. (step_limit)", "a step limit stop with no cause still reads plainly");
+  for (const minutes of [10, 30, 60]) {
+    const timed = { ...turn(1, "failed"), reason: "time_limit", cause: `master_time_limit_${minutes}` };
+    assert.equal(research.turnLine(timed), `Stopped after ${minutes} minutes; reply with 'continue' to go on. (master_time_limit_${minutes})`, "a turn stopped at its time limit names the minutes and how to go on (OB-5c)");
+    assert.equal(research.minutesOfCause(timed.cause), minutes);
+  }
+  for (const cause of ["master_time_limit_5", "master_time_limit_", "master_time_limit_600", "master_step_limit_50", "claude_host_deadline", null, undefined]) {
+    assert.equal(research.minutesOfCause(cause), null, `${cause} names no time limit`);
+  }
+  const late = { ...turn(1, "failed"), reason: "time_limit", cause: "codex_host_deadline" };
+  assert.equal(research.turnLine(late), "The master stopped: it ran as long as one turn may run. Change this in Settings, Master. (codex_host_deadline)", "a clock that ended a turn with no minutes named claims no 10 minutes (OB-5c)");
+  const large = { ...turn(1, "failed"), reason: "output_limit", cause: "claude_host_stdout_limit" };
+  assert.equal(research.turnLine(large), "The master stopped: this turn's output was too large to keep. (claude_host_stdout_limit)", "a turn with more output than the app keeps says so plainly (OB-5c)");
   assert.equal(research.replyingTurn([turn(1, "running")])?.id, "t1", "Stop stays for a running turn");
 });
 
@@ -340,22 +413,80 @@ test("a log follows new lines only while the owner is near its bottom", () => {
   assert.equal(research.nearBottom({ scrollHeight: 100, scrollTop: 0, clientHeight: 240 }), true);
 });
 
-test("Recent activity shows eight rows and Show all for the rest", async () => {
-  const overview = await import("../src/screens/project/overview.tsx");
-  const jobs = Array.from({ length: 5 }, (_, i) => job("done", { id: i, kind_label: `Kind ${i}`, started_ms: 2_000 + i, finished_ms: 3_000 + i }));
-  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData(jobs) }));
-  assert.equal(markup.match(/class="pj-activity-row"/g)?.length, 8);
-  assert.match(markup, />Show all \(10\)</);
-  const few = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData(jobs.slice(0, 2)) }));
-  assert.equal(few.match(/class="pj-activity-row"/g)?.length, 4);
-  assert.doesNotMatch(few, />Show all/);
-});
-
 test("Thinking shows the seconds since this window sent the message", () => {
   assert.equal(research.thinkingLine(undefined, 50_000), "Thinking...");
   assert.equal(research.thinkingLine(38_000, 50_000), "Thinking... 12 s");
   assert.equal(research.thinkingLine(50_000, 49_000), "Thinking... 0 s");
   assert.equal(research.thinkingLine(0, 3 * 60_000 + 5_000), "Thinking... 3 min");
+});
+
+test("Thinking counts from the engine's start time when this window did not send the message", async () => {
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const running = { id: "t1", ordinal: 1, phase: "running", reason: null, reply: null, attempt: { connection: { account_ref: "main" }, selected_at_ms: 1_000 } };
+  const status = (turn, sentAt) => conversation.consoleLines([turn], {}, sentAt, 361_000).find((line) => line.id === "t1-status");
+  assert.deepEqual(status(running, {}), { id: "t1-status", kind: "engine", text: "Thinking... 6 min" });
+  assert.equal(status(running, undefined).text, "Thinking... 6 min", "a reloaded window has no send times at all");
+  assert.equal(status(running, { t1: 301_000 }).text, "Thinking... 1 min", "this window's own send time comes first");
+  assert.equal(status({ ...running, attempt: null }, {}).text, "Thinking...");
+  assert.equal(status({ ...running, attempt: { connection: { account_ref: "main" } } }, {}).text, "Thinking...");
+});
+
+test("the Thinking line names what the master last did and how long ago", () => {
+  const activity = [{ at_ms: 100_000, text: "Searching the code" }, { at_ms: 356_000, text: "Reading src/app/page.tsx" }];
+  assert.equal(research.thinkingLine(0, 360_000, activity), "Thinking... 6 min · Reading src/app/page.tsx, 4 s ago");
+  assert.equal(research.thinkingLine(undefined, 360_000, activity), "Thinking... · Reading src/app/page.tsx, 4 s ago");
+  assert.equal(research.thinkingLine(0, 350_000, activity), "Thinking... 5 min · Reading src/app/page.tsx, 0 s ago", "a line stamped after this window's clock counts as just seen");
+  assert.equal(research.thinkingLine(0, 360_000, []), "Thinking... 6 min");
+  assert.equal(research.thinkingLine(0, 360_000), "Thinking... 6 min");
+});
+
+test("past a minute without a new line, Thinking says how long nothing new came", () => {
+  const activity = [{ at_ms: 180_000, text: "Running a command" }];
+  assert.equal(research.ACTIVITY_QUIET_MS, 60_000);
+  assert.equal(research.thinkingLine(0, 239_999, activity), "Thinking... 3 min · Running a command, 59 s ago");
+  assert.equal(research.thinkingLine(0, 240_000, activity), "Thinking... 4 min · no new activity for 1 min");
+  assert.equal(research.thinkingLine(0, 540_000, activity), "Thinking... 9 min · no new activity for 6 min");
+  assert.doesNotMatch(research.thinkingLine(0, 540_000, activity), /Running a command/);
+});
+
+test("Show activity lists a running turn's last twenty lines in order, and is gone when the turn ends", async () => {
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const { Console } = await import("../src/screens/project/console.tsx");
+  const now = 100_000;
+  const activity = Array.from({ length: 25 }, (_, step) => ({ at_ms: now - (25 - step) * 1_000, text: `Step ${step}` }));
+  const running = { id: "t1", ordinal: 1, phase: "running", reason: null, reply: null, activity };
+  const listed = research.activityLines(activity, now);
+  assert.equal(research.ACTIVITY_LINES_MAX, 20);
+  assert.equal(listed.length, 20);
+  assert.equal(listed[0], "Step 5, 20 s ago");
+  assert.equal(listed[19], "Step 24, 1 s ago");
+  assert.deepEqual(research.activityLines(undefined, now), []);
+  assert.deepEqual(research.activityLines([{ at_ms: now + 5_000, text: "Working" }], now), ["Working, 0 s ago"]);
+  const status = (turn) => conversation.consoleLines([turn], {}, {}, now).find((line) => line.id === "t1-status");
+  assert.deepEqual(status(running).activity, listed);
+  assert.equal(status(running).text, "Thinking... · Step 24, 1 s ago");
+  const draw = (turn) => renderToStaticMarkup(createElement(Console, { projectId: "p-1", lines: conversation.consoleLines([turn], {}, {}, now), agents: [], onSend: () => {}, onStop: () => {}, onNavigate: () => {} }));
+  const html = draw(running);
+  assert.ok(html.includes('<details class="cs-activity"><summary>Show activity (20)</summary><ol><li>Step 5, 20 s ago</li><li>Step 6, 19 s ago</li>'), html);
+  assert.ok(html.includes("<li>Step 24, 1 s ago</li></ol></details>"), html);
+  assert.doesNotMatch(html, /Step 4,/);
+  assert.doesNotMatch(html, /<details[^>]* open/, "the list starts closed");
+  const hostile = draw({ ...running, activity: [{ at_ms: now, text: "<b>x</b>\u001b[31m" }] });
+  assert.ok(hostile.includes("<li>&lt;b&gt;x&lt;/b&gt;"), hostile);
+  assert.doesNotMatch(hostile, /<b>x<\/b>|\u001b/);
+  const ended = [
+    { ...running, phase: "succeeded", reply: { text: "Done." } },
+    { ...running, phase: "failed", reason: "transient_failure" },
+    { ...running, phase: "cancelled" },
+    { ...running, phase: "waiting_approval" },
+    { ...running, phase: "uncertain" },
+  ];
+  for (const turn of ended) {
+    assert.equal(conversation.consoleLines([turn], {}, {}, now).some((line) => "activity" in line), false, turn.phase);
+    assert.doesNotMatch(draw(turn), /Show activity|Step \d/, turn.phase);
+  }
+  assert.equal("activity" in status({ ...running, activity: [] }), false);
+  assert.doesNotMatch(draw({ ...running, activity: undefined }), /Show activity|<details/);
 });
 
 test("Stop targets the master turn that is still replying", () => {
@@ -387,6 +518,30 @@ test("only the brief offers Edit, which opens the project details it is written 
   const documentOnly = { kind: "ok", value: { ...folder.value, items: [folder.value.items[1]] } };
   const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: documentOnly } }));
   assert.doesNotMatch(markup, />Edit</);
+});
+
+test("a file linked from the repo has its own group, says where it is from and cannot be deleted", async () => {
+  const context = await import("../src/screens/project/context.tsx");
+  const linked = { path: "repo/docs/plan-2026.md", kind: "plan", bytes: 15, linked: true };
+  const report = { path: "repo/notes/market.md", kind: "research", bytes: 9, linked: true };
+  assert.equal(context.shownPath(linked), "docs/plan-2026.md");
+  assert.equal(context.shownPath({ path: "context/brief.md", kind: "brief", bytes: 1 }), "context/brief.md");
+  assert.equal(context.shownPath({ path: "repo/kept.md", kind: "document", bytes: 1 }), "repo/kept.md", "only a linked item drops the prefix");
+  const only = { kind: "ok", value: { project_id: "p-1", folder: "/tmp/p-1/.crazyagent", items: [linked, report] } };
+  const markup = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: only } }));
+  assert.match(markup, /From your repo/);
+  assert.match(markup, /<h2 class="pj-mono">docs\/plan-2026\.md<\/h2>/);
+  assert.match(markup, /Linked from your repo/);
+  assert.match(markup, />Open in default app</);
+  assert.doesNotMatch(markup, /class="btn danger-text">Delete<|>Edit</);
+  assert.equal(markup.split("notes/market.md").length - 1, 1, "a linked research file is listed once, in the repo group");
+  const mixed = { kind: "ok", value: { ...only.value, items: [{ path: "context/brief.md", kind: "brief", bytes: 120 }, linked] } };
+  const brief = renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: mixed } }));
+  assert.match(brief, /<h2 class="pj-mono">context\/brief\.md<\/h2>/, "the brief still opens first");
+  assert.doesNotMatch(brief, /Linked from your repo/);
+  assert.match(brief, /From your repo/);
+  const none = { kind: "ok", value: { ...only.value, items: [{ path: "context/brief.md", kind: "brief", bytes: 120 }] } };
+  assert.doesNotMatch(renderToStaticMarkup(createElement(context.ContextTab, { data: { ...tabData([]), context: none } })), /From your repo/);
 });
 
 test("a project change shows a toast only when the engine applied it", () => {
@@ -427,6 +582,13 @@ test("the master's reply mark is the small mark with the reduced drawing for low
   assert.match(markup, /<svg class="brand-glyph reduced" width="24" height="24" viewBox="0 0 16 16"/);
   const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
   assert.match(css, /\.pj-mark \.brand-name \{ display: none; \}/);
+});
+
+test("the IDE-unavailable notice keeps the same gap below it as the waiting-changes notice", () => {
+  const css = readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8");
+  const gap = (selector) => new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{[^}]*margin-bottom: ([^;]+);`).exec(css)?.[1] ?? null;
+  assert.equal(gap(".pj-waiting"), "var(--space-4)");
+  assert.equal(gap(".pj-ide-unavailable"), gap(".pj-waiting"), "the IDE notice does not touch the block under it");
 });
 
 test("Needs you names the project's pool accounts that aren't signed in", () => {
@@ -596,16 +758,20 @@ test("the Team panel names each agent, its account and current task, and lists t
   const label = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
-    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder", rename: null },
-    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null },
-    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "", rename: null },
-  ]);
+    { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder", rename: null,
+      depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [], messageNote: null },
+    { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null,
+      depth: 0, lead: null, stop: { agent: 2 }, stoppedByYou: false, teammates: [], messageNote: null },
+    { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "acct-gone", word: "Ready", task: "Last task: Task 12", folder: "", rename: null,
+      depth: 0, lead: null, stop: { agent: 3 }, stoppedByYou: false, teammates: [], messageNote: null },
+  ], "the master has no Stop; each live sub-agent has its own");
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "From you", "Codex", "Queued", "Write the README", "", "", { task: 11, label: "Cancel" }],
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
-  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null });
+  assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null,
+    depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [], messageNote: null }, "a failed sub-agent has nothing left to stop");
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Sub-agent 2", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
@@ -621,7 +787,57 @@ test("the Team panel names each agent, its account and current task, and lists t
   assert.deepEqual(named.agents.map((row) => [row.name, row.harness, row.rename]), [["Ada (@onboarding-fix)", "Codex", { agent: 5, handle: "onboarding-fix" }], ["Sub-agent 6", "Codex", null]]);
   const stopped = research.teamPanel({ agents: [teamAgent(7, "stopped", { label: "Grace (@docs)", persona: "Grace", handle: "docs" })], tasks: [] }, [], label, "all", 0);
   assert.equal(stopped.agents[0].rename, null);
+  const led = research.teamPanel({
+    agents: [teamAgent(8, "idle", { label: "Grace (@lead-b)" }), teamAgent(9, "working", { task: 21, parent: 8 })],
+    tasks: [teamTask(21, "running", { agent: 9, parent: 8 }), teamTask(22, "queued", { parent: 99 }), teamTask(23, "queued", { source: "owner" }), teamTask(24, "queued", { parent: null })],
+  }, accounts, label, "all", 0);
+  assert.deepEqual(led.tasks.map((row) => row.from), ["From Grace (@lead-b)", "From a lead", "From you", "From the master"],
+    "a task a lead handed out names that lead");
+  assert.deepEqual(led.agents.map((row) => [row.name, row.depth, row.lead]), [["Grace (@lead-b)", 0, null], ["Sub-agent 9", 1, "Grace (@lead-b)"]],
+    "a worker sits one level under the lead that started it and names it");
   assert.equal(named.tasks[0].to, "Ada (@onboarding-fix)");
+  assert.deepEqual(led.agents.map((row) => [row.key, row.depth, row.lead]), [["agent-8", 0, null], ["agent-9", 1, "Grace (@lead-b)"]]);
+});
+
+test("the Team panel lists each worker under its lead, and offers Stop only on a live sub-agent or teammate the owner did not stop", () => {
+  const status = {
+    agents: [
+      teamAgent(1, "working", { role: "master" }),
+      teamAgent(2, "working", { label: "Lin (@search)" }),
+      teamAgent(3, "working", { label: "Ada (@notes)", teammates: [{ pane: "%4", ended: false, stopped: false }, { pane: "%5", ended: true, stopped: false }, { pane: "%6", ended: false, stopped: true }] }),
+      teamAgent(4, "working", { parent: 3 }),
+      teamAgent(5, "idle", { parent: 2 }),
+      teamAgent(6, "working", { parent: 4 }),
+      teamAgent(7, "stopped", { parent: 3, owner_stopped: true }),
+      teamAgent(8, "working", { owner_stopped: true, teammates: [{ pane: "%9", ended: false, stopped: false }] }),
+    ],
+    tasks: [],
+  };
+  const rows = research.teamPanel(status, [], (id) => id, "all", 0).agents;
+  assert.deepEqual(rows.map((row) => [row.key, row.depth, row.lead]), [
+    ["agent-1", 0, null],
+    ["agent-2", 0, null],
+    ["agent-5", 1, "Lin (@search)"],
+    ["agent-3", 0, null],
+    ["agent-4", 1, "Ada (@notes)"],
+    ["agent-6", 2, "Sub-agent 4"],
+    ["agent-7", 1, "Ada (@notes)"],
+    ["agent-8", 0, null],
+  ]);
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  assert.equal(byKey.get("agent-1").stop, null, "the master stops with Stop all");
+  assert.deepEqual(byKey.get("agent-6").stop, { agent: 6 }, "a worker of a worker can be stopped");
+  assert.deepEqual([byKey.get("agent-7").stop, byKey.get("agent-7").stoppedByYou], [null, true]);
+  assert.deepEqual([byKey.get("agent-8").stop, byKey.get("agent-8").stoppedByYou], [null, true]);
+  assert.deepEqual(byKey.get("agent-3").teammates, [
+    { key: "teammate-3-%4", pane: "%4", word: "Running", stop: { agent: 3, pane: "%4" } },
+    { key: "teammate-3-%5", pane: "%5", word: "Closed", stop: null },
+    { key: "teammate-3-%6", pane: "%6", word: "Stopped by you", stop: null },
+  ]);
+  assert.deepEqual(byKey.get("agent-8").teammates.map((row) => [row.word, row.stop]), [["Running", null]], "a harness the owner stopped offers no teammate Stop");
+  assert.deepEqual(byKey.get("agent-4").teammates, []);
+  assert.deepEqual(research.leadTree([{ id: 1, parent: 2 }, { id: 2, parent: 1 }, { id: 3, parent: 3 }]).map(({ agent, depth }) => [agent.id, depth]), [[3, 0], [1, 0], [2, 0]],
+    "agents that name each other as lead are each listed once");
 });
 
 test("a task result summary is its first plain line", () => {
@@ -639,18 +855,30 @@ test("a long task prompt shows its first line, cut to fit a row", () => {
   assert.equal(research.firstLine(""), "");
 });
 
-test("the Agents tab counts working team agents and running research like the project card", async () => {
+test("the Agents toolbar's team line names the pool with its account count, Running and All count team agents and research, and the fold keeps its working count", async () => {
   const agents = await import("../src/screens/project/agents.tsx");
   const team = { project_id: "p-1", keep_warm: false, paused: false, min_agents: 0, max_agents: 5, harnesses: [], messages: [], plan: [],
     agents: [teamAgent(2, "working", { task: 10 }), teamAgent(3, "working", { task: 11 }), teamAgent(4, "stopped")],
     tasks: [teamTask(10, "running", { agent: 2 }), teamTask(11, "running", { agent: 3 })],
     events: { recent: [], waiting: [], notifications: [], paused: false, questions: [],
-      wake: { app: null, project: null, agents: [], effective: { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 }, level: "shipped" } } };
+      wake: { app: null, app_version: 0, project: null, project_version: 0, agents: [], cleared: [], effective: { question: true, finished: true, failed: true, change_set_ready: true, progress: false, hourly_cap: 30 }, level: "shipped" } } };
   const data = { ...tabData([job("running", { started_ms: 1_000 })]), setup: { kind: "ok", value: { team: { max_agents: 5 } } },
     assigned: { pool: { id: "pool-1", name: "Work", members: ["a", "b"] } }, team: { result: { kind: "ok", value: team }, at: 1_000 } };
   const markup = renderToStaticMarkup(createElement(agents.AgentsTab, { data }));
-  assert.match(markup, /3 agents working\. Work: 2 accounts\./);
-  assert.doesNotMatch(markup, /1 of 5 agents running/);
+  const line = markup.slice(markup.indexOf('class="tg-summary"'), markup.indexOf("Open all terminals"));
+  assert.match(line, /<button type="button" class="tg-asks" aria-haspopup="dialog">Questions<\/button><\/span><span aria-hidden="true"> · <\/span><span>Work: 2 accounts<\/span>/);
+  const show = line.slice(line.indexOf('aria-label="Show"'));
+  assert.match(show, />Running \(3\)</, "Running counts the 2 working team agents and the running research");
+  assert.match(show, />All \(4\)</, "All counts the 3 team agents and the research");
+  const fold = markup.slice(markup.indexOf('<details class="pj-stack-s" aria-label="Agents and tasks">'));
+  assert.match(fold, /2 of 5 agents working\./, "the team table in the fold counts them");
+  const one = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, assigned: { pool: { id: "pool-2", name: "Solo", members: ["a"] } } } }));
+  assert.match(one, /<span>Solo: 1 account<\/span>/);
+  const none = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, assigned: null } }));
+  assert.match(none, /<span>No pool\. Pick a pool to start\.<\/span>/);
+  const settings = renderToStaticMarkup(createElement(agents.AgentsTab, { data: { ...data, team: { result: undefined, at: 1_000 } }, section: "settings" }));
+  assert.match(settings, /<span>Work: 2 accounts<\/span>/, "Agent settings draws the same toolbar row");
+  assert.match(settings, />Running \(1\)</, "with the team not read yet, Running counts the research alone");
 });
 
 test("the Agents tab labels research and asks the engine for the live team", async () => {
@@ -724,6 +952,8 @@ test("Project Settings sends the engine's team fields only, never the tools choi
     about: "a", tech_stack: ["Rust"], platforms: ["cli"], research: [], pool: "main", documents: [],
     team: { master: "cursor", master_tools: true, sub_harnesses: [{ harness: "cursor", agents: 2, tools: true }], min_agents: 1, max_agents: 3 },
   });
+  assert.deepEqual(settings.setupOf({ ...stored, research: ["market_research", "roadmap_planning"] }, team).research, ["market_research", "roadmap_planning"],
+    "saving the team keeps the stored roadmap choice");
 });
 
 test("the master ticket is used only for the project that was opened", () => {
@@ -807,4 +1037,174 @@ test("a master turn whose edits wait in Changes shows the engine's note, and a t
   assert.equal(research.changesLine({ id: "t2", ordinal: 2, phase: "failed", reason: null, reply: null, changes: null }), null);
   assert.equal(research.changesLine({ id: "t3", ordinal: 3, phase: "succeeded", reason: null, reply: { text: "Done." } }), null);
   assert.equal(research.changesLine({ id: "t4", ordinal: 4, phase: "succeeded", reason: null, reply: { text: "Done." }, changes: "  " }), null);
+});
+
+const ideView = (build, platform = "macos", unqualified = null) => ({ state: { build, unqualified }, platform });
+
+test("the IDE tab replaces Context and Changes only on a qualified platform with a Ready build", async () => {
+  const page = await import("../src/screens/project/index.tsx");
+  const client = await import("../src/api-ide.ts");
+  const ids = (view) => page.projectTabs(view).map((tab) => tab.id);
+  const fixed = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings"];
+  const swapped = ["overview", "conversation", "agents", "ide", "questions", "process", "metrics", "settings"];
+  assert.deepEqual(ids(undefined), fixed, "until the engine answers, the page keeps Context and Changes and names no IDE");
+  assert.equal(client.ideUnavailable(undefined), null);
+  const ready = ideView({ state: "ready", version: "1.143.17183", root: "/data/ide/build" });
+  assert.deepEqual(ids(ready), swapped);
+  assert.equal(page.projectTabs(ready).find((tab) => tab.id === "ide").label, "IDE");
+  assert.equal(client.ideUnavailable(ready), null);
+  const fetching = [
+    [ideView({ state: "downloading", bytes: 48 * 1024 * 1024, total: 96 * 1024 * 1024 }), "Downloading the IDE: 48 of 96 MB."],
+    [ideView({ state: "verifying" }), "Checking the IDE download."],
+  ];
+  for (const [view, line] of fetching) {
+    assert.deepEqual(ids(view), fixed, `${line} Changes and Context stay usable until the IDE can open`);
+    assert.deepEqual(client.ideUnavailable(view), { line, action: null }, "the fetch shows its progress, not an unavailable platform");
+  }
+  const unavailable = [
+    [ideView({ state: "ready", version: "1.143.17183", root: "/x" }, "linux", "linux"),
+      "IDE unavailable on Linux: The IDE isn't supported on this platform yet.", null],
+    [ideView({ state: "downloading", bytes: 1, total: 2 }, "windows", "windows"),
+      "IDE unavailable on Windows: The IDE isn't supported on this platform yet.", null],
+    [ideView({ state: "missing" }, "windows", "windows"),
+      "IDE unavailable on Windows: The IDE isn't supported on this platform yet.", null],
+    [ideView({ state: "failed", code: "ide_build_hash_mismatch" }),
+      "IDE unavailable on macOS: The IDE download didn't match its published checksum, so it was deleted and never run.", "retry"],
+    [ideView({ state: "failed", code: "ide_build_unsupported_platform" }),
+      "IDE unavailable on macOS: This CrazyAgent version has no IDE build for this platform.", null],
+    [ideView({ state: "missing" }),
+      "IDE unavailable on macOS: The IDE isn't downloaded yet.", "download"],
+  ];
+  for (const [view, line, action] of unavailable) {
+    assert.deepEqual(ids(view), fixed, line);
+    assert.deepEqual(client.ideUnavailable(view), { line, action }, line);
+  }
+});
+
+test("while the build downloads or verifies, the page reads the IDE state every second until it is Ready", async () => {
+  const client = await import("../src/api-ide.ts");
+  assert.equal(client.ideFetching(undefined), false);
+  assert.equal(client.ideFetching(ideView({ state: "downloading", bytes: 1, total: 2 })), true);
+  assert.equal(client.ideFetching(ideView({ state: "verifying" })), true);
+  assert.equal(client.ideFetching(ideView({ state: "downloading", bytes: 1, total: 2 }, "linux", "linux")), false, "an unqualified platform never opens, so nothing to wait for");
+  for (const build of [{ state: "missing" }, { state: "ready", version: "1", root: "/x" }, { state: "failed", code: "ide_build_storage" }]) {
+    assert.equal(client.ideFetching(ideView(build)), false, build.state);
+  }
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  assert.match(index, /const fetching = ideFetching\(view\);/);
+  assert.match(index, /fetching \? window\.setInterval\(read, IDE_POLL_MS\) : 0/);
+  assert.match(index, /\}, \[projectId, session\?\.revision, fetching\]\);/, "the poll starts once a download starts and stops at Ready or Failed");
+  const tab = readFileSync(new URL("../src/screens/project/ide.tsx", import.meta.url), "utf8");
+  assert.match(tab, /export const IDE_POLL_MS = 1_000;/);
+});
+
+test("routes to a replaced tab keep their target, listed beside the IDE while open, and the IDE route lands on Changes where it can't open", async () => {
+  const page = await import("../src/screens/project/index.tsx");
+  const ready = ideView({ state: "ready", version: "1.143.17183", root: "/x" });
+  const failed = ideView({ state: "failed", code: "ide_build_download_failed" });
+  const ids = (view, route) => page.projectTabs(view, route).map((tab) => tab.id);
+  const routed = (route, view) => page.routedTab(route, page.projectTabs(view, route));
+  assert.deepEqual(ids(ready, "overview"), ["overview", "conversation", "agents", "ide", "questions", "process", "metrics", "settings"]);
+  assert.deepEqual(ids(ready, "changes"), ["overview", "conversation", "agents", "ide", "changes", "questions", "process", "metrics", "settings"], "an open Changes is listed after the IDE");
+  assert.deepEqual(ids(ready, "context"), ["overview", "conversation", "agents", "ide", "questions", "context", "process", "metrics", "settings"]);
+  assert.equal(routed("changes", ready), "changes");
+  assert.equal(routed("context", ready), "context", "Overview's Review and Open report links open their file in Context");
+  assert.equal(routed("ide", ready), "ide");
+  assert.equal(routed("process", ready), "process");
+  assert.equal(routed("ide", failed), "changes");
+  assert.equal(routed("context", failed), "context");
+  assert.equal(routed("nowhere", ready), "overview");
+  assert.equal(routed("nowhere", failed), "overview");
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  assert.match(index, /const tabs = projectTabs\(view, tab\);/);
+  assert.match(index, /tabs\.map\(\(item\) => item\.id\)\.join\(" "\)\]\);/, "the number shortcuts follow the listed tabs, not only their count");
+});
+
+test("every Changes and Context action stays one menu choice away while the IDE replaces them", async () => {
+  const page = await import("../src/screens/project/index.tsx");
+  const ids = (view) => page.replacedTabs(view).map((tab) => tab.id);
+  assert.deepEqual(ids(ideView({ state: "ready", version: "1.143.17183", root: "/x" })), ["changes", "context"]);
+  assert.deepEqual(ids(ideView({ state: "downloading", bytes: 1, total: 2 })), []);
+  assert.deepEqual(ids(ideView({ state: "failed", code: "ide_build_storage" })), []);
+  assert.deepEqual(ids(undefined), []);
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  const menu = index.slice(index.indexOf("function ProjectMenu"), index.indexOf("function hashSection"));
+  assert.match(menu, /replaced\.map\(\(item\) => \(\{ label: `Open \$\{item\.label\}`/, "the project menu offers Open Changes and Open Context");
+  assert.match(menu, /data\.navigate\(`\/projects\/\$\{encodeURIComponent\(data\.id\)\}\/\$\{item\.id\}`\)/);
+  assert.match(index, /<ProjectMenu data=\{data\} replaced=\{replacedTabs\(view\)\} \/>/);
+});
+
+test("a failed IDE state read shows the failure with Retry instead of falling back silently", async () => {
+  const client = await import("../src/api-ide.ts");
+  const ide = await import("../src/screens/project/ide.tsx");
+  const refused = { kind: "error", code: "ide_tab_outcome_unknown", message: "raw" };
+  assert.deepEqual(client.ideReadFailed(refused, "macos"), { line: `IDE unavailable on macOS: ${api.failureCopy(refused)}`, action: "retry" });
+  assert.deepEqual(client.ideReadFailed({ kind: "not_ready" }, "linux"),
+    { line: "IDE unavailable on Linux: CrazyAgent's engine isn't ready yet. Try again in a moment.", action: "retry" });
+  assert.equal(client.desktopPlatform("MacIntel"), "macos");
+  assert.equal(client.desktopPlatform("Win32"), "windows");
+  assert.equal(client.desktopPlatform("Linux x86_64"), "linux");
+  assert.equal(client.desktopPlatform("FreeBSD amd64"), "FreeBSD amd64");
+  const markup = renderToStaticMarkup(createElement(ide.IdeUnavailable, { view: undefined, failure: { kind: "not_ready" }, onAction: () => {} }));
+  assert.match(markup, /role="status"/);
+  assert.ok(markup.includes("IDE unavailable on ") && markup.includes("CrazyAgent&#x27;s engine isn&#x27;t ready yet."), markup);
+  assert.match(markup, />Retry</);
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  assert.match(index, /useState<Result<IdeView>>\(\)/, "the page keeps a failed read, not only a good one");
+  assert.match(index, /failure=\{failure\}/);
+  assert.match(index, /failure \? readIde\(\) : fetchIde\(\)/, "Retry after a failed read reads again and starts no download");
+});
+
+test("the unavailable line names the platform and reason and offers the build's one action", async () => {
+  const ide = await import("../src/screens/project/ide.tsx");
+  const draw = (view) => renderToStaticMarkup(createElement(ide.IdeUnavailable, { view, onAction: () => {} }));
+  const missing = draw(ideView({ state: "missing" }));
+  assert.match(missing, /role="status"/);
+  assert.ok(missing.includes("IDE unavailable on macOS: The IDE isn&#x27;t downloaded yet."), missing);
+  assert.match(missing, />Download</);
+  const failed = draw(ideView({ state: "failed", code: "ide_build_storage" }));
+  assert.match(failed, />Retry</);
+  const linux = draw(ideView({ state: "ready", version: "1.143.17183", root: "/x" }, "linux", "linux"));
+  assert.ok(linux.includes("IDE unavailable on Linux: The IDE isn&#x27;t supported on this platform yet."), linux);
+  assert.doesNotMatch(linux, /<button/);
+  assert.equal(draw(ideView({ state: "ready", version: "1.143.17183", root: "/x" })), "", "a shown IDE needs no line");
+  const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
+  assert.match(index, /<IdeUnavailable /, "the project page shows the line above its tabs");
+  assert.match(index, /onView=\{/, "the IDE tab reports each state it reads, so a failed download brings Context and Changes back");
+});
+
+test("the ide_tab flag is gone: the desktop always asks the engine and names its own platform", () => {
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge/ide.rs", import.meta.url), "utf8");
+  assert.doesNotMatch(bridge, /CRAZYAGENT_IDE_TAB|IDE_TAB_FLAG|ide_tab_on|IdeView::Off/);
+  assert.match(bridge, /platform: std::env::consts::OS/);
+  const client = readFileSync(new URL("../src/api-ide.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(client, /ide_tab_off|tab: "off"/);
+});
+
+test("every desktop memory list and count reads all memory batches, never one engine batch of 8", async () => {
+  const shared = await import("../src/api.ts");
+  assert.equal(typeof shared.loadAllProjectMemories, "function");
+  const root = new URL("../src/", import.meta.url);
+  const source = (path) => readFileSync(new URL(path, root), "utf8");
+  const sources = (dir) => readdirSync(new URL(dir, root), { withFileTypes: true }).flatMap((entry) => entry.isDirectory()
+    ? sources(`${dir}${entry.name}/`) : /\.tsx?$/.test(entry.name) ? [`${dir}${entry.name}`] : []);
+  const screens = sources("").filter((path) => path !== "engine-client.ts");
+  const readers = screens.filter((path) => source(path).includes('"desktop_project_memories"'));
+  assert.deepEqual(readers, ["api.ts"], "one engine batch holds at most 8 entries of any status, so only the paging loader reads it");
+  assert.deepEqual(screens.filter((path) => /\bprojectMemories\(/.test(source(path))), [], "nothing reads one batch through the typed client");
+  const body = (text, name) => text.match(new RegExp(`export async function ${name}[\\s\\S]*?\\n}\\n`))?.[0] ?? "";
+  const all = body(source("api.ts"), "loadAllProjectMemories");
+  assert.match(all, /page < MEMORY_PAGES_MAX/);
+  assert.match(all, /"desktop_project_memories", \{ id, after \}/);
+  assert.match(all, /after = batch\.value\[batch\.value\.length - 1\]\.id/);
+  assert.match(all, /batch\.value\.length === 0\) return \{ kind: "ok", value: \{ items, more: false \} \}/);
+  assert.match(body(source("api.ts"), "memorySuggestions"), /loadAllProjectMemories\(project\.id\)[\s\S]*suggestionsFrom\(project, memories\.value\.items\)/);
+  assert.match(source("screens/project/overview.tsx"), /loadAllProjectMemories\(data\.id\)\.then\(\(result\) => \{[^}]*memoryGroups\(result\.value\.items\)\.suggested\.length/);
+  assert.match(source("screens/project/memory.tsx"), /loadAllProjectMemories\(data\.id\)/);
+});
+
+test("a Team panel row carries the engine's sentence for an agent the Delivery setting leaves without messages, and no other row does", () => {
+  const note = "Can't receive messages: Native only needs tools on for Codex.";
+  const panel = research.teamPanel({ agents: [teamAgent(2, "idle", { tools: false, message_note: note }), teamAgent(3, "idle")], tasks: [] }, [], (id) => id, "all", 0);
+  assert.deepEqual(panel.agents.map((row) => [row.key, row.messageNote]), [["agent-2", note], ["agent-3", null]]);
 });

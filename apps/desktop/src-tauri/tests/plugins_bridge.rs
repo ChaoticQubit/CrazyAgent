@@ -53,13 +53,11 @@ async fn flow(root: &Path) -> Result<(), String> {
             .code,
         "plugin_not_found"
     );
-    assert!(
-        !bridge
-            .set_skill_enabled(skill.id.clone(), false)
-            .await
-            .map_err(code)?
-            .enabled
-    );
+    let disabled = bridge
+        .set_skill_enabled(skill.id.clone(), false, skill.version)
+        .await
+        .map_err(code)?;
+    assert!(!disabled.enabled);
 
     let found = root.join("home/.claude/skills/style");
     std::fs::create_dir_all(&found).unwrap();
@@ -71,6 +69,7 @@ async fn flow(root: &Path) -> Result<(), String> {
     std::fs::write(found.join(".env"), "TOKEN=dummy-value").unwrap();
     let imported = bridge
         .import_skill(found.display().to_string(), None)
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(imported.skill.name, "style");
@@ -79,12 +78,16 @@ async fn flow(root: &Path) -> Result<(), String> {
     assert_eq!(
         bridge
             .import_skill(found.display().to_string(), None)
+            .map_err(code)?
             .await
             .unwrap_err()
             .code,
         "skill_name_taken"
     );
-    bridge.remove_skill(imported.skill.id).await.map_err(code)?;
+    bridge
+        .remove_skill(imported.skill.id, imported.skill.version)
+        .await
+        .map_err(code)?;
 
     let server_path = root.join("servers").join("mcp_fixture.py");
     std::fs::create_dir_all(root.join("servers")).unwrap();
@@ -101,6 +104,7 @@ async fn flow(root: &Path) -> Result<(), String> {
             spec.clone(),
             vec![("FIXTURE_TOKEN".into(), "dummy-value".into())],
         )
+        .map_err(code)?
         .await
         .map_err(code)?;
     assert_eq!(server.status_label, "Waiting for approval");
@@ -127,8 +131,14 @@ async fn flow(root: &Path) -> Result<(), String> {
     let listed = bridge.plugin_servers(None).await.map_err(code)?;
     assert_eq!(listed.len(), 1);
     assert!(!format!("{listed:?}").contains("dummy-value"));
-    bridge.remove_mcp_server(server.id).await.map_err(code)?;
-    bridge.remove_skill(skill.id).await.map_err(code)?;
+    bridge
+        .remove_mcp_server(server.id, listed[0].version)
+        .await
+        .map_err(code)?;
+    bridge
+        .remove_skill(skill.id, disabled.version)
+        .await
+        .map_err(code)?;
     assert!(bridge.plugin_servers(None).await.map_err(code)?.is_empty());
     assert!(bridge.plugin_skills(None).await.map_err(code)?.is_empty());
     Ok(())
@@ -192,6 +202,9 @@ fn plugins_commands_use_the_local_main_window_acl() {
         "desktop_skill_detail",
         "desktop_skill_import_scan",
         "desktop_import_skill",
+        "desktop_tool_switches",
+        "desktop_set_tool_switch",
+        "desktop_restore_tool_switches",
     ] {
         assert!(
             authority

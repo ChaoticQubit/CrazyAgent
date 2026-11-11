@@ -76,3 +76,126 @@ test("a resumed session asks only for the owner lines it does not hold, at most 
   assert.equal(sessions.ownerText(turns[1], { b: "typed here" }, { "12": "older copy" }), "typed here");
   assert.equal(sessions.ownerText(turns[3], {}, {}), undefined);
 });
+
+test("a session whose master harness switched shows the engine's Switched to divider", async () => {
+  const note = "Switched to Codex. The conversation continues: Codex got its earlier turns, newest first, and the open tasks.";
+  const team = (extra) => ({ kind: "ok", value: { project_id: "p-1", ...extra } });
+  assert.equal(sessions.switchDivider(undefined), null);
+  assert.equal(sessions.switchDivider({ kind: "error", code: "x", message: "m" }), null);
+  assert.equal(sessions.switchDivider(team({})), null);
+  assert.equal(sessions.switchDivider(team({ live_switch: null })), null);
+  assert.equal(sessions.switchDivider(team({ live_switch: { harness: "Codex", mode: "carry", note } })), note);
+  assert.equal(renderToStaticMarkup(createElement(sessions.SwitchDivider, { team: team({}) })), "");
+  const shown = renderToStaticMarkup(createElement(sessions.SwitchDivider, { team: team({ live_switch: { harness: "Codex", mode: "carry", note } }) }));
+  assert.match(shown, /role="separator"/);
+  assert.match(shown, /data-testid="harness-switch"/);
+  assert.match(shown, /Switched to Codex\. The conversation continues/);
+
+  const conversation = await import("../src/screens/project/conversation.tsx");
+  const data = (live_switch) => ({
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: team({ live_switch }), at: 1 }, reloadTeam: () => {},
+  });
+  const fresh = "Switched to Claude Code. Started fresh: Claude Code did not get the earlier conversation, as the On harness switch setting asks.";
+  const earlier = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: data({ harness: "Claude Code", mode: "fresh", note: fresh }), readOnly: true }));
+  assert.match(earlier, /No earlier conversation\./);
+  assert.match(earlier, /<p class="cs-line cs-engine"[^>]*>Switched to Claude Code\. Started fresh/);
+  const editable = renderToStaticMarkup(createElement(conversation.ConversationTab, { data: data({ harness: "Claude Code", mode: "fresh", note: fresh }) }));
+  assert.doesNotMatch(editable, /Switched to Claude Code/);
+});
+
+test("the live master area shows the switch divider under its header, above the terminal", async () => {
+  const live = await import("../src/screens/project/live-master.tsx");
+  const note = "Switched to Codex. Started fresh: Codex did not get the earlier conversation, as the On harness switch setting asks.";
+  const data = (live_switch) => ({
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch, messages: [] } }, at: 1 }, reloadTeam: () => {},
+  });
+  const view = (live_switch) => renderToStaticMarkup(createElement(live.LiveMasterView, {
+    data: data(live_switch), harness: "codex", live: { kind: "running", node: null }, onSwitch() {},
+  }));
+  const shown = view({ harness: "Codex", mode: "fresh", note });
+  const head = shown.indexOf("pj-console-head");
+  const divider = shown.indexOf('data-testid="harness-switch"');
+  const waiting = shown.indexOf("Waiting for the master");
+  assert.ok(head >= 0 && head < divider && divider < waiting, shown);
+  assert.match(shown, /Switched to Codex\. Started fresh/);
+  assert.doesNotMatch(view(null), /harness-switch/);
+});
+
+test("a listed live session with no messages is new already, and Delete says why it kept a session", () => {
+  const list = [summary("old", "parked", { turns: 2 })];
+  assert.equal(sessions.liveUnused("live", list, true), true);
+  assert.equal(sessions.liveUnused("live", [summary("live", "configured", { turns: 1 }), ...list], true), false);
+  assert.equal(sessions.liveUnused("live", [], false), false, "not before the list is read");
+  assert.equal(sessions.liveUnused(null, list, true), false);
+  assert.equal(api.failureCopy("master_session_unused"), "This session has no messages yet, so it already is a new session.");
+  assert.match(api.failureCopy("master_session_files_kept"), /nothing was deleted/);
+});
+
+const { bundle, withPage } = await import("./browser.mjs");
+const counted = await bundle(new URL("./fixtures/sessions-count.mjs", import.meta.url).pathname);
+
+/** Runs one Sessions bar count check in a page with the count fixture loaded. Input: the
+ * check, given the page's evaluate. Output: what the check returns. */
+const inCountPage = (check) => withPage(async ({ evaluate }) => {
+  await evaluate(counted);
+  return check(evaluate);
+});
+
+test("the live master's Sessions bar re-reads its count when the master's turn state changes, with no timer read", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("working")');
+    const first = await evaluate('Fixture.liveLine("1 message", 3000)');
+    await evaluate('Fixture.turnLive("idle")');
+    const second = await evaluate('Fixture.liveLine("2 messages", 3000)');
+    const quiet = await evaluate('Fixture.liveLine("never", 2500)');
+    return { first, second, quiet };
+  });
+  assert.equal(seen.first.line, "Live session · Started earlier · 1 message");
+  assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the master's ended turn shows in the count");
+  assert.equal(seen.quiet.reads, seen.second.reads, "the bar reads the list again only on a turn change");
+});
+
+test("the conversation's Sessions bar re-reads its count when a second turn shows, with no timer read", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate("Fixture.mountConversation()");
+    const first = await evaluate('Fixture.liveLine("1 message", 3000)');
+    await evaluate("Fixture.turnConversation()");
+    const second = await evaluate('Fixture.liveLine("2 messages", 5000)');
+    const quiet = await evaluate('Fixture.liveLine("never", 4500)');
+    return { first, second, quiet };
+  });
+  assert.equal(seen.first.line, "Live session · Started earlier · 1 message");
+  assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the second turn shows in the count");
+  assert.equal(seen.quiet.reads, seen.second.reads, "the conversation's two-second turn reads leave the list alone");
+});
+
+test("a Sessions list read that works again clears the problem an earlier refused read showed", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("working", 1)');
+    await evaluate('Fixture.liveLine("never", 500)');
+    const refused = await evaluate("Fixture.problem()");
+    await evaluate('Fixture.turnLive("idle")');
+    const line = await evaluate('Fixture.liveLine("2 messages", 3000)');
+    return { refused, line, after: await evaluate("Fixture.problem()") };
+  });
+  assert.equal(seen.refused, "CrazyAgent's engine isn't running.", "the refused read shows its problem");
+  assert.equal(seen.line.line, "Live session · Started earlier · 2 messages");
+  assert.equal(seen.after, null, "the read that worked clears the earlier problem");
+});
+
+test("a refused New session keeps its problem through the list read after it", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("idle")');
+    const before = await evaluate('Fixture.liveLine("1 message", 3000)');
+    const clicked = await evaluate('Fixture.click("New session")');
+    const after = await evaluate('Fixture.liveLine("never", 500)');
+    return { before, clicked, after, problem: await evaluate("Fixture.problem()") };
+  });
+  assert.equal(seen.clicked, true);
+  assert.equal(seen.after.reads, seen.before.reads + 1, "the refused switch reads the list once");
+  assert.equal(seen.problem, api.failureCopy({ code: "master_source_conflict" }), "the list read that worked keeps the switch's problem");
+});

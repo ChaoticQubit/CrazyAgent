@@ -5,17 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-test("actual project profile requires a pinned service that forbids app replacement", async (t) => {
+test("actual model access profile requires a pinned service that forbids app replacement", async (t) => {
   const evidence = mkdtempSync(join(tmpdir(), "ca-zero-retry-unit-"));
   t.after(() => rmSync(evidence, { recursive: true }));
   process.env.CRAZYAGENT_DESKTOP_TEST_APP = process.execPath;
+  process.env.CRAZYAGENT_DESKTOP_TEST_SUITE = "model-access";
   process.env.CRAZYAGENT_DESKTOP_TEST_PORT = "19259";
   process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = evidence;
-  const { config } = await import("./projects.wdio.conf.mjs");
+  const { config } = await import("./model-access.wdio.conf.mjs");
   assert.equal(
     typeof config.services?.[0]?.[0],
     "function",
-    "actual projects profile must register a custom no-respawn service constructor",
+    "actual model access profile must register a custom no-respawn service constructor",
   );
 
   const { config: baseline } = await import("../../wdio.conf.mjs");
@@ -26,7 +27,7 @@ test("actual project profile requires a pinned service that forbids app replacem
   assert.equal(config.connectionRetryCount, 0);
   assert.equal(config.connectionRetryTimeout, 10000);
   assert.equal(config.specFileRetries, 0);
-  assert.deepEqual(config.mochaOpts, { timeout: 80000, retries: 0 });
+  assert.deepEqual(config.mochaOpts, { timeout: 100000, retries: 0 });
   assert.equal(config.services[0][1].driverProvider, "embedded");
   assert.equal(config.services[0][1].autoInstallTauriDriver, false);
   assert.equal(config.services[0][1].startTimeout, 20000);

@@ -295,6 +295,204 @@ fn denied_device_sign_in_reports_a_plain_problem_and_saves_nothing() {
     assert_eq!(scratch.state(), None);
 }
 
+/// How long a test waits for GitHub work to reach the point where it holds it.
+const PAUSE_WAIT: Duration = Duration::from_secs(30);
+
+/// A GitHub stand-in that grants one device sign-in at its first poll. Input: the token
+/// it grants. Output: the running stand-in.
+fn granting_server(granted: String) -> Server {
+    Server::start(move |seen, _| match seen.path.as_str() {
+        "/login/device/code" => {
+            let host = seen.header("host").unwrap().to_owned();
+            Answer::json(
+                200,
+                serde_json::json!({
+                    "device_code": "device-test-code",
+                    "user_code": "WDJB-MJHT",
+                    "verification_uri": format!("http://{host}/login/device"),
+                    "expires_in": 900,
+                    "interval": 1,
+                }),
+            )
+        }
+        "/login/oauth/access_token" => Answer::json(
+            200,
+            serde_json::json!({
+                "access_token": granted,
+                "token_type": "bearer",
+                "scope": "repo,read:user",
+            }),
+        ),
+        "/user" => user(seen, &granted),
+        _ => Answer::json(404, serde_json::json!({})),
+    })
+}
+
+#[test]
+fn a_device_sign_in_that_saved_its_token_never_reads_as_still_waiting() {
+    let scratch = Scratch::new();
+    let server = granting_server(token());
+    let account = scratch.account(&server);
+    let (saved, go_on) = pause_at(&account.root, Pause::AfterKeep);
+    account.sign_in().unwrap();
+    saved
+        .recv_timeout(PAUSE_WAIT)
+        .expect("the device sign-in never reached its save");
+    let status = account.status();
+    go_on.send(()).unwrap();
+    assert!(status.signed_in, "{status:?}");
+    assert_eq!(status.method, GitHubMethod::Device);
+    assert!(
+        !status.waiting,
+        "a device sign-in that saved its token still reads as waiting: {status:?}"
+    );
+    assert_eq!(status.problem, None);
+    let status = wait_for(&account, |status| status.signed_in && !status.waiting);
+    assert_eq!(status.problem, None);
+    assert!(!account.sign_out().unwrap().signed_in);
+}
+
+#[test]
+fn a_status_read_holds_off_every_save_until_it_has_read_the_saved_sign_in() {
+    let scratch = Scratch::new();
+    let server = Server::start(|_, _| Answer::json(404, serde_json::json!({})));
+    let account = scratch.account(&server);
+    let (read, finish) = pause_at(&account.root, Pause::InStatus);
+    let reader = account.clone();
+    let reading = std::thread::spawn(move || reader.status());
+    read.recv_timeout(PAUSE_WAIT)
+        .expect("the status read never reached the waiting flag");
+    let saves_could_land = PENDING.try_lock().is_ok();
+    finish.send(()).unwrap();
+    let status = reading.join().unwrap();
+    assert!(
+        !saves_could_land,
+        "a save could land between the status read of the waiting flag and of the saved sign-in"
+    );
+    assert!(!status.signed_in && !status.waiting, "{status:?}");
+}
+
+/// How long a test watches for a save that must never come: a sign-in thread that saves
+/// does so within milliseconds of GitHub's answer.
+const LATE_SAVE_WINDOW: Duration = Duration::from_secs(3);
+
+#[test]
+fn a_device_token_github_grants_after_sign_out_is_never_saved() {
+    let scratch = Scratch::new();
+    let (asked, engine_asked) = std::sync::mpsc::channel::<()>();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let asked = Mutex::new(asked);
+    let released = Mutex::new(released);
+    let answered = token();
+    let server = Server::start(move |seen, _| match seen.path.as_str() {
+        "/login/device/code" => {
+            let host = seen.header("host").unwrap().to_owned();
+            Answer::json(
+                200,
+                serde_json::json!({
+                    "device_code": "device-test-code",
+                    "user_code": "WDJB-MJHT",
+                    "verification_uri": format!("http://{host}/login/device"),
+                    "expires_in": 900,
+                    "interval": 1,
+                }),
+            )
+        }
+        "/login/oauth/access_token" => Answer::json(
+            200,
+            serde_json::json!({
+                "access_token": answered,
+                "token_type": "bearer",
+                "scope": "repo,read:user",
+            }),
+        ),
+        "/user" => {
+            asked.lock().unwrap().send(()).unwrap();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30))
+                .unwrap();
+            user(seen, &answered)
+        }
+        _ => Answer::json(404, serde_json::json!({})),
+    });
+    let account = scratch.account(&server);
+    account.sign_in().unwrap();
+    engine_asked
+        .recv_timeout(Duration::from_secs(30))
+        .expect("GitHub granted the code and the engine asked whose token it is");
+    assert!(!account.sign_out().unwrap().signed_in);
+    release.send(()).unwrap();
+
+    let deadline = Instant::now() + LATE_SAVE_WINDOW;
+    while Instant::now() < deadline {
+        assert_eq!(
+            scratch.state(),
+            None,
+            "a token GitHub granted after sign-out must not be saved"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let item = reference(&format!("{}.github", scratch.namespace), "token").unwrap();
+    assert_eq!(
+        scratch.store.get(&item).unwrap_err().0,
+        "credential_missing",
+        "nor may it reach the credential store"
+    );
+    let status = account.status();
+    assert!(!status.signed_in && !status.waiting, "{status:?}");
+}
+
+const SIGN_OUT_RACE_ROUNDS: usize = 12;
+
+/// Stress check, not proof: rounds of a sign-out racing a pasted token must always leave a
+/// stored token with its saved sign-in, or neither. It holds on every interleaving of the
+/// locked sign-out; code without the lock fails it only when the timing lines up, since no
+/// pause point inside sign-out exists to force the losing order with real parts.
+#[test]
+fn a_token_pasted_during_sign_out_is_kept_with_its_record_or_removed_with_it() {
+    let scratch = Scratch::new();
+    let before = token();
+    let pasted = token();
+    let accepted = [before.clone(), pasted.clone()];
+    let server = Server::start(move |seen, _| {
+        if accepted.iter().any(|token| bearer(seen, token)) {
+            Answer::json(200, serde_json::json!({ "login": "octo-cat" }))
+        } else {
+            Answer::json(401, serde_json::json!({ "message": "Bad credentials" }))
+        }
+    });
+    let account = scratch.account(&server);
+    let item = reference(&format!("{}.github", scratch.namespace), "token").unwrap();
+    for round in 0..SIGN_OUT_RACE_ROUNDS {
+        assert!(account.use_token(secret(&before)).unwrap().signed_in);
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let paste = {
+            let (account, start, pasted) = (account.clone(), Arc::clone(&start), pasted.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                account.use_token(secret(&pasted))
+            })
+        };
+        start.wait();
+        assert!(!account.sign_out().unwrap().signed_in);
+        assert!(paste.join().unwrap().unwrap().signed_in);
+        assert_eq!(
+            scratch.state().is_some(),
+            scratch.store.get(&item).is_ok(),
+            "round {round}: a token in the credential store must have its saved sign-in, and a \
+             forgotten sign-in must leave no token behind"
+        );
+        assert!(!account.sign_out().unwrap().signed_in);
+        assert_eq!(scratch.state(), None);
+        assert_eq!(
+            scratch.store.get(&item).unwrap_err().0,
+            "credential_missing"
+        );
+    }
+}
+
 #[test]
 fn verification_page_on_another_host_is_refused() {
     let scratch = Scratch::new();
@@ -445,6 +643,67 @@ fn repos_page_uses_the_stored_token_and_offers_the_next_page_when_full() {
     let query = listed.query_pairs();
     assert_eq!(query.get("per_page").map(String::as_str), Some("100"));
     assert_eq!(query.get("sort").map(String::as_str), Some("pushed"));
+}
+
+#[test]
+fn a_dot_named_repository_is_listed_and_never_stops_the_rest_of_the_page() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let long = format!("octo-cat/{}\u{202e}", "x".repeat(300));
+    let served_long = long.clone();
+    let server = Server::start(move |seen, _| match seen.path.as_str() {
+        "/user" => user(seen, &expected),
+        "/user/repos" if bearer(seen, &expected) => {
+            let repos: Vec<serde_json::Value> = (0..100)
+                .map(|index| {
+                    let full_name = match index {
+                        3 => "octo-cat/.github".to_owned(),
+                        5 => "octo-cat/-dash".to_owned(),
+                        9 => served_long.clone(),
+                        _ => format!("octo-cat/repo-{index}"),
+                    };
+                    let branch = if index == 7 { "ma\u{7}in\nx" } else { "main" };
+                    serde_json::json!({
+                        "full_name": full_name,
+                        "private": false,
+                        "default_branch": branch,
+                        "size": 1,
+                    })
+                })
+                .collect();
+            Answer::json(200, serde_json::Value::Array(repos))
+        }
+        _ => Answer::json(401, serde_json::json!({})),
+    });
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let page = account.repos(1).unwrap();
+    assert_eq!(page.repos.len(), 100);
+    assert_eq!(page.next, Some(2));
+    assert_eq!(page.repos[3].full_name, "octo-cat/.github");
+    assert_eq!(page.repos[5].full_name, "octo-cat/-dash");
+    assert_eq!(page.repos[7].default_branch, "ma\\u0007in\\u000ax");
+    assert_eq!(page.repos[8].full_name, "octo-cat/repo-8");
+    let shown = &page.repos[9].full_name;
+    assert!(
+        shown.starts_with("octo-cat/xxx") && shown.len() <= 201,
+        "{shown}"
+    );
+    assert!(!shown.contains('\u{202e}'), "{shown}");
+    assert_ne!(shown, &long);
+    for (index, repo) in page.repos.iter().enumerate() {
+        let refused = matches!(index, 3 | 5 | 9).then_some("github_repo_name_unsupported");
+        assert_eq!(repo.refused.as_deref(), refused, "{index}");
+    }
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        account
+            .clone_repo(home.path(), "octo-cat/.github")
+            .unwrap_err()
+            .0,
+        "github_repo_name_invalid"
+    );
 }
 
 fn served_repository(full_name: &str, secret_text: &str) -> (tempfile::TempDir, Server) {

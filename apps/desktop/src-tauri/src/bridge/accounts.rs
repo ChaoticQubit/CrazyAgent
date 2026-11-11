@@ -41,18 +41,19 @@ const ACCOUNT_CODES: &[&str] = &[
     "stale_config",
 ];
 
-fn account_error(error: EngineError) -> BridgeError {
+pub(super) fn account_error(error: EngineError) -> BridgeError {
     let code = if error.0 == "controller_disconnected" {
         "not_connected"
     } else {
         error.0.as_str()
     };
-    failure(
+    uncaused(
         ACCOUNT_CODES
             .iter()
             .copied()
             .find(|known| *known == code)
             .unwrap_or("accounts_outcome_unknown"),
+        code,
     )
 }
 
@@ -97,7 +98,7 @@ impl NativeBridge {
         draft: AccountDraft,
         key: Option<String>,
     ) -> Result<AccountView, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         let key = key
             .filter(|value| !value.is_empty())
             .map(|value| AccountSecret::new(value.into_bytes()))
@@ -110,8 +111,13 @@ impl NativeBridge {
     }
 
     /// Renames one account. Inputs: account id and the new name.
-    pub async fn rename_account(&self, id: &str, name: String) -> Result<AccountView, BridgeError> {
-        self.allow_new_auth()?;
+    pub async fn rename_account(
+        &mut self,
+        id: &str,
+        name: String,
+    ) -> Result<AccountView, BridgeError> {
+        self.allow_account_change(|stuck| stuck.id.as_str() == id)
+            .await?;
         self.accounts()?
             .rename_account(account_id(id)?, name)
             .await
@@ -119,8 +125,9 @@ impl NativeBridge {
     }
 
     /// Removes one account that is in no pool. Input: account id.
-    pub async fn remove_account(&self, id: &str) -> Result<(), BridgeError> {
-        self.allow_new_auth()?;
+    pub async fn remove_account(&mut self, id: &str) -> Result<(), BridgeError> {
+        self.allow_account_change(|stuck| stuck.id.as_str() == id)
+            .await?;
         self.accounts()?
             .remove_account(account_id(id)?)
             .await

@@ -106,6 +106,13 @@ impl State {
             return Err("Read the selected connection again before private setup".into());
         }
         validate_connection(&connection)?;
+        if self
+            .native_auth
+            .open_account()
+            .is_some_and(|open| crate::config::same_account(open, &connection))
+        {
+            return Err(self.native_auth.open_refusal(self.basis.as_ref()).into());
+        }
         let id = crate::engine::owner::random_id()
             .map_err(|_| "account_profile_request_identity_unavailable")?;
         let request = crate::engine::owner::AccountProfileRequest {

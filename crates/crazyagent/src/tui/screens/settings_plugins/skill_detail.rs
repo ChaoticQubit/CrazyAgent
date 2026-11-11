@@ -1,10 +1,12 @@
-use super::{back_to, crumbs_of, draw_form, place_of, plugin_plain, tilde};
+use super::{back_to, crumbs_of, draw_form, place_of, plugin_plain, tilde, unused};
+use crate::plugins::Scope;
 use crate::protocol::ProjectId;
 use crate::skills::SkillDetail;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
+use crate::tui::screens::new_project_view::printable;
 use crate::tui::screens::project_markdown::{self, MdLine};
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen};
@@ -16,9 +18,11 @@ use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 
 const TAB_ROWS: usize = 2;
+const HEADER_EXTRA: &str = "Agents also read these lines of its SKILL.md header:";
 
-/// Drops the frontmatter block at the top of a SKILL.md, which the page shows as the
-/// skill's name and description instead. Input: the file text. Output: the Markdown body.
+/// Drops the frontmatter block at the top of a SKILL.md: the page shows it as the skill's
+/// name and description, plus any other header line agents read. Input: the file text.
+/// Output: the Markdown body.
 pub fn skill_body(text: &str) -> &str {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.split_inclusive('\n');
@@ -33,6 +37,37 @@ pub fn skill_body(text: &str) -> &str {
         }
     }
     text
+}
+
+/// The lines of a SKILL.md's frontmatter block, between its two `---` lines, or none when
+/// the file does not open with a closed block. Input: the file text. Output: the lines.
+fn skill_header(text: &str) -> Vec<&str> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return Vec::new();
+    }
+    let mut header = Vec::new();
+    for line in lines {
+        if line.trim_end() == "---" {
+            return header;
+        }
+        header.push(line);
+    }
+    Vec::new()
+}
+
+/// Wraps one header line to the width, keeping its leading spaces on every part so an
+/// indented continuation still reads as part of the field above it.
+/// Inputs: the printable line and the width. Output: the parts.
+fn indented(line: &str, limit: usize) -> Vec<String> {
+    let body = line.trim_start_matches(' ');
+    let indent = (line.len() - body.len()).min(limit / 2);
+    let pad = " ".repeat(indent);
+    wrap(body, limit - indent)
+        .into_iter()
+        .map(|part| format!("{pad}{part}"))
+        .collect()
 }
 
 /// A file size as the page lists it. Input: bytes. Output: such as "812 B" or "4.2 KB".
@@ -63,7 +98,8 @@ fn md_line(line: &MdLine, theme: &Theme) -> Line<'static> {
 /// One skill read in full, from Settings or from one project's Settings tab: its switch,
 /// description and folder, the rendered SKILL.md and the folder's files. Input: keys and
 /// the engine's skill detail. Output: the scrolled page; Space turns the skill on or off
-/// for every project, or for the project it was opened from, and Esc goes back.
+/// for every project, or for the project it was opened from, and Esc goes back. Only a read
+/// for the same place lands, so a project page never holds an every-project read.
 pub struct SkillDetailPage {
     id: String,
     name: String,
@@ -124,7 +160,24 @@ impl SkillDetailPage {
         );
     }
 
+    /// Whether the page was opened from a project but holds a skill with neither that
+    /// project's switch nor that project as its home, so Space must switch nothing.
+    /// Output: true for such a skill.
+    fn elsewhere(&self) -> bool {
+        match (&self.load, &self.project) {
+            (Load::Ready(detail), Some((project, _))) => {
+                detail.skill.on_here.is_none()
+                    && !matches!(&detail.skill.scope, Scope::Project { project_id } if project_id == project)
+            }
+            _ => false,
+        }
+    }
+
     fn toggle(&mut self, ctx: &mut Ctx) {
+        if self.elsewhere() {
+            self.reload(ctx);
+            return;
+        }
         let Load::Ready(detail) = &self.load else {
             return;
         };
@@ -132,7 +185,7 @@ impl SkillDetailPage {
             return;
         }
         let skill = &detail.skill;
-        let id = skill.id.clone();
+        let (id, version) = (skill.id.clone(), skill.version);
         let (change, done) = match (&self.project, skill.on_here) {
             (Some(_), Some(_)) if !skill.enabled => {
                 ctx.say(Message::error(
@@ -149,6 +202,7 @@ impl SkillDetailPage {
                     project: project.clone(),
                     id,
                     on: !on,
+                    version,
                 },
                 format!(
                     "{} is {} for this project.",
@@ -160,6 +214,7 @@ impl SkillDetailPage {
                 PluginChange::SetSkill {
                     id,
                     enabled: !skill.enabled,
+                    version,
                 },
                 format!(
                     "{} is {}.",
@@ -180,7 +235,7 @@ impl SkillDetailPage {
             Load::Ready(detail) => detail,
             Load::Failed(code) => {
                 return vec![
-                    styled(self.name.clone(), Role::Accent, theme),
+                    styled(printable(self.name.clone()), Role::Accent, theme),
                     Line::default(),
                     Line::raw(plugin_plain(code)),
                     Line::raw("Press r to try again."),
@@ -188,14 +243,14 @@ impl SkillDetailPage {
             }
             Load::NotReady => {
                 return vec![
-                    styled(self.name.clone(), Role::Accent, theme),
+                    styled(printable(self.name.clone()), Role::Accent, theme),
                     Line::default(),
                     Line::raw("Skill details are not ready in this build."),
                 ];
             }
             Load::Idle | Load::Loading => {
                 return vec![
-                    styled(self.name.clone(), Role::Accent, theme),
+                    styled(printable(self.name.clone()), Role::Accent, theme),
                     Line::default(),
                     styled("Reading SKILL.md...", Role::Muted, theme),
                 ];
@@ -204,26 +259,61 @@ impl SkillDetailPage {
         let skill = &detail.skill;
         let on = skill.enabled && skill.on_here.unwrap_or(true);
         let state = match (on, self.project.is_some()) {
+            _ if skill.refused.is_some() => styled("Not given to agents", Role::Error, theme),
             (true, true) => styled("On for this project", Role::Success, theme),
             (true, false) => styled("On for every project", Role::Success, theme),
             (false, true) => styled("Off for this project", Role::Muted, theme),
             (false, false) => styled("Off", Role::Muted, theme),
         };
         let mut lines = vec![join([
-            styled(skill.name.clone(), Role::Accent, theme),
+            styled(printable(skill.name.clone()), Role::Accent, theme),
             Line::raw("  "),
             state,
         ])];
-        lines.extend(wrap(&skill.description, limit).into_iter().map(Line::raw));
+        lines.extend(
+            wrap(&printable(skill.description.clone()), limit)
+                .into_iter()
+                .map(Line::raw),
+        );
+        if let Some(code) = &skill.refused {
+            let reason = format!(
+                "{} Remove it in Settings, Plugins and skills.",
+                unused(code)
+            );
+            lines.extend(
+                wrap(&reason, limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Error, theme)),
+            );
+        }
         lines.push(styled(
             cut(
-                &format!("From {}", tilde(&skill.source, ctx)),
+                &printable(format!("From {}", tilde(&skill.source, ctx))),
                 limit,
                 ctx.glyphs.ellipsis,
             ),
             Role::Muted,
             theme,
         ));
+        let (name, description) = (
+            format!("name: {}", skill.name),
+            format!("description: {}", skill.description),
+        );
+        let extra: Vec<&str> = skill_header(&detail.text)
+            .into_iter()
+            .filter(|line| !line.trim().is_empty() && *line != name && *line != description)
+            .collect();
+        if !extra.is_empty() {
+            lines.push(Line::default());
+            lines.push(styled(HEADER_EXTRA, Role::Warning, theme));
+            for line in extra {
+                lines.extend(
+                    indented(&printable(line.to_owned()), limit)
+                        .into_iter()
+                        .map(|part| styled(part, Role::Muted, theme)),
+                );
+            }
+        }
         lines.push(Line::default());
         lines.extend(
             project_markdown::render(skill_body(&detail.text), limit)
@@ -236,7 +326,7 @@ impl SkillDetailPage {
         for file in &detail.files {
             let size = file_size(file.bytes);
             let room = limit.saturating_sub(size.len() + 2).max(8);
-            let path = cut(&file.path, room, ctx.glyphs.ellipsis);
+            let path = cut(&printable(file.path.clone()), room, ctx.glyphs.ellipsis);
             lines.push(join([
                 Line::raw(format!("{path}  ")),
                 styled(size, Role::Muted, theme),
@@ -296,7 +386,9 @@ impl Screen for SkillDetailPage {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match settings_event(arrival) {
-            Some(SettingsEvent::SkillDetail(result)) if self.waiting => {
+            Some(SettingsEvent::SkillDetail(project, result))
+                if self.waiting && project.as_ref() == self.project.as_ref().map(|(id, _)| id) =>
+            {
                 self.waiting = false;
                 match result {
                     Ok(detail) if detail.skill.id == self.id => {

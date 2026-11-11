@@ -29,7 +29,7 @@ mod key_tests;
 mod project_creation_tests;
 
 #[cfg(test)]
-mod render_tests;
+pub(in crate::tui) mod render_tests;
 
 #[cfg(all(test, unix))]
 pub(in crate::tui) mod test_home;
@@ -82,38 +82,56 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Registers the requests that end the TUI: SIGTERM, SIGINT and SIGHUP.
-/// Must run inside the Tokio runtime. Returns a future that completes on the first one,
-/// or the registration error.
+/// Registers the requests that end the TUI: SIGTERM, SIGHUP and SIGINT, except a SIGINT
+/// that arrives while the owner's editor runs, which is the terminal's Ctrl-C to that
+/// editor. Must run inside the Tokio runtime. Takes the editor-running flag. Returns a
+/// future that completes on the first stop request, or the registration error.
 #[cfg(unix)]
-fn stop_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'static, TuiError> {
+fn stop_requested(
+    editor_running: Arc<AtomicBool>,
+) -> Result<impl std::future::Future<Output = ()> + Send + 'static, TuiError> {
     use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = signal(SignalKind::terminate()).map_err(|e| TuiError(e.to_string()))?;
     let mut interrupt = signal(SignalKind::interrupt()).map_err(|e| TuiError(e.to_string()))?;
     let mut hangup = signal(SignalKind::hangup()).map_err(|e| TuiError(e.to_string()))?;
     Ok(async move {
-        tokio::select! {
-            _ = terminate.recv() => {},
-            _ = interrupt.recv() => {},
-            _ = hangup.recv() => {},
+        loop {
+            tokio::select! {
+                _ = terminate.recv() => return,
+                _ = hangup.recv() => return,
+                received = interrupt.recv() => {
+                    if received.is_none() || !editor_running.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
+            }
         }
     })
 }
 
-/// Registers the requests that end the TUI: Ctrl-C, Ctrl-Break and console close.
-/// Must run inside the Tokio runtime. Returns a future that completes on the first one,
-/// or the registration error.
+/// Registers the requests that end the TUI: Ctrl-Break, console close and Ctrl-C, except
+/// a Ctrl-C that arrives while the owner's editor runs, which the console sent to that
+/// editor. Must run inside the Tokio runtime. Takes the editor-running flag. Returns a
+/// future that completes on the first stop request, or the registration error.
 #[cfg(windows)]
-fn stop_requested() -> Result<impl std::future::Future<Output = ()> + Send + 'static, TuiError> {
+fn stop_requested(
+    editor_running: Arc<AtomicBool>,
+) -> Result<impl std::future::Future<Output = ()> + Send + 'static, TuiError> {
     use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close};
     let mut interrupt = ctrl_c().map_err(|e| TuiError(e.to_string()))?;
     let mut brk = ctrl_break().map_err(|e| TuiError(e.to_string()))?;
     let mut close = ctrl_close().map_err(|e| TuiError(e.to_string()))?;
     Ok(async move {
-        tokio::select! {
-            _ = interrupt.recv() => {},
-            _ = brk.recv() => {},
-            _ = close.recv() => {},
+        loop {
+            tokio::select! {
+                _ = brk.recv() => return,
+                _ = close.recv() => return,
+                received = interrupt.recv() => {
+                    if received.is_none() || !editor_running.load(Ordering::Relaxed) {
+                        return;
+                    }
+                }
+            }
         }
     })
 }
@@ -142,7 +160,8 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
         .build()
         .map_err(|e| TuiError(e.to_string()))?;
     let _enter = signals.enter();
-    let requested = stop_requested()?;
+    let editor_running = Arc::new(AtomicBool::new(false));
+    let requested = stop_requested(editor_running.clone())?;
     drop(_enter);
     let stopped = Arc::new(AtomicBool::new(false));
     let finished = Arc::new(AtomicBool::new(false));
@@ -170,7 +189,7 @@ pub fn run_tui(client: Client) -> Result<(), TuiError> {
     });
     let result = (|| {
         if !std::env::var("CRAZYAGENT_TUI").is_ok_and(|value| value == "classic") {
-            return run::run(client, &stopped);
+            return run::run(client, &stopped, editor_running);
         }
         let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
         let _guard = TerminalGuard::enter()?;
@@ -279,6 +298,9 @@ fn event_loop(
             } else if let Some(job) = app.take_conversation_job() {
                 connection.conversation(job).map_err(TuiError)?;
                 dirty = true;
+            } else if let Some(job) = app.take_accounts_job() {
+                connection.settings(job).map_err(TuiError)?;
+                dirty = true;
             } else if let Some(job) = app.master_request().map_err(TuiError)? {
                 connection.master(job).map_err(TuiError)?;
                 dirty = true;
@@ -337,6 +359,7 @@ fn event_loop(
                     } else if app.has_unresolved_conversation()
                         || app.master.has_pending()
                         || app.model_access.has_pending()
+                        || app.model_access.signing_in()
                         || app.has_unresolved_creation()
                     {
                         owner_reconnect = true;

@@ -250,7 +250,20 @@ pub(crate) fn snapshot(
         || stored.lease.owner_session != item.session_id
         || stored.lease.native_descendant.is_some()
         || stored.lease.state != LeaseState::Ready
-        || stored.admission != admission
+        || stored.admission.repository != admission.repository
+        || !crate::file_identity::same_files(
+            &[
+                (admission.root.device, admission.root.inode),
+                (admission.metadata.device, admission.metadata.inode),
+            ],
+            &[
+                (stored.admission.root.device, stored.admission.root.inode),
+                (
+                    stored.admission.metadata.device,
+                    stored.admission.metadata.inode,
+                ),
+            ],
+        )
         || admission.repository != *repository
     {
         return Err(error("dispatch_lease_mismatch_or_unavailable"));
@@ -263,8 +276,8 @@ pub(crate) fn snapshot(
         branch: stored.lease.branch,
         owner_session: stored.lease.owner_session,
         native_descendant: stored.lease.native_descendant,
-        admission_root: admission.root,
-        admission_metadata: admission.metadata,
+        admission_root: stored.admission.root,
+        admission_metadata: stored.admission.metadata,
         directory: stored
             .directory
             .ok_or_else(|| error("dispatch_directory_unsealed"))?,

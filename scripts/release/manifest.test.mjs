@@ -11,6 +11,7 @@ import { writeManifests } from "./manifest.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
+const MANIFEST = join(REPO, "scripts/release/manifest.mjs");
 const VERSION = "0.2.0-dev.202610251607";
 const COMMIT = "5254fb1d0c1e7a1b2c3d4e5f60718293a4b5c6d7";
 const BASE = "https://github.com/ChaoticQubit/CrazyAgent/releases/download/dev";
@@ -28,13 +29,11 @@ async function keyPair(root) {
 async function releaseDir(root, env, targets = Object.keys(TARGETS)) {
   const dir = join(root, "assets");
   await mkdir(dir);
-  for (const target of targets) {
-    const names = [...desktopLayout(target, VERSION).map((item) => item.to), cliArchiveName(VERSION, target)];
-    for (const name of names) {
-      await writeFile(join(dir, name), `${target} ${name}\n`);
-      await signFile({ file: join(dir, name), version: VERSION, env });
-    }
-  }
+  const assets = targets.flatMap((target) => [...desktopLayout(target, VERSION).map((item) => item.to), cliArchiveName(VERSION, target)].map((name) => ({ target, name })));
+  await Promise.all(assets.map(async ({ target, name }) => {
+    await writeFile(join(dir, name), `${target} ${name}\n`);
+    await signFile({ file: join(dir, name), version: VERSION, env });
+  }));
   return dir;
 }
 
@@ -129,6 +128,23 @@ test("a stable release takes a plain version and the stable download base", asyn
     assert.equal(cli.channel, "stable");
     assert.equal(cli.platforms[target].url, `${base}/crazyagent-0.2.0-${target}.tar.gz`);
     assert.deepEqual(Object.keys(JSON.parse(await readFile(join(dir, "latest.json"), "utf8")).platforms), ["linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the manifest command covers only the targets it is given and refuses a target with no assets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "release-manifest-targets-"));
+  try {
+    const { env } = await keyPair(root);
+    const targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"];
+    const dir = await releaseDir(root, env, targets);
+    const run = (list) => execFileSync(process.execPath, [MANIFEST, "--dir", dir, "--version", VERSION, "--channel", "dev", "--commit", COMMIT, "--base-url", BASE, "--public-key-file", join(root, "updater.key.pub"), "--targets", list], { encoding: "utf8", stdio: "pipe" });
+    assert.throws(() => run([...targets, "x86_64-pc-windows-msvc"].join(",")), (error) => error.status === 2 && error.stderr.startsWith("release_asset_missing:"));
+    run(targets.join(","));
+    const latest = JSON.parse(await readFile(join(dir, "latest.json"), "utf8"));
+    assert.deepEqual(Object.keys(latest.platforms), ["darwin-aarch64", "darwin-aarch64-app", "darwin-x86_64", "darwin-x86_64-app", "linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb"]);
+    assert.deepEqual(Object.keys(JSON.parse(await readFile(join(dir, "cli-latest.json"), "utf8")).platforms), targets);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

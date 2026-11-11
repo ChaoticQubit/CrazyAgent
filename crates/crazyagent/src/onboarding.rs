@@ -3,12 +3,15 @@ use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub(crate) mod draft;
 pub(crate) mod graph;
+#[cfg(unix)]
+pub(crate) mod main_graph;
 pub mod service;
 
 #[cfg(test)]
@@ -43,7 +46,12 @@ pub enum Step {
 }
 
 /// What the manifest scan and the mapping agent found that has no field in
-/// [`ProjectSetup`]: languages, build and test commands and entry points.
+/// [`ProjectSetup`]: languages, build and test commands, entry points, the research the
+/// project's own documents already hold, its other documents and the files that plan its
+/// versions, milestones or phases as `roadmap`, as paths below the folder. `shown` is the
+/// engine's own list of the documents the mapping prompt gave with their text, the only
+/// paths an answer may name, and `shown_roadmap` those the local heading scan took for a
+/// roadmap, in reading order; neither leaves the engine.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MappingFacts {
@@ -51,26 +59,64 @@ pub struct MappingFacts {
     pub build_commands: Vec<String>,
     pub test_commands: Vec<String>,
     pub entry_points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub research: Vec<FoundResearch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roadmap: Vec<String>,
+    #[serde(skip)]
+    pub(crate) shown: Vec<String>,
+    #[serde(skip)]
+    pub(crate) shown_roadmap: Vec<String>,
 }
 
-/// The onboarding of one found or cloned project as clients read it: the
-/// graph and mapping steps, the proposed name, the pre-filled setup the owner
-/// confirms with `UpdateProjectSetup`, the extra facts, `missing`, the draft
-/// fields the owner must still fill such as `about` or `platforms`, the
-/// mapping agent's `.crazyagent/overview.md` once it exists, and `finished`
-/// once the owner saved the setup, when name and draft are the saved ones.
+/// One kind of research the project's own documents already hold, as the mapping agent
+/// read it from their text: the kind and the files below the folder that hold it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FoundResearch {
+    pub kind: crate::project_setup::ResearchKind,
+    pub files: Vec<String>,
+}
+
+/// The try a running mapping step is on: its number of `tries`, when it started in ms
+/// since the epoch, and the plain reason the try before it failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MappingTry {
+    pub number: u32,
+    pub tries: u32,
+    pub started_ms: i64,
+    pub earlier: Option<String>,
+}
+
+/// The onboarding of one found or cloned project as clients read it: the graph and mapping
+/// steps, the try a running mapping step is on as `mapping_try`, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
+/// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
+/// engine wrote as `overview` or one it did not write as `folder_overview`, `finished`
+/// once the owner saved the setup, when name and draft are the saved ones, the project's own
+/// instruction files the start moved into `.crazyagent/imported/`, and as `proposed` the
+/// mapping's draft when the owner saved a setup with neither about nor tech stack before
+/// the mapping finished.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnboardingView {
     pub project_id: ProjectId,
     pub graph: Step,
     pub mapping: Step,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping_try: Option<MappingTry>,
     pub name: String,
     pub draft: ProjectSetup,
     pub facts: MappingFacts,
     pub missing: Vec<String>,
     pub overview: Option<String>,
+    pub folder_overview: Option<String>,
     pub finished: bool,
+    pub imported: Vec<crate::instruction_files::ImportFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<ProjectSetup>,
 }
 
 /// The receipt of `StartOnboarding`: the project the folder is registered as.
@@ -144,15 +190,21 @@ impl Step {
 
     /// A failed step with `reason` bounded and free of control characters.
     pub(crate) fn failed(reason: &str) -> Self {
-        let reason: String = reason.chars().filter(|c| !c.is_control()).collect();
-        let mut end = reason.len().min(REASON_BYTES_MAX);
-        while !reason.is_char_boundary(end) {
-            end -= 1;
-        }
         Self::Failed {
-            reason: reason[..end].to_owned(),
+            reason: bounded_reason(reason),
         }
     }
+}
+
+/// `reason` free of control characters and cut to [`REASON_BYTES_MAX`] bytes on a
+/// character boundary, as a step's stored reason. Input: the text. Output: the reason.
+pub(crate) fn bounded_reason(reason: &str) -> String {
+    let reason: String = reason.chars().filter(|c| !c.is_control()).collect();
+    let mut end = reason.len().min(REASON_BYTES_MAX);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_owned()
 }
 
 fn failure(code: &str) -> EngineError {
@@ -173,8 +225,24 @@ pub(crate) fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// The columns that keep a running mapping step's try for the view, which onboarding
+/// tables made before 18.15 lack: the try number, its start in ms since the epoch and
+/// the reason the try before it failed.
+const TRY_COLUMNS: [(&str, &str); 3] = [
+    ("mapping_try", "INTEGER"),
+    ("mapping_try_ms", "INTEGER"),
+    ("mapping_try_earlier", "TEXT"),
+];
+
+/// The column that keeps the research and documents the mapping found beside the draft,
+/// outside it, so engines up to 18.14, whose draft refuses unknown keys, still read the
+/// row; onboarding tables made before 18.15 lack it.
+const FOUND_COLUMN: (&str, &str) = ("mapping_found", "TEXT");
+
 /// Creates the onboarding table: one row per imported project with its
-/// folder, pool, both steps, the current draft and the worker's claim.
+/// folder, pool, both steps, the mapping try, the current draft, what the
+/// mapping found and the worker's claim, and adds the try and found columns
+/// to an older table.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -186,15 +254,44 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 graph_reason TEXT,
                 mapping_state TEXT NOT NULL,
                 mapping_reason TEXT,
+                mapping_try INTEGER,
+                mapping_try_ms INTEGER,
+                mapping_try_earlier TEXT,
                 drafted TEXT NOT NULL,
+                mapping_found TEXT,
                 runs INTEGER NOT NULL DEFAULT 0,
                 claimer TEXT,
                 heartbeat_ms INTEGER,
                 created_ms INTEGER NOT NULL,
                 updated_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS onboarding_saved_drafts (
+                repo TEXT PRIMARY KEY,
+                seal TEXT NOT NULL CHECK(length(seal)=64)
+            );
+            CREATE TABLE IF NOT EXISTS onboarding_saved_overviews (
+                repo TEXT PRIMARY KEY,
+                seal TEXT NOT NULL CHECK(length(seal)=64)
             );",
         )
-        .map_err(error)
+        .map_err(error)?;
+    for (column, kind) in TRY_COLUMNS.into_iter().chain([FOUND_COLUMN]) {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('onboarding') WHERE name=?1)",
+                [column],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !present {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE onboarding ADD COLUMN {column} {kind}"
+                ))
+                .map_err(error)?;
+        }
+    }
+    Ok(())
 }
 
 /// The project id a folder is onboarded as: its name in lower case, every
@@ -279,20 +376,92 @@ fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str>
     Ok(repo)
 }
 
+/// Records the seal of the draft the engine saved in `repo`'s `.crazyagent/setup/draft.json`.
+/// The row outlives the project, so adding the folder again reuses that draft. Takes the
+/// connection, the folder and the draft. Returns any storage failure.
+pub(crate) fn seal_draft(
+    connection: &Connection,
+    repo: &Path,
+    drafted: &draft::Drafted,
+) -> rusqlite::Result<()> {
+    let (Some(repo), Some(seal)) = (repo.to_str(), draft::seal(drafted)) else {
+        return Ok(());
+    };
+    connection.execute(
+        "INSERT INTO onboarding_saved_drafts(repo,seal) VALUES (?1,?2)
+         ON CONFLICT(repo) DO UPDATE SET seal=excluded.seal",
+        params![repo, seal],
+    )?;
+    Ok(())
+}
+
+/// The draft in the folder's `.crazyagent/setup/draft.json` when this engine saved it
+/// there: it matches the seal recorded for the folder. A draft the folder came with, or
+/// one changed since, is never taken as the engine's. Takes the transaction, the folder
+/// and its layout. Returns the draft, or None.
+fn engine_draft(
+    tx: &Transaction<'_>,
+    repo: &str,
+    layout: &Path,
+) -> Result<Option<draft::Drafted>, EngineError> {
+    let sealed: Option<String> = tx
+        .query_row(
+            "SELECT seal FROM onboarding_saved_drafts WHERE repo=?1",
+            [repo],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(sealed) = sealed else {
+        return Ok(None);
+    };
+    Ok(draft::reused(layout)
+        .filter(|drafted| draft::seal(drafted).as_deref() == Some(sealed.as_str())))
+}
+
+/// Records the seal of the overview the engine wrote in `repo`'s `.crazyagent/overview.md`,
+/// so the onboarding view shows that text as the mapping agent's. The row outlives the
+/// project like the draft's. Takes the connection, the folder and the overview as it reads
+/// back. Returns any storage failure.
+#[cfg(unix)]
+pub(crate) fn seal_overview(
+    connection: &Connection,
+    repo: &Path,
+    overview: &str,
+) -> rusqlite::Result<()> {
+    let Some(repo) = repo.to_str() else {
+        return Ok(());
+    };
+    connection.execute(
+        "INSERT INTO onboarding_saved_overviews(repo,seal) VALUES (?1,?2)
+         ON CONFLICT(repo) DO UPDATE SET seal=excluded.seal",
+        params![repo, draft::overview_seal(overview)],
+    )?;
+    Ok(())
+}
+
 fn real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
 /// Registers a found or cloned folder as a project and queues its graph and
 /// mapping steps, inside the owner transaction. The folder's `.crazyagent/`
-/// is created through the projects home layout, or reused with its saved
-/// draft when it already exists; nothing in it is overwritten. Research stays
-/// off. Starting a folder that is already onboarding returns its project and
+/// is created through the projects home layout, or reused with the draft this
+/// engine saved there; a draft the folder came with is not taken as the engine's,
+/// and the brief is written from the recorded setup. Research stays off. A new
+/// project gets the agent access New Project preselects (Own branch, or Sandboxed
+/// where this computer cannot run it), so its agents work in their own clones.
+/// Starting a folder that is already onboarding returns its project and
 /// retries only failed steps; an onboarding left by a removed project starts
 /// over as a new project, also when it was left at another folder with the
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
-/// while that folder is still there. Takes the transaction, configuration, engine
-/// database path and action. Returns Applied or a plain rejection.
+/// while that folder is still there. A new project's own instruction files
+/// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
+/// project instructions and moved into `.crazyagent/imported/` last, and the moved
+/// files are kept for the onboarding view; a file or import the engine refuses
+/// stays in place for the owner's later import. Takes the transaction,
+/// configuration, engine database path and action. Returns Applied or a plain
+/// rejection.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -367,7 +536,7 @@ pub(crate) fn execute(
     {
         return Ok(rejected("onboarding_layout_incomplete"));
     }
-    let mut drafted = draft::reused(&layout)
+    let mut drafted = engine_draft(tx, repo_text, &layout)?
         .unwrap_or_else(|| draft::Drafted::new(draft::folder_name(&repo), pool));
     drafted.draft.pool = Some(pool.clone());
     drafted.draft.research = Vec::new();
@@ -399,11 +568,21 @@ pub(crate) fn execute(
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
-    if std::fs::symlink_metadata(layout.join(CONTEXT_DIRECTORY).join("brief.md")).is_err() {
-        let stored = crate::project_setup::load_setup(tx, &project_id)?
-            .ok_or_else(|| failure("project_setup_missing"))?;
-        crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
-    }
+    let access = Some(AgentAccess::NEW_PROJECT)
+        .filter(|level| level.unavailable().is_none())
+        .unwrap_or_default();
+    let policy = AgentPolicy {
+        access,
+        toolchains: Vec::new(),
+        network: crate::sandbox::policy::AgentNetwork::default(),
+        ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
+    };
+    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+    let stored = crate::project_setup::load_setup(tx, &project_id)?
+        .ok_or_else(|| failure("project_setup_missing"))?;
+    crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
     let now = now_ms();
     let graph = graph_step(tx)?;
     let (graph_state, graph_reason) = graph.columns();
@@ -421,6 +600,10 @@ pub(crate) fn execute(
         ],
     )
     .map_err(error)?;
+    let moved = crate::instruction_files::import(&repo).unwrap_or_default();
+    if !moved.is_empty() {
+        crate::instruction_files::record_moved(tx, &project_id, &moved)?;
+    }
     Ok(Outcome::Applied)
 }
 
@@ -472,53 +655,157 @@ fn restart(
     Ok(())
 }
 
-/// The onboarding of `project_id`: both steps, the draft, its proposed name,
-/// the extra facts, the fields still missing and the overview, read bounded
-/// and never through a link. Once the owner saved the setup it is finished,
-/// and the name, draft and missing fields come from the saved setup. Returns
-/// `None` for a project that was not onboarded.
+/// The files the setup mapping found that the owner kept, as the project's links: each
+/// roadmap file as a roadmap and each research file under its kind, a roadmap planning file
+/// as a roadmap too. A found file is linked only under a group the owner kept it in, so a
+/// file found as the roadmap and as research is not linked as the roadmap once the owner
+/// turned the roadmap off. A kept file the mapping did not find in that group, and a path
+/// the links store refuses, such as one in the engine folder, is left out, and at most
+/// [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX) links are kept. Takes the
+/// transaction, the project and the files the owner kept. Returns the links, none for a
+/// project that was not onboarded or whose mapping found nothing.
+pub(crate) fn found_links(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    kept: &[crate::project_setup::KeptFile],
+) -> Result<Vec<crate::project_setup::links::DocLink>, EngineError> {
+    use crate::project_setup::ResearchKind;
+    use crate::project_setup::links::{self, DocLink, LinkKind};
+    let column = tx
+        .query_row(
+            "SELECT mapping_found FROM onboarding WHERE project=?1",
+            [project_id.as_str()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(error)?
+        .flatten();
+    let mut facts = MappingFacts::default();
+    draft::restore_found(&mut facts, column.as_deref()).map_err(error)?;
+    let roadmap = facts
+        .roadmap
+        .iter()
+        .map(|path| (path, None, LinkKind::Roadmap));
+    let research = facts.research.iter().flat_map(|found| {
+        let kind = match found.kind {
+            ResearchKind::RoadmapPlanning => LinkKind::Roadmap,
+            kind => LinkKind::Research(kind),
+        };
+        found
+            .files
+            .iter()
+            .map(move |path| (path, Some(found.kind), kind))
+    });
+    let mut linked: Vec<DocLink> = Vec::new();
+    for (path, group, kind) in roadmap.chain(research) {
+        let link = DocLink {
+            path: path.clone(),
+            kind,
+        };
+        if linked.len() < links::LINKS_MAX
+            && kept
+                .iter()
+                .any(|file| file.research == group && file.path == *path)
+            && links::below_folder(path)
+            && !linked.contains(&link)
+        {
+            linked.push(link);
+        }
+    }
+    assert!(linked.len() <= links::LINKS_MAX);
+    Ok(linked)
+}
+
+/// The onboarding of `project_id`: both steps, the draft, its proposed name, the extra
+/// facts, the fields still missing and the overview, read bounded and never through a link,
+/// as the mapping agent's only while it holds the text this engine sealed on writing it.
+/// Once the owner saved the setup, name, draft and missing fields come from the saved
+/// setup. Returns `None` for a project that was not onboarded.
 pub(crate) fn status(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
 ) -> Result<Option<OnboardingView>, EngineError> {
     let row = tx
         .query_row(
-            "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo
+            "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo,
+                mapping_try,mapping_try_ms,mapping_try_earlier,mapping_found
              FROM onboarding WHERE project=?1",
             [project_id.as_str()],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(9)?,
+                    ),
+                    (
+                        row.get::<_, Option<u32>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ),
                 ))
             },
         )
         .optional()
         .map_err(error)?;
-    let Some((graph, graph_reason, mapping, mapping_reason, drafted, repo)) = row else {
+    let Some(((graph, graph_reason, mapping, mapping_reason, drafted, repo, found), tried)) = row
+    else {
         return Ok(None);
     };
+    let mapping = Step::from_columns(&mapping, mapping_reason)?;
+    let mapping_try = match (&mapping, tried) {
+        (Step::Running, (Some(number), Some(started_ms), earlier)) => Some(MappingTry {
+            number,
+            tries: service::MAPPING_TRIES,
+            started_ms,
+            earlier,
+        }),
+        _ => None,
+    };
     let mut drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
+    draft::restore_found(&mut drafted.facts, found.as_deref()).map_err(error)?;
     let saved = crate::project_setup::load_setup(tx, project_id)?.filter(|stored| stored.saved());
     let finished = saved.is_some();
+    let mut proposed = None;
     if let Some(stored) = saved {
+        let unanswered = stored.about.trim().is_empty() && stored.tech_stack.is_empty();
+        let mapped = !drafted.draft.about.trim().is_empty() || !drafted.draft.tech_stack.is_empty();
+        if unanswered && mapped && matches!(mapping, Step::Done) {
+            proposed = Some(drafted.draft.clone());
+        }
         drafted.draft = stored.editable();
         drafted.name = stored.name;
     }
     let missing = drafted.missing();
+    let found = draft::overview(&Path::new(&repo).join(CRAZYAGENT_DIRECTORY));
+    let sealed: Option<String> = tx
+        .query_row(
+            "SELECT seal FROM onboarding_saved_overviews WHERE repo=?1",
+            [repo.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let wrote = sealed.is_some() && found.as_deref().map(draft::overview_seal) == sealed;
+    let found = found.map(|text| draft::names::without_secret_paths(&text));
+    let (overview, folder_overview) = if wrote { (found, None) } else { (None, found) };
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),
         graph: Step::from_columns(&graph, graph_reason)?,
-        mapping: Step::from_columns(&mapping, mapping_reason)?,
+        mapping,
+        mapping_try,
         name: drafted.name,
         draft: drafted.draft,
         facts: drafted.facts,
         missing,
-        overview: draft::overview(&Path::new(&repo).join(CRAZYAGENT_DIRECTORY)),
+        overview,
+        folder_overview,
         finished,
+        imported: crate::instruction_files::moved(tx, project_id, Path::new(&repo))?,
+        proposed,
     }))
 }

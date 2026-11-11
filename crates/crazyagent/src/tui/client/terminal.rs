@@ -19,25 +19,32 @@ const THREADS_MAX: usize = 4;
 const NOTICES_MAX: usize = 8;
 const DRAIN_TIME: Duration = Duration::from_secs(5);
 
-enum Command {
-    Input(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
-}
-
 struct Session {
     agent: AgentId,
-    commands: mpsc::Sender<Command>,
+    pane: Option<String>,
+    commands: mpsc::Sender<Vec<u8>>,
     frames: mpsc::Receiver<TerminalFrame>,
+}
+
+/// An attach the screens asked for, started at the next poll or key so the size the screens
+/// send right after it goes with it and the engine sizes the window before it reads the screen.
+struct Wanted {
+    agent: AgentId,
+    pane: Option<String>,
+    size: Option<(u16, u16)>,
 }
 
 /// The TUI's live agent terminal: one attached session at a time, each on its
 /// own thread and owner connection so a slow engine read never holds back
-/// typing. Input: terminal requests from the screens. Output: terminal frames
-/// polled by the run loop, ending with Closed or Rejected.
+/// typing. A new size starts the view again at that size, because tmux reflows its
+/// screen on a resize and the screens' vt100 copy cannot. Input: terminal requests
+/// from the screens. Output: terminal frames polled by the run loop, ending with
+/// Closed or Rejected.
 pub(in crate::tui) struct Terminals {
     socket: PathBuf,
     timeout: Duration,
     session: Option<Session>,
+    wanted: Option<Wanted>,
     threads: Vec<JoinHandle<()>>,
     notices: VecDeque<(AgentId, TerminalFrame)>,
 }
@@ -51,6 +58,7 @@ impl Terminals {
             socket,
             timeout,
             session: None,
+            wanted: None,
             threads: Vec::new(),
             notices: VecDeque::new(),
         }
@@ -61,15 +69,20 @@ impl Terminals {
     /// failure comes back from `poll` as a Closed or Rejected frame.
     pub fn handle(&mut self, request: Request) {
         match request {
-            Request::TerminalAttach { agent } => self.attach(agent),
+            Request::TerminalAttach { agent } => self.want(agent, None),
+            Request::TerminalAttachPane { agent, pane } => {
+                assert!(crate::terminal::pane_id_valid(&pane));
+                self.want(agent, Some(pane));
+            }
             Request::TerminalInput { agent, bytes } => {
                 assert!(!bytes.is_empty() && bytes.len() <= INPUT_BYTES_MAX);
-                self.command(&agent, Command::Input(bytes));
+                self.start();
+                self.command(&agent, bytes);
             }
             Request::TerminalResize { agent, cols, rows } => {
                 assert!((SIZE_MIN..=SIZE_MAX).contains(&cols));
                 assert!((SIZE_MIN..=SIZE_MAX).contains(&rows));
-                self.command(&agent, Command::Resize { cols, rows });
+                self.resize(agent, cols, rows);
             }
             Request::TerminalDetach { agent } => {
                 if self
@@ -78,6 +91,13 @@ impl Terminals {
                     .is_some_and(|session| session.agent == agent)
                 {
                     self.session = None;
+                }
+                if self
+                    .wanted
+                    .as_ref()
+                    .is_some_and(|wanted| wanted.agent == agent)
+                {
+                    self.wanted = None;
                 }
             }
             other => unreachable!("not a terminal request: {other:?}"),
@@ -88,6 +108,7 @@ impl Terminals {
     /// Input: none. Output: the agent and frame, or None while nothing waits;
     /// a Closed or Rejected frame ends the session.
     pub fn poll(&mut self) -> Option<(AgentId, TerminalFrame)> {
+        self.start();
         if let Some(notice) = self.notices.pop_front() {
             return Some(notice);
         }
@@ -113,30 +134,64 @@ impl Terminals {
     /// enough to show its output as it arrives.
     /// Input: none. Output: true while frames can arrive.
     pub fn live(&self) -> bool {
-        self.session.is_some() || !self.notices.is_empty()
+        self.session.is_some() || self.wanted.is_some() || !self.notices.is_empty()
     }
 
-    fn attach(&mut self, agent: AgentId) {
+    /// Lets go of the attached session and asks for a view of the agent, or one pane of
+    /// its window, that starts at the next poll or key. Takes the agent and the pane.
+    fn want(&mut self, agent: AgentId, pane: Option<String>) {
         self.session = None;
-        self.threads.retain(|thread| !thread.is_finished());
-        if self.threads.len() >= THREADS_MAX {
-            self.notice(agent, "terminal_busy");
+        self.wanted = Some(Wanted {
+            agent,
+            pane,
+            size: None,
+        });
+    }
+
+    /// Gives a waiting attach its size, or starts the attached view again at the new size
+    /// so the engine sends the screen as tmux reflowed it. A size for an agent with no
+    /// session or attach is dropped. Takes the agent, columns and rows.
+    fn resize(&mut self, agent: AgentId, cols: u16, rows: u16) {
+        if let Some(wanted) = self.wanted.as_mut().filter(|wanted| wanted.agent == agent) {
+            wanted.size = Some((cols, rows));
             return;
         }
+        if let Some(session) = self.session.take_if(|session| session.agent == agent) {
+            self.wanted = Some(Wanted {
+                agent,
+                pane: session.pane,
+                size: Some((cols, rows)),
+            });
+        }
+    }
+
+    /// Starts the waiting attach on its own thread once fewer than `THREADS_MAX` earlier
+    /// sessions are still closing; until then it keeps waiting, since each one ends within
+    /// its timeout and `DRAIN_TIME`. Input: none. Output: none.
+    fn start(&mut self) {
+        self.threads.retain(|thread| !thread.is_finished());
+        if self.threads.len() >= THREADS_MAX {
+            return;
+        }
+        let Some(Wanted { agent, pane, size }) = self.wanted.take() else {
+            return;
+        };
         let (commands, receiver) = mpsc::channel(COMMANDS_QUEUED);
         let (sender, frames) = mpsc::channel(FRAMES_QUEUED);
         let socket = self.socket.clone();
         let timeout = self.timeout;
         let target = agent.clone();
+        let view = pane.clone();
         let spawned = std::thread::Builder::new()
             .name("tui-terminal".into())
-            .spawn(move || stream(socket, timeout, target, receiver, sender));
+            .spawn(move || stream(socket, timeout, target, view, size, receiver, sender));
         match spawned {
             Ok(thread) => {
                 self.threads.push(thread);
                 assert!(self.threads.len() <= THREADS_MAX);
                 self.session = Some(Session {
                     agent,
+                    pane,
                     commands,
                     frames,
                 });
@@ -145,7 +200,7 @@ impl Terminals {
         }
     }
 
-    fn command(&mut self, agent: &AgentId, command: Command) {
+    fn command(&mut self, agent: &AgentId, bytes: Vec<u8>) {
         let Some(session) = self
             .session
             .as_ref()
@@ -153,7 +208,7 @@ impl Terminals {
         else {
             return;
         };
-        let reason = match session.commands.try_send(command) {
+        let reason = match session.commands.try_send(bytes) {
             Ok(()) => return,
             Err(TrySendError::Full(_)) => "terminal_input_backlog",
             Err(TrySendError::Closed(_)) => "terminal_closed",
@@ -178,15 +233,18 @@ impl Terminals {
     }
 }
 
-/// Runs one terminal session on its own thread: attaches, forwards frames
-/// and sends queued keys and sizes until the screens let go, then detaches.
-/// Inputs: engine socket, timeout, agent, command and frame channels.
+/// Runs one terminal session on its own thread: attaches at the size, if any,
+/// forwards frames and sends queued keys until the screens let go, then detaches.
+/// Inputs: engine socket, timeout, agent, the pane of its window to view
+/// instead of its own, the size, key and frame channels.
 /// Output: none; the thread ends once the session is over.
 fn stream(
     socket: PathBuf,
     timeout: Duration,
     agent: AgentId,
-    mut commands: mpsc::Receiver<Command>,
+    pane: Option<String>,
+    size: Option<(u16, u16)>,
+    mut commands: mpsc::Receiver<Vec<u8>>,
     frames: mpsc::Sender<TerminalFrame>,
 ) {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
@@ -205,7 +263,7 @@ fn stream(
             rows,
             output,
             mut control,
-        } = match open(socket, timeout, agent).await {
+        } = match open(socket, timeout, agent, pane, size).await {
             Ok(session) => session,
             Err(code) => {
                 let _ = frames.send(TerminalFrame::Rejected { code }).await;
@@ -221,12 +279,8 @@ fn stream(
             return;
         }
         let reader = tokio::spawn(forward(output, frames));
-        while let Some(command) = commands.recv().await {
-            let sent = match command {
-                Command::Input(bytes) => control.input(bytes).await,
-                Command::Resize { cols, rows } => control.resize(cols, rows).await,
-            };
-            if sent.is_err() {
+        while let Some(bytes) = commands.recv().await {
+            if control.input(bytes).await.is_err() {
                 break;
             }
         }
@@ -235,13 +289,16 @@ fn stream(
     });
 }
 
-/// Opens an owner connection and attaches to the agent's terminal.
-/// Inputs: engine socket, timeout and agent. Output: the session, or a plain
-/// bounded code such as `terminal_agent_unknown`.
+/// Opens an owner connection and attaches to the agent's terminal, or to one
+/// pane of its window such as a native teammate's, sized first when a size is given.
+/// Inputs: engine socket, timeout, agent, the pane and the size, if any. Output: the
+/// session, or a plain bounded code such as `terminal_agent_unknown`.
 async fn open(
     socket: PathBuf,
     timeout: Duration,
     agent: AgentId,
+    pane: Option<String>,
+    size: Option<(u16, u16)>,
 ) -> Result<TerminalSession, String> {
     let problem = |error: crate::engine::EngineError| bounded_problem(&error.0);
     let client = Client::new(socket, timeout).map_err(problem)?;
@@ -249,7 +306,12 @@ async fn open(
         .with_owner(OwnerClientKind::Tui)
         .await
         .map_err(problem)?;
-    owner.terminal_attach(agent).await.map_err(problem)
+    match (pane, size) {
+        (pane, Some((cols, rows))) => owner.terminal_attach_sized(agent, pane, cols, rows).await,
+        (Some(pane), None) => owner.terminal_attach_pane(agent, pane).await,
+        (None, None) => owner.terminal_attach(agent).await,
+    }
+    .map_err(problem)
 }
 
 /// Forwards engine frames to the screens in order until the terminal closes

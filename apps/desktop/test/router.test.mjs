@@ -25,8 +25,8 @@ test("every design route parses to its screen and formats back to the same hash"
   for (const tab of SETTINGS_TABS) assert.deepEqual(parseRoute(formatRoute({ name: "settings", tab })), { name: "settings", tab });
   for (const tab of PROJECT_TABS) assert.deepEqual(parseRoute(formatRoute({ name: "project", id: "p 1/é", tab })), { name: "project", id: "p 1/é", tab });
   for (const step of NEW_PROJECT_STEPS) assert.deepEqual(parseRoute(formatRoute({ name: "new-project", step })), { name: "new-project", step });
-  assert.deepEqual(SETTINGS_TABS, ["accounts", "pools", "harnesses", "plugins", "process", "pack", "home", "github", "memory", "usage", "alerts", "profile", "updates"]);
-  assert.deepEqual(PROJECT_TABS, ["overview", "conversation", "agents", "changes", "context", "process", "settings"]);
+  assert.deepEqual(SETTINGS_TABS, ["accounts", "pools", "harnesses", "plugins", "process", "pack", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "profile", "updates"]);
+  assert.deepEqual(PROJECT_TABS, ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings", "ide"]);
   assert.deepEqual(NEW_PROJECT_STEPS, ["basics", "documents", "work", "pool", "team"]);
 });
 
@@ -51,4 +51,8 @@ test("missing parts fall back to the first tab or step, unknown routes fall back
   for (const hash of ["#/projects/", "#/projects/%E0%A4%A", "#/projects/" + "x".repeat(257) + "/overview", "#/approvals", "#/javascript:alert(1)"]) {
     assert.deepEqual(parseRoute(hash), { name: "home" }, hash);
   }
+});
+
+test("the old Settings, Usage link opens Metrics", () => {
+  assert.deepEqual(parseRoute("#/settings/usage"), { name: "metrics" });
 });

@@ -9,7 +9,10 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::master_session::{MasterBackend, MasterOwnerAction};
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
+use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crazyagent::sandbox::LinuxSockets;
+use crazyagent::sandbox_settings::SandboxSettings;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -238,6 +241,43 @@ async fn the_owner_profile_is_absent_on_first_run_then_saved_updated_and_durable
 }
 
 #[tokio::test]
+async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.sandbox_settings().await.unwrap().linux_sockets,
+        LinuxSockets::TcpOnly
+    );
+    for (generation, linux_sockets) in [
+        (1, LinuxSockets::Refuse),
+        (2, LinuxSockets::TcpPorts),
+        (3, LinuxSockets::TcpOnly),
+        (4, LinuxSockets::TcpPorts),
+    ] {
+        let settings = SandboxSettings { linux_sockets };
+        assert_eq!(
+            applied(
+                controller
+                    .set_sandbox_settings(settings, generation)
+                    .await
+                    .unwrap()
+            ),
+            OwnerResult::Applied
+        );
+        assert_eq!(controller.sandbox_settings().await.unwrap(), settings);
+    }
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.sandbox_settings().await.unwrap().linux_sockets,
+        LinuxSockets::TcpPorts
+    );
+    drop(controller);
+    case.close().await;
+}
+
+#[tokio::test]
 async fn the_pool_list_reads_plainly_and_pool_limits_hold_in_the_engine() {
     let case = Case::new().await;
     let mut controller = case.controller().await;
@@ -448,6 +488,127 @@ async fn a_mixed_pool_assigned_to_a_project_selects_an_eligible_master_member() 
     assert_eq!(selection.backend, MasterBackend::Codex);
     assert_eq!(selection.route.account_ref.as_str(), "codex-2");
     assert_eq!(selection.target_profile_ref.as_str(), "codex-b");
+    drop(controller);
+    case.close().await;
+}
+
+/// Creates a project whose team plan names `master` as its master harness, with no pool.
+/// Inputs: the controller, the project id and the master harness. Output: the owner result.
+async fn setup_with_master(
+    controller: &mut OwnerController,
+    id: &str,
+    master: &str,
+) -> OwnerResult {
+    let setup = ProjectSetup {
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: Some(TeamPlan {
+            master: master.into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        }),
+        documents: vec![],
+    };
+    let spec = ProjectSpec {
+        name: format!("Project {id}"),
+        repositories: vec![],
+    };
+    applied(
+        controller
+            .setup_project(ProjectId::new(id).unwrap(), spec, setup, 1)
+            .await
+            .unwrap(),
+    )
+}
+
+/// Reads the backend of the master Open action the TUI and desktop build by default.
+/// Inputs: the controller and the project id. Output: the backend and pool it chose.
+async fn default_backend(controller: &mut OwnerController, id: &str) -> (MasterBackend, String) {
+    let project = ProjectId::new(id).unwrap();
+    let MasterOwnerAction::Open { selection, .. } =
+        crazyagent::tui::default_master_open(controller, &project)
+            .await
+            .unwrap()
+    else {
+        panic!("open action required");
+    };
+    (selection.backend, selection.pool_ref.as_str().to_owned())
+}
+
+#[tokio::test]
+async fn the_default_master_runs_on_the_team_plans_master_harness_when_its_pool_can() {
+    let case = Case::new().await;
+    let mut controller = case.controller().await;
+    let home = tempfile::Builder::new()
+        .prefix("ca-owner-setup-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    assert_eq!(
+        applied(
+            controller
+                .set_projects_home(home_path.to_str().unwrap().into(), 1)
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied
+    );
+    let mixed = ["claude-a", "api-a", "codex-a", "codex-b", "local-a"];
+    for (id, master) in [("codex-master", "codex"), ("claude-master", "claude-code")] {
+        assert_eq!(
+            setup_with_master(&mut controller, id, master).await,
+            OwnerResult::Applied,
+            "{master}"
+        );
+    }
+    assert_eq!(
+        edit(
+            &mut controller,
+            ModelAccessEdit::ReplacePool {
+                pool: pool("pool-mixed", &mixed, &["codex-master", "claude-master"])
+            }
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    for (id, backend) in [
+        ("codex-master", MasterBackend::Codex),
+        ("claude-master", MasterBackend::Claude),
+    ] {
+        assert_eq!(
+            default_backend(&mut controller, id).await,
+            (backend, "pool-mixed".to_owned()),
+            "the master of {id} runs on its team plan's harness, not on RCLI first"
+        );
+    }
+    assert_eq!(
+        setup_with_master(&mut controller, "rcli-master", "rcli").await,
+        OwnerResult::Applied,
+        "a project takes RCLI as its master"
+    );
+    assert_eq!(
+        edit(
+            &mut controller,
+            ModelAccessEdit::ReplacePool {
+                pool: pool(
+                    "pool-mixed",
+                    &mixed,
+                    &["codex-master", "claude-master", "rcli-master"]
+                )
+            }
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        default_backend(&mut controller, "rcli-master").await,
+        (MasterBackend::Rcli, "pool-mixed".to_owned())
+    );
     drop(controller);
     case.close().await;
 }

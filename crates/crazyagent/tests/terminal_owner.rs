@@ -2,8 +2,13 @@
 
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::engine::owner::{OwnerClientKind, TerminalOutput, TerminalSession};
+use crazyagent::engine::owner::{
+    OwnerClientKind, OwnerResponse, OwnerResult, TerminalOutput, TerminalSession,
+};
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
+use crazyagent::protocol::{ProjectId, ProjectSpec};
+use crazyagent::team::{AgentStatus, NodeKind};
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{AgentId, FOLDER, Host, TerminalFrame};
 use std::os::unix::fs::PermissionsExt;
@@ -330,7 +335,7 @@ impl SubAgent {
             .await
             .unwrap()
             .unwrap();
-        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref()))
+        tokio::task::spawn_blocking(move || crazyagent::terminal::quit(terminal.as_ref(), true))
             .await
             .unwrap()
             .unwrap();
@@ -353,6 +358,10 @@ async fn a_test_engine_dropped_without_a_stop_leaves_no_tmux_server() {
     );
 }
 
+/// A secret typed at a hidden prompt and a typed command line never reach the engine
+/// database. The row waits for the shell's next prompt before it types the visible line: a
+/// shell without line editing of its own (dash, `/bin/sh` on Ubuntu) shows typed keys only
+/// through the terminal's echo, which is off until the hidden prompt's command list ends.
 #[tokio::test(flavor = "multi_thread")]
 async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
     let mut sub = SubAgent::start().await;
@@ -367,11 +376,13 @@ async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
         .unwrap();
     let mut seen = Vec::new();
     assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    seen.clear();
     control
         .input(b"stty -echo; read secret; stty echo\r".to_vec())
         .await
         .unwrap();
     control.input(b"hunter2-hidden\r".to_vec()).await.unwrap();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
     control
         .input(b"echo typed-line-shown\r".to_vec())
         .await
@@ -387,6 +398,145 @@ async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
     assert!(
         !contains(&stored, b"echo typed-line-shown"),
         "a typed command line is not in the engine database"
+    );
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
+}
+
+/// finding_855af84870d65746: a revoked viewer's next key, prompt or resize never reaches the
+/// terminal. A view checks its grant at once and then every 5 s, so the viewer first types
+/// one key and idles, and the revoke lands between those checks, where only the per-key
+/// check stands between the revoked viewer and the terminal.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
+    use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
+    use crazyagent::protocol::RequestId;
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    control
+        .input(b"echo before-revoke\r".to_vec())
+        .await
+        .unwrap();
+    assert!(read_until(&mut output, &mut seen, b"\r\nbefore-revoke\r\n").await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let host = sub.service.owner_runtime().unwrap();
+    host.control(OwnerControl {
+        operation_id: RequestId::new("revoke-terminal-viewer").unwrap(),
+        target: OwnerClientKind::Desktop,
+        expected_epoch: host.epoch(OwnerClientKind::Desktop).unwrap(),
+        decision: OwnerDecision::Revoke,
+    })
+    .await
+    .unwrap();
+    let _ = control.input(b"echo leaked-after-revoke\r".to_vec()).await;
+    let _ = control.resize(100, 30).await;
+    assert_eq!(closed(&mut output).await, "owner_grant_stale_or_revoked");
+
+    let mut tui = OwnerController::attach(
+        sub.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let TerminalSession {
+        cols,
+        rows,
+        mut output,
+        mut control,
+        ..
+    } = tui.terminal_attach(sub.agent.clone()).await.unwrap();
+    assert_eq!(
+        (cols, rows),
+        (80, 24),
+        "the revoked viewer's resize never reached the terminal"
+    );
+    let mut screen = Vec::new();
+    control
+        .input(b"echo still-served\r".to_vec())
+        .await
+        .unwrap();
+    assert!(
+        read_until(&mut output, &mut screen, b"\r\nstill-served\r\n").await,
+        "{}",
+        String::from_utf8_lossy(&screen)
+    );
+    assert!(
+        !contains(&screen, b"leaked-after-revoke"),
+        "a key the revoked viewer typed never reached the terminal: {}",
+        String::from_utf8_lossy(&screen)
+    );
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    drop(tui);
+    sub.stop().await;
+}
+
+/// A full scrollback replayed to a viewer that starts reading only after the attach deadline
+/// arrives whole and in order, then live output follows and the view ends with its detach
+/// reason, instead of a rejection written into a session that already opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_scrollback_replay_outlives_the_attach_deadline_and_stays_whole() {
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    control
+        .input(
+            b"seq -f 'row-%04g-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' 1 4000; echo filled-up\r"
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+    assert!(read_until(&mut output, &mut seen, b"\r\nfilled-up\r\n").await);
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let mut replayed = Vec::new();
+    for wanted in [&b"row-0001-"[..], b"row-3950-", b"\r\nfilled-up\r\n"] {
+        assert!(
+            read_until(&mut output, &mut replayed, wanted).await,
+            "the replay after the attach deadline holds {:?}",
+            String::from_utf8_lossy(wanted)
+        );
+    }
+    control
+        .input(b"echo live-after-replay\r".to_vec())
+        .await
+        .unwrap();
+    assert!(
+        read_until(&mut output, &mut replayed, b"\r\nlive-after-replay\r\n").await,
+        "live output follows the whole replay"
     );
     control.detach().await.unwrap();
     assert_eq!(closed(&mut output).await, "terminal_detached");
@@ -550,5 +700,173 @@ async fn owner_keys_keep_echoing_while_another_writer_holds_the_engine_database(
     drop(agents);
     control.detach().await.unwrap();
     assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
+}
+
+/// Checks that the engine recorded one owner change. Input: its reply. Output: none.
+fn applied(response: OwnerResponse) {
+    match response {
+        OwnerResponse::Applied { operation } => {
+            assert_eq!(operation.result, OwnerResult::Applied)
+        }
+        other => panic!("the owner change must be recorded: {other:?}"),
+    }
+}
+
+/// Waits up to ten seconds for an agent terminal's screen to show some text. Inputs: the
+/// host, the agent and the text. Output: whether it showed.
+fn shows(host: &dyn Host, agent: &AgentId, wanted: &[u8]) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !host
+        .screen(agent)
+        .is_ok_and(|screen| contains(&screen, wanted))
+    {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// A finished sub-agent whose last screen the engine kept names its terminal in the team
+/// graph, and its card opens that screen, labeled with the time it finished, and closes as
+/// ended, so no key reaches the ended agent; one that never ran here names none (N-D21).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finished_sub_agent_opens_its_kept_last_screen_read_only() {
+    let mut sub = SubAgent::start().await;
+    let project = ProjectId::new("alpha").unwrap();
+    let disk = tempfile::Builder::new()
+        .prefix("ca-term-home-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(disk.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    applied(
+        sub.controller
+            .set_projects_home(home.to_str().unwrap().into(), 1)
+            .await
+            .unwrap(),
+    );
+    applied(
+        sub.controller
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Alpha".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Watches sensor buoys and raises alerts.".into(),
+                    tech_stack: vec!["rust".into()],
+                    platforms: vec![Platform::Website],
+                    research: vec![ResearchKind::MarketResearch],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                2,
+            )
+            .await
+            .unwrap(),
+    );
+    let lead = sub.agent.team_agent().unwrap();
+    let (finished, never) = {
+        let connection = rusqlite::Connection::open(sub.root.path().join("engine.db")).unwrap();
+        connection.busy_timeout(Duration::from_secs(5)).unwrap();
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_finished_view(project,show) VALUES ('alpha',1)",
+                [],
+            )
+            .unwrap();
+        let worker = || {
+            connection
+                .execute(
+                    "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent) VALUES ('alpha','sub','codex',1,'stopped',1,1,?1)",
+                    [lead],
+                )
+                .unwrap();
+            AgentId::team(connection.last_insert_rowid()).unwrap()
+        };
+        (worker(), worker())
+    };
+    let host = sub.service.owner_runtime().unwrap().terminal().unwrap();
+    let ran = {
+        let (host, finished, cwd) = (
+            host.clone(),
+            finished.clone(),
+            sub.root.path().to_path_buf(),
+        );
+        tokio::task::spawn_blocking(move || {
+            let command = InteractiveCommand {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "printf 'kept-screen-%s\\n' $((6*7)); exec /bin/sleep 30".into(),
+                ],
+                cwd,
+                env: Vec::new(),
+                transcript: Transcript::Unavailable,
+            };
+            host.spawn(&finished, &command).unwrap();
+            let shown = shows(host.as_ref(), &finished, b"kept-screen-42");
+            host.kill(&finished).unwrap();
+            shown
+        })
+        .await
+        .unwrap()
+    };
+    assert!(
+        ran,
+        "the sub-agent's run drew its last screen before it ended"
+    );
+
+    let graph = sub.controller.team_graph(project).await.unwrap();
+    let node = |agent: &AgentId| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == agent.to_string())
+            .unwrap_or_else(|| panic!("{agent} is drawn: {graph:?}"))
+    };
+    assert_eq!(
+        (node(&finished).kind, node(&finished).status),
+        (NodeKind::Sub, Some(AgentStatus::Stopped))
+    );
+    assert_eq!(
+        node(&finished).terminal,
+        Some(finished.clone()),
+        "the card of a finished sub-agent whose last screen is kept opens it"
+    );
+    assert_eq!(
+        node(&never).terminal,
+        None,
+        "a finished sub-agent that never ran under this engine has no screen to open"
+    );
+
+    let TerminalSession { mut output, .. } = sub
+        .controller
+        .terminal_attach(finished.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(
+        read_until(&mut output, &mut seen, b"kept-screen-42").await
+            && read_until(&mut output, &mut seen, b" Finished at ").await,
+        "the card shows the kept screen under its finished label: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    assert_eq!(closed(&mut output).await, "terminal_ended");
+    let typed = tokio::task::spawn_blocking(move || host.input(&finished, b"x").err())
+        .await
+        .unwrap()
+        .map(|error| error.0);
+    assert_eq!(
+        typed.as_deref(),
+        Some("terminal_agent_unknown"),
+        "no key reaches the ended agent"
+    );
     sub.stop().await;
 }

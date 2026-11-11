@@ -82,6 +82,12 @@ pub(crate) enum MasterRuntimeCommand {
         session_id: SessionId,
         turn_id: RequestId,
     },
+    Policy {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+    },
     AcquireProfile {
         host: HostStamp,
         project_id: ProjectId,
@@ -124,6 +130,13 @@ pub(crate) enum MasterRuntimeCommand {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    ServeMemory {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        mailbox: PathBuf,
+    },
     Checked {
         provisioned: Box<crate::worktrees::Provisioned>,
         prepare: Box<MasterRuntimeCommand>,
@@ -150,6 +163,7 @@ pub(crate) enum MasterRuntimeObservation {
 pub(crate) struct PreparedMasterTurn {
     pub(crate) text: String,
     pub(crate) message: String,
+    pub(crate) owner_turn: Option<u64>,
     pub(crate) instructions: String,
     pub(crate) tools: bool,
     pub(crate) session: MasterSessionView,
@@ -160,6 +174,11 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) worktree_lease: RequestId,
     pub(crate) lease: WorktreeLease,
     pub(crate) agent_project: crate::agent_home::AgentProject,
+    pub(crate) agent_policy: crate::sandbox::policy::AgentPolicy,
+    pub(crate) hidden_paths: Vec<std::path::PathBuf>,
+    pub(crate) tools_off: Vec<String>,
+    pub(crate) steps: crate::master_step_limit::StepLimit,
+    pub(crate) time: crate::master_time_limit::TimeLimit,
 }
 
 impl PreparedMasterTurn {
@@ -179,6 +198,7 @@ pub(crate) enum MasterRuntimeResult {
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
+    Policy(Box<Option<crate::sandbox::policy::AgentPolicy>>),
     Profile(Box<NativeProfileUse>),
     Checkout(Box<MasterCheckout>),
     Waiting,
@@ -527,6 +547,39 @@ fn committed(tx: &Transaction<'_>, provenance: &OwnerProvenance) -> Result<(), E
     Ok(())
 }
 
+/// Tells whether a session's owner provenance is the request that created it: the
+/// owner's Open, or a New session with or without cancelling a running turn, each rebuilt
+/// from the session's own project, source basis and selection. Every check of how a
+/// session was opened uses this one rule. Takes the session. Returns whether the stored
+/// request hash is one of them.
+pub(super) fn opened_by_owner(session: &MasterSessionView) -> Result<bool, EngineError> {
+    let opening = |action: MasterOwnerAction| -> Result<bool, EngineError> {
+        let original = OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: session.owner.operation_id.clone(),
+            expected_revision: session.owner.revision_before.clone(),
+            operation: OwnerOperation::Apply {
+                mutation: OwnerMutation::ProjectMaster { action },
+            },
+        };
+        Ok(original.mutation_hash()? == session.owner.request_hash)
+    };
+    let renewal = |cancel_running: bool| MasterOwnerAction::NewSession {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+        cancel_running,
+    };
+    Ok(opening(MasterOwnerAction::Open {
+        project_id: session.project_id.clone(),
+        expected_config_id: session.config_id.clone(),
+        expected_source_hash: session.source_hash.clone(),
+        selection: Box::new(session.selection.clone()),
+    })? || opening(renewal(false))?
+        || opening(renewal(true))?)
+}
+
 fn decode_session(
     tx: &Transaction<'_>,
     row: &Row<'_>,
@@ -558,36 +611,7 @@ fn decode_session(
         return Err(error("master_session_record"));
     }
     committed(tx, &session.owner)?;
-    let opened_by = |action: MasterOwnerAction| -> Result<bool, EngineError> {
-        let original = OwnerRequest {
-            protocol_version: PROTOCOL_VERSION,
-            request_id: session.owner.operation_id.clone(),
-            expected_revision: session.owner.revision_before.clone(),
-            operation: OwnerOperation::Apply {
-                mutation: OwnerMutation::ProjectMaster { action },
-            },
-        };
-        Ok(original.mutation_hash()? == session.owner.request_hash)
-    };
-    let opened = opened_by(MasterOwnerAction::Open {
-        project_id: session.project_id.clone(),
-        expected_config_id: session.config_id.clone(),
-        expected_source_hash: session.source_hash.clone(),
-        selection: Box::new(session.selection.clone()),
-    })?;
-    let mut renewed = false;
-    for cancel_running in [false, true] {
-        renewed = renewed
-            || (!opened
-                && opened_by(MasterOwnerAction::NewSession {
-                    project_id: session.project_id.clone(),
-                    expected_config_id: session.config_id.clone(),
-                    expected_source_hash: session.source_hash.clone(),
-                    selection: Box::new(session.selection.clone()),
-                    cancel_running,
-                })?);
-    }
-    if !opened && !renewed {
+    if !opened_by_owner(&session)? {
         return Err(error("master_open_provenance"));
     }
     let mut statement = tx
@@ -648,6 +672,10 @@ fn latest(
         .transpose()
 }
 
+/// Reads one stored turn and checks it against its session and the owner operation that
+/// took its input. An input entry an older engine pruned leaves no text to hash, so such a
+/// turn still reads when its operation holds and no other entry took that cursor. Inputs:
+/// the transaction, session, row and owner revision. Output: the turn or a plain error.
 fn decode_turn(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -680,22 +708,26 @@ fn decode_turn(
         validate_runtime_record(tx, session, &turn)?;
         return Ok(turn);
     }
-    let input_owner: Option<(String, String)> = tx.query_row("SELECT CASE WHEN length(o.owner_id)=64 THEN o.owner_id END,CASE WHEN length(CAST(c.text AS BLOB))<=8192 THEN c.text END FROM conversation_entries c JOIN owner_operations o ON o.event_cursor=c.event_cursor AND o.origin='native_owner' WHERE c.project=?1 AND c.event_cursor=?2 AND c.kind='message' AND c.brief_version=0 AND o.operation_id=?3", params![session.project_id.as_str(), signed(input)?, turn.id.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(error)?;
-    let (owner, text) = input_owner.ok_or_else(|| error("master_input_provenance"))?;
+    let provenance = input_operation(tx, &turn)?;
+    let Some(text) = turn_input(tx, session, &turn)? else {
+        let kept: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversation_entries WHERE event_cursor=?1)",
+                [signed(input)?],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if kept {
+            return Err(error("master_input_provenance"));
+        }
+        validate_runtime_record(tx, session, &turn)?;
+        return Ok(turn);
+    };
     ConversationMutation::AppendMessage {
         project_id: session.project_id.clone(),
         text: text.clone(),
     }
     .validate()?;
-    let (provenance, result) = owner_lookup(tx, "native_owner", &owner, &turn.id, None)?
-        .ok_or_else(|| error("master_input_provenance"))?;
-    if provenance.event_cursor != Some(turn.input_cursor.clone())
-        || provenance.revision_after != turn.input_cursor
-        || provenance.revision_before.value().checked_add(1) != Some(input)
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(error("master_input_provenance"));
-    }
     let original = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: turn.id.clone(),
@@ -736,25 +768,7 @@ fn resolve_provenance(
     {
         return Err(refused());
     }
-    let input = signed(turn.input_cursor.value())?;
-    let owner: Option<Option<String>> = tx
-        .query_row(
-            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
-            params![turn.id.as_str(), input],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    let owner = owner.flatten().ok_or_else(refused)?;
-    let (provenance, result) =
-        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
-    if provenance.event_cursor != Some(turn.input_cursor.clone())
-        || provenance.revision_after != turn.input_cursor
-        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
-        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-    {
-        return Err(refused());
-    }
+    let provenance = input_operation(tx, turn)?;
     let original = OwnerRequest {
         protocol_version: PROTOCOL_VERSION,
         request_id: turn.id.clone(),
@@ -773,6 +787,59 @@ fn resolve_provenance(
         return Err(refused());
     }
     Ok(())
+}
+
+/// Reads the native owner's operation that took a turn's input: applied, with the turn's
+/// id, recorded at the turn's input revision one revision after the one it was asked at.
+/// Inputs: the transaction and the turn. Output: its provenance, or
+/// `master_input_provenance`.
+fn input_operation(
+    tx: &Transaction<'_>,
+    turn: &MasterTurnView,
+) -> Result<OwnerProvenance, EngineError> {
+    let refused = || error("master_input_provenance");
+    let owner: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(owner_id)=64 THEN owner_id END FROM owner_operations WHERE origin='native_owner' AND operation_id=?1 AND event_cursor=?2",
+            params![turn.id.as_str(), signed(turn.input_cursor.value())?],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let owner = owner.flatten().ok_or_else(refused)?;
+    let (provenance, result) =
+        owner_lookup(tx, "native_owner", &owner, &turn.id, None)?.ok_or_else(refused)?;
+    if provenance.event_cursor != Some(turn.input_cursor.clone())
+        || provenance.revision_after != turn.input_cursor
+        || provenance.revision_before.value().checked_add(1) != Some(turn.input_cursor.value())
+        || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
+    {
+        return Err(refused());
+    }
+    Ok(provenance)
+}
+
+/// Reads the owner's message a turn took as input from the project's conversation.
+/// Inputs: the transaction, session and turn. Output: the text, None once an older
+/// engine pruned the entry, or `master_input_provenance` for text past its bound.
+fn turn_input(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<Option<String>, EngineError> {
+    let text: Option<Option<String>> = tx
+        .query_row(
+            "SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0",
+            params![
+                session.project_id.as_str(),
+                signed(turn.input_cursor.value())?
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    text.map(|text| text.ok_or_else(|| error("master_input_provenance")))
+        .transpose()
 }
 
 fn load_turn(
@@ -935,10 +1002,11 @@ fn resume(
         return Ok(reject(&reason.0));
     }
     let current = live(tx, project, revision)?;
-    if current
-        .as_ref()
-        .is_some_and(|session| session.current_turn.is_some())
-        && !cancel_running
+    if !cancel_running
+        && (current
+            .as_ref()
+            .is_some_and(|session| session.current_turn.is_some())
+            || crate::team::master::turn_running(tx, project)?)
     {
         return Ok(reject("master_turn_running"));
     }
@@ -992,6 +1060,81 @@ fn live(
         .map_err(error)?
         .map(|row| decode_session(tx, row, revision))
         .transpose()
+}
+
+/// Deletes a project's master session that is not live, for the owner's Delete: first the
+/// harness transcript it kept is removed from its master's private home, then a parked
+/// session closes so it can no longer be resumed, and its stored turns, their owner
+/// messages, its marks and its kept conversation go, so it leaves the Sessions list.
+/// Takes the transaction, the project, the session and the revision read at.
+/// Returns Applied, or a plain rejection before any write.
+fn delete_session(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    id: &SessionId,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let Some(mut session) =
+        load_session(tx, id, revision)?.filter(|session| &session.project_id == project)
+    else {
+        return Ok(reject("master_session_missing"));
+    };
+    if session.phase == MasterSessionPhase::Configured {
+        return Ok(reject("master_session_live"));
+    }
+    if let Some(kept) = crate::team::master::session_conversation(tx, project, id.as_str())? {
+        let Some(runtime) = tx.path().map(Path::new).and_then(Path::parent) else {
+            return Ok(reject("master_session_files_kept"));
+        };
+        let home = crate::team::runtime::agent_home(&runtime.join("team"), kept.agent);
+        if !remove_transcript(&home, &kept.resume) {
+            return Ok(reject("master_session_files_kept"));
+        }
+    }
+    if session.phase == MasterSessionPhase::Parked {
+        end_session(tx, &mut session, revision, MasterSessionPhase::Closed)?;
+        save_session(tx, &session)?;
+    }
+    for statement in [
+        "DELETE FROM master_preparations WHERE session=?1",
+        "DELETE FROM conversation_entries WHERE kind='message' AND event_cursor IN (SELECT input FROM master_turns WHERE session=?1)",
+        "DELETE FROM master_turns WHERE session=?1",
+        "DELETE FROM team_master_conversations WHERE session=?1",
+        "DELETE FROM session_owner_turns WHERE session=?1",
+        "DELETE FROM session_messages WHERE session=?1",
+        "DELETE FROM session_marks WHERE session=?1",
+    ] {
+        tx.execute(statement, [id.as_str()]).map_err(error)?;
+    }
+    assert!(!crate::master_sessions::has_owner_turn(tx, id)?);
+    Ok(Outcome::Applied)
+}
+
+/// Removes a deleted session's harness transcript from its master's private home: the
+/// record and the folder Claude Code keeps beside it under the conversation id. Nothing
+/// outside the home, nothing that is a link and nothing reached through a link is removed.
+/// Takes the master's home and the kept conversation. Returns true once neither is left,
+/// false when one lies outside the home or could not be removed.
+fn remove_transcript(home: &Path, kept: &crate::harnesses::terminal_session::Resume) -> bool {
+    let record = kept.record.as_path();
+    if !crate::harnesses::transcript::plain_below(home, record) {
+        return false;
+    }
+    let removed_record = match std::fs::symlink_metadata(record) {
+        Ok(metadata) if metadata.is_file() => std::fs::remove_file(record).is_ok(),
+        Ok(_) => false,
+        Err(missing) => missing.kind() == std::io::ErrorKind::NotFound,
+    };
+    let Some(folder) = record.parent().map(|parent| parent.join(&kept.id)) else {
+        return false;
+    };
+    let removed_folder = !crate::harnesses::transcript::plain_below(home, &folder)
+        || match std::fs::symlink_metadata(&folder) {
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&folder).is_ok(),
+            Ok(_) => true,
+            Err(missing) => missing.kind() == std::io::ErrorKind::NotFound,
+        };
+    removed_record && removed_folder
 }
 
 /// Closes every master session of a project as the project is removed: the live one ends
@@ -1201,6 +1344,10 @@ fn now_ms() -> Result<u64, EngineError> {
 }
 
 fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineError> {
+    assert!(
+        turn.activity.is_empty(),
+        "master turn activity is never stored"
+    );
     let changed = tx
         .execute(
             "UPDATE master_turns SET phase=?1,body=?2 WHERE session=?3 AND id=?4",
@@ -1213,6 +1360,14 @@ fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineEr
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
+    if let Some(reply) = &turn.reply {
+        crate::master_sessions::one_turn_reply(
+            tx,
+            &turn.session_id,
+            turn.id.as_str(),
+            &reply.text,
+        )?;
+    }
     Ok(())
 }
 
@@ -1269,18 +1424,20 @@ fn fail_before_running(
     Ok(())
 }
 
-/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause
-/// and the provider's rejection of its earlier credential, so its next turn may run at once.
-/// Inputs: the transaction and the account's connection. Output: both holds are gone.
+/// Lifts the holds on an account that just signed in afresh or got a new API key: its pause,
+/// every project's hold on it and the provider's rejection of its earlier credential, so its
+/// next turn may run at once. Inputs: the transaction and the account's connection. Output:
+/// every hold is gone.
 pub(super) fn lift_account_holds(
     tx: &Transaction<'_>,
     connection: &ModelConnection,
 ) -> Result<(), EngineError> {
-    tx.execute(
+    for sql in [
         "DELETE FROM team_paused_accounts WHERE connection=?1",
-        [connection.id.as_str()],
-    )
-    .map_err(error)?;
+        "DELETE FROM team_project_pauses WHERE connection=?1",
+    ] {
+        tx.execute(sql, [connection.id.as_str()]).map_err(error)?;
+    }
     model_gateway::sign_in_renewed(tx, connection, now_ms()?)
 }
 
@@ -1546,7 +1703,10 @@ fn validate_registration(
         return Err(error("master_configured_receipt_conflict"));
     }
     let metadata = std::fs::symlink_metadata(&record.database_path).map_err(error)?;
-    if record.database_identity != database_identity(&metadata)? {
+    if !crate::file_identity::same_files(
+        &[record.database_identity],
+        &[database_identity(&metadata)?],
+    ) {
         return Err(error("master_configured_database_changed"));
     }
     let config = crate::config::resolve_config(&record.global_source, &record.project_source)
@@ -2391,24 +2551,56 @@ fn current_prompt(
     checked_prompt(&session.session_id, turn_id, message, context.as_deref())
 }
 
+/// The text a turn hands its master: the engine's request, or the owner's message.
+/// Inputs: the transaction, session and turn. Output: the text, or None once an older
+/// engine pruned the owner's message.
 fn turn_message(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
     turn: &MasterTurnView,
-) -> Result<String, EngineError> {
+) -> Result<Option<String>, EngineError> {
     if let Some(request) = &turn.engine_request {
-        return Ok(request.text.clone());
+        return Ok(Some(request.text.clone()));
     }
-    tx.query_row("SELECT CASE WHEN length(CAST(text AS BLOB))<=8192 THEN text END FROM conversation_entries WHERE project=?1 AND event_cursor=?2 AND kind='message' AND brief_version=0", params![session.project_id.as_str(), signed(turn.input_cursor.value())?], |row| row.get(0)).map_err(error)
+    turn_input(tx, session, turn)
+}
+
+/// The text a turn about to run hands its master, which it must still have.
+/// Inputs: the transaction, session and turn. Output: the text, or
+/// `master_input_provenance` once the owner's message is gone.
+fn running_message(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<String, EngineError> {
+    turn_message(tx, session, turn)?.ok_or_else(|| error("master_input_provenance"))
 }
 
 const HISTORY_HEADER: &str = "Conversation so far, oldest first:";
 const HISTORY_OMITTED: &str = "(Earlier turns were left out to fit.)";
+const INPUT_GONE: &str = "(This message is no longer kept.)";
+
+/// Takes from the live terminal exchanges still to place the ones that followed one
+/// engine-run turn, or with None the ones before every such turn. Inputs: the exchanges
+/// and the turn id. Output: their entries, oldest first; the rest stay.
+fn exchanges_after(
+    live: &mut Vec<crate::master_sessions::LiveExchange>,
+    turn: Option<&str>,
+) -> Vec<String> {
+    let before = live.len();
+    let (here, rest): (Vec<_>, Vec<_>) = std::mem::take(live)
+        .into_iter()
+        .partition(|exchange| exchange.after_turn.as_deref() == turn);
+    *live = rest;
+    assert_eq!(here.len() + live.len(), before);
+    here.into_iter().map(|exchange| exchange.entry).collect()
+}
 
 /// Reads the earlier turns of this conversation that reached a model, oldest first, as
 /// the entries the next prompt carries. Inputs: the transaction, session and current
 /// turn. Output: one "Owner:" entry per turn with its reply or a no-reply line, then one
-/// "Engine:" line per task that turn handed to the team.
+/// "Engine:" line per task that turn handed to the team; and, in its place among them,
+/// one entry per exchange of the session's live terminal, whatever harness ran there.
 fn prior_turns(
     tx: &Transaction<'_>,
     session: &MasterSessionView,
@@ -2425,7 +2617,9 @@ fn prior_turns(
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let mut entries = Vec::new();
+    let mut live = crate::master_sessions::live_exchanges(tx, &session.session_id)?;
+    let mut entries = exchanges_after(&mut live, None);
+    let mut turns = 0usize;
     for body in bodies {
         let body = body.ok_or_else(|| error("master_turn_bounds"))?;
         let earlier: MasterTurnView = serde_json::from_str(&body).map_err(error)?;
@@ -2436,11 +2630,17 @@ fn prior_turns(
             earlier.phase,
             MasterTurnPhase::Succeeded | MasterTurnPhase::Failed | MasterTurnPhase::Uncertain
         ) {
+            entries.extend(exchanges_after(&mut live, Some(earlier.id.as_str())));
             continue;
         }
         let asked = match &earlier.engine_request {
             Some(request) => format!("Engine: {}", request.line),
-            None => format!("Owner: {}", turn_message(tx, session, &earlier)?),
+            None => format!(
+                "Owner: {}",
+                turn_message(tx, session, &earlier)?
+                    .as_deref()
+                    .unwrap_or(INPUT_GONE)
+            ),
         };
         let mut entry = match &earlier.reply {
             Some(reply) => format!("{asked}\nYou: {}", reply.text),
@@ -2451,8 +2651,12 @@ fn prior_turns(
             entry.push_str(&task.line());
         }
         entries.push(entry);
+        turns += 1;
+        entries.extend(exchanges_after(&mut live, Some(earlier.id.as_str())));
     }
-    assert!(entries.len() < usize::try_from(turn.ordinal).map_err(error)?);
+    entries.extend(live.into_iter().map(|exchange| exchange.entry));
+    assert!(turns < usize::try_from(turn.ordinal).map_err(error)?);
+    assert!(turns <= entries.len());
     Ok(entries)
 }
 
@@ -2530,7 +2734,7 @@ fn prompt(
     session: &MasterSessionView,
     turn: &MasterTurnView,
 ) -> Result<String, EngineError> {
-    let message = turn_message(tx, session, turn)?;
+    let message = running_message(tx, session, turn)?;
     let context = prompt_context(tx, session)?;
     let entries = prior_turns(tx, session, turn)?;
     let fixed = context.as_ref().map_or(0, |context| context.len() + 2)
@@ -2627,21 +2831,30 @@ fn bundle(
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
     let tools = turn_tools(tx, &session)?;
+    let tools_off = match tools {
+        true => crate::team::master::switched_off_tools(tx, &session.project_id)?,
+        false => Vec::new(),
+    };
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => crate::launch_context::for_master(
             tx,
             &session.project_id,
-            tools,
+            tools.then_some(tools_off.as_slice()),
             config.settings.model_access.as_ref(),
         )
         .map_err(|problem| EngineError(problem.0))?,
     };
     let agent_project = crate::launch_context::agent_project(tx, &session.project_id)
         .map_err(|problem| EngineError(problem.0))?;
+    let agent_policy =
+        crate::sandbox::policy::load(tx, session.project_id.as_str()).map_err(error)?;
+    let hidden_paths =
+        crate::sandbox::hidden_paths::load(tx, session.project_id.as_str()).map_err(error)?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
-        message: turn_message(tx, &session, turn)?,
+        message: running_message(tx, &session, turn)?,
+        owner_turn: turn.engine_request.is_none().then_some(turn.ordinal),
         instructions,
         tools,
         session,
@@ -2652,6 +2865,11 @@ fn bundle(
         worktree_lease: record.worktree_lease,
         lease: record.lease,
         agent_project,
+        agent_policy,
+        hidden_paths,
+        tools_off,
+        steps: crate::master_step_limit::load(tx)?.limit,
+        time: crate::master_time_limit::load(tx)?.limit,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -3855,6 +4073,12 @@ pub(super) fn runtime(
             session_id,
             turn_id,
         }
+        | MasterRuntimeCommand::Policy {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+        }
         | MasterRuntimeCommand::AcquireProfile {
             host,
             project_id,
@@ -3884,6 +4108,13 @@ pub(super) fn runtime(
             ..
         }
         | MasterRuntimeCommand::Changes {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
+        }
+        | MasterRuntimeCommand::ServeMemory {
             host,
             project_id,
             session_id,
@@ -3932,6 +4163,12 @@ pub(super) fn runtime(
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
+        MasterRuntimeCommand::Policy { ref host, .. } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            let policy = crate::sandbox::policy::load(&tx, session.project_id.as_str()).ok();
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Policy(Box::new(policy)))
+        }
         MasterRuntimeCommand::AcquireProfile {
             ref host,
             ref attempt_id,
@@ -3969,6 +4206,19 @@ pub(super) fn runtime(
                 )?,
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
+        }
+        MasterRuntimeCommand::ServeMemory {
+            ref host,
+            ref mailbox,
+            ..
+        } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            if turn.phase != MasterTurnPhase::Running || !turn_tools(&tx, &session)? {
+                return Err(error("master_memory_turn_not_running"));
+            }
+            tx.commit().map_err(error)?;
+            crate::team::master::serve_memory_calls(db, &session.project_id, mailbox)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
         MasterRuntimeCommand::RecordChild { group, .. } => {
             super::harness_groups::record(&tx, &session.session_id, &turn.id, group)?;
@@ -4026,7 +4276,12 @@ pub(super) fn runtime(
                 turn.reason = Some(reason);
                 turn.cause = Some(cause_code(cause));
                 if turn.phase == MasterTurnPhase::Failed
-                    && cause == "native_profile_credential_unavailable"
+                    && matches!(
+                        cause.as_str(),
+                        "native_profile_credential_unavailable"
+                            | "native_profile_codex_api_key"
+                            | "native_profile_codex_token_unreadable"
+                    )
                     && let Some(attempt) = &turn.attempt
                 {
                     super::native_auth::doubt_sign_in(&tx, host, &attempt.connection)?;
@@ -4101,7 +4356,9 @@ fn rebind(
         if &bound.id != session.binding().0 {
             return Err(error("master_config_record"));
         }
-        if master_scope(&bound, &session.selection) != master_scope(config, &session.selection) {
+        if master_scope(&bound, &session.project_id, &session.selection)
+            != master_scope(config, &session.project_id, &session.selection)
+        {
             return Ok(false);
         }
     }
@@ -4160,13 +4417,42 @@ fn queue_turn(
         tasks: Vec::new(),
         changes: None,
         engine_request,
+        activity: Vec::new(),
         detail: None,
         cause: None,
     };
     let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![session.session_id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(turn.input_cursor.value())?, encode(&turn)?]).map_err(error)?;
     assert_eq!(changed, 1);
+    note_asked(tx, session, &turn)?;
     session.current_turn = Some(turn.id);
     Ok(())
+}
+
+/// Stores what a newly queued turn asked in the session's one conversation store: the
+/// owner's message, or the line of the engine's own request. Inputs: the transaction,
+/// session and turn. Output: Ok once stored.
+fn note_asked(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+    turn: &MasterTurnView,
+) -> Result<(), EngineError> {
+    use crate::master_sessions::Asked;
+    let message = match &turn.engine_request {
+        Some(_) => None,
+        None => turn_input(tx, session, turn)?,
+    };
+    let asked = match &turn.engine_request {
+        Some(request) => Asked::Engine(&request.line),
+        None => Asked::Owner(message.as_deref()),
+    };
+    crate::master_sessions::one_turn_asked(
+        tx,
+        &session.project_id,
+        &session.session_id,
+        session.selection.backend,
+        turn.id.as_str(),
+        &asked,
+    )
 }
 
 /// Keeps a Resolve the owner asked for while the master's turn was outstanding, so the
@@ -4286,6 +4572,7 @@ fn touched(action: &MasterOwnerAction) -> Option<&ProjectId> {
         MasterOwnerAction::Cancel { .. }
         | MasterOwnerAction::Close { .. }
         | MasterOwnerAction::Resolve { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => None,
     }
 }
@@ -4314,6 +4601,13 @@ fn execute(
             session_id,
             *cancel_running,
         );
+    }
+    if let MasterOwnerAction::DeleteSession {
+        project_id,
+        session_id,
+    } = action
+    {
+        return delete_session(tx, project_id, session_id, revision);
     }
     let opening = match action {
         MasterOwnerAction::Open {
@@ -4365,11 +4659,17 @@ fn execute(
         if let Some(current) = &current {
             match renew {
                 None => return Ok(reject("master_session_active")),
+                Some(_) if !crate::master_sessions::has_owner_turn(tx, &current.session_id)? => {
+                    return Ok(reject("master_session_unused"));
+                }
                 Some(false) if current.current_turn.is_some() => {
                     return Ok(reject("master_turn_running"));
                 }
                 Some(_) => {}
             }
+        }
+        if renew == Some(false) && crate::team::master::turn_running(tx, project_id)? {
+            return Ok(reject("master_turn_running"));
         }
         if !live_capacity(tx, current.is_some())? {
             return Ok(reject("master_session_capacity"));
@@ -4417,6 +4717,7 @@ fn execute(
         MasterOwnerAction::Open { .. }
         | MasterOwnerAction::NewSession { .. }
         | MasterOwnerAction::Resume { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
         }
@@ -4524,6 +4825,7 @@ fn execute(
         MasterOwnerAction::Open { .. }
         | MasterOwnerAction::NewSession { .. }
         | MasterOwnerAction::Resume { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {
             return Err(error("master_action_invalid"));
         }
@@ -4796,6 +5098,21 @@ pub(super) fn read(
         OwnerRead::ProjectMasterSessions { project_id } => OwnerData::ProjectMasterSessions {
             sessions: crate::master_sessions::list(&tx, project_id)?,
         },
+        OwnerRead::ProjectMasterMessages {
+            project_id,
+            session_id,
+            before,
+            limit,
+        } => {
+            if load_session(&tx, session_id, revision)?
+                .is_none_or(|session| &session.project_id != project_id)
+            {
+                return Err(error("master_session_missing"));
+            }
+            OwnerData::ProjectMasterMessages {
+                page: crate::master_sessions::page(&tx, project_id, session_id, *before, *limit)?,
+            }
+        }
         OwnerRead::ProjectMasterInputs {
             project_id,
             session_id,
@@ -4886,6 +5203,10 @@ mod rcli_configured_tests {
 
     mod readiness_tests {
         include!("master_session/readiness_tests.rs");
+    }
+
+    mod pruned_history_tests {
+        include!("master_session/pruned_history_tests.rs");
     }
     use crate::engine::owner::{ModelAccessCollection, Started};
     use crate::master_session::{MasterBootstrapAuth, MasterSelection, RcliConfiguredProfileProof};
@@ -5537,6 +5858,33 @@ fallback_allowed = false
     }
 
     #[tokio::test]
+    async fn a_master_turn_is_prepared_on_a_repository_whose_config_lists_more_than_64_kib() {
+        use std::fmt::Write;
+        let case = Fixture::onboarded().await;
+        case.register().await;
+        let config = case.repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        for branch in 0..1000 {
+            let name = format!("feature/scholar-scope-{branch:04}");
+            write!(
+                text,
+                "[branch \"{name}\"]\n\tremote = origin\n\tmerge = refs/heads/{name}\n"
+            )
+            .unwrap();
+        }
+        std::fs::write(&config, &text).unwrap();
+        assert!(text.len() > 100_000);
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a repository with many branches must prepare its master turn"),
+            Err(failure) => panic!("many branches must not stop a master turn: {failure:?}"),
+        };
+        assert_eq!(prepared.repository, case.repository);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        case.close().await;
+    }
+
+    #[tokio::test]
     async fn unregistered_local_rcli_is_configuration_required_without_admission_or_allocation() {
         let case = Fixture::new(false).await;
         let before = case.snapshot();
@@ -6003,6 +6351,202 @@ fallback_allowed = false
     }
 
     impl Fixture {
+        /// Starts a new session as the owner's New session does, parking the live one and
+        /// cancelling its turn, then submits `message` there. Inputs: the owner operation
+        /// name and the message. Output: the fixture bound to the new session and its turn.
+        async fn renewed(self, id: &str, message: &str) -> Self {
+            let basis = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ModelAccessPage {
+                    collection: ModelAccessCollection::Pools,
+                    cursor: None,
+                    limit: 1,
+                },
+            )
+            .await;
+            let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+                panic!("actual model source basis missing");
+            };
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::NewSession {
+                        project_id: self.session.project_id.clone(),
+                        expected_config_id: basis.config_id,
+                        expected_source_hash: source_hash,
+                        selection: Box::new(self.session.selection.clone()),
+                        cancel_running: true,
+                    },
+                },
+            )
+            .await;
+            self.submitted(&format!("{id}-submit"), message).await
+        }
+
+        /// Makes a parked session live again as the owner's Resume does, parking the live
+        /// one and cancelling its turn, then submits `message` there. Inputs: the owner
+        /// operation name, the parked session and the message. Output: the fixture bound to
+        /// that session and its new turn.
+        async fn resumed(self, id: &str, session: &SessionId, message: &str) -> Self {
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Resume {
+                        project_id: self.session.project_id.clone(),
+                        session_id: session.clone(),
+                        cancel_running: true,
+                    },
+                },
+            )
+            .await;
+            self.submitted(&format!("{id}-submit"), message).await
+        }
+
+        /// Submits `message` to the project's live session and binds the fixture to that
+        /// session and the turn it queued. Inputs: the owner operation name and the message.
+        /// Output: the rebound fixture.
+        async fn submitted(mut self, id: &str, message: &str) -> Self {
+            let project_id = self.session.project_id.clone();
+            let live = |state: OwnerReadReply| match state.data {
+                OwnerData::ProjectMaster {
+                    session: Some(session),
+                } => *session,
+                _ => panic!("actual live master session missing"),
+            };
+            let session = live(
+                owner_read(
+                    &self.storage,
+                    &self.started,
+                    OwnerRead::ProjectMaster {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .await,
+            );
+            owner_apply(
+                &self.storage,
+                &self.started,
+                id,
+                OwnerMutation::ProjectMaster {
+                    action: MasterOwnerAction::Submit {
+                        project_id: project_id.clone(),
+                        session_id: session.session_id.clone(),
+                        text: message.into(),
+                    },
+                },
+            )
+            .await;
+            let session = live(
+                owner_read(
+                    &self.storage,
+                    &self.started,
+                    OwnerRead::ProjectMaster {
+                        project_id: project_id.clone(),
+                    },
+                )
+                .await,
+            );
+            let state = owner_read(
+                &self.storage,
+                &self.started,
+                OwnerRead::ProjectMasterTurns {
+                    project_id,
+                    session_id: session.session_id.clone(),
+                    cursor: None,
+                    limit: 8,
+                },
+            )
+            .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turns missing");
+            };
+            let queued: Vec<MasterTurnView> = page
+                .turns
+                .into_iter()
+                .filter(|turn| turn.phase == MasterTurnPhase::Queued)
+                .collect();
+            assert_eq!(queued.len(), 1, "one queued turn in the live session");
+            self.session = session;
+            self.turn = queued.into_iter().next().unwrap();
+            assert_eq!(self.session.current_turn.as_ref(), Some(&self.turn.id));
+            self
+        }
+    }
+
+    const RENEWED: &str = "Name the main language of this project in one word.";
+
+    /// A session the owner started with New session prepares its turns as an opened one
+    /// does: its New session provenance is the request that created it, so the master
+    /// bootstrap admits it instead of refusing every turn with a scope conflict.
+    #[tokio::test]
+    async fn a_session_started_with_new_session_prepares_its_turns() {
+        let first = Fixture::new(true).await;
+        let opened = first.session.session_id.clone();
+        let case = first.renewed("renew-rcli-master", RENEWED).await;
+        assert_ne!(case.session.session_id, opened);
+        let proof = case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a renewed session must prepare its turn"),
+            Err(failure) => panic!("a renewed session must prepare its turn: {}", failure.0),
+        };
+        assert_eq!(prepared.text, RENEWED);
+        assert_eq!(prepared.session.session_id, case.session.session_id);
+        assert_eq!(
+            prepared.attempt.request.task_id,
+            turn_task_id(&case.session.session_id, &case.turn.id).unwrap()
+        );
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.owner_session, case.session.session_id);
+        assert_eq!(prepared.lease.task_id, case.session.bootstrap_task_id);
+        assert!(prepared.cwd.is_dir());
+        case.close().await;
+    }
+
+    /// A renewed session the owner parks and resumes keeps preparing turns: Resume keeps
+    /// the New session provenance the session was created with, and the bootstrap admits it.
+    #[tokio::test]
+    async fn a_resumed_renewed_session_prepares_its_turns() {
+        let case = Fixture::new(true)
+            .await
+            .renewed("renew-rcli-master", RENEWED)
+            .await;
+        let renewed = case.session.session_id.clone();
+        let case = case
+            .renewed("renew-rcli-master-again", PROMPT)
+            .await
+            .resumed("resume-renewed-master", &renewed, RENEWED)
+            .await;
+        assert_eq!(case.session.session_id, renewed);
+        assert_eq!(case.session.phase, MasterSessionPhase::Configured);
+        let proof = case.register().await;
+        let prepared = match case.runtime(case.prepare()).await {
+            Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+            Ok(_) => panic!("a resumed renewed session must prepare its turn"),
+            Err(failure) => panic!(
+                "a resumed renewed session must prepare its turn: {}",
+                failure.0
+            ),
+        };
+        assert_eq!(prepared.text, RENEWED);
+        assert_eq!(prepared.session.session_id, renewed);
+        assert_eq!(
+            prepared.attempt.request.task_id,
+            turn_task_id(&renewed, &case.turn.id).unwrap()
+        );
+        assert_eq!(prepared.attempt.connection, proof.connection);
+        assert_eq!(prepared.lease.state, LeaseState::Ready);
+        assert_eq!(prepared.lease.owner_session, renewed);
+        case.close().await;
+    }
+
+    impl Fixture {
         /// Stores a team plan for the fixture's project: a tools-on Claude Code master and
         /// one tools-on Codex sub-agent. Output: the stored setup.
         fn team_plan(&self) -> crate::project_setup::StoredSetup {
@@ -6325,6 +6869,41 @@ mod sign_in_gap_tests {
             );
         }
         assert_eq!(sign_in_gap(NativeAuthPhase::AuthenticatedObserved), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod activity_store_tests {
+    use super::*;
+    use crate::master_session::MasterActivityLine;
+
+    #[test]
+    #[should_panic(expected = "master turn activity is never stored")]
+    fn a_turn_read_with_its_live_activity_is_never_saved_back() {
+        let db = Connection::open_in_memory().unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        let turn = MasterTurnView {
+            id: RequestId::new("turn-1").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 1,
+            input_cursor: Cursor::new(1),
+            phase: MasterTurnPhase::Running,
+            reason: None,
+            attempt: None,
+            runtime: None,
+            reply: None,
+            accounts: Vec::new(),
+            tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
+            activity: vec![MasterActivityLine {
+                at_ms: 1,
+                text: "Reading src/app.ts".into(),
+            }],
+            detail: None,
+            cause: None,
+        };
+        let _ = save_turn(&tx, &turn);
     }
 }
 

@@ -4,12 +4,14 @@ use super::new_project_input::cells;
 use super::new_project_view::{
     Look, Row, Screen, columns, list_row, modal, research_glyph, spread, tab_strip, wrap_words,
 };
+use super::planning_line::{planning, planning_value};
 use super::project::{
-    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS, Speaker,
-    Tab, Transcript, memory_source, research_kind,
+    Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, Picks, ProjectScreen, REVIEW_ROWS,
+    RemoveChoice, Speaker, Tab, Transcript, memory_source, research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render};
+use super::project_master::{activity_rows, last_activity};
 use super::project_time::{clock, duration};
 use super::sessions::Sessions;
 use crate::project_setup::{
@@ -18,6 +20,43 @@ use crate::project_setup::{
 use ratatui::style::Style;
 
 const SPINNER: &str = "\u{283c}";
+const REMOVE_BOX: usize = 64;
+const REMOVE_BOX_MIN: usize = 32;
+const REMOVE_FOLDERS_SHOWN: usize = 3;
+const REMOVE_LOSSES_SHOWN: usize = 6;
+
+/// The project tabs for the tab strip: each label after its section glyph, with the count of
+/// running agents on Agents. When the labels with glyphs and the narrowest gaps do not fit
+/// the width, the glyphs go. Inputs: the running count, the width and the look. Output: the
+/// labels and counts in tab order.
+pub(in crate::tui) fn tab_items(
+    running: usize,
+    width: usize,
+    look: &Look,
+) -> Vec<(String, String)> {
+    let glyphed: usize = Tab::ALL
+        .iter()
+        .map(|tab| cells(look.glyph(tab.glyph())) + 1 + cells(tab.label()))
+        .sum::<usize>()
+        + 2 * (Tab::ALL.len() - 1)
+        + 2;
+    Tab::ALL
+        .iter()
+        .map(|tab| {
+            let count = if *tab == Tab::Agents && running > 0 {
+                running.to_string()
+            } else {
+                String::new()
+            };
+            let label = if glyphed <= width {
+                format!("{} {}", look.glyph(tab.glyph()), tab.label())
+            } else {
+                tab.label().to_owned()
+            };
+            (label, count)
+        })
+        .collect()
+}
 
 /// Draws one project tab with its tab strip, header status and help keys.
 /// Takes the screen state, the frame size and the look; the reader caches rendered reports.
@@ -32,22 +71,14 @@ pub(in crate::tui) fn project_screen(
     let body_height = usize::from(height).saturating_sub(4);
     let content = width.saturating_sub(4);
     let running = screen.counts().0;
-    let items: Vec<(String, String)> = Tab::ALL
-        .iter()
-        .map(|tab| {
-            let count = if *tab == Tab::Agents && running > 0 {
-                running.to_string()
-            } else {
-                String::new()
-            };
-            (
-                format!("{} {}", look.glyph(tab.glyph()), tab.label()),
-                count,
-            )
-        })
-        .collect();
+    let items = tab_items(running, width, look);
     let mut rows: Vec<Row> = tab_strip(width, &items, screen.tab as usize, look).into();
-    let room = body_height.saturating_sub(2);
+    let composer = screen.tab == Tab::Conversation && screen.typing;
+    let banner = screen.recovery.rows(content, look, composer);
+    let room = body_height.saturating_sub(2 + banner.len());
+    for line in banner {
+        rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
+    }
     let mut crumbs = vec!["Home".to_owned(), screen.name.clone()];
     if screen.tab != Tab::Overview {
         crumbs.push(screen.tab.label().to_owned());
@@ -57,6 +88,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Conversation => conversation(screen, content, room, look),
         Tab::Agents => agents(screen, width, content, room, look),
         Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
+        Tab::Questions => screen.questions.rows(content, room, screen.offset, look),
         Tab::Context => {
             if screen.reading
                 && width < 100
@@ -139,7 +171,7 @@ pub(in crate::tui) fn project_screen(
         } else {
             Row::of(
                 format!(
-                    "Lines {}-{end} of {}. Read to the end to save it.",
+                    "Lines {}-{end} of {}. Read to the end to save or edit it.",
                     review.scroll + 1,
                     lines.len()
                 ),
@@ -155,12 +187,7 @@ pub(in crate::tui) fn project_screen(
                 ("Esc", "Back"),
             ]
         } else {
-            vec![
-                ("Down", "Read on"),
-                ("e", "Edit first"),
-                ("n", "Dismiss"),
-                ("Esc", "Back"),
-            ]
+            vec![("Down", "Read on"), ("n", "Dismiss"), ("Esc", "Back")]
         };
         return Screen {
             rows,
@@ -284,27 +311,126 @@ pub(in crate::tui) fn project_screen(
             status: header_status(running, look),
         };
     }
-    if screen.confirm_remove {
-        let mut body = vec![Row::of(
-            format!("Remove {} from CrazyAgent?", screen.name),
-            look.fg,
-        )];
-        body.extend(
-            wrap_words(
-                "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
-                50,
-            )
-            .into_iter()
-            .map(|line| Row::of(line, look.muted)),
+    if let Some(hidden) = &screen.hidden {
+        let field = 52;
+        let (_, (_, column)) = hidden.input.wrap(16384);
+        let value: Vec<char> = hidden.input.value().chars().collect();
+        let start = column.saturating_sub(field - 1);
+        let shown: String = value.iter().skip(start).take(field).collect();
+        let mut body: Vec<Row> = wrap_words(
+            "Folders inside the project that agents, the master and research jobs can't read, write or run. Separate them with a colon. Each must be a folder inside the project that git does not track.",
+            56,
+        )
+        .into_iter()
+        .map(|line| Row::of(line, look.muted))
+        .collect();
+        if screen
+            .agent_policy
+            .as_ref()
+            .is_some_and(|view| view.access == crate::sandbox::policy::AgentAccess::Full)
+        {
+            body.push(Row::default());
+            body.extend(
+                wrap_words(
+                    "Full access runs agents without a sandbox, so hidden folders do not apply.",
+                    56,
+                )
+                .into_iter()
+                .map(|line| Row::of(line, look.warning)),
+            );
+        }
+        body.push(Row::default());
+        let at = body.len();
+        body.push(
+            Row::of("[", look.accent)
+                .push(" ", Style::new())
+                .cat(Row::of(shown, look.fg).pad(field))
+                .push(" ", Style::new())
+                .push("]", look.accent),
         );
         body.push(Row::default());
-        body.push(
-            Row::of("[ Remove project ]", look.fg)
-                .push("   ", Style::new())
-                .push("[> Keep project ]", look.selection),
+        body.extend(
+            hidden
+                .error
+                .iter()
+                .flat_map(|error| wrap_words(error, 56))
+                .map(|line| Row::of(line, look.error)),
         );
-        rows = modal(&rows, width, 56, "Remove project", body, 5, look);
-        help = vec![("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")];
+        body.push(if hidden.busy {
+            Row::of(format!("{SPINNER} Saving..."), look.running)
+        } else {
+            Row::of("[> Save hidden folders ]", look.selection).push("   [ Cancel ]", look.fg)
+        });
+        let top = 4;
+        let box_left = width.saturating_sub(62) / 2;
+        rows = modal(&rows, width, 62, "Hidden folders", body, top, look);
+        help = if hidden.busy {
+            vec![("Esc", "Close")]
+        } else {
+            vec![("Enter", "Save hidden folders"), ("Esc", "Cancel")]
+        };
+        let cursor = (!hidden.busy).then(|| {
+            (
+                (box_left + 4 + column - start) as u16,
+                (top + 1 + at) as u16,
+            )
+        });
+        return Screen {
+            rows,
+            cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if let Some(access) = &screen.access {
+        let top = 4;
+        let body = access.rows(look, body_height.saturating_sub(top + 2));
+        rows = modal(&rows, width, 62, "Agent access", body, top, look);
+        help = if access.busy {
+            vec![("Esc", "Close")]
+        } else if access.confirm_full {
+            vec![("y", "Allow Full access"), ("n", "Keep")]
+        } else {
+            vec![
+                ("Up/Down", "Move"),
+                ("Left/Right", "Change"),
+                ("Enter", "Save"),
+                ("Esc", "Cancel"),
+            ]
+        };
+        return Screen {
+            rows,
+            cursor: None,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if screen.confirm_remove {
+        let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
+        let (body, keys) = remove_ask(screen, box_width - 4, look);
+        rows = modal(&rows, width, box_width, "Remove project", body, 2, look);
+        help = keys;
+    }
+    if screen.confirm_move {
+        let box_width = REMOVE_BOX.min(width).max(REMOVE_BOX_MIN);
+        let body = move_ask(screen, box_width - 4, look);
+        rows = modal(
+            &rows,
+            width,
+            box_width,
+            "Move into CrazyAgent folder",
+            body,
+            2,
+            look,
+        );
+        help = vec![
+            ("m", "Move"),
+            ("c", "Copy"),
+            ("n", "Keep it here"),
+            ("Esc", "Keep it here"),
+        ];
     }
     if let Some(path) = &screen.confirm_delete {
         let name = path.rsplit('/').next().unwrap_or(path).to_owned();
@@ -343,6 +469,25 @@ pub(in crate::tui) fn project_screen(
             ("n", "Keep running"),
             ("Esc", "Keep running"),
         ];
+    }
+    if screen.confirm_plan.is_some() {
+        let mut body = vec![Row::of("Replace the roadmap?", look.fg)];
+        body.extend(
+            wrap_words(
+                "Planning writes roadmap.md and release-process.md again from the brief and research. Your edits to them are lost.",
+                50,
+            )
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+        );
+        body.push(Row::default());
+        body.push(
+            Row::of("[ Replace ]", look.fg)
+                .push("   ", Style::new())
+                .push("[> Keep ]", look.selection),
+        );
+        rows = modal(&rows, width, 56, "Plan roadmap", body, 5, look);
+        help = vec![("y", "Replace"), ("n", "Keep"), ("Esc", "Keep")];
     }
     if let Some(cursor) = screen.pool_picker {
         let mut body = vec![
@@ -429,6 +574,150 @@ fn header_status(running: usize, look: &Look) -> Option<Row> {
 }
 
 type Help = Vec<(&'static str, &'static str)>;
+
+/// What the move ask says about the team and its work before a project moves.
+pub(in crate::tui) const MOVE_ASK_TEAM: &str = "Stop the team first (Stop all on the Team tab). Work not landed yet stays in the agents' copies, which follow the move.";
+
+/// What the move ask says about its two ways.
+pub(in crate::tui) const MOVE_ASK_WAYS: &str = "Move takes the folder into your CrazyAgent folder. Copy leaves the old folder where it is and the project uses the copy.";
+
+/// Draws the move ask: that the team must be stopped and its work follows, then Move, Copy
+/// or keeping the project where it is. Inputs: the screen, the box's inner width and the
+/// look. Output: the box rows.
+fn move_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> Vec<Row> {
+    assert!(inner >= REMOVE_BOX_MIN - 4);
+    let mut body = vec![
+        Row::of(
+            format!("Move {} into your CrazyAgent folder?", screen.name),
+            look.fg,
+        ),
+        Row::default(),
+    ];
+    for text in [MOVE_ASK_TEAM, MOVE_ASK_WAYS] {
+        body.extend(
+            wrap_words(text, inner)
+                .iter()
+                .map(|line| Row::of(line.as_str(), look.muted)),
+        );
+        body.push(Row::default());
+    }
+    body.push(
+        Row::of("[ m Move ]", look.fg)
+            .push("   ", Style::new())
+            .push("[ c Copy ]", look.fg)
+            .push("   ", Style::new())
+            .push("[> Keep it here ]", look.selection),
+    );
+    body
+}
+
+/// Draws the remove ask: Remove from dashboard, which keeps every file, and Delete everything
+/// when the engine's preview allows it, with the folders it moves to the Trash, what would be
+/// lost and the name typed so far, or else the engine's reason it is not offered. Inputs: the
+/// screen, the box's inner width and the look. Output: the box rows and the help keys.
+fn remove_ask(screen: &ProjectScreen, inner: usize, look: &Look) -> (Vec<Row>, Help) {
+    assert!(inner >= REMOVE_BOX_MIN - 4);
+    let removal = screen.removal.as_ref();
+    let can_delete = removal.is_some_and(|removal| removal.can_delete);
+    let everything = screen.remove_choice == RemoveChoice::Everything;
+    assert!(!everything || can_delete);
+    let name = removal.map_or(screen.name.as_str(), |removal| removal.name.as_str());
+    let pick = |chosen: bool, label: &str| {
+        let mark = if chosen { "(*)" } else { "( )" };
+        let style = if chosen { look.selection } else { look.fg };
+        Row::of(format!("{mark} {label}"), style)
+    };
+    let indented = |line: &str, style: Style| Row::of(format!("    {line}"), style);
+    let mut body = vec![
+        Row::of(format!("Remove {name} from CrazyAgent?"), look.fg),
+        Row::default(),
+        pick(!everything, "Remove from dashboard (keep files)"),
+    ];
+    body.extend(
+        wrap_words(
+            "Its master conversation ends, its research and agents stop and CrazyAgent forgets it. The project folder stays on disk, with every file in it.",
+            inner - 4,
+        )
+        .iter()
+        .map(|line| indented(line, look.muted)),
+    );
+    match removal {
+        None => {
+            body.push(Row::default());
+            body.push(Row::of("Reading what removing would do...", look.muted));
+        }
+        Some(removal) if removal.can_delete => {
+            body.push(Row::default());
+            body.push(pick(everything, "Delete everything"));
+            body.push(indented("Moves to the Trash:", look.muted));
+            for folder in removal.folders.iter().take(REMOVE_FOLDERS_SHOWN) {
+                for line in wrap_words(folder, inner - 6) {
+                    body.push(indented(&format!("  {line}"), look.fg));
+                }
+            }
+            if removal.folders.len() > REMOVE_FOLDERS_SHOWN {
+                let more = removal.folders.len() - REMOVE_FOLDERS_SHOWN;
+                body.push(indented(&format!("  and {more} more"), look.muted));
+            }
+            let losses = crate::team::cleanup::loss_lines(removal);
+            if losses.is_empty() {
+                body.push(indented(
+                    "No agent is running and no work is unlanded.",
+                    look.muted,
+                ));
+            }
+            for loss in losses.iter().take(REMOVE_LOSSES_SHOWN) {
+                for line in wrap_words(loss, inner - 4) {
+                    body.push(indented(&line, look.warning));
+                }
+            }
+            if losses.len() > REMOVE_LOSSES_SHOWN {
+                let more = losses.len() - REMOVE_LOSSES_SHOWN;
+                body.push(indented(&format!("and {more} more"), look.warning));
+            }
+            let typed = if everything { look.fg } else { look.muted };
+            body.push(indented(
+                &format!("Type the project name: {}", screen.remove_typed),
+                typed,
+            ));
+        }
+        Some(removal) => {
+            let blocked = removal.blocked.as_deref().unwrap_or_default();
+            if !blocked.is_empty() {
+                body.push(Row::default());
+                for line in wrap_words(blocked, inner - 4) {
+                    body.push(indented(&line, look.muted));
+                }
+            }
+        }
+    }
+    body.push(Row::default());
+    let send = if everything {
+        "[ Delete everything ]"
+    } else {
+        "[ Remove project ]"
+    };
+    body.push(
+        Row::of(send, look.fg)
+            .push("   ", Style::new())
+            .push("[> Keep project ]", look.selection),
+    );
+    let help = match (everything, can_delete) {
+        (true, _) => vec![
+            ("Enter", "Delete everything"),
+            ("Up/Down", "Choose"),
+            ("Esc", "Keep"),
+        ],
+        (false, true) => vec![
+            ("y", "Remove"),
+            ("Up/Down", "Choose"),
+            ("n", "Keep"),
+            ("Esc", "Keep"),
+        ],
+        (false, false) => vec![("y", "Remove"), ("n", "Keep"), ("Esc", "Keep")],
+    };
+    (body, help)
+}
 type Drawn = (Vec<Row>, Option<(usize, usize)>, Help);
 
 const PICKER_ROWS: usize = 8;
@@ -519,19 +808,41 @@ fn title(screen: &ProjectScreen, content: usize, look: &Look) -> Row {
     spread(content, name, path)
 }
 
+/// Draws the roadmap planning line under the Work rows once the jobs are read.
+/// Takes the screen and the look. Returns the row, or none before the jobs are read.
+fn roadmap_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    let jobs = screen.jobs.as_ref()?;
+    Some(
+        Row::of("  ", Style::new())
+            .cat(Row::of("Roadmap", look.fg).pad(24))
+            .cat(planning_value(&planning(jobs), look)),
+    )
+}
+
+/// Draws the roadmap status line under the planning line once the jobs are read.
+/// Takes the screen and the look. Returns the row, or none before the jobs are read.
+fn roadmap_status_row(screen: &ProjectScreen, look: &Look) -> Option<Row> {
+    screen.jobs.as_ref()?;
+    Some(
+        Row::of("  ", Style::new())
+            .cat(Row::of("Roadmap status", look.fg).pad(24))
+            .cat(screen.roadmap.value(look, screen.now_ms)),
+    )
+}
+
 fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> Vec<Row> {
-    let Some(setup) = &screen.setup else {
+    if screen.setup.is_none() {
         return vec![Row::of("Loading...", look.muted)];
-    };
-    if setup.research.is_empty() {
+    }
+    let kinds = screen.work_kinds();
+    if kinds.is_empty() {
         return vec![Row::of(
             "  No research was picked for this project.",
             look.muted,
         )];
     }
     let suggested = screen.suggested().len();
-    setup
-        .research
+    kinds
         .iter()
         .enumerate()
         .map(|(index, kind)| {
@@ -735,6 +1046,8 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
         left.extend(needs_you(screen, look));
         left.push(Row::of("Work", look.heading));
         left.extend(work_rows(screen, look, true, left_width));
+        left.extend(roadmap_row(screen, look));
+        left.extend(roadmap_status_row(screen, look));
         let mut right = vec![Row::of("Team", look.heading)];
         if let Some(setup) = &screen.setup {
             let team = &setup.team;
@@ -808,6 +1121,8 @@ fn overview(screen: &ProjectScreen, width: usize, content: usize, look: &Look) -
     lines.extend(needs_you(screen, look));
     lines.push(Row::of("Work", look.heading));
     lines.extend(work_rows(screen, look, false, content));
+    lines.extend(roadmap_row(screen, look));
+    lines.extend(roadmap_status_row(screen, look));
     lines.push(Row::default());
     lines.push(
         Row::of("Team", look.heading)
@@ -901,17 +1216,21 @@ fn transcript_lines(
             }
         }
     }
-    if let MasterStatus::Thinking { since_ms } = transcript.status {
-        lines.push(
-            Row::of(SPINNER, look.running)
-                .push(" Thinking...", look.fg)
-                .push(
-                    since_ms
-                        .map(|since| format!("  {}", duration(screen.now_ms - since)))
-                        .unwrap_or_default(),
-                    look.muted,
-                ),
-        );
+    if let MasterStatus::Thinking { since_ms, activity } = &transcript.status {
+        let detail = since_ms
+            .map(|since| duration(screen.now_ms - since))
+            .into_iter()
+            .chain(last_activity(activity, screen.now_ms))
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+        let mut row = Row::of(SPINNER, look.running).push(" Thinking...", look.fg);
+        if !detail.is_empty() {
+            row = row.push(format!("  {detail}"), look.muted);
+        }
+        lines.push(row);
+        for (age, text) in activity_rows(activity, screen.activity_open, screen.now_ms) {
+            lines.push(Row::of(format!("  {age:>10}  {text}"), look.muted));
+        }
     }
     lines
 }
@@ -1183,6 +1502,7 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
                 ("/", "Commands"),
                 ("@", "Tag"),
                 ("PgUp", "Scroll"),
+                ("Ctrl-T", "Team"),
                 TABS,
                 ("Esc", esc),
             ]
@@ -1207,6 +1527,14 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
         if !screen.typing {
             let at = help.len().saturating_sub(2);
             help.splice(at..at, Sessions::conversation_help());
+        }
+        if screen.more_activity() {
+            let label = if screen.activity_open {
+                "Less activity"
+            } else {
+                "All activity"
+            };
+            help.insert(help.len().saturating_sub(2), ("Ctrl-O", label));
         }
         let input = if screen.typing {
             prompt
@@ -1300,6 +1628,7 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         ("t", "Team"),
         TABS,
         ("Esc", "Home"),
+        ("s", "Team settings"),
     ]);
     if screen.pool_ready && !screen.pool.as_ref().is_some_and(|pool| pool.assigned) {
         lines.push(Row::of(
@@ -1374,12 +1703,16 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
                 ),
                 look.muted,
             ),
-            (_, Some(start), None) => Row::of(
+            (ResearchStatus::Running, Some(start), None) => Row::of(
                 format!(
                     "Started {}, running {}",
                     clock(start, screen.offset),
                     duration(screen.now_ms - start)
                 ),
+                look.muted,
+            ),
+            (_, Some(start), None) => Row::of(
+                format!("Started {}", clock(start, screen.offset)),
                 look.muted,
             ),
             _ => Row::of(
@@ -1395,7 +1728,7 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         if let Some(error) = job
             .error
             .as_ref()
-            .filter(|_| job.status == ResearchStatus::Failed)
+            .filter(|_| matches!(job.status, ResearchStatus::Failed | ResearchStatus::Queued))
         {
             for line in wrap_words(error, content) {
                 lines.push(Row::of(line, look.fg));
@@ -1510,10 +1843,20 @@ pub(in crate::tui) fn activity(
     steps
 }
 
+/// Where the Context tab says a file linked from the repository comes from.
+pub(in crate::tui) const LINKED_SOURCE: &str = "Linked from your repo";
+
 fn source(screen: &ProjectScreen, item: &ContextItem, look: &Look) -> (Row, Row) {
+    if item.linked {
+        return (Row::default(), Row::of(LINKED_SOURCE, look.muted));
+    }
     match item.kind {
         ContextKind::Brief => (Row::default(), Row::of("Project brief", look.muted)),
         ContextKind::Document => (Row::default(), Row::of("You added it", look.muted)),
+        ContextKind::Plan => (
+            Row::default(),
+            Row::of("Planned after research", look.muted),
+        ),
         ContextKind::Research => {
             let label = research_kind(&item.path).map_or("Research", |kind| kind.label());
             match screen.job_for(&item.path) {
@@ -1666,16 +2009,18 @@ fn context(
             vec![
                 ("y", "Save to memory"),
                 ("n", "Dismiss"),
-                ("o", "Open in editor"),
+                ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
+                ("v", "Edit file"),
             ]
         } else {
             vec![
                 ("m", "Save to memory"),
-                ("o", "Open in editor"),
+                ("o", "Open in app"),
                 ("PgDn", "Scroll"),
                 ("Esc", "Back to files"),
+                ("v", "Edit file"),
             ]
         };
         return (preview_rows(screen, content, room, look), None, help);
@@ -1683,11 +2028,13 @@ fn context(
     let help = vec![
         ("Enter", "Open"),
         ("a", "Add file"),
-        ("o", "Open in editor"),
+        ("o", "Open in app"),
         ("d", "Delete"),
         ("m", "Save to memory"),
+        ("v", "Edit file"),
         TABS,
         ("Esc", "Home"),
+        ("O", "Open in IDE"),
     ];
     let mut lines = vec![
         spread(
@@ -1861,13 +2208,29 @@ fn general_form(general: &GeneralEdit, content: usize, look: &Look) -> Drawn {
 /// The Settings line for a project's extra read-only folders: how many, or loading.
 /// Takes the screen and look. Returns the row with its edit key.
 fn folders_line(screen: &ProjectScreen, look: &Look) -> Row {
-    let text = match screen.read_paths.as_deref() {
+    let text = match screen
+        .read_paths
+        .as_ref()
+        .map(|saved| saved.paths.as_slice())
+    {
         None => "Loading...".to_owned(),
         Some([]) => "Toolchains only".to_owned(),
         Some([one]) => one.clone(),
         Some(many) => format!("{} extra read-only folders", many.len()),
     };
     Row::of(text, look.fg).push("   f Edit read-only folders", look.muted)
+}
+
+/// The Settings line for a project's hidden folders: how many, or loading.
+/// Takes the screen and look. Returns the row with its edit key.
+fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
+    let text = match screen.hidden_paths.as_deref() {
+        None => "Loading...".to_owned(),
+        Some([]) => "None hidden".to_owned(),
+        Some([one]) => one.clone(),
+        Some(many) => format!("{} hidden folders", many.len()),
+    };
+    Row::of(text, look.fg).push("   k Edit hidden folders", look.muted)
 }
 
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
@@ -1895,7 +2258,9 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry(
             "Folder",
-            Row::of(folder(screen), look.fg).push("   x Remove project", look.muted),
+            Row::of(folder(screen), look.fg)
+                .push("   x Remove project", look.muted)
+                .push("   m Move into CrazyAgent folder", look.muted),
         ),
         entry("Pool", pool),
         entry(
@@ -1910,13 +2275,32 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
+        entry("Hidden", hidden_line(screen, look)),
+        entry(
+            "Access",
+            Row::of(
+                super::project_access::summary(screen.agent_policy.as_ref()),
+                look.fg,
+            )
+            .push("   c Agent access", look.muted),
+        ),
         entry(
             "Process",
             Row::of("Instructions for this project's agents", look.fg)
                 .push("   i Edit", look.muted),
         ),
-        Row::default(),
+        entry(
+            "Roadmap",
+            match &screen.jobs {
+                Some(jobs) => planning_value(&planning(jobs), look),
+                None => Row::of("Loading...", look.muted),
+            },
+        ),
+        entry("Status", screen.roadmap.value(look, screen.now_ms)),
     ];
+    if room.saturating_sub(lines.len()) > screen.plugins.floor() {
+        lines.push(Row::default());
+    }
     let (plugins, mut help) = screen
         .plugins
         .rows(content, room.saturating_sub(lines.len()), look);

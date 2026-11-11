@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  accountCatalog, addAccount, checkAccount, localModels, poolSummaries, savePool, POOL_MEMBER_MAX,
-  type AccountProvider, type AccountView, type ProviderEntry, type Result, type SignInMethodEntry,
+  accountCatalog, addAccount, checkAccount, localModels, plainError, poolSummaries, savePool, POOL_MEMBER_MAX,
+  type AccountCheck, type AccountProvider, type AccountView, type ProviderEntry, type Result, type SignInMethodEntry,
 } from "../../api";
 import type { NativeAuthMethod } from "../../native-auth";
 import { useAppSession, useLoad } from "../../state";
@@ -125,12 +125,14 @@ export function nameError(text: string): string | undefined {
 }
 
 /** The Account added line for a method. Inputs: the method entry, the saved account and, for
- * URL accounts, the check result. Output: the line. */
-export function addedLine(entry: SignInMethodEntry, account: AccountView, check?: Result<{ models: string[] }>): string {
+ * URL accounts, the engine's check: its fresh account status and listed models. Output: the line. */
+export function addedLine(entry: SignInMethodEntry, account: AccountView, check?: Result<AccountCheck>): string {
   if (entry.method === "api_key") return "Key saved. CrazyAgent will check it the first time an agent uses it.";
   if (entry.method === "subscription") return account.status === "signed_in" ? "Signed in." : "Saved. Sign in from the account when you're ready.";
   if (!check) return "Saved. Checking the connection...";
   if (check.kind !== "ok") return check.kind === "not_ready" ? "Saved." : `Saved. ${check.message}`;
+  if (check.value.account.status === "unreachable") return `Saved. ${plainError("account_url_unreachable")}`;
+  if (check.value.account.status === "not_signed_in") return "Saved. This URL didn't accept the key. Check it and try again.";
   const count = check.value.models.length;
   return `Connected. ${count} ${count === 1 ? "model" : "models"} found.`;
 }

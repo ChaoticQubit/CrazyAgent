@@ -298,10 +298,18 @@ fn no_repository_hook_runs_during_commit_diff_or_accept() {
     let workspace = fx.workspace(&worktree, &git_dir);
     let id = record_one(&db, &workspace);
     fx.assert_marker_absent("record_turn_end");
-    let _ = landing::diff(&db, &id, 0).expect("diff");
+    let _ = landing::diff(&db, &id, &reviewed_head(&db, &fx.project, &id), 0).expect("diff");
     fx.assert_marker_absent("diff");
     let head = reviewed_head(&db, &fx.project, &id);
-    let _ = landing::accept(&db, &fx.owner_home, &id, &head, None).expect("accept");
+    let _ = landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &head,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .expect("accept");
     fx.assert_marker_absent("accept");
 }
 
@@ -315,10 +323,17 @@ fn no_filter_driver_runs_during_commit_diff_or_accept() {
     let workspace = fx.workspace(&worktree, &git_dir);
     let id = record_one(&db, &workspace);
     fx.assert_marker_absent("record_turn_end");
-    let _ = landing::diff(&db, &id, 0).expect("diff");
+    let _ = landing::diff(&db, &id, &reviewed_head(&db, &fx.project, &id), 0).expect("diff");
     fx.assert_marker_absent("diff");
     let head = reviewed_head(&db, &fx.project, &id);
-    match landing::accept(&db, &fx.owner_home, &id, &head, None) {
+    match landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &head,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    ) {
         Ok(_) => {}
         Err(EngineError(code)) => assert_eq!(
             code, "changes_git_unsupported",
@@ -338,7 +353,7 @@ fn no_fsmonitor_runs_during_commit_or_diff() {
     let workspace = fx.workspace(&worktree, &git_dir);
     let id = record_one(&db, &workspace);
     fx.assert_marker_absent("record_turn_end");
-    let _ = landing::diff(&db, &id, 0).expect("diff");
+    let _ = landing::diff(&db, &id, &reviewed_head(&db, &fx.project, &id), 0).expect("diff");
     fx.assert_marker_absent("diff");
 }
 
@@ -378,7 +393,7 @@ fn a_crafted_worktree_dot_git_file_does_not_redirect_the_engine() {
     let workspace = fx.workspace(&worktree, &git_dir);
     let id = record_one(&db, &workspace);
     fx.assert_marker_absent("record_turn_end with a crafted worktree .git file");
-    let _ = landing::diff(&db, &id, 0).expect("diff");
+    let _ = landing::diff(&db, &id, &reviewed_head(&db, &fx.project, &id), 0).expect("diff");
     fx.assert_marker_absent("diff with a crafted worktree .git file");
 }
 
@@ -400,12 +415,17 @@ fn no_hook_or_filter_runs_during_update_or_discard() {
     fx.assert_marker_absent("discard");
 }
 
+/// Crafted entries an agent leaves in its tree are marked in the diff: a symlink, an
+/// executable, `.gitattributes` and `.gitmodules`. A crafted gitlink never reaches a diff:
+/// the turn end refuses any change that records an embedded repository (mode 160000) as
+/// `changes_embedded_repository` before a change set holds it (998cd3a0, the landing
+/// backstop of the sandbox's nested `.git` deny), so its refusal is what is asserted.
 #[test]
 fn crafted_tree_entries_are_marked_in_the_diff() {
     let fx = Fixture::new();
     let db = fx.store();
     let (worktree, git_dir) = fx.worktree("agent-1");
-    std::os::unix::fs::symlink("/etc/passwd", worktree.join("link")).unwrap();
+    std::os::unix::fs::symlink("tracked.txt", worktree.join("link")).unwrap();
     let script = worktree.join("run.sh");
     std::fs::write(&script, "#!/bin/sh\necho hi\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -415,17 +435,9 @@ fn crafted_tree_entries_are_marked_in_the_diff() {
         "[submodule \"dep\"]\n\tpath = dep\n\turl = ./dep\n",
     )
     .unwrap();
-    let dep = worktree.join("dep");
-    std::fs::create_dir(&dep).unwrap();
-    git(&dep, &["init", "-b", "main"]);
-    git(&dep, &["config", "user.name", "Dep Example"]);
-    git(&dep, &["config", "user.email", "dep@example.invalid"]);
-    std::fs::write(dep.join("seed.txt"), "seed\n").unwrap();
-    git(&dep, &["add", "seed.txt"]);
-    git(&dep, &["commit", "-m", "dep base"]);
     let workspace = fx.workspace(&worktree, &git_dir);
     let id = record_one(&db, &workspace);
-    let diff = landing::diff(&db, &id, 0).expect("diff");
+    let diff = landing::diff(&db, &id, &reviewed_head(&db, &fx.project, &id), 0).expect("diff");
     let kind = |path: &str| diff.files.iter().find(|f| f.path == path).map(|f| f.kind);
     let marks = |path: &str| {
         diff.files
@@ -437,7 +449,6 @@ fn crafted_tree_entries_are_marked_in_the_diff() {
     assert_eq!(kind("link"), Some(FileKind::Symlink), "{diff:?}");
     assert!(marks("link").contains(&FileMark::Symlink), "{diff:?}");
     assert!(marks("run.sh").contains(&FileMark::Executable), "{diff:?}");
-    assert_eq!(kind("dep"), Some(FileKind::Gitlink), "{diff:?}");
     assert!(
         marks(".gitattributes").contains(&FileMark::Attributes),
         "{diff:?}"
@@ -446,6 +457,22 @@ fn crafted_tree_entries_are_marked_in_the_diff() {
         marks(".gitmodules").contains(&FileMark::Modules),
         "{diff:?}"
     );
+
+    let dep = worktree.join("dep");
+    std::fs::create_dir(&dep).unwrap();
+    git(&dep, &["init", "-b", "main"]);
+    git(&dep, &["config", "user.name", "Dep Example"]);
+    git(&dep, &["config", "user.email", "dep@example.invalid"]);
+    std::fs::write(dep.join("seed.txt"), "seed\n").unwrap();
+    git(&dep, &["add", "seed.txt"]);
+    git(&dep, &["commit", "-m", "dep base"]);
+    match landing::record_turn_end(&db, &workspace, &turn()) {
+        Err(EngineError(code)) => assert_eq!(
+            code, "changes_embedded_repository",
+            "a crafted gitlink is refused at the turn end, never marked in a diff"
+        ),
+        Ok(outcome) => panic!("an embedded repository was recorded: {outcome:?}"),
+    }
 }
 
 #[test]
@@ -486,7 +513,15 @@ fn accept_refuses_a_dirty_owner_checkout_and_changes_nothing() {
     let expected = reviewed_head(&db, &fx.project, &id);
     std::fs::write(fx.repo.join("tracked.txt"), "owner uncommitted\n").unwrap();
     let before = checkout_state(&fx.repo);
-    let err = landing::accept(&db, &fx.owner_home, &id, &expected, None).unwrap_err();
+    let err = landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &expected,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap_err();
     assert_eq!(err.0, "changes_owner_dirty");
     assert_eq!(
         checkout_state(&fx.repo),
@@ -505,7 +540,15 @@ fn accept_refuses_a_detached_owner_head_and_changes_nothing() {
     let expected = reviewed_head(&db, &fx.project, &id);
     git(&fx.repo, &["checkout", "--detach"]);
     let before = checkout_state(&fx.repo);
-    let err = landing::accept(&db, &fx.owner_home, &id, &expected, None).unwrap_err();
+    let err = landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &expected,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap_err();
     assert_eq!(err.0, "changes_detached_head");
     assert_eq!(
         checkout_state(&fx.repo),
@@ -528,7 +571,15 @@ fn accept_refuses_a_mid_operation_owner_checkout_and_changes_nothing() {
     )
     .unwrap();
     let before = checkout_state(&fx.repo);
-    let err = landing::accept(&db, &fx.owner_home, &id, &expected, None).unwrap_err();
+    let err = landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &expected,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap_err();
     assert_eq!(err.0, "changes_git_busy");
     assert_eq!(
         checkout_state(&fx.repo),
@@ -551,7 +602,15 @@ fn accept_moves_the_branch_only_by_compare_and_swap() {
     git(&fx.repo, &["commit", "-m", "owner commit"]);
     let moved = fx.head();
     assert_ne!(expected, unreviewed);
-    let err = landing::accept(&db, &fx.owner_home, &id, &unreviewed, None).unwrap_err();
+    let err = landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &unreviewed,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .unwrap_err();
     assert!(
         err.0 == "changes_stale" || err.0 == "changes_branch_moved",
         "an expected head the owner did not review must be refused, got {}",
@@ -562,8 +621,15 @@ fn accept_moves_the_branch_only_by_compare_and_swap() {
         moved,
         "a refused compare-and-swap moved the branch"
     );
-    match landing::accept(&db, &fx.owner_home, &id, &expected, None)
-        .expect("accept at the real tip")
+    match landing::accept(
+        &db,
+        &fx.owner_home,
+        &id,
+        &expected,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    )
+    .expect("accept at the real tip")
     {
         landing::AcceptOutcome::Landed { commit, branch } => {
             assert_eq!(branch, "main");

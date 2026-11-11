@@ -18,7 +18,14 @@ const PROJECT_FOLDER_TITLE: &str = "Choose the project folder to add.";
 #[cfg(target_os = "linux")]
 const PROJECTS_HOME_TITLE: &str = "Choose the folder that holds your projects.";
 #[cfg(target_os = "linux")]
+const MEMORY_FOLDER_TITLE: &str = "Choose a folder of markdown memory files to import.";
+#[cfg(target_os = "linux")]
+const PLUGIN_FOLDER_TITLE: &str = "Choose a plugin folder. Its hooks are added.";
+#[cfg(target_os = "linux")]
 const DOCUMENTS_TITLE: &str = "Choose documents to add";
+#[cfg(target_os = "linux")]
+const INSTRUCTIONS_TITLE: &str =
+    "Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
 const CANCELED: &str = "(-128)";
@@ -35,6 +42,13 @@ pub const PROJECT_FOLDER_SCRIPT: &str =
 pub const PROJECTS_HOME_SCRIPT: &str =
     "POSIX path of (choose folder with prompt \"Choose the folder that holds your projects.\")";
 
+/// The macOS folder chooser for a folder of markdown memory files to import. Fixed text.
+pub const MEMORY_FOLDER_SCRIPT: &str = "POSIX path of (choose folder with prompt \"Choose a folder of markdown memory files to import.\")";
+
+/// The macOS folder chooser for a Claude Code plugin folder whose hooks are added. Fixed text.
+pub const PLUGIN_FOLDER_SCRIPT: &str =
+    "POSIX path of (choose folder with prompt \"Choose a plugin folder. Its hooks are added.\")";
+
 /// The macOS file chooser for project documents, one POSIX path per line. Fixed text.
 pub const DOCUMENTS_SCRIPT: &str = "set picked to choose file with prompt \"Choose documents to add\" with multiple selections allowed
 set reply to \"\"
@@ -42,6 +56,10 @@ repeat with chosen in picked
 set reply to reply & POSIX path of chosen & linefeed
 end repeat
 return reply";
+
+/// The macOS file chooser for one instructions file whose text goes into the app-wide
+/// instructions editor, such as a CLAUDE.md or AGENTS.md. Fixed text.
+pub const INSTRUCTIONS_SCRIPT: &str = "POSIX path of (choose file with prompt \"Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.\")";
 
 /// The Windows folder chooser, a fixed PowerShell script that prints the chosen folder.
 /// Nothing the owner or the web view sends is ever placed into it.
@@ -53,23 +71,41 @@ pub const WINDOWS_PROJECT_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Te
 /// The Windows folder chooser for the folder that holds the owner's projects. Fixed text.
 pub const WINDOWS_PROJECTS_HOME_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose the folder that holds your projects.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
 
+/// The Windows folder chooser for a folder of markdown memory files to import. Fixed text.
+pub const WINDOWS_MEMORY_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder of markdown memory files to import.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
+
+/// The Windows folder chooser for a plugin folder whose hooks are added. Fixed text.
+pub const WINDOWS_PLUGIN_FOLDER_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a plugin folder. Its hooks are added.'; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.SelectedPath + [char]10) }";
+
 /// The Windows document chooser, a fixed PowerShell script that prints one chosen path per line.
 pub const WINDOWS_DOCUMENTS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose documents to add'; $d.Multiselect = $true; if ($d.ShowDialog() -eq 'OK') { foreach ($f in $d.FileNames) { [Console]::Out.Write($f + [char]10) } }";
 
-/// What a folder chooser is for: a skill folder, an existing project folder to add, or the
-/// folder that holds the owner's projects. The web view names one of these; each has its own
-/// fixed prompt, so no text from the web view reaches a chooser.
+/// The Windows instructions file chooser, a fixed PowerShell script that prints the chosen path.
+pub const WINDOWS_INSTRUCTIONS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.'; $d.Multiselect = $false; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName + [char]10) }";
+
+/// What a folder chooser is for: a skill folder, an existing project folder to add, the
+/// folder that holds the owner's projects, a folder of memory files to import, or a plugin
+/// folder whose hooks are added. The web view names one of these; each has its own fixed
+/// prompt, so no text from the web view reaches a chooser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderPurpose {
     Skill,
     Project,
     ProjectsHome,
+    Memory,
+    Plugin,
 }
 
 impl FolderPurpose {
     /// Every purpose, in the order the choosers are listed.
-    pub const ALL: [Self; 3] = [Self::Skill, Self::Project, Self::ProjectsHome];
+    pub const ALL: [Self; 5] = [
+        Self::Skill,
+        Self::Project,
+        Self::ProjectsHome,
+        Self::Memory,
+        Self::Plugin,
+    ];
 
     /// The fixed macOS script of this purpose's chooser; it also picks the Linux title and the
     /// Windows script. Input: the purpose. Output: one of the folder scripts.
@@ -78,6 +114,8 @@ impl FolderPurpose {
             Self::Skill => FOLDER_SCRIPT,
             Self::Project => PROJECT_FOLDER_SCRIPT,
             Self::ProjectsHome => PROJECTS_HOME_SCRIPT,
+            Self::Memory => MEMORY_FOLDER_SCRIPT,
+            Self::Plugin => PLUGIN_FOLDER_SCRIPT,
         }
     }
 }
@@ -134,7 +172,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
     let purpose = FolderPurpose::ALL
         .into_iter()
         .find(|purpose| purpose.script() == script);
-    assert!(purpose.is_some() || script == DOCUMENTS_SCRIPT);
+    assert!(purpose.is_some() || script == DOCUMENTS_SCRIPT || script == INSTRUCTIONS_SCRIPT);
     #[cfg(target_os = "macos")]
     {
         let _ = purpose;
@@ -159,6 +197,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                         .arg("--directory")
                         .arg(format!("--title={}", linux_title(purpose)));
                 }
+                None if script == INSTRUCTIONS_SCRIPT => {
+                    command.arg(format!("--title={INSTRUCTIONS_TITLE}"));
+                }
                 None => {
                     command
                         .args(["--multiple", "--separator=\n"])
@@ -172,6 +213,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
             if let Some(purpose) = purpose {
                 command.args(["--getexistingdirectory", "."]);
                 command.args(["--title", linux_title(purpose)]);
+            } else if script == INSTRUCTIONS_SCRIPT {
+                command.args(["--getopenfilename", "."]);
+                command.args(["--title", INSTRUCTIONS_TITLE]);
             } else {
                 command.args(["--getopenfilename", ".", "--multiple", "--separate-output"]);
                 command.args(["--title", DOCUMENTS_TITLE]);
@@ -199,6 +243,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 Some(FolderPurpose::Skill) => WINDOWS_FOLDER_SCRIPT,
                 Some(FolderPurpose::Project) => WINDOWS_PROJECT_FOLDER_SCRIPT,
                 Some(FolderPurpose::ProjectsHome) => WINDOWS_PROJECTS_HOME_SCRIPT,
+                Some(FolderPurpose::Memory) => WINDOWS_MEMORY_FOLDER_SCRIPT,
+                Some(FolderPurpose::Plugin) => WINDOWS_PLUGIN_FOLDER_SCRIPT,
+                None if script == INSTRUCTIONS_SCRIPT => WINDOWS_INSTRUCTIONS_SCRIPT,
                 None => WINDOWS_DOCUMENTS_SCRIPT,
             })
             .creation_flags(CREATE_NO_WINDOW);
@@ -217,6 +264,8 @@ fn linux_title(purpose: FolderPurpose) -> &'static str {
         FolderPurpose::Skill => FOLDER_TITLE,
         FolderPurpose::Project => PROJECT_FOLDER_TITLE,
         FolderPurpose::ProjectsHome => PROJECTS_HOME_TITLE,
+        FolderPurpose::Memory => MEMORY_FOLDER_TITLE,
+        FolderPurpose::Plugin => PLUGIN_FOLDER_TITLE,
     }
 }
 

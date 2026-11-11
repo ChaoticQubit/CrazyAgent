@@ -32,6 +32,10 @@ test("bridge refusals map to plain copy and never echo raw codes or unknown text
   }
 });
 
+test("a refused agent git step on a Mac with no Command Line Tools names the fix", () => {
+  assert.equal(api.plainError("agent_git_needs_tools"), "Agent git needs the Command Line Tools: run xcode-select --install.");
+});
+
 test("an engine receipt counts as saved only when applied and settled", () => {
   const base = { kind: "owner_profile", generation: "4", project_id: null, baseline_id: null, model_access: null, project_spec: null, operation_id: "x" };
   assert.deepEqual(api.receiptResult({ ...base, outcome: "applied", pending: false, rejection: null }), { kind: "ok", value: undefined });

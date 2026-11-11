@@ -4,7 +4,7 @@ import { useAppSession, type ProjectRow } from "../../state";
 import { Button, Drawer, Notice, ProviderMark, StatusBadge, TextField } from "../../ui";
 import { displayText } from "../conversation";
 import { nameError } from "./add-account";
-import { cancelSignIn, signOut, SignInPanel, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
+import { cancelSignIn, signOut, SignInPanel, signInRunning, signInStage, useSignIn, type SubscriptionProvider } from "./sign-in";
 
 /** Joins names for a sentence: "A", "A and B", "A, B and C". Input: the names. Output: the text. */
 export function andList(names: readonly string[]): string {
@@ -39,30 +39,36 @@ export function canSignOut(account: AccountView): boolean {
 }
 
 /** Names what keeps an account from signing out, grouped by project: "Team sub-agent 3 and
- * the master conversation in Alpha are using this account." Inputs: the account's use and
- * the known projects. Output: the sentence. */
+ * the master conversation in Alpha are using this account.", followed by the report of each
+ * Full access stop that left processes running. Inputs: the account's use and the known
+ * projects. Output: the sentences. */
 export function inUseLine(used: AccountUse, projects: readonly ProjectRow[] | undefined): string {
   const named = [
     ...used.agents.map((agent) => ({ project: agent.project, name: displayText(agent.label) })),
-    ...used.holders.map((holder) => ({ project: holder.project, name: holder.kind === "master" ? "the master conversation" : displayText(holder.title) })),
+    ...used.holders.flatMap((holder) => holder.kind === "leftover" ? []
+      : [{ project: holder.project, name: holder.kind === "master" ? "the master conversation" : displayText(holder.title) }]),
   ];
+  const left = used.holders.flatMap((holder) => holder.kind === "leftover" ? [`${displayText(holder.report)}.`] : []);
+  if (named.length === 0) return left.join(" ");
   const groups = new Map<string, string[]>();
   for (const { project, name } of named) groups.set(project, [...groups.get(project) ?? [], name]);
   const parts = [...groups].map(([project, names]) =>
     `${andList(names)} in ${displayText(projects?.find((row) => row.id === project)?.name ?? "another project")}`);
   const line = `${andList(parts)} ${named.length === 1 ? "is" : "are"} using this account.`;
-  return line.charAt(0).toUpperCase() + line.slice(1);
+  return [line.charAt(0).toUpperCase() + line.slice(1), ...left].join(" ");
 }
 
 /** Names the one action that ends what uses an account and signs it out: agents and
- * research jobs stop, master conversations end. Input: the account's use. Output: the
- * action's label and its label while it runs. */
+ * research jobs stop, master conversations end, and what Full access agents left running is
+ * let go of while it still runs. Input: the account's use. Output: the action's label and
+ * its label while it runs. */
 export function releaseLabels(used: AccountUse): { label: string; pending: string } {
   const master = used.holders.some((holder) => holder.kind === "master");
   const others = used.agents.length > 0 || used.holders.some((holder) => holder.kind === "research");
   if (master && others) return { label: "Stop agents, end conversation and sign out", pending: "Ending..." };
   if (master) return { label: "End conversation and sign out", pending: "Ending conversation..." };
-  return { label: "Stop agents and sign out", pending: "Stopping agents..." };
+  if (others) return { label: "Stop agents and sign out", pending: "Stopping agents..." };
+  return { label: "Sign out anyway", pending: "Signing out..." };
 }
 
 /** Says why an account could not be signed out. When the engine named what uses it, offers
@@ -81,17 +87,24 @@ export function InUseNotice({ used, projects, pending, onStop }: {
   </span></Notice>;
 }
 
-function SignInAgain({ account, onSignedIn }: { account: AccountView; onSignedIn: () => void }) {
+function SignInAgain({ account, onSignedIn, onStarted }: { account: AccountView; onSignedIn: () => void; onStarted: () => void }) {
   const provider = account.provider as SubscriptionProvider;
   const signIn = useSignIn(account.id);
   const stage = signInStage(signIn.state, provider);
   const signedIn = stage.kind === "signed_in";
   const reported = useRef(false);
+  const attempt = signInRunning(signIn.state) ? signIn.state?.operation?.operation_id : undefined;
+  const started = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!signedIn || reported.current) return;
     reported.current = true;
     onSignedIn();
   }, [signedIn, onSignedIn]);
+  useEffect(() => {
+    if (!attempt || started.current === attempt) return;
+    started.current = attempt;
+    onStarted();
+  }, [attempt, onStarted]);
   return <SignInPanel provider={provider} method={provider === "claude" ? "claude_official" : "codex_device_code"} state={signIn.state}
     onStart={(method) => void signIn.start(method)} onCancel={() => void signIn.cancel()} onCheck={() => void signIn.check()}
     onClaudeCode={signIn.sendClaudeCode} />;
@@ -220,7 +233,7 @@ export function AccountDrawer({ account, pools, signIn = false, onClose, onChang
         <span><Button icon="log-out" pending={signingOut} pendingLabel="Signing out..." onClick={() => void signOutAccount(false)}>Sign out</Button></span>}
       {inUse !== undefined && <InUseNotice used={inUse} projects={session.projects.kind === "ok" ? session.projects.value : undefined}
         pending={signingOut} onStop={() => void signOutAccount(true)} />}
-      {subscription && signingIn && <SignInAgain account={account} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
+      {subscription && signingIn && <SignInAgain account={account} onStarted={() => onChanged()} onSignedIn={() => { onChanged({ ...account, status: "signed_in", status_label: "Signed in" }); }} />}
       {account.method === "url" && <div className="stack-small">
         <span><Button icon="refresh-cw" pending={checking} pendingLabel="Checking..." onClick={() => void check()}>Check again</Button></span>
         {checkLine && <p role="status">{checkLine}</p>}

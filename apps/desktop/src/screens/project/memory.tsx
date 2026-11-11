@@ -1,7 +1,7 @@
-import { deleteMemory, editProjectMemory, nextGeneration, savedMemories } from "../../api";
+import { deleteMemory, editProjectMemory, loadAllProjectMemories, nextGeneration, savedMemories } from "../../api";
 import type { Result, SavedMemory } from "../../api";
 import { useEffect, useState } from "react";
-import { failureCopy, loadProjectMemories, MEMORY_PAGES_MAX, promoteProjectMemory, reviewMemory } from "../../api-projects";
+import { failureCopy, promoteProjectMemory, reviewMemory } from "../../api-projects";
 import type { MemoryDecision, MemoryItem } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
 import { Button, ConfirmDialog, StatusBadge } from "../../ui";
@@ -11,19 +11,6 @@ import { memoryGroups, changeOutcome } from "./research";
 import { useLoad } from "../../state";
 import { NotReady, ProjectEmpty } from "./shared";
 import type { ProjectData } from "./shared";
-
-async function loadAll(id: string): Promise<Result<{ items: MemoryItem[]; more: boolean }>> {
-  const items: MemoryItem[] = [];
-  let after: string | null = null;
-  for (let page = 0; page < MEMORY_PAGES_MAX; page += 1) {
-    const batch = await loadProjectMemories(id, after);
-    if (batch.kind !== "ok") return batch;
-    if (batch.value.length === 0) return { kind: "ok", value: { items, more: false } };
-    items.push(...batch.value);
-    after = batch.value[batch.value.length - 1].id;
-  }
-  return { kind: "ok", value: { items, more: true } };
-}
 
 /** One research memory waiting for the owner, like the TUI's y Save to memory, n Dismiss and
  * e Edit first. The row shows the exact stored text with hidden characters as escapes, never a
@@ -65,6 +52,23 @@ export function SavedMemoryRow({ item, busy, onPromote, onDelete }: { item: Memo
   </li>;
 }
 
+/** One note in Your notes with its exact stored text, hidden characters as escapes, next to
+ * Delete. A note an agent wrote names that agent, so the owner never takes it for their own,
+ * and one it asked for reads Needs approval until the owner approves it in Settings, Memory,
+ * since no agent reads it before (OP-22). Inputs: the memory, whether it is busy and the
+ * delete action. Output: the row. */
+export function OwnNoteRow({ memory, busy, onDelete }: { memory: SavedMemory; busy: boolean; onDelete: () => void }) {
+  const byAgent = memory.origin === "agent" || memory.origin === "requested";
+  return <li className="pj-memory">
+    <p className="pj-note-text">{displayText(memory.text)}</p>
+    <span className="pj-row">{byAgent && <span className="pj-small pj-muted">From {displayText(memory.agent ?? "an agent")}</span>}
+      {memory.origin === "requested"
+      ? <><StatusBadge word="Needs approval" /><span className="pj-small pj-muted">Approve it in Settings, Memory.</span></>
+      : <StatusBadge word="Saved" tone="ok" />}
+      <Button size="small" variant="danger-text" disabled={busy} onClick={onDelete}>Delete</Button></span>
+  </li>;
+}
+
 /** The project's memories in the Context tab: Suggested ones wait for Save to memory, Edit
  * first or Dismiss, Saved ones can be used in all projects with one click or deleted, and the owner's
  * own notes can be deleted. Input: the project data. Output: the panel. */
@@ -80,7 +84,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
 
   useEffect(() => {
     let live = true;
-    void loadAll(data.id).then((result) => { if (live) setMemories(result); });
+    void loadAllProjectMemories(data.id).then((result) => { if (live) setMemories(result); });
     return () => { live = false; };
   }, [data.id, round]);
 
@@ -150,11 +154,8 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     </section>}
     {ownNotes.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-notes">
       <h3 id="pj-mem-notes">Your notes</h3>
-      <ul className="pj-rows">{ownNotes.map((memory) => <li key={memory.id} className="pj-memory">
-        <p className="pj-note-text">{displayText(memory.text)}</p>
-        <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
-          <Button size="small" variant="danger-text" disabled={busy === memory.id} onClick={() => setForgetting(memory)}>Delete</Button></span>
-      </li>)}</ul>
+      <ul className="pj-rows">{ownNotes.map((memory) => <OwnNoteRow key={memory.id} memory={memory} busy={busy === memory.id}
+        onDelete={() => setForgetting(memory)} />)}</ul>
       {notes.kind === "ok" && notes.value.next !== null && <p className="pj-small pj-muted">Showing your newest {ownNotes.length} notes. Settings, Memory lists them all.</p>}
     </section>}
     {value && value.more && <p className="pj-small pj-muted">Showing the first {value.items.length} memories.</p>}

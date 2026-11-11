@@ -15,14 +15,18 @@ use std::time::Duration;
 const ARGUMENTS_MAX: usize = 32;
 const USAGE: &str = "crazyagent qualification report --source-revision REV --profile-id PROFILE\n\
 crazyagent --version\n\
+crazyagent --third-party-notices\n\
 crazyagent engine [--home DIR] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent engine RUNTIME_DIR GLOBAL_TOML PROJECT_TOML SOCKET_NAME [--writable-settings] [--codex-executable ABS_PATH] [--claude-executable ABS_PATH] [--rcli-executable ABS_PATH]\n\
 crazyagent tui\n\
 crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
 crazyagent update [--check] [--channel stable|dev]\n\
-crazyagent team-mcp DROP_FILE\n\
-crazyagent team-mcp-live MAILBOX_DIR\n\
+crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]\n\
+crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
+crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
+crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
+crazyagent coord-watch MAILBOX_DIR\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -47,6 +51,10 @@ fn main() -> ExitCode {
     }
     if args == ["--version"] {
         println!("{}", crazyagent::version::line());
+        return ExitCode::SUCCESS;
+    }
+    if args == ["--third-party-notices"] {
+        print!("{}", crazyagent::usage::THIRD_PARTY_NOTICES);
         return ExitCode::SUCCESS;
     }
     if args.first().is_some_and(|arg| arg == "update") {
@@ -90,7 +98,7 @@ fn main() -> ExitCode {
         return match run_native_auth_custodian(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error}");
+                let _ = writeln!(io::stderr(), "{error}");
                 ExitCode::FAILURE
             }
         };
@@ -99,15 +107,56 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::SERVER_COMMAND)
     {
-        let result = if args.len() != 2 {
-            Err("usage: crazyagent team-mcp DROP_FILE".to_owned())
-        } else {
-            crazyagent::team::tool::serve(
-                io::stdin().lock(),
-                io::stdout().lock(),
-                Path::new(&args[1]),
-            )
-            .map_err(|e| e.to_string())
+        let off: Option<Vec<String>> = args
+            .get(3..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    args.get(2).map(Path::new),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => {
+                Err("usage: crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]".to_owned())
+            }
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::team::tool::AGENT_SERVER_COMMAND)
+    {
+        let off: Option<Vec<String>> = args
+            .get(2..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve_live(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => Err("usage: crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]".to_owned()),
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
@@ -121,15 +170,64 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::LIVE_SERVER_COMMAND)
     {
-        let result = if args.len() != 2 {
-            Err("usage: crazyagent team-mcp-live MAILBOX_DIR".to_owned())
-        } else {
-            crazyagent::team::tool::serve_live(
+        let off: Option<Vec<String>> = args
+            .get(2..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve_live(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => Err("usage: crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]".to_owned()),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::coord::relay::HOOK_COMMAND)
+    {
+        let result = match (args.len(), args.get(1).and_then(|event| event.to_str())) {
+            (3, Some(event)) => crazyagent::coord::hook::run(
+                event,
+                Path::new(&args[2]),
                 io::stdin().lock(),
                 io::stdout().lock(),
-                Path::new(&args[1]),
-            )
-            .map_err(|e| e.to_string())
+            ),
+            _ => Err(
+                "usage: crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR"
+                    .to_owned(),
+            ),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::coord::relay::WATCH_COMMAND)
+    {
+        let result = if args.len() != 2 {
+            Err("usage: crazyagent coord-watch MAILBOX_DIR".to_owned())
+        } else {
+            crazyagent::coord::watch::run(Path::new(&args[1]), io::stdout().lock())
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,
@@ -668,6 +766,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         std::env::current_exe().ok().as_deref(),
                         agents,
                         agent_terminal(&service),
+                        service.owner_runtime().map(|handle| handle.reproving()),
                     ) {
                         Ok(team) => Ok((research, onboarding, Some(team))),
                         Err(error) => {
@@ -721,6 +820,10 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let terminal = service
                 .owner_runtime()
                 .and_then(|runtime| runtime.terminal().ok());
+            #[cfg(unix)]
+            let renewal = terminal.clone().and_then(|host| {
+                crazyagent::terminal::renew_while_running(host, runtime_dir.to_path_buf())
+            });
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(upkeep) = usage_upkeep {
                 let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
@@ -732,9 +835,17 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             if let Some(team) = team {
                 let _ = tokio::task::spawn_blocking(move || team.stop()).await;
             }
+            #[cfg(unix)]
+            if let Some(renewal) = renewal {
+                let _ = tokio::task::spawn_blocking(move || renewal.stop()).await;
+            }
             if let Some(terminal) = terminal {
+                let root = runtime_dir.to_path_buf();
                 let quit = tokio::task::spawn_blocking(move || {
-                    crazyagent::terminal::quit(terminal.as_ref())
+                    let keep = crazyagent::landing::open(&root)
+                        .and_then(|db| crazyagent::quit_settings::load(&db))
+                        .map_or(true, |settings| settings.keeps_team_agents());
+                    crazyagent::terminal::quit(terminal.as_ref(), keep)
                 })
                 .await;
                 if let Ok(Err(problem)) = quit {
@@ -886,9 +997,13 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .ok_or("HOME is not set")?;
-        let link = crazyagent::service::link_cli(&executable, &home.join(".local").join("bin"))
+        let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
+        let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
+        let target = crazyagent::service::persistable(&executable, &layout, appdir.as_deref())
             .map_err(|e| e.to_string())?;
-        println!("Linked {} to {}", link.display(), executable.display());
+        let link = crazyagent::service::link_cli(&target, &home.join(".local").join("bin"))
+            .map_err(|e| e.to_string())?;
+        println!("Linked {} to {}", link.display(), target.display());
         return Ok(());
     }
     let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;

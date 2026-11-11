@@ -24,7 +24,10 @@ const INLINE_DEPTH_MAX = 4;
 const TABLE_COLUMNS_MAX = 32;
 const URL_CHARS_MAX = 2048;
 const PUNCTUATION = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-const URL_LIKE = /^(?:https?:\/\/)?(?:[\p{L}\p{N}-]+\.)+[\p{L}\p{N}-]{2,}(?::\d+)?(?:[/?#]\S*)?$/iu;
+const URL_PIECE = /\[[0-9a-f:.]+\](?::\d+)?|[\p{L}\p{N}](?:(?:[^\s\p{P}\p{S}]|[.:/?#%_~+=&。-])*[\p{L}\p{N}])?/giu;
+const URL_AUTHORITY = /^(?:[a-z][a-z\d+.-]*:\/\/)?(\[[^\]]*\]|[^:/?#]*)(:\d+)?/iu;
+const HOST_LABEL = /^[\p{L}\p{N}\p{M}\p{Cf}-]+$/u;
+export const SHOWN_HOSTS_MAX = 64;
 
 /** Accepts only absolute http and https links without spaces or control characters.
  * Input: a link target from untrusted Markdown. Output: the same target, or null. */
@@ -39,17 +42,44 @@ export function safeHref(url: string): string | null {
   }
 }
 
-/** Names the target host when a link's visible text looks like a URL on a different host, as
- * in [https://docs.example](https://other.example). A leading www. is ignored on both sides.
- * Inputs: the visible text and the target. Output: the target host, or null. */
+/** Names the target host when a link's visible text names any host other than the target's,
+ * alone or among other words, as in [see docs.example](https://other.example). The NFKC text
+ * is cut into URL-shaped pieces; a piece names a host when its host, as written, is shown by
+ * namesHost, and the URL parser then reads that host for the comparison (leading www. and a
+ * trailing dot ignored). A named host the parser refuses, or more than SHOWN_HOSTS_MAX of them,
+ * names the target too. Inputs: the visible text and the target. Output: the target host, or
+ * null when no other host is named or the target is not a URL. */
 export function linkTargetHost(text: string, href: string): string | null {
-  const shown = text.trim();
-  if (shown.length > URL_CHARS_MAX || !URL_LIKE.test(shown)) return null;
-  const bare = (host: string) => host.replace(/^www\./u, "");
+  const target = urlHost(href);
+  if (target === null) return null;
+  const bare = (host: string) => host.replace(/^www\./u, "").replace(/\.$/u, "");
+  let named = 0;
+  for (const [piece] of text.normalize("NFKC").matchAll(URL_PIECE)) {
+    const [whole, host, port] = URL_AUTHORITY.exec(piece) ?? ["", "", undefined];
+    if (!namesHost(host, whole.includes("://") || port !== undefined)) continue;
+    named += 1;
+    const seen = urlHost(`https://${host}${port ?? ""}`);
+    if (named > SHOWN_HOSTS_MAX || seen === null || bare(seen) !== bare(target)) return target;
+  }
+  return null;
+}
+
+/** Whether a host written in link text reads as a host: an IPv6 literal in brackets, an IPv4
+ * address of four numbers, localhost, a name given with a scheme or port, or a dotted name
+ * whose last label has two or more characters and is not a number.
+ * Inputs: the host as written and whether a scheme or port came with it. Output: true or false. */
+function namesHost(host: string, explicit: boolean): boolean {
+  if (host.startsWith("[") || /^\d{1,3}(?:\.\d{1,3}){3}$/u.test(host)) return true;
+  const labels = host.split(/[.。]/u);
+  const last = labels[labels.length - 1];
+  if (!labels.every((label) => HOST_LABEL.test(label)) || /^\d+$/u.test(last)) return false;
+  if (labels.length === 1) return explicit || last.toLowerCase() === "localhost";
+  return [...last].length >= 2;
+}
+
+function urlHost(url: string): string | null {
   try {
-    const seen = new URL(/^https?:\/\//iu.test(shown) ? shown : `https://${shown}`).hostname;
-    const target = new URL(href).hostname;
-    return bare(seen) === bare(target) ? null : target;
+    return new URL(url).hostname;
   } catch {
     return null;
   }
@@ -433,15 +463,18 @@ function renderInline(nodes: Inline[], open: (href: string, text: string) => voi
 }
 
 /** Renders untrusted Markdown as React elements; raw HTML stays visible text. Every link shows
- * its target on hover, and one whose URL text names another host asks before it opens.
- * Inputs: the source, a link handler and an optional per-heading action.
- * Output: the rendered report. */
-export function MarkdownView({ source, onOpenLink, headingAction }: {
+ * its target on hover, and one whose URL text names another host asks before it opens, in the
+ * report and in its optional Sources list alike.
+ * Inputs: the source, a link handler, an optional per-heading action and whether to list the
+ * report's links as Sources. Output: the rendered report. */
+export function MarkdownView({ source, onOpenLink, headingAction, sources = false }: {
   source: string;
   onOpenLink: (href: string) => void;
   headingAction?: (heading: string) => ReactNode;
+  sources?: boolean;
 }) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
+  const listed = useMemo(() => sources ? markdownLinks(blocks) : [], [sources, blocks]);
   const [asking, setAsking] = useState<{ href: string; text: string; host: string } | null>(null);
   const follow = (href: string, text: string) => {
     const host = linkTargetHost(text, href);
@@ -470,5 +503,7 @@ export function MarkdownView({ source, onOpenLink, headingAction }: {
         <tbody>{block.rows.map((row, index) => <tr key={index}>{row.map((cell, column) => <td key={column}>{renderInline(cell, follow)}</td>)}</tr>)}</tbody>
       </table></div>;
     }
-  })}</div></>;
+  })}</div>{listed.length > 0 && <section className="pj-sources" aria-labelledby="pj-sources"><h3 id="pj-sources">Sources</h3>
+    <ol>{listed.map((link) => <li key={link.href}><a href={link.href} target="_blank" rel="noopener noreferrer" onClick={(event) => { event.preventDefault(); follow(link.href, link.text); }}>{displayText(link.text)}</a>
+      {link.text !== link.href && <span className="pj-small pj-muted pj-mono"> {displayText(link.href)}</span>}</li>)}</ol></section>}</>;
 }

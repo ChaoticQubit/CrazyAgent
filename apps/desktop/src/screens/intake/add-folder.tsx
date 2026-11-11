@@ -1,14 +1,19 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { nextGeneration, pickFolder } from "../../api";
-import { addExistingFolder, intakeCopy, loadFolderSize, loadProjectsHome } from "../../api-intake";
+import {
+  ADD_WARNINGS, addExistingFolder, cancelIcloudDownload, downloadFromIcloud, intakeCopy, loadFolderSize, loadIcloudProgress, loadProjectsHome,
+} from "../../api-intake";
 import { receiptState } from "../../api-projects";
-import type { FolderSize, ProjectsHome } from "../../engine-client";
+import type { AddFolderMode, AddOverride, FolderSize, IcloudProgress, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, formatRoute, navigate } from "../../ui";
+import { Button, Dialog, LoadError, Notice, NotReady, PageHeader, Segmented, Skeleton, formatRoute, navigate } from "../../ui";
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
-import { folderName, joinPath, pickedFolderProblem, sizeLine, worktreesLine, type AddWay } from "./intake";
+import {
+  ICLOUD_PROGRESS_MS, addWay, anywayIssues, anywayOverrides, asksAgain, anywayWarnings, folderName, icloudCountLine, icloudMoveLine,
+  icloudOutcome, icloudPlaceholders, icloudProgressLine, icloudRun, joinPath, pickedFolderProblem, sizeLine, waysOffered, waysWithheld, worktreesLine, type AddWay, type AnywayWarning,
+} from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -22,9 +27,10 @@ const ADD_LABELS: Record<AddWay, string> = { here: "Set up here", move: "Move in
 
 /** Add an existing folder as a view of its state: the chosen folder, used where it is (default)
  * or explicitly moved or copied with the target shown first, Copy with the size first and a
- * warning above 1 GB and the linked worktrees it leaves behind, and a clone suggestion when the
- * code is on GitHub. Inputs: the projects home
- * read, the source folder, its size read, the way, a busy flag, the last problem and the handlers.
+ * warning above 1 GB or when it could not be measured and the linked worktrees it leaves behind,
+ * Move and Copy once the folder read has finished (what it found is asked about before anything
+ * moves), and a clone suggestion when the code is on GitHub. Inputs: the projects home read, the
+ * source folder, its size read, the way, a busy flag, the last problem and the handlers.
  * Output: the page. */
 export function AddFolderView({ home, source, size, mode, busy, problem, onChoose, onMode, onAdd, onClone, onRetry }: {
   home: Loaded<ProjectsHome>;
@@ -49,13 +55,16 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
   const bytes = size?.kind === "ok" ? size.value.bytes : null;
   const github = size?.kind === "ok" ? size.value.github ?? null : null;
   const worktrees = size?.kind === "ok" ? size.value.worktrees ?? 0 : 0;
-  const line = sizeLine(mode, bytes, root);
+  const offered = waysOffered(size);
+  const withheld = waysWithheld(size);
+  const way = addWay(mode, size);
+  const line = sizeLine(way, bytes, root, offered && bytes === null);
   const name = source ? folderName(source) : "";
   return <div className="pj in-page">
     {header}
     <div className="pj-stack-s">
       <span className="pj-row"><Button icon="folder-open" disabled={busy} onClick={onChoose}>{source ? "Choose another folder" : "Choose folder"}</Button></span>
-      {source && (mode === "here"
+      {source && (way === "here"
         ? <p><span className="pj-mono" title={source}>{displayText(folderLabel(source))}</span> stays where it is.</p>
         : <p><span className="pj-mono" title={source}>{displayText(folderLabel(source))}</span> goes to <span className="pj-mono">{displayText(folderLabel(joinPath(root, name)))}</span>.</p>)}
     </div>
@@ -66,17 +75,16 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
       </Notice>}
       <div className="pj-field">
         <span className="pj-label">How to add it</span>
-        <Segmented label="How to add it" value={mode} onValue={onMode} options={WAYS} />
+        <Segmented label="How to add it" value={way} onValue={onMode} options={WAYS.filter((option) => offered || option.value === "here")} />
       </div>
+      {withheld.map((line) => <Notice key={line} tone="info">{line}</Notice>)}
       {line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>}
-      {mode === "copy" && worktrees > 0 && <Notice tone="info">{worktreesLine(worktrees)}</Notice>}
-      {size?.kind === "not_ready" && mode === "copy" && <p className="pj-help">The folder size isn't in this build, so Copy can't show it first.</p>}
+      {way === "copy" && worktrees > 0 && <Notice tone="info">{worktreesLine(worktrees)}</Notice>}
       {size?.kind === "error" && <p className="pj-error" role="alert">{size.message}</p>}
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       <span className="pj-row">
-        <Button variant="primary" icon={mode === "here" ? "list-checks" : mode === "move" ? "folder-input" : "copy"} pending={busy}
-          pendingLabel={mode === "move" ? "Moving..." : "Copying..."} disabled={mode === "copy" && bytes === null}
-          onClick={onAdd}>{ADD_LABELS[mode]}</Button>
+        <Button variant="primary" icon={way === "here" ? "list-checks" : way === "move" ? "folder-input" : "copy"} pending={busy}
+          pendingLabel={way === "move" ? "Moving..." : "Copying..."} onClick={onAdd}>{ADD_LABELS[way]}</Button>
         <a className="btn quiet" href={formatRoute({ name: "home" })}>Cancel</a>
       </span>
     </>}
@@ -84,9 +92,106 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
   </div>;
 }
 
-/** Add an existing folder: picks it in the macOS chooser and reads its size. By default it is set up
- * where it is on a chosen pool; Move asks to confirm with the target shown, and a moved or copied
- * folder shows on Home as found. */
+/** The warning blocks of a Move or Copy question: data loss blocks as warnings, other effects as
+ * information, each with the folders it names. Input: the blocks in order. Output: the list. */
+function AddWarnings({ blocks }: { blocks: AnywayWarning[] }) {
+  return <div className="pj-stack-s">
+    {blocks.map((block) => <Notice key={block.lines.join(" ")} tone={block.loss ? "warn" : "info"}>
+      {block.lines.map((line) => <p key={line}>{line}</p>)}
+      {block.paths.length > 0 && <ul>{block.paths.map((path) => <li key={path} className="pj-mono">{displayText(path)}</li>)}</ul>}
+    </Notice>)}
+  </div>;
+}
+
+/** The question before a Move or Copy of a folder with issues: what each issue means, data loss
+ * first, then "Move anyway?" or "Copy anyway?". It starts on Use where it is; Move anyway or Copy
+ * anyway is the danger button; closing it changes nothing. Inputs: whether it is open, the way,
+ * the folder name, its read, the engine refusal it follows, if any, a busy flag, the two answers
+ * and the close handler. Output: the dialog, or nothing. */
+export function AnywayDialog({ open, way, name, size, refused, busy, onUseHere, onAnyway, onCancel }: {
+  open: boolean;
+  way: AddFolderMode;
+  name: string;
+  size: Loaded<FolderSize> | null;
+  refused: string | null;
+  busy: boolean;
+  onUseHere: () => void;
+  onAnyway: () => void;
+  onCancel?: () => void;
+}) {
+  const verb = way === "move" ? "Move" : "Copy";
+  const blocks = anywayWarnings(way, anywayIssues(way, size, refused), size);
+  return <Dialog open={open} title={`${verb} ${name} anyway?`} onClose={onCancel ?? onUseHere} busy={busy}
+    footer={<><Button disabled={busy} onClick={onUseHere} data-autofocus>Use where it is</Button>
+      <Button variant="danger" pending={busy} onClick={onAnyway}>{`${verb} anyway`}</Button></>}>
+    <AddWarnings blocks={blocks} />
+  </Dialog>;
+}
+
+/** The confirm before a Move with no issues: the folder, where it goes and what a move can lose,
+ * apps still using it first, then the old place and whether it is a quick rename or a copy across
+ * disks. It shows only while asked for and while Move is still the way. Inputs: whether it is
+ * asked for, the way, the folder name, source and projects folder, whether both are on one disk,
+ * a busy flag and the handlers. Output: the dialog, or nothing. */
+export function MoveConfirmDialog({ open, way, name, source, root, sameVolume, busy, onCancel, onConfirm }: {
+  open: boolean;
+  way: AddWay;
+  name: string;
+  source: string | null;
+  root: string | null;
+  sameVolume: boolean | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const loss = [ADD_WARNINGS.close_apps, ...(sameVolume === false ? [ADD_WARNINGS.across_disks] : [])];
+  const effects = [ADD_WARNINGS.old_place, ...(sameVolume === true ? [ADD_WARNINGS.same_disk] : [])];
+  return <Dialog open={open && way === "move" && source !== null && root !== null} title={`Move ${name} into your projects folder?`} onClose={onCancel} busy={busy}
+    footer={<><Button disabled={busy} onClick={onCancel} data-autofocus>Keep it here</Button>
+      <Button variant="danger" pending={busy} onClick={onConfirm}>Move folder</Button></>}>
+    <p>{displayText(folderLabel(source ?? ""))} moves to {displayText(folderLabel(root ? joinPath(root, name) : ""))}.</p>
+    <AddWarnings blocks={[{ loss: true, lines: loss, paths: [] }, { loss: false, lines: effects, paths: [] }]} />
+  </Dialog>;
+}
+
+/** The question before a Move or Copy of a folder with files only in iCloud: how many, that
+ * CrazyAgent downloads them first, and that a move takes the folder out of iCloud on the owner's
+ * other Macs; then Download and move, Download and copy or Cancel, the owner's way first in focus.
+ * While the download runs it shows the progress and Stop download instead, and cannot be closed.
+ * Inputs: whether it is open, the folder name and path, the count (null when only the engine's
+ * refusal said some are), the way, the download state and the handlers. Output: the dialog. */
+export function ICloudDialog({ open, name, source, placeholders, way, downloading, progress, stopping, onDownload, onStop, onCancel }: {
+  open: boolean;
+  name: string;
+  source: string;
+  placeholders: number | null;
+  way: AddFolderMode;
+  downloading: boolean;
+  progress: IcloudProgress | null;
+  stopping: boolean;
+  onDownload: (way: AddFolderMode) => void;
+  onStop: () => void;
+  onCancel: () => void;
+}) {
+  const choice = (option: AddFolderMode, label: string) => <Button variant={option === way ? "primary" : "secondary"}
+    icon={option === "move" ? "folder-input" : "copy"} onClick={() => onDownload(option)} data-autofocus={option === way || undefined}>{label}</Button>;
+  const footer = downloading
+    ? <Button pending={stopping} pendingLabel="Stopping..." onClick={onStop}>Stop download</Button>
+    : <>{choice("move", "Download and move")}{choice("copy", "Download and copy")}<Button onClick={onCancel}>Cancel</Button></>;
+  return <Dialog open={open} title={`Download ${name} from iCloud first?`} onClose={onCancel} busy={downloading} footer={footer}>
+    <p>{icloudCountLine(placeholders)}</p>
+    <Notice tone="info">{icloudMoveLine(source)}</Notice>
+    {downloading && <p className="pj-secondary" role="status">{stopping ? "Stopping the download..." : icloudProgressLine(progress)}</p>}
+  </Dialog>;
+}
+
+/** Add an existing folder: picks it in the macOS chooser and reads its size and git links. By
+ * default it is set up where it is on a chosen pool; Move and Copy are offered once the read is
+ * done. A Move or Copy with issues asks "Move anyway?" first: yes sends an override for exactly
+ * those issues, Use where it is opens the setup in place. A Move with none asks to confirm with
+ * the target shown, and a moved or copied folder shows on Home as found. A folder with files only
+ * in iCloud asks before all of that whether to download them and then move or copy, shows the
+ * download's progress with a stop, and goes on with the chosen way once every file is here. */
 export function AddFolder() {
   const session = useAppSession();
   const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
@@ -96,12 +201,26 @@ export function AddFolder() {
   const [mode, setMode] = useState<AddWay>("here");
   const [settingUp, setSettingUp] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [refused, setRefused] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
+  const [icloud, setIcloud] = useState<{ placeholders: number | null } | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [progress, setProgress] = useState<IcloudProgress | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const run = useRef<ReturnType<typeof icloudRun> | null>(null);
+  const downloaded = useRef<string | null>(null);
+  useEffect(() => () => run.current?.leave(), []);
   const root = home.kind === "ok" ? home.value.path : null;
+  const way = addWay(mode, size);
 
   const choose = async () => {
     setProblem("");
+    setConfirming(false);
+    setAsking(false);
+    setRefused(null);
+    setIcloud(null);
     const result = await pickFolder("project");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
     if (result.value === null) return;
@@ -116,25 +235,78 @@ export function AddFolder() {
     if (picks.current === pick) setSize(measured);
   };
 
-  const add = async () => {
-    if (!source || busy || mode === "here") return;
+  const add = async (overrides: AddOverride[], chosen: AddWay = way) => {
+    if (!source || busy || chosen === "here") return;
     setBusy(true);
     setProblem("");
-    const result = await addExistingFolder(source, mode, nextGeneration());
+    const result = await addExistingFolder(source, chosen, overrides, nextGeneration());
     setBusy(false);
     setConfirming(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Adding a folder isn't in this build." : intakeCopy(result)); return; }
-    const state = receiptState(result.value);
-    if (state.kind === "rejected") { setProblem(intakeCopy(state)); return; }
-    if (state.kind === "unconfirmed") { setProblem("We couldn't confirm the folder was added. Check Home before trying again."); return; }
+    setAsking(false);
+    setRefused(null);
+    if (result.kind === "not_ready") { setProblem("Adding a folder isn't in this build."); return; }
+    const state = result.kind === "ok" ? receiptState(result.value) : null;
+    const code = result.kind === "error" ? result.code : state?.kind === "rejected" ? state.code : null;
+    if (code !== null && asksAgain(code, overrides)) { setRefused(code); setAsking(true); return; }
+    if (code === "home_icloud_not_downloaded" && downloaded.current !== source) { setIcloud({ placeholders: null }); return; }
+    if (result.kind === "error") { setProblem(intakeCopy(result)); return; }
+    if (state?.kind === "rejected") { setProblem(intakeCopy(state)); return; }
+    if (state?.kind === "unconfirmed") { setProblem("We couldn't confirm the folder was added. Check Home before trying again."); return; }
     session.showToast(`${folderName(source)} is in your projects folder. Set it up from Home.`);
     navigate({ name: "home" });
   };
 
+  const proceed = (chosen: AddFolderMode) => {
+    if (anywayIssues(chosen, size, null).length > 0) setAsking(true);
+    else if (chosen === "move") setConfirming(true);
+    else void add([], chosen);
+  };
+
   const start = () => {
-    if (mode === "here") setSettingUp(true);
-    else if (mode === "move") setConfirming(true);
-    else void add();
+    const placeholders = icloudPlaceholders(size);
+    if (way === "here") setSettingUp(true);
+    else if (placeholders > 0 && downloaded.current !== source) setIcloud({ placeholders });
+    else proceed(way);
+  };
+
+  const download = async (chosen: AddFolderMode) => {
+    if (!source || downloading) return;
+    setMode(chosen);
+    setDownloading(true);
+    setProgress(null);
+    setProblem("");
+    const watching = icloudRun(
+      () => void cancelIcloudDownload(),
+      () => void loadIcloudProgress().then((read) => { if (read.kind === "ok" && read.value) setProgress(read.value); }),
+      ICLOUD_PROGRESS_MS,
+    );
+    run.current = watching;
+    const result = await downloadFromIcloud(source);
+    const outcome = icloudOutcome(watching.end(), result);
+    run.current = null;
+    if (outcome.next === "none") return;
+    setDownloading(false);
+    setStopping(false);
+    setIcloud(null);
+    if (outcome.next === "add") { downloaded.current = source; proceed(chosen); return; }
+    setProblem(outcome.text);
+  };
+
+  const stop = () => {
+    setStopping(true);
+    run.current?.stop();
+  };
+
+  const anyway = () => {
+    if (way === "here") return;
+    void add(anywayOverrides(way, anywayIssues(way, size, refused), size));
+  };
+
+  const useHere = () => {
+    setAsking(false);
+    setRefused(null);
+    setMode("here");
+    setSettingUp(true);
   };
 
   const name = source ? folderName(source) : "";
@@ -143,10 +315,13 @@ export function AddFolder() {
       onChoose={() => void choose()} onMode={setMode} onAdd={start} onClone={() => navigate({ name: "add-project", way: "clone" })} onRetry={reload} />
     {settingUp && source && <SetUpDialog folder={{ name, path: source }} onClose={() => setSettingUp(false)}
       onStarted={() => { setSettingUp(false); session.showToast(`Setting up ${name}. Continue setup from Home.`); navigate({ name: "home" }); }} />}
-    <ConfirmDialog open={confirming && source !== null && root !== null} title={`Move ${name} into your projects folder?`} confirmLabel="Move folder" cancelLabel="Keep it here" pending={busy}
-      onCancel={() => setConfirming(false)} onConfirm={() => void add()}>
-      {displayText(folderLabel(source ?? ""))} moves to {displayText(folderLabel(root ? joinPath(root, name) : ""))} and won't stay at its old place.
-      Anything that points at the old place, like a terminal or an editor, has to open the new one.
-    </ConfirmDialog>
+    <MoveConfirmDialog open={confirming} way={way} name={name} source={source} root={root}
+      sameVolume={size?.kind === "ok" ? size.value.same_volume ?? null : null} busy={busy}
+      onCancel={() => setConfirming(false)} onConfirm={() => void add([])} />
+    {way !== "here" && <AnywayDialog open={asking} way={way} name={name} size={size} refused={refused} busy={busy}
+      onUseHere={useHere} onAnyway={anyway} onCancel={() => { setAsking(false); setRefused(null); }} />}
+    {way !== "here" && source && icloud && <ICloudDialog open name={name} source={source} placeholders={icloud.placeholders} way={way}
+      downloading={downloading} progress={progress} stopping={stopping} onDownload={(chosen) => void download(chosen)} onStop={stop}
+      onCancel={() => setIcloud(null)} />}
   </>;
 }

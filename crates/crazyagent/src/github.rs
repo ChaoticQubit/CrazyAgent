@@ -60,7 +60,9 @@ pub struct GitHubDeviceCode {
     pub expires_s: u64,
 }
 
-/// One repository the signed-in owner can clone.
+/// One repository on the signed-in owner's list. `refused` holds the failure code when
+/// CrazyAgent can't clone it, such as a name starting with a dot; the name and branch are
+/// then shown escaped and bounded, and the rest of the page still lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubRepo {
@@ -68,6 +70,7 @@ pub struct GitHubRepo {
     pub private: bool,
     pub default_branch: String,
     pub size_kb: u64,
+    pub refused: Option<String>,
 }
 
 /// One page of repositories, newest activity first, and the next page number if any.
@@ -120,6 +123,56 @@ pub(crate) fn use_loopback(root: &Path, port: Option<u16>) {
         None => roots.remove(root),
     };
 }
+
+/// Where a test may hold one engine root's GitHub work: a device sign-in between saving
+/// its token and settling, or a status read between the waiting flag and the saved sign-in.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Pause {
+    AfterKeep,
+    InStatus,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+type Paused = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+#[cfg(all(test, target_os = "macos"))]
+static PAUSES: Mutex<BTreeMap<(PathBuf, Pause), Paused>> = Mutex::new(BTreeMap::new());
+
+/// Holds the next pass of one engine root through a pause point. Test builds only.
+/// Inputs: the engine root and the point. Output: the receiver told once the work reaches
+/// the point, and the sender that lets it go on.
+#[cfg(all(test, target_os = "macos"))]
+fn pause_at(
+    root: &Path,
+    point: Pause,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached, told) = std::sync::mpsc::channel();
+    let (go, resume) = std::sync::mpsc::channel();
+    PAUSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((root.to_path_buf(), point), (reached, resume));
+    (told, go)
+}
+
+/// Waits at a pause point while a test holds it for this root, once. Test builds only.
+/// Inputs: the engine root and the point.
+#[cfg(all(test, target_os = "macos"))]
+fn paused_at(root: &Path, point: Pause) {
+    let paused = PAUSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&(root.to_path_buf(), point));
+    if let Some((reached, resume)) = paused
+        && reached.send(()).is_ok()
+    {
+        let _ = resume.recv();
+    }
+}
+
+/// A pause point outside test builds: nothing ever waits. Inputs: unused.
+#[cfg(not(all(test, target_os = "macos")))]
+fn paused_at(_root: &Path, _point: Pause) {}
 
 /// The GitHub an engine root talks to. Input: the engine root. Output: the real GitHub.
 #[cfg(not(all(test, target_os = "macos")))]
@@ -184,18 +237,35 @@ pub fn problem(code: &str) -> String {
 
 fn replace_pending(root: &Path, next: Option<Pending>) {
     let mut pending = pending();
-    if let Some(old) = pending.remove(root) {
-        old.cancel.store(true, Ordering::Release);
-    }
+    cancel_waiting(&mut pending, root);
     if let Some(next) = next {
         pending.insert(root.to_path_buf(), next);
     }
 }
 
-fn settle(root: &Path, cancel: &Arc<AtomicBool>, error: Option<EngineError>) {
-    let mut pending = pending();
+/// Ends the device sign-in waiting for one engine root, if any: forgets it and sets its
+/// cancel flag, so its thread saves nothing. Inputs: the held pending map and the root.
+fn cancel_waiting(pending: &mut BTreeMap<PathBuf, Pending>, root: &Path) {
+    if let Some(old) = pending.remove(root) {
+        old.cancel.store(true, Ordering::Release);
+    }
+}
+
+fn settle(root: &Path, cancel: &AtomicBool, error: Option<EngineError>) {
+    settle_held(&mut pending(), root, cancel, error);
+}
+
+/// Ends one device sign-in's waiting and records its problem, if that sign-in is still the
+/// root's current one. Inputs: the held pending map, the root, the sign-in's cancel flag
+/// and its failure, if any.
+fn settle_held(
+    pending: &mut BTreeMap<PathBuf, Pending>,
+    root: &Path,
+    cancel: &AtomicBool,
+    error: Option<EngineError>,
+) {
     if let Some(entry) = pending.get_mut(root)
-        && Arc::ptr_eq(&entry.cancel, cancel)
+        && std::ptr::eq(Arc::as_ptr(&entry.cancel), cancel)
     {
         entry.waiting = false;
         entry.problem = error
@@ -257,14 +327,18 @@ impl GitHub {
     }
 
     /// Reads what the settings page shows. A saved sign-in counts only while its token is
-    /// still in the store; any failure becomes a plain problem sentence.
-    /// Output: the status, which never carries the token.
+    /// still in the store; any failure becomes a plain problem sentence. The waiting flag and
+    /// the saved sign-in are read under the pending lock every save takes, so a sign-in
+    /// never reads as saved and still waiting. Output: the status, which never carries the
+    /// token.
     pub fn status(&self) -> GitHubStatus {
-        let (waiting, last) = pending()
+        let pending = pending();
+        let (waiting, last) = pending
             .get(&self.root)
             .map(|entry| (entry.waiting, entry.problem.clone()))
             .unwrap_or((false, None));
-        match state::load(&self.root) {
+        paused_at(&self.root, Pause::InStatus);
+        let status = match state::load(&self.root) {
             Ok(Some(saved)) => match self.store.get(&saved.credential) {
                 Ok(_) => GitHubStatus {
                     signed_in: true,
@@ -282,7 +356,9 @@ impl GitHub {
                 self.signed_out(waiting, last.or(setup))
             }
             Err(error) => self.signed_out(waiting, Some(problem(&error.0))),
-        }
+        };
+        drop(pending);
+        status
     }
 
     /// Starts a device sign-in and finishes it on a background thread once the owner
@@ -307,7 +383,10 @@ impl GitHub {
             .name("github-sign-in".into())
             .spawn(move || {
                 let outcome = api::finish_device(&account.endpoints, &client_id, start, &flag)
-                    .and_then(|token| account.keep(&token, GitHubMethod::Device));
+                    .and_then(|token| {
+                        account.keep(&token, GitHubMethod::Device, Some(flag.as_ref()))
+                    });
+                paused_at(&account.root, Pause::AfterKeep);
                 settle(&account.root, &flag, outcome.err());
             });
         if spawned.is_err() {
@@ -354,8 +433,7 @@ impl GitHub {
         token: &SecretString,
         method: GitHubMethod,
     ) -> Result<GitHubStatus, EngineError> {
-        let login = self.keep(token, method)?;
-        replace_pending(&self.root, None);
+        let login = self.keep(token, method, None)?;
         Ok(GitHubStatus {
             signed_in: true,
             login: Some(login),
@@ -365,8 +443,23 @@ impl GitHub {
         })
     }
 
-    fn keep(&self, token: &SecretString, method: GitHubMethod) -> Result<String, EngineError> {
+    /// Saves a token GitHub accepted. A device sign-in passes its cancel flag, saves
+    /// nothing once a sign-out or newer sign-in set it, and ends its own waiting once saved;
+    /// any other sign-in that saved its token cancels the one waiting. All of it runs under
+    /// the pending lock sign-out and status hold throughout, so no token lands during or
+    /// after a sign-out and no status reads a saved sign-in as still waiting.
+    /// Inputs: the token, the method and the device flag. Output: the login, or the refusal.
+    fn keep(
+        &self,
+        token: &SecretString,
+        method: GitHubMethod,
+        device: Option<&AtomicBool>,
+    ) -> Result<String, EngineError> {
         let login = api::login(&self.endpoints, token)?;
+        let mut pending = pending();
+        if device.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+            return Err(failure("github_sign_in_cancelled"));
+        }
         let credential = self.store.put(&self.service(), TOKEN_ACCOUNT, token)?;
         state::save(
             &self.root,
@@ -376,17 +469,24 @@ impl GitHub {
                 credential,
             },
         )?;
+        match device {
+            Some(cancel) => settle_held(&mut pending, &self.root, cancel, None),
+            None => cancel_waiting(&mut pending, &self.root),
+        }
         Ok(login)
     }
 
     /// Signs out: cancels a waiting device sign-in, deletes the stored token and forgets
-    /// the saved sign-in. Output: the signed-out status.
+    /// the saved sign-in, all under the pending lock every save takes, so no pasted, CLI or
+    /// device token is saved between the read and the forget. Output: the signed-out status.
     pub fn sign_out(&self) -> Result<GitHubStatus, EngineError> {
-        replace_pending(&self.root, None);
+        let mut pending = pending();
+        cancel_waiting(&mut pending, &self.root);
         if let Some(saved) = state::load(&self.root)? {
             self.store.delete(&saved.credential)?;
         }
         state::forget(&self.root)?;
+        drop(pending);
         Ok(self.signed_out(false, None))
     }
 

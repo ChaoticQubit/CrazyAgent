@@ -11,6 +11,12 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS accounts (
 )";
 const REGISTRY_MAX: i64 = 1_000_000;
 
+/// Creates the saved accounts table, so the start sweep can check a key against it.
+/// Input: the engine connection. Output: any SQLite failure.
+pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
+    db.execute_batch(SCHEMA).map_err(error)
+}
+
 pub(crate) enum Command {
     Add(Box<ModelConnection>, AccountDetails),
     Rename(CredentialRef, String),
@@ -18,6 +24,7 @@ pub(crate) enum Command {
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
     KeyReplaced(CredentialRef),
+    Held,
 }
 
 pub(crate) struct Listed {
@@ -32,6 +39,7 @@ pub(crate) enum ResultValue {
     Account(Box<Listed>),
     Removed(Box<ModelConnection>),
     Page(Vec<Listed>, Option<CredentialRef>),
+    Held(Vec<CredentialRef>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,6 +47,45 @@ pub(crate) enum ResultValue {
 struct Record {
     connection: ModelConnection,
     details: AccountDetails,
+}
+
+/// The folder beside the engine database that holds account keys, one 0600 file per key
+/// named by its credential reference.
+#[cfg(unix)]
+pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
+
+/// Deletes one account key file from the engine root's owner-only key folder, for the start
+/// sweep of keys a committed removal left behind. Inputs: the engine root and the key's
+/// credential reference. Output: Ok when the file is gone, including when it or the folder
+/// was already missing; `account_key_store_unsafe` for a folder that is not this user's 0700
+/// directory.
+#[cfg(unix)]
+pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+    if CredentialRef::new(name).is_err() || name.starts_with('.') {
+        return Err(error("account_key_reference_invalid"));
+    }
+    let directory = match rustix::fs::open(
+        root.join(ACCOUNT_KEYS),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    };
+    let metadata = directory.metadata().map_err(error)?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(error("account_key_store_unsafe"));
+    }
+    match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
 }
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
@@ -123,9 +170,20 @@ pub(super) fn execute(
     admission: &Admission,
     command: Command,
 ) -> Result<ResultValue, EngineError> {
-    db.execute_batch(SCHEMA).map_err(error)?;
+    initialize(db)?;
     match command {
         Command::List(after, limit) => list(db, config, admission, after.as_ref(), limit),
+        Command::Held => {
+            let tx = db.transaction().map_err(error)?;
+            check_owner_admission(&tx, admission)?;
+            let held = config
+                .settings
+                .model_access
+                .as_ref()
+                .map(|catalog| catalog.connections.iter().map(|c| c.id.clone()).collect())
+                .unwrap_or_default();
+            Ok(ResultValue::Held(held))
+        }
         Command::Get(id) => {
             let tx = db.transaction().map_err(error)?;
             check_owner_admission(&tx, admission)?;
@@ -236,9 +294,59 @@ pub(super) fn execute(
             check_owner_admission(&tx, admission)?;
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
+            crate::usage::forget_limits(&tx, &id)?;
+            if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
+                super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
+            }
+            #[cfg(unix)]
+            let left = account_files(&connection.auth);
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                super::trash::put(&tx, kind, name)?;
+            }
             tx.commit().map_err(error)?;
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
+            }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
+    }
+}
+
+/// Names the files a removed account leaves to delete beside its key: a native account's
+/// sign-in or an API key account's generated SDK home. Input: the account's authentication.
+/// Output: the trash kind and reference, none for an account with neither.
+#[cfg(unix)]
+fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
+    match auth {
+        ModelAuthentication::ApiKey { credential_ref } => {
+            Some((super::trash::GENERATED_HOME, credential_ref.as_str()))
+        }
+        ModelAuthentication::NativeManaged { profile_ref } => {
+            Some((super::trash::NATIVE_SIGN_IN, profile_ref.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Deletes a removed account's files straight after its removal commits; what cannot go
+/// now stays noted for the next start. Inputs: the connection, the catalog left after the
+/// removal, the kind and the reference.
+#[cfg(unix)]
+fn settle_removed(
+    db: &Connection,
+    catalog: Option<&crate::config::ModelAccess>,
+    kind: &str,
+    name: &str,
+) {
+    let settled = db
+        .path()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .ok_or_else(|| error("account_file_root_unknown"))
+        .and_then(|root| super::trash::settle(db, root, catalog, kind, name));
+    if let Err(problem) = settled {
+        eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0);
     }
 }
 
@@ -352,29 +460,26 @@ fn list(
         )?);
     }
     let wanted = limit - items.len();
-    let mut more = skip + items.len() < unregistered.len();
-    if wanted > 0 {
-        let mut statement = tx
-            .prepare("SELECT id, body FROM accounts WHERE seq>?1 ORDER BY seq LIMIT ?2")
-            .map_err(error)?;
-        let rows = statement
-            .query_map(params![after_seq, wanted as i64 + 1], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })
-            .map_err(error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(error)?;
-        more = rows.len() > wanted;
-        for (id, body) in rows.into_iter().take(wanted) {
-            let record = decode(&id, &body)?;
-            let connection = catalog
-                .connections
-                .iter()
-                .find(|c| c.id == record.connection.id)
-                .cloned()
-                .unwrap_or(record.connection);
-            items.push(listed(&tx, admission, connection, record.details)?);
-        }
+    let mut statement = tx
+        .prepare("SELECT id, body FROM accounts WHERE seq>?1 ORDER BY seq LIMIT ?2")
+        .map_err(error)?;
+    let rows = statement
+        .query_map(params![after_seq, wanted as i64 + 1], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    let more = skip + items.len() < unregistered.len() || rows.len() > wanted;
+    for (id, body) in rows.into_iter().take(wanted) {
+        let record = decode(&id, &body)?;
+        let connection = catalog
+            .connections
+            .iter()
+            .find(|c| c.id == record.connection.id)
+            .cloned()
+            .unwrap_or(record.connection);
+        items.push(listed(&tx, admission, connection, record.details)?);
     }
     let next = if more {
         items.last().map(|item| item.connection.id.clone())

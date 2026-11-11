@@ -739,3 +739,183 @@ fn account_setup_repins_a_generated_config_whose_times_changed() {
     assert_eq!(second.profile_generation, 2);
     assert_eq!(second.profile_config_sha256, first.profile_config_sha256);
 }
+
+fn rewrite_in_place(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    use std::io::Write as _;
+    use std::os::unix::fs::MetadataExt as _;
+    let inode = std::fs::metadata(path).unwrap().ino();
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    edit(&mut value);
+    let mut file = File::options()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .unwrap();
+    file.write_all(&serde_json::to_vec(&value).unwrap())
+        .unwrap();
+    file.sync_all().unwrap();
+    assert_eq!(std::fs::metadata(path).unwrap().ino(), inode);
+}
+
+fn renumber(value: &mut serde_json::Value, by: u64) {
+    if let serde_json::Value::Object(fields) = value {
+        for (name, field) in fields.iter_mut() {
+            if name == "device" {
+                *field = (field.as_u64().unwrap() + by).into();
+            } else {
+                renumber(field, by);
+            }
+        }
+    }
+}
+
+fn prepared_then_renumbered(root_by: u64, slot_by: u64) -> NativeCase {
+    let case = NativeCase::new();
+    case.custody()
+        .prepare(&case.host, &case.connection)
+        .unwrap();
+    rewrite_in_place(&case.root().join(MANIFEST), |value| {
+        renumber(value, root_by)
+    });
+    rewrite_in_place(&case.slot().join(MANIFEST), |value| {
+        renumber(value, slot_by)
+    });
+    case
+}
+
+#[test]
+fn custody_written_before_a_volume_renumber_stays_usable_without_a_rewrite() {
+    let case = prepared_then_renumbered(1, 1);
+    let root_manifest = case.root().join(MANIFEST);
+    let slot_manifest = case.slot().join(MANIFEST);
+    let written = (
+        std::fs::read(&root_manifest).unwrap(),
+        std::fs::read(&slot_manifest).unwrap(),
+    );
+    let mut custody = case.custody();
+    let (custody_id, key) = custody.prepare(&case.host, &case.connection).unwrap();
+    assert_eq!(key, digest(PROFILE.as_bytes()));
+    assert_eq!(custody_id, digest(&written.1));
+    case.usable(&mut custody, &case.connection);
+    assert_eq!(
+        (
+            std::fs::read(&root_manifest).unwrap(),
+            std::fs::read(&slot_manifest).unwrap()
+        ),
+        written
+    );
+}
+
+#[test]
+fn profile_made_after_an_earlier_renumber_stays_usable_after_the_next_one() {
+    let case = prepared_then_renumbered(1, 2);
+    let mut custody = case.custody();
+    custody.prepare(&case.host, &case.connection).unwrap();
+    case.usable(&mut custody, &case.connection);
+}
+
+#[test]
+fn custody_with_mixed_or_moved_pins_is_still_refused() {
+    let mixed_root = NativeCase::new();
+    mixed_root
+        .custody()
+        .prepare(&mixed_root.host, &mixed_root.connection)
+        .unwrap();
+    rewrite_in_place(&mixed_root.root().join(MANIFEST), |value| {
+        renumber(&mut value["state"], 1)
+    });
+    let refused = mixed_root
+        .custody()
+        .prepare(&mixed_root.host, &mixed_root.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+
+    let mixed_profile = prepared_then_renumbered(1, 1);
+    rewrite_in_place(&mixed_profile.slot().join(MANIFEST), |value| {
+        renumber(&mut value["home"], 1)
+    });
+    let refused = mixed_profile
+        .custody()
+        .prepare(&mixed_profile.host, &mixed_profile.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+
+    let moved = prepared_then_renumbered(1, 1);
+    rewrite_in_place(&moved.slot().join(MANIFEST), |value| {
+        let inode = value["home"]["inode"].as_u64().unwrap();
+        value["home"]["inode"] = (inode + 1).into();
+    });
+    let refused = moved.custody().prepare(&moved.host, &moved.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+
+    let moved_root = prepared_then_renumbered(1, 1);
+    rewrite_in_place(&moved_root.root().join(MANIFEST), |value| {
+        let inode = value["database"]["inode"].as_u64().unwrap();
+        value["database"]["inode"] = (inode + 1).into();
+    });
+    let refused = moved_root
+        .custody()
+        .prepare(&moved_root.host, &moved_root.connection);
+    assert_eq!(refused.unwrap_err().0, "native_profile_binding_conflict");
+}
+
+/// Names a configured case's custody root manifest and its profile slot manifest.
+/// Input: the case. Output: the two `identity.json` paths.
+fn configured_manifests(case: &ConfiguredCase) -> (PathBuf, PathBuf) {
+    let root = case.root.path().join("state").join(ROOT);
+    let slot = root.join(digest(case.profile.as_str().as_bytes()));
+    (root.join(MANIFEST), slot.join(MANIFEST))
+}
+
+#[test]
+fn configured_profile_survives_a_volume_renumber() {
+    let mut case = ConfiguredCase::new(true, true);
+    let first = case.register();
+    let (root_manifest, slot_manifest) = configured_manifests(&case);
+    rewrite_in_place(&root_manifest, |value| renumber(value, 1));
+    rewrite_in_place(&slot_manifest, |value| renumber(value, 1));
+    let written = (
+        std::fs::read(&root_manifest).unwrap(),
+        std::fs::read(&slot_manifest).unwrap(),
+    );
+    case.custody = recapture(&case);
+    let loaded = case
+        .custody
+        .configured_rcli_profile(&case.host, &case.connection, &case.profile)
+        .unwrap();
+    assert_eq!(loaded.profile_generation, first.profile_generation);
+    assert_eq!(loaded.profile_config_sha256, first.profile_config_sha256);
+    assert_eq!(loaded.custody_id, digest(&written.1));
+    let registered = case.register();
+    assert_eq!(registered, loaded);
+    let connection = case.connection.clone();
+    drop(acquire(&mut case, &connection, &registered).unwrap());
+    assert_eq!(
+        (
+            std::fs::read(&root_manifest).unwrap(),
+            std::fs::read(&slot_manifest).unwrap()
+        ),
+        written
+    );
+}
+
+#[test]
+fn a_configured_sdk_pinned_on_another_device_alone_is_refused() {
+    let mut case = ConfiguredCase::new(true, true);
+    case.register();
+    let (_, slot_manifest) = configured_manifests(&case);
+    rewrite_in_place(&slot_manifest, |value| {
+        renumber(&mut value["configured"]["sdk"], 1)
+    });
+    case.custody = recapture(&case);
+    let loaded = case
+        .custody
+        .configured_rcli_profile(&case.host, &case.connection, &case.profile);
+    assert_eq!(loaded.unwrap_err().0, "rcli_profile_identity_changed");
+    let registered = case.custody.register_configured_rcli_profile(
+        &case.host,
+        &case.connection,
+        &case.profile,
+        &case.home,
+    );
+    assert_eq!(registered.unwrap_err().0, "rcli_profile_identity_changed");
+}

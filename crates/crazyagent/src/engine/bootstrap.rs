@@ -36,6 +36,8 @@ pub(crate) use native_profiles::MAX_PROFILES;
 pub(crate) use native_profiles::{
     AgentCredential, NativeProfileCustody, NativeProfileUse, NativeProfileUsePurpose,
 };
+#[cfg(unix)]
+pub(crate) use native_profiles::{remove_generated_home, remove_sign_in};
 
 const LOCATOR: &str = "owner-current";
 #[cfg(unix)]
@@ -604,7 +606,8 @@ impl EngineService {
             return Err(fail("engine_service_closed"));
         }
         self.live()?;
-        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let host =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         self.owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?
@@ -616,7 +619,8 @@ impl EngineService {
             return Err(fail("engine_service_closed"));
         }
         self.live()?;
-        let host = crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+        let host =
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         self.owner_runtime
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?
@@ -636,9 +640,9 @@ impl EngineService {
             .as_ref()
             .ok_or_else(|| fail("owner_runtime_missing"))?;
         let master =
-            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         let writer =
-            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture(executable)?;
+            crate::engine::native_auth_host::RegisteredNativeAuthHost::capture_entry(executable)?;
         runtime.register_rcli_master_executable(master)?;
         runtime.register_rcli_private_key_executable(writer)
     }
@@ -817,13 +821,7 @@ impl EngineService {
         self.stops.push(stop);
         self.tasks.spawn(owner.run(stopped));
         cancelled(shutdown)?;
-        if let Some(old) = previous {
-            old.verify(&self.anchor)?;
-            if old.value.database != database || old.value.db_instance != stamp.db_instance {
-                return Err(fail("owner_locator_database_mismatch"));
-            }
-            check_generation(&self.anchor, &old.value)?;
-        }
+        let previous = self.trusted_previous(previous, database, &stamp.db_instance)?;
         self.retire_socket(ordinary, previous).await?;
         let server = Server::bind(
             &self.anchor.path.join(ordinary),
@@ -916,19 +914,90 @@ impl EngineService {
         }
     }
 
+    /// Keeps the locator an earlier run left while it still names this database and its
+    /// owner generation. Start holds the engine lock, so no earlier engine on this database
+    /// is alive: a locator whose pinned database, instance, generation or owner socket no
+    /// longer match, as when a reboot gives the volume another device number, is stale and
+    /// is set aside. A locator replaced since start read it is still refused.
+    /// Inputs: the locator read at start, the database identity and instance.
+    /// Output: the trusted locator or none, or the refusal.
+    #[cfg(unix)]
+    fn trusted_previous<'a>(
+        &self,
+        previous: Option<&'a PinnedLocator>,
+        database: Identity,
+        db_instance: &str,
+    ) -> Result<Option<&'a PinnedLocator>, EngineError> {
+        let Some(old) = previous else {
+            return Ok(None);
+        };
+        old.verify(&self.anchor)?;
+        let cause = if old.value.database != database || old.value.db_instance != db_instance {
+            "owner_locator_database_mismatch".to_owned()
+        } else {
+            match check_generation(&self.anchor, &old.value) {
+                Ok(()) => return Ok(Some(old)),
+                Err(error) => error.0,
+            }
+        };
+        old.verify(&self.anchor)?;
+        self.set_aside(LOCATOR, &cause)?;
+        Ok(None)
+    }
+
+    /// Moves a stale anchor entry to `<name>.stale-<8 hex>`, never over another entry and
+    /// never deleting it, and logs one line with its cause.
+    /// Inputs: the entry name and the cause code. Output: done, or the anchor, entropy or
+    /// rename error.
+    #[cfg(unix)]
+    fn set_aside(&self, name: &str, cause: &str) -> Result<(), EngineError> {
+        for _ in 0..8 {
+            self.anchor.verify()?;
+            let aside = format!("{name}.stale-{}", random_hex()?);
+            match rustix::fs::renameat_with(
+                &self.anchor.directory,
+                name,
+                &self.anchor.directory,
+                aside.as_str(),
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => {
+                    eprintln!(
+                        "owner_stale_entry_set_aside name={name} aside={aside} cause={cause}"
+                    );
+                    return self.anchor.directory.sync_all().map_err(io_error);
+                }
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+        Err(fail("owner_stale_entry_collision_limit"))
+    }
+
+    /// Sets aside the entry at the ordinary socket path when no trusted locator names it and
+    /// it is a dead socket of this user: private, one link, and a connect finds no listener.
+    /// Start holds the engine lock, so no engine on this database listens there; anything
+    /// else, a live listener included, keeps `socket_path_already_exists`.
+    /// Inputs: the socket name and path. Output: done, or the refusal.
+    #[cfg(unix)]
+    async fn set_aside_dead_socket(&self, ordinary: &str, path: &Path) -> Result<(), EngineError> {
+        let identity = Identity::of(&self.anchor.metadata(ordinary)?);
+        if check_socket(&self.anchor, path, identity).is_err() {
+            return Err(fail("socket_path_already_exists"));
+        }
+        match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(path)).await {
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
+            _ => return Err(fail("socket_path_already_exists")),
+        }
+        check_socket(&self.anchor, path, identity)?;
+        self.set_aside(ordinary, "ordinary_socket_stale")
+    }
+
     #[cfg(unix)]
     fn create_generation(&mut self) -> Result<(), EngineError> {
         for _ in 0..8 {
             self.anchor.verify()?;
-            let mut random = [0; 4];
-            getrandom::fill(&mut random).map_err(|_| fail("owner_entropy_unavailable"))?;
-            let name = format!(
-                "o{}",
-                random
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            );
+            let name = format!("o{}", random_hex()?);
             match rustix::fs::mkdirat(&self.anchor.directory, &name, Mode::RWXU) {
                 Ok(()) => {
                     let metadata = self.anchor.metadata(&name)?;
@@ -958,9 +1027,9 @@ impl EngineService {
             Err(error) => return Err(io_error(error)),
             Ok(_) => {}
         }
-        let old = previous
-            .filter(|old| old.value.ordinary_name == ordinary)
-            .ok_or_else(|| fail("socket_path_already_exists"))?;
+        let Some(old) = previous.filter(|old| old.value.ordinary_name == ordinary) else {
+            return self.set_aside_dead_socket(ordinary, &path).await;
+        };
         old.verify(&self.anchor)?;
         check_socket(&self.anchor, &path, old.value.ordinary_socket)?;
         match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(&path)).await {
@@ -1169,6 +1238,15 @@ impl EngineService {
             Err(EngineError(errors.join("; ")))
         }
     }
+}
+
+/// Eight lowercase hex digits from the system's entropy, for fresh anchor entry names.
+/// Output: the digits, or `owner_entropy_unavailable`.
+#[cfg(unix)]
+fn random_hex() -> Result<String, EngineError> {
+    let mut random = [0; 4];
+    getrandom::fill(&mut random).map_err(|_| fail("owner_entropy_unavailable"))?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Removes the published owner locator relative to the pinned engine root.
@@ -1406,5 +1484,137 @@ mod tests {
             "owner_locator_replaced_or_unsafe"
         );
         assert!(path.exists());
+    }
+
+    /// The anchor entries whose names start with `prefix`, sorted.
+    /// Input: the anchor folder and the prefix. Output: the matching paths.
+    fn set_aside(root: &Path, prefix: &str) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(prefix)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// A reboot can renumber the engine volume's device while every inode stays, so the
+    /// locator an engine stopped by it left names its database, generation and sockets on
+    /// the device the volume had before, while those objects are still there. The next
+    /// engine holds the engine lock, so it sets the locator and the dead ordinary socket
+    /// aside, never deleting them, sweeps the old generation and starts like a clean restart.
+    #[tokio::test]
+    async fn an_engine_starts_like_a_clean_restart_after_a_reboot_renumbered_its_volume() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let path = root.path().join(LOCATOR);
+        let mut first = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        let mut left: Locator = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        first.shutdown().await.unwrap();
+        let generation = root.path().join(&left.generation);
+        std::fs::create_dir(&generation).unwrap();
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let dead_socket = |socket: &Path| {
+            drop(crate::spawn_gate::bind_unix_std(socket).unwrap());
+            std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+            Identity::of(&std::fs::symlink_metadata(socket).unwrap())
+        };
+        left.generation_identity = Identity::of(&std::fs::metadata(&generation).unwrap());
+        left.owner_socket = dead_socket(&generation.join("owner.sock"));
+        left.ordinary_socket = dead_socket(&root.path().join("e.sock"));
+        let renumbered = std::fs::metadata(root.path()).unwrap().dev() ^ 1;
+        for identity in [
+            &mut left.database,
+            &mut left.generation_identity,
+            &mut left.owner_socket,
+            &mut left.ordinary_socket,
+        ] {
+            identity.device = renumbered;
+        }
+        let stale = serde_json::to_vec(&left).unwrap();
+        std::fs::write(&path, &stale).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let started = EngineService::start(root.path(), "e.sock", &config, &stopped).await;
+        assert_eq!(
+            started.as_ref().err().map(|error| error.0.as_str()),
+            None,
+            "an engine starts after a reboot renumbered its volume"
+        );
+        let mut second = started.unwrap();
+        second.ensure_ready(&stopped).unwrap();
+        let locators = set_aside(root.path(), "owner-current.stale-");
+        let sockets = set_aside(root.path(), "e.sock.stale-");
+        assert_eq!(
+            (locators.len(), sockets.len()),
+            (1, 1),
+            "the stale locator and socket are kept aside, not deleted"
+        );
+        assert_eq!(std::fs::read(&locators[0]).unwrap(), stale);
+        assert!(
+            std::fs::symlink_metadata(&sockets[0])
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        assert!(!generation.exists(), "the earlier generation is swept");
+        second.shutdown().await.unwrap();
+        assert_eq!(set_aside(root.path(), "owner-current.stale-"), locators);
+        assert_eq!(set_aside(root.path(), "e.sock.stale-"), sockets);
+    }
+
+    /// An engine stopped without its cleanup leaves its ordinary socket file behind with no
+    /// listener; with no locator naming it, the next engine holds the engine lock, finds no
+    /// listener there and sets the socket file aside instead of refusing to start.
+    #[tokio::test]
+    async fn an_engine_starts_beside_the_socket_a_dropped_listener_left() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let socket = root.path().join("e.sock");
+        let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        drop(listener);
+        assert!(
+            std::fs::symlink_metadata(&socket)
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        assert!(!root.path().join(LOCATOR).exists());
+
+        let started = EngineService::start(root.path(), "e.sock", &config, &stopped).await;
+        assert_eq!(
+            started.as_ref().err().map(|error| error.0.as_str()),
+            None,
+            "an engine starts beside the socket file a dropped listener left"
+        );
+        let mut service = started.unwrap();
+        service.ensure_ready(&stopped).unwrap();
+        let aside = set_aside(root.path(), "e.sock.stale-");
+        assert_eq!(
+            aside.len(),
+            1,
+            "the stale socket is kept aside, not deleted"
+        );
+        assert!(
+            std::fs::symlink_metadata(&aside[0])
+                .unwrap()
+                .file_type()
+                .is_socket()
+        );
+        service.shutdown().await.unwrap();
     }
 }

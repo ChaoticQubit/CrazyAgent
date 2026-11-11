@@ -231,7 +231,9 @@ pub(crate) fn detached_survivors(
             .collect();
         if left.is_empty() || std::time::Instant::now() >= deadline {
             for (pid, _) in &left {
-                if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+                if still_naming(*pid, needles)
+                    && let Some(pid) = rustix::process::Pid::from_raw(*pid)
+                {
                     let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
                 }
             }
@@ -239,6 +241,28 @@ pub(crate) fn detached_survivors(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Whether process `pid` of this user still names one of `needles`, read again with `ps` just
+/// before it is killed, so an id that ended and was reused by another process is never hit.
+/// Inputs: the id and the texts. Output: true when it still names one.
+fn still_naming(pid: i32, needles: &[&str]) -> bool {
+    let listing = crate::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-ww", "-o", "pid=,uid=,command=", "-p", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    naming(
+        &String::from_utf8_lossy(&listing.stdout),
+        &rustix::process::getuid().as_raw().to_string(),
+        i32::try_from(std::process::id()).unwrap(),
+        "",
+    )
+    .iter()
+    .any(|(found, command)| *found == pid && needles.iter().any(|needle| command.contains(needle)))
 }
 
 /// Kills, by id, the warden of every running harness of this user started from `harness`:

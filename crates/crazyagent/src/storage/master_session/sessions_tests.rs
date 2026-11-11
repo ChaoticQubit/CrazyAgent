@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::{AccountPool, ModelAccessEdit};
 use crate::engine::owner::{ModelAccessCollection, Started};
 use crate::master_session::MasterSelection;
 use crate::master_sessions::{MasterSessionSummary, ResumePlan, SESSIONS_LISTED_MAX};
@@ -124,6 +125,40 @@ impl Case {
         receive.await.unwrap().unwrap()
     }
 
+    /// Reads one page of a session's conversation from the message store, or the code the
+    /// read was refused with.
+    async fn messages(
+        &self,
+        project: &ProjectId,
+        session: &SessionId,
+        before: Option<u64>,
+        limit: u8,
+    ) -> Result<crate::master_sessions::SessionMessagePage, String> {
+        let (send, receive) = oneshot::channel();
+        self.storage
+            .sender
+            .try_send(Job::OwnerRead(
+                self.started.owners[0].admission.clone(),
+                OwnerRead::ProjectMasterMessages {
+                    project_id: project.clone(),
+                    session_id: session.clone(),
+                    before,
+                    limit,
+                },
+                send,
+            ))
+            .unwrap_or_else(|_| panic!("owner read queue unavailable"));
+        match receive.await.unwrap() {
+            Ok(reply) => {
+                let OwnerData::ProjectMasterMessages { page } = reply.data else {
+                    panic!("the session's messages are read");
+                };
+                Ok(page)
+            }
+            Err(refused) => Err(refused.0),
+        }
+    }
+
     async fn apply(&self, id: &str, mutation: OwnerMutation) -> OwnerResult {
         let basis = self.read(OwnerRead::Capabilities).await;
         let (send, receive) = oneshot::channel();
@@ -245,6 +280,27 @@ impl Case {
             },
         )
         .await
+    }
+
+    async fn delete(&self, id: &str, session: &SessionId) -> OwnerResult {
+        self.master(
+            id,
+            MasterOwnerAction::DeleteSession {
+                project_id: self.project.clone(),
+                session_id: session.clone(),
+            },
+        )
+        .await
+    }
+
+    fn used_in_terminal(&self, session: &SessionId) {
+        crate::master_sessions::mark_owner_turn(
+            &self.db(),
+            &self.project,
+            session.as_str(),
+            "claude-code",
+        )
+        .unwrap();
     }
 
     async fn shown(&self) -> MasterSessionView {
@@ -419,11 +475,20 @@ async fn new_session_parks_the_live_one_and_opens_a_fresh_one_atomically() {
     assert_eq!(cancelled[0].phase, MasterTurnPhase::Cancelled);
     assert_eq!(cancelled[0].reason, Some(MasterReason::Cancelled));
 
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![first.session_id.clone()],
+        "the fresh live session holds no owner turn, so it is not listed"
+    );
+    case.used_in_terminal(&second.session_id);
     let listed = case.sessions().await;
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].session_id, second.session_id);
     assert_eq!(listed[0].phase, MasterSessionPhase::Configured);
-    assert_eq!(listed[0].turns, 0);
+    assert_eq!(
+        listed[0].turns, 1,
+        "the turn run in the live terminal counts as the session's message"
+    );
     assert!(listed[0].started_ms.is_some());
     assert_eq!(listed[1].session_id, first.session_id);
     assert_eq!(listed[1].phase, MasterSessionPhase::Parked);
@@ -543,7 +608,7 @@ async fn resume_swaps_the_live_session_atomically_and_keeps_every_turn() {
         &second.project_id,
         &second.session_id,
         "codex",
-        "conn-1",
+        &|_| true,
     )
     .unwrap() else {
         panic!("a session with earlier turns and no kept conversation starts fresh");
@@ -560,12 +625,14 @@ async fn the_session_list_is_bounded_and_newest_activity_first() {
     assert_eq!(case.open("open-0").await, OwnerResult::Applied);
     let total = SESSIONS_LISTED_MAX + 2;
     for index in 1..total {
+        case.used_in_terminal(&case.shown().await.session_id);
         assert_eq!(
             case.renew(&format!("renew-{index}"), false).await,
             OwnerResult::Applied,
             "renew {index}"
         );
     }
+    case.used_in_terminal(&case.shown().await.session_id);
     let phases = case.phases();
     assert_eq!(phases.len(), total);
     assert_eq!(live_count(&phases), 1);
@@ -604,11 +671,13 @@ async fn results_of_a_parked_session_wait_for_it_and_its_agents_are_its_own() {
     let case = Case::new().await;
     assert_eq!(case.open("open-first").await, OwnerResult::Applied);
     let first = case.shown().await;
+    case.used_in_terminal(&first.session_id);
     assert_eq!(
         case.renew("renew-second", false).await,
         OwnerResult::Applied
     );
     let second = case.shown().await;
+    case.used_in_terminal(&second.session_id);
     let db = case.db();
     db.execute(
         "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,session) VALUES (?1,'sub','codex',0,'idle',1,1,?2)",
@@ -663,6 +732,7 @@ async fn results_of_a_parked_session_wait_for_it_and_its_agents_are_its_own() {
 async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     let case = Case::new().await;
     assert_eq!(case.open("open-zero").await, OwnerResult::Applied);
+    case.used_in_terminal(&case.shown().await.session_id);
     assert_eq!(
         case.renew_with("open-first", false, MasterBackend::Claude)
             .await,
@@ -718,7 +788,8 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    let latest = crate::storage::migrations::STEPS.last().unwrap().to;
+    assert_eq!(version, latest);
     let schema: String = db
         .query_row(
             "SELECT sql FROM sqlite_schema WHERE name='master_sessions'",
@@ -742,7 +813,7 @@ async fn upgrading_a_version_3_database_makes_ended_sessions_resumable() {
     assert!(
         root_backups(&case)
             .iter()
-            .any(|name| name.starts_with("3-to-4-")),
+            .any(|name| name.starts_with(&format!("3-to-{latest}-"))),
         "the upgrade kept a backup"
     );
     drop(db);
@@ -829,6 +900,7 @@ async fn parking_switching_and_new_sessions_never_touch_a_dirty_master_worktree(
 
     assert_eq!(case.open("open-dirty").await, OwnerResult::Applied);
     let first = case.shown().await;
+    case.used_in_terminal(&first.session_id);
     assert_eq!(case.renew("renew-dirty", false).await, OwnerResult::Applied);
     let second = case.shown().await;
     assert_ne!(second.session_id, first.session_id);
@@ -868,12 +940,14 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     let case = Case::new().await;
     assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
     let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
     assert_eq!(
         case.renew_with("renew-native", false, MasterBackend::Claude)
             .await,
         OwnerResult::Applied
     );
     let native = case.shown().await;
+    case.used_in_terminal(&native.session_id);
     assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
     let case = case.reopen().await;
 
@@ -912,6 +986,111 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
             code: "master_source_conflict".into()
         },
         "the session's own pool changed, so it no longer runs under the current settings"
+    );
+    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+    case.close().await;
+}
+
+/// Has the owner replace the native pool with one serving the given projects, its
+/// members, roles, fallback and quota policy as in CONFIG. Inputs: the case, the edit id
+/// and the projects. Output: the owner's result.
+async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerResult {
+    let (expected_config_id, expected_source_hash, _) = case.basis().await;
+    case.apply(
+        id,
+        OwnerMutation::ModelAccess {
+            expected_config_id,
+            expected_source_hash,
+            edit: ModelAccessEdit::ReplacePool {
+                pool: AccountPool {
+                    id: reference("native-pool"),
+                    name: None,
+                    members: vec![reference("native-connection")],
+                    projects: projects.iter().copied().map(reference).collect(),
+                    roles: vec![reference("project_leader")],
+                    fallback_allowed: false,
+                    provider_quota_policy: Default::default(),
+                },
+            },
+        },
+    )
+    .await
+}
+
+/// Parks a used native session behind a fresh one, then has the owner replace the native
+/// pool with one serving the given projects, as adding a folder again did in run 7 (N-D15).
+/// A second project exists first so the pool can name it, and one unchanged pool edit runs
+/// before any session opens: every pool edit writes the assigned pools' approvals and
+/// destinations into the settings (config.rs:912-975), which CONFIG lacks for the native
+/// connection. Inputs: the case and the projects. Output: the parked session.
+async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> SessionId {
+    let repository = case.root.path().join("joined-repository");
+    std::fs::create_dir(&repository).unwrap();
+    std::fs::write(repository.join("README.md"), "Joined repository\n").unwrap();
+    assert_eq!(
+        case.apply(
+            "create-joined-project",
+            OwnerMutation::CreateProject {
+                project_id: ProjectId::new("joined-project").unwrap(),
+                spec: ProjectSpec {
+                    name: "Joined project".into(),
+                    repositories: vec![repository.to_str().unwrap().into()],
+                },
+            },
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        replace_native_pool(case, "settle-native-pool", &["session-project"]).await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
+    let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
+    assert_eq!(
+        case.renew_with("renew-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied
+    );
+    let native = case.shown().await;
+    case.used_in_terminal(&native.session_id);
+    assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
+    let (bound, _, _) = case.basis().await;
+    assert_eq!(native.config_id, bound);
+    assert_eq!(
+        replace_native_pool(case, "replace-native-pool", projects).await,
+        OwnerResult::Applied
+    );
+    let (after, _, _) = case.basis().await;
+    assert_ne!(after, bound, "the pool edit changes the settings");
+    native.session_id
+}
+
+#[tokio::test]
+async fn resume_continues_a_session_after_another_project_joins_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_pool_edit(&case, &["session-project", "joined-project"]).await;
+    assert_eq!(
+        case.resume("resume-joined", &native, false).await,
+        OwnerResult::Applied,
+        "another project joining the session's pool leaves what the session runs on as it was"
+    );
+    assert_eq!(case.shown().await.session_id, native);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn resume_refuses_a_session_whose_own_project_left_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_pool_edit(&case, &["joined-project"]).await;
+    let before = snapshot(&case);
+    assert_eq!(
+        case.resume("resume-left", &native, false).await,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        },
+        "the session's own project left its pool, so it no longer runs under the current settings"
     );
     assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
     case.close().await;
@@ -976,6 +1155,788 @@ async fn a_parked_session_s_owner_messages_are_read_back_for_its_turns_only() {
     assert_eq!(
         receive.await.unwrap().unwrap_err().0,
         "master_inputs_bounds"
+    );
+    case.close().await;
+}
+
+#[tokio::test]
+async fn a_master_turn_s_input_outlives_conversation_pruning() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-capacity").await, OwnerResult::Applied);
+    let session = case.shown().await;
+    assert_eq!(
+        case.submit(
+            "capacity-message",
+            &session.session_id,
+            "Plan the first slice"
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    let turn = case.turns(&session.session_id).await.remove(0);
+    for n in 0..=crate::conversation::ENTRIES_MAX {
+        let appended = case
+            .apply(
+                &format!("capacity-{n}"),
+                OwnerMutation::Conversation {
+                    mutation: ConversationMutation::AppendMessage {
+                        project_id: case.project.clone(),
+                        text: format!("filler {n}"),
+                    },
+                },
+            )
+            .await;
+        assert_eq!(appended, OwnerResult::Applied);
+    }
+    let db = case.db();
+    let oldest: Vec<String> = db
+        .prepare(
+            "SELECT text FROM conversation_entries WHERE project=?1 ORDER BY event_cursor LIMIT 3",
+        )
+        .unwrap()
+        .query_map([case.project.as_str()], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        oldest,
+        ["Plan the first slice", "filler 1", "filler 2"],
+        "the oldest plain message went and the turn's input stayed"
+    );
+    let total: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_entries WHERE project=?1",
+            [case.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, crate::conversation::ENTRIES_MAX as i64 + 1);
+    drop(db);
+    assert_eq!(case.turns(&session.session_id).await, vec![turn.clone()]);
+    let OwnerData::ProjectMasterInputs { entries } = case
+        .read(OwnerRead::ProjectMasterInputs {
+            project_id: case.project.clone(),
+            session_id: session.session_id.clone(),
+            cursors: vec![turn.input_cursor.clone()],
+        })
+        .await
+        .data
+    else {
+        panic!("the owner messages are read");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].text, "Plan the first slice");
+    let mut db = case.db();
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        turn_message(&tx, &session, &turn).unwrap().as_deref(),
+        Some("Plan the first slice")
+    );
+    drop(tx);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn turns_whose_input_an_older_engine_pruned_still_read_and_end() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-pruned").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(
+        case.submit("pruned-message", &first.session_id, "Plan the first slice")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-pruned", true).await, OwnerResult::Applied);
+    let second = case.shown().await;
+    assert_eq!(
+        case.submit("queued-message", &second.session_id, "Add a dark theme")
+            .await,
+        OwnerResult::Applied
+    );
+    let ended = case.turns(&first.session_id).await.remove(0);
+    let queued = case.turns(&second.session_id).await.remove(0);
+    assert_eq!(ended.phase, MasterTurnPhase::Cancelled);
+    assert_eq!(queued.phase, MasterTurnPhase::Queued);
+    let db = case.db();
+    for turn in [&ended, &queued] {
+        assert_eq!(
+            db.execute(
+                "DELETE FROM conversation_entries WHERE event_cursor=?1",
+                [signed(turn.input_cursor.value()).unwrap()],
+            )
+            .unwrap(),
+            1,
+            "an older engine pruned the turn's input"
+        );
+    }
+    drop(db);
+    assert_eq!(case.turns(&first.session_id).await, vec![ended.clone()]);
+    assert_eq!(case.turns(&second.session_id).await, vec![queued.clone()]);
+    let second = case.shown().await;
+    assert_eq!(second.current_turn, Some(queued.id.clone()));
+    let OwnerData::ProjectMasterInputs { entries } = case
+        .read(OwnerRead::ProjectMasterInputs {
+            project_id: case.project.clone(),
+            session_id: first.session_id.clone(),
+            cursors: vec![ended.input_cursor.clone()],
+        })
+        .await
+        .data
+    else {
+        panic!("the owner messages are read");
+    };
+    assert!(
+        entries.is_empty(),
+        "a pruned input is left out, not refused"
+    );
+    let mut db = case.db();
+    let tx = db.transaction().unwrap();
+    assert_eq!(turn_message(&tx, &first, &ended).unwrap(), None);
+    assert_eq!(
+        prompt(&tx, &second, &queued).unwrap_err().0,
+        "master_input_provenance",
+        "a turn about to run still needs its message"
+    );
+    drop(tx);
+    drop(db);
+    assert_eq!(
+        case.renew("renew-after-prune", true).await,
+        OwnerResult::Applied,
+        "the session still parks, cancelling its turn"
+    );
+    assert_eq!(
+        case.turns(&second.session_id).await[0].phase,
+        MasterTurnPhase::Cancelled
+    );
+    case.close().await;
+}
+
+/// D6: while the live master answers a turn in its terminal (`team_live_masters` live, an
+/// agent and an open turn), New session and Resume are refused with `master_turn_running`
+/// and change nothing, unless the owner confirmed stopping that reply; once the turn
+/// closed, Resume applies.
+#[tokio::test]
+async fn a_live_master_turn_holds_new_session_and_resume_until_the_owner_stops_it() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-live").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    let db = case.db();
+    crate::team::master::initialize(&db).unwrap();
+    crate::master_sessions::mark_owner_turn(
+        &db,
+        &case.project,
+        first.session_id.as_str(),
+        "claude-code",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_live_masters(project,live,agent,turn_open) VALUES (?1,1,7,1)
+         ON CONFLICT(project) DO UPDATE SET live=1, agent=7, turn_open=1",
+        [case.project.as_str()],
+    )
+    .unwrap();
+    assert!(crate::team::master::turn_running(&db, &case.project).unwrap());
+
+    let before = case.phases();
+    assert_eq!(
+        case.renew("renew-live-turn", false).await,
+        OwnerResult::Rejected {
+            code: "master_turn_running".into()
+        }
+    );
+    assert_eq!(
+        case.phases(),
+        before,
+        "a refused New session changes nothing"
+    );
+    assert_eq!(
+        case.renew("renew-live-turn-stopped", true).await,
+        OwnerResult::Applied
+    );
+    let second = case.shown().await;
+    assert_ne!(second.session_id, first.session_id);
+    crate::master_sessions::mark_owner_turn(
+        &db,
+        &case.project,
+        second.session_id.as_str(),
+        "claude-code",
+    )
+    .unwrap();
+
+    let before = case.phases();
+    assert_eq!(
+        case.resume("resume-live-turn", &first.session_id, false)
+            .await,
+        OwnerResult::Rejected {
+            code: "master_turn_running".into()
+        }
+    );
+    assert_eq!(case.phases(), before, "a refused Resume changes nothing");
+    db.execute(
+        "UPDATE team_live_masters SET turn_open=0 WHERE project=?1",
+        [case.project.as_str()],
+    )
+    .unwrap();
+    assert!(!crate::team::master::turn_running(&db, &case.project).unwrap());
+    assert_eq!(
+        case.resume("resume-closed-turn", &first.session_id, false)
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.shown().await.session_id, first.session_id);
+}
+
+fn listed_ids(listed: &[MasterSessionSummary]) -> Vec<SessionId> {
+    listed
+        .iter()
+        .map(|summary| summary.session_id.clone())
+        .collect()
+}
+
+fn count(case: &Case, sql: &str, session: &SessionId) -> i64 {
+    case.db()
+        .query_row(sql, [session.as_str()], |row| row.get(0))
+        .unwrap()
+}
+
+fn keep_conversation(case: &Case, session: &SessionId, agent: i64, id: &str, record: &Path) {
+    case.db()
+        .execute(
+            "INSERT INTO team_master_conversations(session,project,agent,harness,connection,conversation,record)
+             VALUES (?1,?2,?3,'claude-code','native-connection',?4,?5)",
+            rusqlite::params![
+                session.as_str(),
+                case.project.as_str(),
+                agent,
+                id,
+                record.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn new_session_on_a_session_with_no_owner_turn_is_refused_and_blank_sessions_are_not_listed()
+{
+    let case = Case::new().await;
+    assert_eq!(case.open("open-blank").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert!(
+        case.sessions().await.is_empty(),
+        "a live session with no owner turn is not listed"
+    );
+    let before = snapshot(&case);
+    for (id, cancel_running) in [("renew-blank", false), ("renew-blank-again", true)] {
+        assert_eq!(
+            case.renew(id, cancel_running).await,
+            OwnerResult::Rejected {
+                code: "master_session_unused".into()
+            }
+        );
+    }
+    assert_eq!(
+        snapshot(&case),
+        before,
+        "a refused New session creates nothing"
+    );
+    assert!(case.sessions().await.is_empty());
+
+    assert_eq!(
+        case.submit("first-line", &first.session_id, "Draft the release notes")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![first.session_id.clone()]
+    );
+    assert_eq!(case.renew("renew-used", true).await, OwnerResult::Applied);
+    let second = case.shown().await;
+    assert_ne!(second.session_id, first.session_id);
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![first.session_id.clone()],
+        "the fresh live session is not listed before its first turn"
+    );
+    assert_eq!(
+        case.renew("renew-fresh", true).await,
+        OwnerResult::Rejected {
+            code: "master_session_unused".into()
+        }
+    );
+    assert_eq!(
+        case.submit("second-line", &second.session_id, "Check the changelog")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![second.session_id.clone(), first.session_id.clone()]
+    );
+    assert_eq!(case.phases().len(), 2);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-typed").await, OwnerResult::Applied);
+    let typed = case.shown().await;
+    assert_eq!(
+        case.submit("typed-line", &typed.session_id, "Sketch the settings page")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        case.renew("renew-terminal", true).await,
+        OwnerResult::Applied
+    );
+    let terminal = case.shown().await;
+    let record = case
+        .root
+        .path()
+        .join("team/agents/agent-3/home/terminal.jsonl");
+    keep_conversation(
+        &case,
+        &terminal.session_id,
+        3,
+        "terminal-conversation",
+        &record,
+    );
+    write_record(&record, "Plan the import page", IMPORT_REPLY);
+    keep_conversation(
+        &case,
+        &typed.session_id,
+        2,
+        "typed-conversation",
+        &case
+            .root
+            .path()
+            .join("team/agents/agent-2/home/typed.jsonl"),
+    );
+    let project = case.project.clone();
+    let root = case.close().await;
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    db.execute_batch("DROP TABLE session_owner_turns").unwrap();
+    drop(db);
+
+    let (storage, started) = start(root.path()).await;
+    let case = Case {
+        storage,
+        started,
+        project,
+        root,
+    };
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![terminal.session_id.clone(), typed.session_id.clone()],
+        "a session that only kept a harness conversation stays listed after the upgrade"
+    );
+    assert_eq!(
+        case.sessions()
+            .await
+            .iter()
+            .map(|summary| summary.turns)
+            .collect::<Vec<_>>(),
+        vec![1, 1],
+        "a kept conversation counts as one terminal turn only for a session with no engine turn"
+    );
+    assert_eq!(
+        case.renew("renew-after-upgrade", true).await,
+        OwnerResult::Applied,
+        "the backfilled live session counts as used"
+    );
+    let fresh = case.shown().await;
+    assert!(
+        !listed_ids(&case.sessions().await).contains(&fresh.session_id),
+        "a session with neither a turn nor a kept conversation is not listed"
+    );
+    assert_eq!(listed_ids(&case.sessions().await).len(), 2);
+    let listed = case.sessions().await;
+    let parked = summary_of(&listed, &terminal.session_id);
+    assert_eq!(parked.phase, MasterSessionPhase::Parked);
+    assert_eq!(
+        parked.last_line.as_deref(),
+        Some(IMPORT_REPLY),
+        "a parked session used only in the terminal shows the newest reply of its kept conversation"
+    );
+    case.close().await;
+}
+
+const IMPORT_REPLY: &str = "The import plan is in docs/import.md.";
+
+/// Writes a Claude Code conversation record of one typed line and one reply, as the harness
+/// keeps it. Takes the record path, the typed line and the reply.
+fn write_record(record: &Path, typed: &str, reply: &str) {
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let lines = [
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": typed}}),
+        serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}}),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(record, text).unwrap();
+}
+
+fn summary_of<'a>(
+    listed: &'a [MasterSessionSummary],
+    session: &SessionId,
+) -> &'a MasterSessionSummary {
+    listed
+        .iter()
+        .find(|summary| &summary.session_id == session)
+        .unwrap_or_else(|| panic!("{} is listed", session.as_str()))
+}
+
+/// N-D14: the Sessions list counts every turn run in a session's live terminal as a message,
+/// added to its engine-run turns, also when an 18.14 engine, which had no message store,
+/// recorded it in the two-column table and this engine moves it into the store: a row of a session with no engine turn counts as the one turn it proves, a row of
+/// a session with engine turns may be a kept conversation's backfill and adds none (ND14-L1),
+/// and later turns count on.
+#[tokio::test]
+async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18_14() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-terminal").await, OwnerResult::Applied);
+    let terminal = case.shown().await;
+    case.used_in_terminal(&terminal.session_id);
+    case.used_in_terminal(&terminal.session_id);
+    let listed = case.sessions().await;
+    assert_eq!(listed_ids(&listed), vec![terminal.session_id.clone()]);
+    assert_eq!(listed[0].phase, MasterSessionPhase::Configured);
+    assert_eq!(listed[0].turns, 2, "each terminal turn counts once");
+    assert_eq!(
+        case.renew("renew-terminal", true).await,
+        OwnerResult::Applied
+    );
+    let live = case.shown().await;
+    assert_eq!(
+        case.submit("typed-line", &live.session_id, "Outline the export page")
+            .await,
+        OwnerResult::Applied
+    );
+    case.used_in_terminal(&live.session_id);
+    assert_eq!(
+        turns_of(&case.sessions().await, &live.session_id),
+        2,
+        "an engine-run turn adds to the terminal turns"
+    );
+    let record = case
+        .root
+        .path()
+        .join("team/agents/agent-4/home/terminal.jsonl");
+    keep_conversation(
+        &case,
+        &terminal.session_id,
+        4,
+        "terminal-conversation",
+        &record,
+    );
+    write_record(&record, "Plan the import page", IMPORT_REPLY);
+
+    let project = case.project.clone();
+    let root = case.close().await;
+    let db = Connection::open(root.path().join("engine.db")).unwrap();
+    db.execute_batch(
+        "DROP TABLE session_messages;
+         DROP TABLE session_owner_turns;
+         CREATE TABLE session_owner_turns (
+             session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
+             project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128)
+         );",
+    )
+    .unwrap();
+    for session in [&terminal.session_id, &live.session_id] {
+        db.execute(
+            "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)",
+            [session.as_str(), project.as_str()],
+        )
+        .unwrap();
+    }
+    drop(db);
+    let (storage, started) = start(root.path()).await;
+    let case = Case {
+        storage,
+        started,
+        project,
+        root,
+    };
+    let listed = case.sessions().await;
+    assert_eq!(
+        turns_of(&listed, &terminal.session_id),
+        1,
+        "the 18.14 row of a session with no engine turn counts as one terminal turn"
+    );
+    assert_eq!(
+        turns_of(&listed, &live.session_id),
+        1,
+        "the 18.14 row of a session with engine turns adds no turn to them"
+    );
+    let parked = summary_of(&listed, &terminal.session_id);
+    assert_eq!(parked.phase, MasterSessionPhase::Parked);
+    assert_eq!(
+        parked.last_line.as_deref(),
+        Some(IMPORT_REPLY),
+        "a parked session an 18.14 engine recorded from the terminal shows its newest reply"
+    );
+    case.used_in_terminal(&live.session_id);
+    let listed = case.sessions().await;
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        turns_of(&listed, &live.session_id),
+        2,
+        "a later terminal turn counts on"
+    );
+    case.close().await;
+}
+
+fn turns_of(listed: &[MasterSessionSummary], session: &SessionId) -> u64 {
+    listed
+        .iter()
+        .find(|summary| &summary.session_id == session)
+        .unwrap_or_else(|| panic!("{} is listed", session.as_str()))
+        .turns
+}
+
+#[tokio::test]
+async fn delete_removes_a_parked_session_and_its_transcript_inside_the_master_home_only() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-kept").await, OwnerResult::Applied);
+    let kept = case.shown().await;
+    assert_eq!(
+        case.submit("kept-line", &kept.session_id, "Write the import guide")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-linked", true).await, OwnerResult::Applied);
+    let linked = case.shown().await;
+    assert_eq!(
+        case.submit("linked-line", &linked.session_id, "Review the export flow")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-live", true).await, OwnerResult::Applied);
+    let live = case.shown().await;
+    assert_eq!(
+        case.submit("live-line", &live.session_id, "Plan the next sprint")
+            .await,
+        OwnerResult::Applied
+    );
+
+    let root = case.root.path().to_path_buf();
+    let home = crate::team::runtime::agent_home(&root.join("team"), 4);
+    let projects = home.join(".claude/projects/-session-repository");
+    std::fs::create_dir_all(projects.join("conversation-kept/subagents")).unwrap();
+    let record = projects.join("conversation-kept.jsonl");
+    std::fs::write(&record, "{\"type\":\"user\"}\n").unwrap();
+    std::fs::write(
+        projects.join("conversation-kept/subagents/agent-a.jsonl"),
+        "{}\n",
+    )
+    .unwrap();
+    let outside = root.join("outside/.claude/projects/-session-repository");
+    std::fs::create_dir_all(outside.join("conversation-kept")).unwrap();
+    std::fs::write(outside.join("conversation-kept.jsonl"), "outside\n").unwrap();
+    std::fs::write(outside.join("conversation-linked.jsonl"), "outside\n").unwrap();
+    keep_conversation(&case, &kept.session_id, 4, "conversation-kept", &record);
+    std::os::unix::fs::symlink(&outside, home.join(".claude/projects/linked")).unwrap();
+    let through_link = home.join(".claude/projects/linked/conversation-linked.jsonl");
+    keep_conversation(
+        &case,
+        &linked.session_id,
+        4,
+        "conversation-linked",
+        &through_link,
+    );
+    let inputs: Vec<i64> = {
+        let db = case.db();
+        let mut statement = db
+            .prepare("SELECT input FROM master_turns WHERE session=?1")
+            .unwrap();
+        statement
+            .query_map([kept.session_id.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(inputs.len(), 1);
+
+    let before = snapshot(&case);
+    let linked_turns = count(
+        &case,
+        "SELECT COUNT(*) FROM master_turns WHERE session=?1",
+        &linked.session_id,
+    );
+    assert_eq!(
+        case.delete("delete-linked", &linked.session_id).await,
+        OwnerResult::Rejected {
+            code: "master_session_files_kept".into()
+        }
+    );
+    assert_eq!(
+        snapshot(&case),
+        before,
+        "a refused Delete changes no session"
+    );
+    assert_eq!(
+        count(
+            &case,
+            "SELECT COUNT(*) FROM master_turns WHERE session=?1",
+            &linked.session_id
+        ),
+        linked_turns
+    );
+    assert_eq!(
+        count(
+            &case,
+            "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1",
+            &linked.session_id
+        ),
+        1
+    );
+    assert!(outside.join("conversation-linked.jsonl").is_file());
+    assert_eq!(
+        case.delete("delete-live", &live.session_id).await,
+        OwnerResult::Rejected {
+            code: "master_session_live".into()
+        }
+    );
+    assert_eq!(snapshot(&case), before);
+
+    assert_eq!(
+        case.delete("delete-kept", &kept.session_id).await,
+        OwnerResult::Applied
+    );
+    assert!(!record.exists(), "the kept record is removed");
+    assert!(
+        !projects.join("conversation-kept").exists(),
+        "the same-id folder is removed"
+    );
+    assert!(projects.is_dir(), "the master home itself stays");
+    assert_eq!(
+        std::fs::read_to_string(outside.join("conversation-kept.jsonl")).unwrap(),
+        "outside\n",
+        "a same-named record outside the home is untouched"
+    );
+    assert!(outside.join("conversation-kept").is_dir());
+    assert_eq!(
+        listed_ids(&case.sessions().await),
+        vec![live.session_id.clone(), linked.session_id.clone()]
+    );
+    let phases = case.phases();
+    assert_eq!(
+        phases[0],
+        (kept.session_id.as_str().into(), "closed".into())
+    );
+    for table in [
+        "SELECT COUNT(*) FROM master_turns WHERE session=?1",
+        "SELECT COUNT(*) FROM master_preparations WHERE session=?1",
+        "SELECT COUNT(*) FROM team_master_conversations WHERE session=?1",
+        "SELECT COUNT(*) FROM session_owner_turns WHERE session=?1",
+        "SELECT COUNT(*) FROM session_messages WHERE session=?1",
+        "SELECT COUNT(*) FROM session_marks WHERE session=?1",
+    ] {
+        assert_eq!(count(&case, table, &kept.session_id), 0, "{table}");
+    }
+    let db = case.db();
+    let messages: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_entries WHERE kind='message' AND event_cursor=?1",
+            [inputs[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    assert_eq!(
+        messages, 0,
+        "the deleted session's owner messages are removed"
+    );
+    assert_eq!(
+        case.resume("resume-deleted", &kept.session_id, true).await,
+        OwnerResult::Rejected {
+            code: "master_session_closed".into()
+        }
+    );
+    assert_eq!(
+        case.delete("delete-again", &kept.session_id).await,
+        OwnerResult::Applied,
+        "deleting a deleted session again finds nothing left to remove"
+    );
+    case.close().await;
+}
+
+/// OB-6: one owner read gives a session's conversation whatever master wrote it. A turn the
+/// one-turn master was asked and a turn run in the live terminal come back from the same
+/// read, newest first, with a cursor that walks back to the first message.
+#[tokio::test]
+async fn one_read_pages_a_session_s_conversation_whatever_master_wrote_it() {
+    use crate::master_sessions::{MasterMode, MessageSpeaker};
+    let case = Case::new().await;
+    assert_eq!(case.open("open-mixed").await, OwnerResult::Applied);
+    let live = case.shown().await;
+    assert_eq!(
+        case.submit("typed-line", &live.session_id, "Outline the export page")
+            .await,
+        OwnerResult::Applied
+    );
+    case.used_in_terminal(&live.session_id);
+
+    let newest = case
+        .messages(&case.project, &live.session_id, None, 1)
+        .await
+        .unwrap();
+    let older = case
+        .messages(&case.project, &live.session_id, newest.next, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(newest.count, 2);
+    assert_eq!(newest.messages.len(), 1);
+    assert_eq!(newest.messages[0].speaker, MessageSpeaker::Owner);
+    assert_eq!(newest.messages[0].mode, MasterMode::Live);
+    assert_eq!(newest.messages[0].harness.as_deref(), Some("claude-code"));
+    assert_eq!(newest.messages[0].text, None);
+    assert_eq!(newest.next, Some(newest.messages[0].seq));
+    assert_eq!(older.messages.len(), 1);
+    assert_eq!(older.messages[0].speaker, MessageSpeaker::Owner);
+    assert_eq!(older.messages[0].mode, MasterMode::OneTurn);
+    assert_eq!(
+        older.messages[0].text.as_deref(),
+        Some("Outline the export page")
+    );
+    assert_eq!(older.next, None);
+    case.close().await;
+}
+
+/// The conversation read answers only for a session of the named project and within its
+/// page bounds; a refused read leaves the stored messages as they are.
+#[tokio::test]
+async fn the_conversation_read_refuses_a_foreign_session_and_a_page_out_of_bounds() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-first").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(
+        case.submit("first-line", &first.session_id, "Draft the changelog")
+            .await,
+        OwnerResult::Applied
+    );
+    let other = ProjectId::new("no-such-project").unwrap();
+    let unknown = SessionId::new("no-such-session").unwrap();
+
+    let foreign = case.messages(&other, &first.session_id, None, 8).await;
+    let missing = case.messages(&case.project, &unknown, None, 8).await;
+    let unbounded = case
+        .messages(&case.project, &first.session_id, None, 0)
+        .await;
+
+    assert_eq!(foreign.unwrap_err(), "master_session_missing");
+    assert_eq!(missing.unwrap_err(), "master_session_missing");
+    assert_eq!(unbounded.unwrap_err(), "master_messages_page_limit");
+    assert_eq!(
+        count(
+            &case,
+            "SELECT COUNT(*) FROM session_messages WHERE session=?1",
+            &first.session_id
+        ),
+        1
     );
     case.close().await;
 }

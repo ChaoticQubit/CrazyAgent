@@ -2,7 +2,8 @@
 use crazyagent::sandbox::linux::{BWRAP_PATHS, HelperRequest, LinuxBackend, LinuxSandbox};
 
 use crazyagent::sandbox::{
-    InstalledSandbox, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    InstalledSandbox, LinuxSockets, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
+    SandboxRemote,
 };
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
@@ -175,7 +176,7 @@ fn bubblewrap_holds_the_same_project_boundary() {
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let sandbox = LinuxSandbox::new(
-        policy(&case, SandboxNetwork::Open),
+        policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -212,7 +213,7 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        policy(&case, SandboxNetwork::Open),
+        policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -253,7 +254,10 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
 
 const SESSION: &str = "read -r stat < /proc/$$/stat; set -- ${stat##*\") \"}; echo \"$$ $3 $4 $5\"";
 
-fn assert_own_session(command: &mut Command) {
+/// Runs a wrapped [`SESSION`] command to its end. Takes the command. Returns the four
+/// numbers it printed, as Linux shows them to the agent: its process id, its process group,
+/// its session and its controlling terminal.
+fn session_fields(command: &mut Command) -> Vec<String> {
     let output = crazyagent::spawn_gate::output(
         command
             .stdin(Stdio::null())
@@ -267,19 +271,45 @@ fn assert_own_session(command: &mut Command) {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<&str> = text.split_whitespace().collect();
+    let fields: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
     assert_eq!(fields.len(), 4, "{text}");
+    fields
+}
+
+fn assert_own_session(command: &mut Command) {
+    let fields = session_fields(command);
     assert_eq!(
         fields[1], fields[0],
-        "the agent leads its process group: {text}"
+        "the agent leads its process group: {fields:?}"
     );
     assert_eq!(
         fields[2], fields[0],
-        "the agent leads its own session: {text}"
+        "the agent leads its own session: {fields:?}"
     );
     assert_eq!(
         fields[3], "0",
-        "the agent has no controlling terminal: {text}"
+        "the agent has no controlling terminal: {fields:?}"
+    );
+}
+
+/// Checks an agent under bubblewrap, which runs it in a process namespace of its own: the
+/// group and the session are led by that namespace's first process, bubblewrap's own, in a
+/// session made for this agent, with no controlling terminal. A session that began outside
+/// the namespace, such as the engine's, would read 0 there, never 1. Takes the wrapped
+/// [`SESSION`] command.
+fn assert_boundary_session(command: &mut Command) {
+    let fields = session_fields(command);
+    assert_eq!(
+        fields[1], "1",
+        "the boundary's first process leads the agent's group: {fields:?}"
+    );
+    assert_eq!(
+        fields[2], "1",
+        "the boundary's first process leads a session of its own: {fields:?}"
+    );
+    assert_eq!(
+        fields[3], "0",
+        "the agent has no controlling terminal: {fields:?}"
     );
 }
 
@@ -353,7 +383,7 @@ fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        policy(&case, SandboxNetwork::Open),
+        policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -430,7 +460,7 @@ fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        policy(&case, SandboxNetwork::Open),
+        policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -444,6 +474,9 @@ fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
     holder.wait().unwrap();
 }
 
+/// No agent shares the engine's session or terminal. Under Landlock the agent itself leads
+/// its group and session, however it is started. Under bubblewrap the first process of the
+/// agent's own process namespace leads them, see [`assert_boundary_session`].
 #[test]
 fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
     let case = case();
@@ -494,13 +527,13 @@ fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        policy(&case, SandboxNetwork::Open),
+        policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
     )
     .unwrap();
-    assert_own_session(&mut bubblewrap.wrap(&harness).unwrap());
+    assert_boundary_session(&mut bubblewrap.wrap(&harness).unwrap());
 }
 
 #[test]
@@ -514,11 +547,8 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
         .join("worktree");
     fs::create_dir_all(&worktree).unwrap();
     fs::write(worktree.join("README.md"), "lease\n").unwrap();
-    let leased = || {
-        policy(&case, SandboxNetwork::Open)
-            .allow_worktree(&worktree)
-            .unwrap()
-    };
+    let leased =
+        |network: SandboxNetwork| policy(&case, network).allow_worktree(&worktree).unwrap();
     let script = format!(
         "mkdir {folder} && echo made > {file} && \
          (echo x > {top} || true) && (mkdir {top_folder} || true)",
@@ -527,7 +557,7 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
         top = quoted(&case.project.join("new.txt")),
         top_folder = quoted(&case.project.join("src3")),
     );
-    let landlock = LinuxSandbox::detect(leased(), Path::new(HELPER)).unwrap();
+    let landlock = LinuxSandbox::detect(leased(SandboxNetwork::Open), Path::new(HELPER)).unwrap();
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
@@ -539,7 +569,7 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        leased(),
+        leased(SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -651,7 +681,12 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
     assert_eq!(program, Path::new("/bin/sh"));
     assert_eq!(args, ["-c", "true"].map(OsString::from));
     assert!(policy.limit_network);
-    assert_eq!(policy.connect, [443, 8080]);
+    assert_eq!(policy.connect, [53, 443, 8080]);
+    assert!(
+        wrapped
+            .get_envs()
+            .any(|(name, value)| name == "RES_OPTIONS" && value == Some(OsStr::new("use-vc")))
+    );
     assert!(policy.read.contains(&case.project));
     let git = case.project.join(".git");
     for granted in [
@@ -699,9 +734,21 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
     assert_eq!(
         parse(&["--probe", "--limit-network"]),
         Ok(HelperRequest::Probe {
-            limit_network: true
+            limit_network: true,
+            open_sockets: false,
+            keep_free: false,
         })
     );
+    assert_eq!(
+        parse(&["--probe", "--limit-network", "--open-sockets"]),
+        Ok(HelperRequest::Probe {
+            limit_network: true,
+            open_sockets: true,
+            keep_free: false,
+        })
+    );
+    assert!(parse(&["--probe", "--open-sockets"]).is_err());
+    assert!(parse(&["--open-sockets", "--", "/bin/sh"]).is_err());
 }
 
 #[test]
@@ -822,17 +869,13 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
     let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
     let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
-    let guarded = || {
-        policy(&case, SandboxNetwork::Open)
-            .guard_engine(&runtime)
-            .unwrap()
-    };
+    let guarded = |network: SandboxNetwork| policy(&case, network).guard_engine(&runtime).unwrap();
     assert_eq!(
         reach(None, &case, &socket, port, &runtime),
         "pair=ok\nunix=ok\ntcp=ok\nruntime=present\n",
         "the unsandboxed control must reach the socket"
     );
-    let landlock = LinuxSandbox::detect(guarded(), Path::new(HELPER)).unwrap();
+    let landlock = LinuxSandbox::detect(guarded(SandboxNetwork::Open), Path::new(HELPER)).unwrap();
     assert!(
         matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
         "Linux test machines need Landlock and seccomp: {:?}",
@@ -848,7 +891,7 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        guarded(),
+        guarded(SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -856,7 +899,189 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
     .unwrap();
     assert_eq!(
         reach(Some(&bubblewrap), &case, &socket, port, &runtime),
-        "pair=ok\nunix=refused\ntcp=ok\nruntime=absent\n"
+        "pair=ok\nunix=refused\ntcp=refused\nruntime=absent\n",
+        "bubblewrap starts an agent only without a network"
+    );
+}
+
+const LISTEN: &str = "import socket, sys
+for port in sys.argv[1:]:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(('127.0.0.1', int(port)))
+        listener.listen(1)
+        print(port + '=bound')
+    except PermissionError:
+        print(port + '=refused')
+    except OSError:
+        print(port + '=taken')
+    listener.close()
+for name, family, protocol in (('mptcp', socket.AF_INET, 262), ('mptcp6', socket.AF_INET6, 262),
+                               ('smc', 43, 0)):
+    try:
+        socket.socket(family, socket.SOCK_STREAM, protocol).close()
+        print(name + '=ok')
+    except PermissionError:
+        print(name + '=refused')
+    except OSError:
+        print(name + '=absent')
+";
+
+/// Runs the listen probe inside a sandbox. Inputs: the sandbox, the case and the TCP ports
+/// to listen on, port 0 asking Linux for a free one. Output: one line per port, then one
+/// per socket kind that holds a TCP port without being plain TCP.
+fn listens(sandbox: &dyn Sandbox, case: &Case, ports: &[u16]) -> String {
+    port_probe(sandbox, case, LISTEN, ports)
+}
+
+const PICKS: &str = "import socket, sys
+kept = set(int(port) for port in sys.argv[1:])
+def held(bind):
+    count = 0
+    for _ in range(3000):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if bind:
+            listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        if listener.getsockname()[1] in kept:
+            count += 1
+        listener.close()
+    return count
+print('bind0=' + str(held(True)))
+print('listen=' + str(held(False)))
+";
+
+/// Runs a Python port probe inside a sandbox. Inputs: the sandbox, the case, the script
+/// and the TCP ports it is given. Output: what the script printed.
+fn port_probe(sandbox: &dyn Sandbox, case: &Case, script: &str, ports: &[u16]) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", script])
+        .args(ports.iter().map(u16::to_string))
+        .current_dir(case.project.join("worktrees"));
+    let output = crazyagent::spawn_gate::output(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// An agent with an open network listens on any TCP port but the owner's fixed ports, a
+/// kept local model port and the model proxy ports, and opens no stream socket that would
+/// hold such a port without being plain TCP. Bubblewrap, which keeps no port free, starts
+/// no open-network agent at all (DEC-137 addendum 2).
+#[test]
+fn an_open_network_agent_listens_on_no_owner_model_or_proxy_port() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let kept: u16 = 18_080;
+    let open = || {
+        policy(&case, SandboxNetwork::Open)
+            .keep_ports(&[kept])
+            .unwrap()
+    };
+    let landlock = LinuxSandbox::detect(open(), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        listens(&landlock, &case, &[1455, 11434, 29_300, 29_427, kept, 0]),
+        "1455=refused\n11434=refused\n29300=refused\n29427=refused\n18080=refused\n0=bound\n\
+         mptcp=refused\nmptcp6=refused\nsmc=refused\n"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    match LinuxSandbox::new(
+        open(),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    ) {
+        Err(SandboxError::Unavailable(reason)) => assert_eq!(
+            reason,
+            crazyagent::sandbox::LINUX_OPEN_NETWORK_NEEDS_LANDLOCK
+        ),
+        other => panic!("bubblewrap must refuse an open network: {other:?}"),
+    }
+}
+
+/// LPF1-M1: Landlock checks only the port a bind names, so a port Linux picks itself, for
+/// a bind to port 0 or a listen with no bind, must never be one the owner's side keeps.
+/// The kept ports lie below the range Linux picks from, so thousands of picks hold none.
+#[test]
+fn a_port_linux_picks_for_an_open_network_agent_is_never_a_kept_port() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let kept: u16 = 18_080;
+    let open = policy(&case, SandboxNetwork::Open)
+        .keep_ports(&[kept])
+        .unwrap();
+    let landlock = LinuxSandbox::detect(open, Path::new(HELPER)).unwrap();
+    let mut ports: Vec<u16> = vec![1455, 11434, kept];
+    ports.extend(29_300..=29_427);
+    assert_eq!(
+        port_probe(&landlock, &case, PICKS, &ports),
+        "bind0=0\nlisten=0\n"
+    );
+}
+
+/// LPF1-M1: a kept port inside the range Linux picks from could be handed to the agent
+/// with no check, so the launch is refused with a plain sentence, by the engine and by a
+/// helper started without it.
+#[test]
+fn an_open_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
+    let case = case();
+    let range = fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").unwrap();
+    let low: u16 = range
+        .split_ascii_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let open = policy(&case, SandboxNetwork::Open)
+        .keep_ports(&[low])
+        .unwrap();
+    match LinuxSandbox::detect(open, Path::new(HELPER)) {
+        Err(SandboxError::Unavailable(reason)) => {
+            assert!(reason.contains(&format!("port {low} ")), "{reason}");
+            assert!(reason.contains("by itself"), "{reason}");
+        }
+        other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
+    }
+    let direct = crazyagent::spawn_gate::output(
+        Command::new(HELPER)
+            .args(["--keep-free", &low.to_string(), "--", "/bin/true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(direct.status.code(), Some(3));
+    assert!(
+        String::from_utf8_lossy(&direct.stderr).contains(&format!("port {low} ")),
+        "{}",
+        String::from_utf8_lossy(&direct.stderr)
     );
 }
 
@@ -1017,7 +1242,7 @@ fn no_agent_plants_the_git_metadata_git_follows_on_either_backend() {
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
     let bubblewrap = LinuxSandbox::new(
-        policy(&case, SandboxNetwork::Open),
+        policy(&case, SandboxNetwork::Only(Vec::new())),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
         },
@@ -1040,4 +1265,330 @@ fn no_agent_plants_the_git_metadata_git_follows_on_either_backend() {
         fs::read_to_string(git.join("worktrees/agent-1/commondir")).unwrap(),
         "../..\n"
     );
+}
+
+const DATAGRAM: &str = "import os, socket, sys
+port = int(sys.argv[1])
+def attempt(name, family, kind, proto, address):
+    try:
+        s = socket.socket(family, kind, proto)
+        if address is not None:
+            s.sendto(b'x', address)
+        s.close()
+        print(name + '=ok')
+    except PermissionError:
+        print(name + '=refused')
+    except OSError as error:
+        print(name + '=' + type(error).__name__)
+attempt('udp', socket.AF_INET, socket.SOCK_DGRAM, 0, ('127.0.0.1', port))
+attempt('udp6', socket.AF_INET6, socket.SOCK_DGRAM, 0, None)
+attempt('udp_nonblock', socket.AF_INET, socket.SOCK_DGRAM | socket.SOCK_NONBLOCK, 0, None)
+attempt('ping', socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP, None)
+attempt('sctp', socket.AF_INET, socket.SOCK_STREAM, 132, None)
+attempt('vsock', 40, socket.SOCK_STREAM, 0, None)
+attempt('netlink_route', socket.AF_NETLINK, socket.SOCK_RAW, 0, None)
+attempt('netlink_generic', socket.AF_NETLINK, socket.SOCK_RAW, 16, None)
+try:
+    socket.create_connection(('127.0.0.1', port), 5).close()
+    print('tcp=ok')
+except OSError:
+    print('tcp=refused')
+try:
+    socket.create_connection(('127.0.0.1', 53), 5).close()
+    print('dns_tcp=reachable')
+except ConnectionRefusedError:
+    print('dns_tcp=reachable')
+except OSError as error:
+    print('dns_tcp=' + type(error).__name__)
+print('resolver=' + os.environ.get('RES_OPTIONS', ''))
+";
+
+fn datagrams(sandbox: Option<&dyn Sandbox>, case: &Case, port: u16) -> Vec<String> {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", DATAGRAM])
+        .arg(port.to_string())
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_tcp_only_agent_sends_no_datagram_and_may_ask_names_on_tcp_port_53() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let open = datagrams(None, &case, port);
+    assert!(
+        open.contains(&"udp=ok".to_owned())
+            && open.contains(&"tcp=ok".to_owned())
+            && open.contains(&"netlink_generic=ok".to_owned()),
+        "the unsandboxed control must send a datagram and open generic netlink: {open:?}"
+    );
+    let named = SandboxNetwork::Only(vec![
+        SandboxRemote::Loopback(port),
+        SandboxRemote::AnyHost(443),
+    ]);
+    let landlock = LinuxSandbox::detect(policy(&case, named), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        datagrams(Some(&landlock), &case, port),
+        [
+            "udp=refused",
+            "udp6=refused",
+            "udp_nonblock=refused",
+            "ping=refused",
+            "sctp=refused",
+            "vsock=refused",
+            "netlink_route=ok",
+            "netlink_generic=refused",
+            "tcp=ok",
+            "dns_tcp=reachable",
+            "resolver=use-vc",
+        ]
+    );
+    let loopback = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
+    let landlock = LinuxSandbox::detect(policy(&case, loopback), Path::new(HELPER)).unwrap();
+    assert_eq!(
+        datagrams(Some(&landlock), &case, port),
+        [
+            "udp=refused",
+            "udp6=refused",
+            "udp_nonblock=refused",
+            "ping=refused",
+            "sctp=refused",
+            "vsock=refused",
+            "netlink_route=ok",
+            "netlink_generic=refused",
+            "tcp=ok",
+            "dns_tcp=PermissionError",
+            "resolver=",
+        ],
+        "an agent with no remote on another host gets no resolver port"
+    );
+    let unlimited =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    let reached = datagrams(Some(&unlimited), &case, port);
+    assert!(
+        reached.contains(&"udp=ok".to_owned()) && reached.contains(&"resolver=".to_owned()),
+        "an open network keeps datagrams: {reached:?}"
+    );
+}
+
+#[test]
+fn a_tcp_ports_agent_keeps_its_port_limit_but_opens_datagrams_and_asks_names_its_own_way() {
+    let case = case();
+    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let named = SandboxNetwork::Only(vec![
+        SandboxRemote::Loopback(port),
+        SandboxRemote::AnyHost(443),
+    ]);
+    let landlock = LinuxSandbox::detect(
+        policy(&case, named).limit_sockets(LinuxSockets::TcpPorts),
+        Path::new(HELPER),
+    )
+    .unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock network rules (Linux 6.7 or newer): {:?}",
+        landlock.backend()
+    );
+    let mut harness = Command::new("/usr/bin/python3");
+    harness.current_dir(case.project.join("worktrees"));
+    let wrapped = landlock.wrap(&harness).unwrap();
+    let HelperRequest::Run { policy, .. } =
+        HelperRequest::parse(wrapped.get_args().map(OsString::from).collect()).unwrap()
+    else {
+        panic!("expected a run request");
+    };
+    assert!(policy.limit_network && policy.open_sockets);
+    assert_eq!(policy.connect, [443, port]);
+    assert!(!wrapped.get_envs().any(|(name, _)| name == "RES_OPTIONS"));
+    let reached = datagrams(Some(&landlock), &case, port);
+    for expected in [
+        "udp=ok",
+        "udp6=ok",
+        "udp_nonblock=ok",
+        "netlink_route=ok",
+        "netlink_generic=ok",
+        "tcp=ok",
+        "dns_tcp=PermissionError",
+        "resolver=",
+    ] {
+        assert!(
+            reached.contains(&expected.to_owned()),
+            "{expected}: {reached:?}"
+        );
+    }
+}
+
+#[test]
+fn under_refuse_no_limited_network_agent_starts_on_either_backend() {
+    let case = case();
+    let named = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    for network in [named, SandboxNetwork::Only(Vec::new())] {
+        let refused = policy(&case, network).limit_sockets(LinuxSockets::Refuse);
+        for result in [
+            LinuxSandbox::detect(refused.clone(), Path::new(HELPER)),
+            LinuxSandbox::new(
+                refused.clone(),
+                LinuxBackend::Landlock {
+                    helper: PathBuf::from(HELPER),
+                },
+            ),
+        ] {
+            match result {
+                Err(SandboxError::Unavailable(reason)) => {
+                    assert!(reason.contains("limited-network sockets"), "{reason}")
+                }
+                other => panic!("a limited network must be refused: {other:?}"),
+            }
+        }
+    }
+    let open = policy(&case, SandboxNetwork::Open).limit_sockets(LinuxSockets::Refuse);
+    assert!(LinuxSandbox::detect(open, Path::new(HELPER)).is_ok());
+}
+
+/// TCP only takes a glibc program and a script whose interpreter is one (`/bin/sh` on a
+/// glibc machine), and refuses a program with a musl loader and a script whose interpreter
+/// is that program, each before it starts. A script is judged by its interpreter, one level.
+#[test]
+fn tcp_only_refuses_a_harness_whose_loader_is_not_glibc_before_it_starts() {
+    let case = case();
+    let original = fs::read("/bin/true").unwrap();
+    let at = original
+        .windows(8)
+        .position(|window| window == b"ld-linux")
+        .expect("Linux test machines run glibc: /bin/true names ld-linux as its loader");
+    let mut musl = original.clone();
+    musl[at..at + 8].copy_from_slice(b"ld-musl-");
+    let programs = case.outside.join("programs");
+    fs::create_dir(&programs).unwrap();
+    for (name, bytes) in [("glibc", &original[..]), ("musl", &musl[..])] {
+        fs::write(programs.join(name), bytes).unwrap();
+    }
+    fs::write(
+        programs.join("script"),
+        format!("#!{}\ntrue\n", programs.join("musl").display()),
+    )
+    .unwrap();
+    fs::write(programs.join("shell"), "#!/bin/sh\ntrue\n").unwrap();
+    let named = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
+    let wrap = |sockets: LinuxSockets, network: SandboxNetwork, name: &str| {
+        let sandbox = LinuxSandbox::new(
+            policy(&case, network).limit_sockets(sockets),
+            LinuxBackend::Landlock {
+                helper: PathBuf::from(HELPER),
+            },
+        )
+        .unwrap();
+        let mut harness = Command::new(programs.join(name));
+        harness.current_dir(&case.project);
+        sandbox.wrap(&harness)
+    };
+    for name in ["glibc", "shell"] {
+        assert!(
+            wrap(LinuxSockets::TcpOnly, named.clone(), name).is_ok(),
+            "{name} looks names up over TCP, so TCP only takes it"
+        );
+    }
+    for name in ["musl", "script"] {
+        match wrap(LinuxSockets::TcpOnly, named.clone(), name) {
+            Err(SandboxError::Unavailable(reason)) => {
+                assert!(reason.contains("cannot look up names over TCP"), "{reason}");
+                assert!(reason.contains("TCP ports only"), "{reason}");
+            }
+            other => panic!("{name} must be refused under TCP only: {other:?}"),
+        }
+        assert!(wrap(LinuxSockets::TcpPorts, named.clone(), name).is_ok());
+        let local = SandboxNetwork::Only(vec![SandboxRemote::Loopback(8080)]);
+        assert!(wrap(LinuxSockets::TcpOnly, local, name).is_ok());
+    }
+}
+
+const ENVIRON: &str = "import sys
+def read(path):
+    try:
+        with open(path, 'rb') as file:
+            return 'marker' if b'CRAZYAGENT_TEST_MARKER=outside' in file.read() else 'read'
+    except PermissionError:
+        return 'refused'
+    except FileNotFoundError:
+        return 'absent'
+print('outside=' + read('/proc/' + sys.argv[1] + '/environ'))
+print('own=' + read('/proc/self/environ'))
+";
+
+fn environ(sandbox: Option<&dyn Sandbox>, case: &Case, target: u32) -> String {
+    let mut harness = Command::new("/usr/bin/python3");
+    harness
+        .args(["-I", "-c", ENVIRON])
+        .arg(target.to_string())
+        .current_dir(case.project.join("worktrees"));
+    agent_stdout(sandbox, harness)
+}
+
+#[test]
+fn no_agent_reads_the_environment_of_a_process_outside_its_boundary() {
+    let case = case();
+    assert!(
+        Path::new("/usr/bin/python3").is_file(),
+        "Linux test machines need /usr/bin/python3"
+    );
+    let mut outside = crazyagent::spawn_gate::spawn(
+        Command::new("/bin/sleep")
+            .arg("60")
+            .env("CRAZYAGENT_TEST_MARKER", "outside")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let target = outside.id();
+    assert_eq!(
+        environ(None, &case, target),
+        "outside=marker\nown=read\n",
+        "the unsandboxed control must read the outside environment"
+    );
+    let landlock =
+        LinuxSandbox::detect(policy(&case, SandboxNetwork::Open), Path::new(HELPER)).unwrap();
+    assert!(
+        matches!(landlock.backend(), LinuxBackend::Landlock { .. }),
+        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
+        landlock.backend()
+    );
+    assert_eq!(
+        environ(Some(&landlock), &case, target),
+        "outside=refused\nown=read\n",
+        "Landlock refuses ptrace-mode reads of a process outside the agent's domain"
+    );
+    let bwrap = BWRAP_PATHS
+        .iter()
+        .map(Path::new)
+        .find(|path| path.is_file())
+        .expect("Linux test machines need bubblewrap installed");
+    let bubblewrap = LinuxSandbox::new(
+        policy(&case, SandboxNetwork::Only(Vec::new())),
+        LinuxBackend::Bubblewrap {
+            bwrap: bwrap.to_path_buf(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        environ(Some(&bubblewrap), &case, target),
+        "outside=absent\nown=read\n"
+    );
+    outside.kill().unwrap();
+    outside.wait().unwrap();
 }

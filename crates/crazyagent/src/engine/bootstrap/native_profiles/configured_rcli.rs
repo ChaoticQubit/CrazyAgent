@@ -293,18 +293,30 @@ pub(super) fn require_entries(profile: &File) -> Result<(), EngineError> {
 }
 
 /// Tells whether a configured home differs from its pin only in file times, as after a
-/// touch, a chmod back to 0600 or an extended attribute. Inputs: the pinned and the
-/// current identity. Output: true when the path, every identity and the bytes match.
+/// touch, a chmod back to 0600 or an extended attribute. The home, SDK and config files
+/// match through `same_files`, so a whole-volume renumber still matches. Inputs: the pinned
+/// and the current identity. Output: true when the path, every file and the bytes match.
 fn times_only(pinned: &ConfiguredHomeIdentity, current: &ConfiguredHomeIdentity) -> bool {
     pinned.path == current.path
-        && pinned.home == current.home
-        && pinned.sdk == current.sdk
+        && same_files(
+            &[pinned.home, pinned.sdk, pinned.config.identity],
+            &[current.home, current.sdk, current.config.identity],
+        )
         && pinned.config_sha256 == current.config_sha256
-        && pinned.config.identity == current.config.identity
         && pinned.config.owner == current.config.owner
         && pinned.config.mode == current.config.mode
         && pinned.config.links == current.config.links
         && pinned.config.length == current.config.length
+}
+
+/// Tells whether a pinned configured home still matches the live one: everything
+/// `times_only` checks, and the config's times too. A whole-volume renumber of the home,
+/// its SDK and its config (see `same_files`) still matches, so a restart never rewrites the
+/// profile. Inputs: the pinned and the live identity. Output: true when they match.
+fn same_home(pinned: &ConfiguredHomeIdentity, live: &ConfiguredHomeIdentity) -> bool {
+    times_only(pinned, live)
+        && pinned.config.modified == live.config.modified
+        && pinned.config.changed == live.config.changed
 }
 
 /// The profile root, its manifest and its identity while a registration holds the lock.
@@ -328,11 +340,30 @@ impl NativeProfileCustody {
         let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
         let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("rcli_profile_binding_conflict"))?;
+        let [state, database, root_directory, root_manifest] = actual.root.files();
+        let [live_state, live_database, live_root, live_root_manifest] = root_identity.files();
         if actual.version != 2
-            || actual.root != *root_identity
+            || actual.root.version != root_identity.version
+            || actual.root.database_instance != root_identity.database_instance
             || actual.profile_ref != *target_profile_ref
-            || actual.directory != profile.identity
-            || actual.manifest != manifest.identity
+            || !same_files(
+                &[
+                    state,
+                    database,
+                    root_directory,
+                    root_manifest,
+                    actual.directory,
+                    actual.manifest,
+                ],
+                &[
+                    live_state,
+                    live_database,
+                    live_root,
+                    live_root_manifest,
+                    profile.identity,
+                    manifest.identity,
+                ],
+            )
             || actual.generation == 0
             || slots.get(key) != Some(&profile.identity)
             || self
@@ -367,7 +398,7 @@ impl NativeProfileCustody {
         }
         self.validate_configured_home_path(&actual.configured.path)?;
         let (home, configured) = ConfiguredRcliUse::capture(&actual.configured.path, connection)?;
-        if configured.identity != actual.configured {
+        if !same_home(&actual.configured, &configured.identity) {
             return Err(failure("rcli_profile_identity_changed"));
         }
         manifest.verify(&profile.file)?;
@@ -439,7 +470,9 @@ impl NativeProfileCustody {
         let (profile, manifest, previous, manifest_lock) = if slots.contains_key(&key) {
             let (profile, manifest, actual) =
                 self.read_configured_slot(root, locked.identity, &slots, &key, target_profile_ref)?;
-            if actual.connection == *connection && actual.configured == configured.identity {
+            if actual.connection == *connection
+                && same_home(&actual.configured, &configured.identity)
+            {
                 let loaded = self.load_configured_rcli(host, connection, target_profile_ref)?;
                 if loaded.configured.identity != configured.identity {
                     return Err(failure("rcli_profile_binding_conflict"));

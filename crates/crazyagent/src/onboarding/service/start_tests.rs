@@ -28,7 +28,7 @@ fn every_start_failure_has_a_plain_cause_code_without_its_text() {
             "sandbox_io_permission_denied",
         ),
         (
-            RunError::Context(LaunchError(PRIVATE.into())),
+            RunError::Context(LaunchError(PRIVATE.into(), None)),
             "context_refused",
         ),
         (RunError::Account(PRIVATE.into()), "account_unavailable"),
@@ -66,5 +66,33 @@ fn a_step_that_cannot_start_keeps_its_sentence_and_logs_one_plain_line() {
     assert_eq!(
         start_diagnostic(Kind::Mapping, "run_name_used"),
         "onboarding_mapping_not_started cause=run_name_used"
+    );
+}
+
+#[test]
+fn a_setup_code_that_is_not_plain_is_withheld_instead_of_stopping_the_onboarding_thread() {
+    for code in [
+        "worktree-add-failed",
+        "Worktree_Failed",
+        "",
+        "setup failed: /Users/someone",
+    ] {
+        assert_eq!(
+            start_cause(&RunError::Setup(code)),
+            crate::protocol::TEXT_WITHHELD,
+            "{code:?}"
+        );
+    }
+    assert_eq!(
+        not_started(Kind::Graph, &RunError::Setup("worktree-add-failed")),
+        Step::failed(&format!(
+            "Graph build could not start ({})",
+            crate::protocol::TEXT_WITHHELD
+        ))
+    );
+    assert_eq!(
+        start_cause(&RunError::Setup("worktree_add_failed")),
+        "worktree_add_failed",
+        "a plain setup code is kept"
     );
 }

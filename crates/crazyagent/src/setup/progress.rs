@@ -9,14 +9,16 @@ use std::time::Instant;
 
 /// What one engine's setup run is doing now: whether it runs, whether it installs the
 /// graphify command (only while the code graph entry is ticked or on), the dependencies it
-/// touched with their states, and the pack entries still installing or failed with a
-/// reason. It also keeps the last background version check, so a status read never waits.
+/// touched with their states, the pack entries still installing or failed with a reason,
+/// and the plain reason each entry's last hooks seeding was refused. It also keeps the last
+/// background version check, so a status read never waits.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     pub running: bool,
     pub graph_tool: bool,
     pub dependencies: BTreeMap<Dependency, DependencyState>,
     pub pack: BTreeMap<String, PackState>,
+    pub hooks: BTreeMap<String, String>,
     pub checking: bool,
     pub checked: Option<Checked>,
 }
@@ -84,9 +86,10 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
 }
 
 /// Lists each default-pack entry for the setup screen: installing while a run works on
-/// it, on or off once installed, the failure a run met, else available. Inputs: the
-/// manifest, the installed entries with their on flags and the progress. Output: one row
-/// per manifest entry in manifest order.
+/// it, on or off once installed, the failure a run met, else available, and for an
+/// installed entry why its hooks were refused. Inputs: the manifest, the installed entries
+/// with their on flags and the progress. Output: one row per manifest entry in manifest
+/// order.
 pub fn pack_rows(
     manifest: &PackManifest,
     installed: &[(String, bool)],
@@ -112,6 +115,7 @@ pub fn pack_rows(
                 license: entry.license.clone(),
                 on_by_default: entry.on_by_default,
                 state,
+                hooks_refused: row.and_then(|_| progress.hooks.get(&entry.id).cloned()),
             }
         })
         .collect();

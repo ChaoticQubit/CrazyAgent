@@ -3,6 +3,7 @@ use super::process::{
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -36,6 +37,8 @@ struct PendingWrite {
 struct OwnedChild {
     child: Child,
     warden: Option<Warden>,
+    follower: Option<Follower>,
+    lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
@@ -48,7 +51,9 @@ struct OwnedChild {
     abandoned: bool,
     pending: Option<PendingWrite>,
     kill_sent: bool,
+    stopped_at: Option<Instant>,
     accounting_failed: bool,
+    waiting: bool,
     shared: Arc<ProcessShared>,
 }
 
@@ -57,12 +62,13 @@ struct Custody(Option<OwnedChild>);
 pub(super) fn run(
     command: Command,
     profile: Option<NativeProfileUse>,
+    unconfined: bool,
     mut input: mpsc::Receiver<WriteRequest>,
     shared: Arc<ProcessShared>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     output_limit: u64,
 ) {
-    let mut custody = match start(command, profile, &shared) {
+    let mut custody = match start(command, profile, unconfined, &shared) {
         Ok(custody) => custody,
         Err(code) => {
             if let Ok(mut state) = shared.lock() {
@@ -77,13 +83,14 @@ pub(super) fn run(
         return;
     };
     loop {
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             shared.fail("codex_host_deadline");
         }
         child.input(&mut input);
         child.read_output(output_limit);
         child.observe_exit();
         child.observe_group();
+        child.give_up_group();
         child.release_held_pipes();
         if child.complete() {
             child.publish_completion();
@@ -99,6 +106,7 @@ pub(super) fn run(
 fn start(
     command: Command,
     profile: Option<NativeProfileUse>,
+    unconfined: bool,
     shared: &Arc<ProcessShared>,
 ) -> Result<Custody, &'static str> {
     if let Some(profile) = &profile {
@@ -110,6 +118,8 @@ fn start(
         return Err("codex_host_start_cancelled");
     }
     let mut command = selected_command(command);
+    let token = LineageToken::new().ok_or("codex_host_spawn_failed")?;
+    command.env(LINEAGE_VARIABLE, token.as_str());
     let (child, warden) = warden::spawn(
         command
             .stdin(Stdio::piped())
@@ -117,9 +127,12 @@ fn start(
             .stderr(Stdio::piped()),
     )
     .map_err(|_| "codex_host_spawn_failed")?;
+    let follower = unconfined.then(|| Follower::start(child.id(), Some(token)));
     let mut custody = Custody(Some(OwnedChild {
         child,
         warden,
+        follower,
+        lineage: None,
         profile,
         stdin: None,
         stdout: None,
@@ -132,7 +145,9 @@ fn start(
         abandoned: false,
         pending: None,
         kill_sent: false,
+        stopped_at: None,
         accounting_failed: false,
+        waiting: false,
         shared: Arc::clone(shared),
     }));
     let retained = custody.0.as_mut().ok_or("codex_host_custody_missing")?;
@@ -255,6 +270,7 @@ impl OwnedChild {
             &self.shared,
             limit,
         );
+        self.waiting = matches!(stdout, Ok(true));
         if stdout.is_err() || stderr.is_err() {
             self.accounting_failed = true;
             self.shared.accounting_failed();
@@ -277,7 +293,14 @@ impl OwnedChild {
         }
     }
 
+    /// Stops the harness: closes its input and kills its group and itself. At Full access it
+    /// first takes the harness's lineage, followed from its start, once, so what left the
+    /// group can be checked when the run completes. Takes nothing.
     fn stop(&mut self) {
+        if let Some(follower) = self.follower.take() {
+            self.lineage = Some(follower.stop());
+        }
+        self.stopped_at.get_or_insert_with(Instant::now);
         self.stdin = None;
         self.pending = None;
         self.kill_group();
@@ -347,15 +370,44 @@ impl OwnedChild {
 
     /// Gives up the pipes once the harness is reaped, its group has been empty for
     /// `DRAIN_TIME` and a pipe is still open, which only a process outside the group can hold.
+    /// While the output queue is full, custody itself leaves stdout unread, so the time
+    /// starts again once the reader has made room (OB-5e).
     /// Takes nothing; the completion then reports an uncertain cleanup.
     fn release_held_pipes(&mut self) {
         if self.status.is_none() || !self.group_absent || (self.stdout_eof && self.stderr_eof) {
+            return;
+        }
+        if self.waiting {
+            self.group_gone_at = None;
             return;
         }
         let gone = *self.group_gone_at.get_or_insert_with(Instant::now);
         if gone.elapsed() < DRAIN_TIME {
             return;
         }
+        self.stdout = None;
+        self.stderr = None;
+        self.stdout_eof = true;
+        self.stderr_eof = true;
+        self.abandoned = true;
+    }
+
+    /// Stops waiting for a harness that is still unreaped, or for the group of a reaped one
+    /// that still answers its probe, `CLOSE_TIME` after the first stop: a harness stuck in the
+    /// kernel is never reaped, and macOS answers the probe for a group left with only an
+    /// unreaped process. The warden stops the sandbox, the pipes are given up and the
+    /// completion reports an uncertain cleanup, so the profile lease is released.
+    /// Takes nothing.
+    fn give_up_group(&mut self) {
+        if self.group_absent
+            || self.abandoned
+            || !self
+                .stopped_at
+                .is_some_and(|stopped| stopped.elapsed() >= CLOSE_TIME)
+        {
+            return;
+        }
+        self.fire_warden();
         self.stdout = None;
         self.stderr = None;
         self.stdout_eof = true;
@@ -371,11 +423,7 @@ impl OwnedChild {
     }
 
     fn complete(&self) -> bool {
-        self.status.is_some()
-            && self.group_absent
-            && self.stdout_eof
-            && self.stderr_eof
-            && !self.accounting_failed
+        (self.group_absent || self.abandoned) && self.stdout_eof && self.stderr_eof
     }
 
     /// Settles custody that ended before completion: kills the harness group until the
@@ -395,19 +443,44 @@ impl OwnedChild {
         }
     }
 
+    /// Publishes the run's end and releases the account lease. At Full access, no warden
+    /// reaches what left the group, so the lineage taken at the stop, or now when the harness
+    /// ended on its own, is checked first; while some of it still runs the run ends with that
+    /// code and the lease stays held until it ends or the owner signs the account out.
+    /// Takes nothing.
     fn publish_completion(&mut self) {
         assert!(self.complete());
-        assert!(self.status.is_some());
+        assert!(self.status.is_some() || self.abandoned);
         if let Some(profile) = &self.profile
             && profile.revalidate_retained().is_err()
         {
             self.shared.fail("codex_host_profile_invalid");
         }
+        let mut left = None;
+        let lineage = match self.follower.take() {
+            Some(follower) => Some(follower.stop()),
+            None => self.lineage.take(),
+        };
+        if let Some(lineage) = lineage
+            && let Err(unstopped) = lineage.and_then(Lineage::settle)
+        {
+            left = Some(unstopped.code());
+            self.shared.fail(unstopped.code());
+            if let (Unstopped::Left(leftovers), Some(profile)) = (unstopped, self.profile.take()) {
+                leftovers.hold(Some(profile.account().clone()), profile);
+            }
+        }
         self.profile = None;
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
             state.complete = true;
-            state.cleanup_error = self.abandoned.then_some("codex_host_cleanup_uncertain");
+            state.cleanup_error = if self.accounting_failed {
+                Some("codex_host_pipe_accounting")
+            } else {
+                self.abandoned
+                    .then_some("codex_host_cleanup_uncertain")
+                    .or(left)
+            };
         }
     }
 }
@@ -436,34 +509,50 @@ fn nonblocking(pipe: &impl AsFd) -> Result<(), &'static str> {
     fcntl_setfl(pipe, flags | OFlags::NONBLOCK).map_err(|_| "codex_host_pipe_flags")
 }
 
+/// Whether the stdout read must wait: the output queue is full and the run is not stopping.
+/// Input: the shared state. Output: the answer, or `codex_host_custody_poisoned`.
+fn queue_full(shared: &ProcessShared) -> Result<bool, EngineError> {
+    let queued = shared.lock()?.output.len();
+    assert!(queued <= OUTPUT_QUEUE_MAX);
+    Ok(queued == OUTPUT_QUEUE_MAX && !shared.stop.load(Ordering::Acquire))
+}
+
+/// Reads what a harness pipe holds into the run's accounting and, for stdout, its output
+/// queue. A full queue stops the stdout read: the bytes stay in the pipe and the harness
+/// waits on it until the reader takes a chunk, so undelivered output never ends a run
+/// (OB-5e). Inputs: the pipe, its end flag, which pipe, the shared state and the byte limit.
+/// Output: whether the read stopped for a full queue, or a plain code.
 fn read_pipe<R: Read>(
     pipe: &mut Option<R>,
     eof: &mut bool,
     stderr: bool,
     shared: &ProcessShared,
     limit: u64,
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
     if *eof {
-        return Ok(());
+        return Ok(false);
     }
     let reader = pipe
         .as_mut()
         .ok_or_else(|| EngineError("codex_host_pipe_missing".into()))?;
     let mut bytes = [0; READ_BYTES];
     for _ in 0..READS_PER_POLL {
+        if !stderr && queue_full(shared)? {
+            return Ok(true);
+        }
         match reader.read(&mut bytes) {
             Ok(0) => {
                 *eof = true;
                 *pipe = None;
-                return Ok(());
+                return Ok(false);
             }
             Ok(count) => record_output(shared, &bytes[..count], stderr, limit)?,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => return Err(EngineError("codex_host_pipe_accounting".into())),
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn record_output(
@@ -487,20 +576,110 @@ fn record_output(
         shared.stop.store(true, Ordering::Release);
         return Ok(());
     }
-    if shared.stop.load(Ordering::Acquire) {
+    if stderr || shared.stop.load(Ordering::Acquire) {
         return Ok(());
     }
-    if state.output.len() == OUTPUT_QUEUE_MAX {
-        state.error.get_or_insert("codex_host_output_backpressure");
-        shared.stop.store(true, Ordering::Release);
-        return Ok(());
-    }
-    if stderr {
-        return Ok(());
-    }
+    assert!(state.output.len() < OUTPUT_QUEUE_MAX);
     state
         .output
         .push_back(CodexHostOutput::Stdout(bytes.to_vec()));
     assert!(state.output.len() <= OUTPUT_QUEUE_MAX);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::process::ProcessState;
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    /// The shared state of a run whose output queue already holds `queued` unread chunks.
+    /// Input: the number of chunks. Output: the state.
+    fn shared(queued: usize) -> ProcessShared {
+        assert!(queued <= OUTPUT_QUEUE_MAX);
+        let chunk = || CodexHostOutput::Stdout(vec![b'x'; READ_BYTES]);
+        ProcessShared {
+            state: Mutex::new(ProcessState {
+                started: None,
+                output: std::iter::repeat_with(chunk).take(queued).collect(),
+                observed: (0, 0),
+                status: None,
+                complete: false,
+                error: None,
+                cleanup_error: None,
+            }),
+            stop: AtomicBool::new(false),
+            close_stdin: AtomicBool::new(false),
+        }
+    }
+
+    /// A pipe holding `chunks` full reads of output. Input: the number. Output: the pipe.
+    fn pipe(chunks: usize) -> Option<io::Cursor<Vec<u8>>> {
+        Some(io::Cursor::new(vec![b'y'; chunks * READ_BYTES]))
+    }
+
+    /// A full output queue holds stdout back in the pipe and ends no run (OB-5e): it used to
+    /// fail the run with codex_host_output_backpressure at the 129th unread chunk. Nothing
+    /// is read while the queue is full, one chunk is read for each one the reader takes, and
+    /// the rest is read to its end once there is room.
+    #[test]
+    fn a_full_output_queue_holds_stdout_in_the_pipe_and_ends_no_run() {
+        let shared = shared(OUTPUT_QUEUE_MAX);
+        let mut held = pipe(3);
+        let mut eof = false;
+        let waited = read_pipe(&mut held, &mut eof, false, &shared, u64::MAX).unwrap();
+        assert!(waited, "a full queue stops the read");
+        assert_eq!(held.as_ref().unwrap().position(), 0, "nothing was read");
+        assert_eq!(shared.lock().unwrap().observed, (0, 0));
+        shared.lock().unwrap().output.pop_front();
+        let waited = read_pipe(&mut held, &mut eof, false, &shared, u64::MAX).unwrap();
+        assert!(waited, "the queue is full again after one chunk");
+        assert_eq!(held.as_ref().unwrap().position(), READ_BYTES as u64);
+        assert_eq!(shared.lock().unwrap().output.len(), OUTPUT_QUEUE_MAX);
+        shared.lock().unwrap().output.clear();
+        let waited = read_pipe(&mut held, &mut eof, false, &shared, u64::MAX).unwrap();
+        assert!(!waited);
+        assert!(eof && held.is_none(), "the pipe was read to its end");
+        let state = shared.lock().unwrap();
+        assert_eq!(state.observed, (3 * READ_BYTES as u64, 0));
+        assert_eq!(state.output.len(), 2);
+        assert_eq!(state.error, None, "no undelivered output ended the run");
+        assert!(!shared.stop.load(Ordering::Acquire));
+    }
+
+    /// Only stdout of a running harness waits for the reader: stderr, which is counted and
+    /// not queued, and the output of a run that is stopping are read past a full queue, so
+    /// a stopped harness still reaches the end of its pipes.
+    #[test]
+    fn stderr_and_a_stopping_run_are_read_past_a_full_output_queue() {
+        let shared = shared(OUTPUT_QUEUE_MAX);
+        let mut errors = pipe(2);
+        let mut eof = false;
+        let waited = read_pipe(&mut errors, &mut eof, true, &shared, u64::MAX).unwrap();
+        assert!(!waited);
+        assert!(eof && errors.is_none());
+        assert_eq!(shared.lock().unwrap().observed, (0, 2 * READ_BYTES as u64));
+        shared.stop.store(true, Ordering::Release);
+        let mut output = pipe(2);
+        let mut eof = false;
+        let waited = read_pipe(&mut output, &mut eof, false, &shared, u64::MAX).unwrap();
+        assert!(!waited, "a stopping run does not wait for its reader");
+        assert!(eof && output.is_none());
+        let state = shared.lock().unwrap();
+        assert_eq!(state.observed.0, 2 * READ_BYTES as u64);
+        assert_eq!(
+            state.output.len(),
+            OUTPUT_QUEUE_MAX,
+            "its output is dropped"
+        );
+        assert_eq!(state.error, None);
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: state.output.len() < OUTPUT_QUEUE_MAX")]
+    fn a_chunk_recorded_into_a_full_output_queue_is_a_broken_invariant() {
+        let shared = shared(OUTPUT_QUEUE_MAX);
+        let _ = record_output(&shared, b"unread", false, u64::MAX);
+    }
 }

@@ -1,5 +1,7 @@
 use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
+use crate::usage::metrics::Metrics;
+use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
@@ -12,6 +14,7 @@ pub(super) const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const USAGE_CODES: &[&str] = &[
     "usage_limits_invalid",
     "usage_outcome_unknown",
+    "usage_recount_not_ready",
     "usage_reply_bounds",
     "usage_request_bounds",
     "usage_request_invalid",
@@ -37,11 +40,22 @@ enum Action {
         since_ms: Option<i64>,
         offset_minutes: i32,
     },
+    Metrics {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<ProjectId>,
+        since_ms: i64,
+    },
     Refresh,
     SetReset {
         account: CredentialRef,
         window: WindowKind,
         at_ms: Option<i64>,
+    },
+    SetMoney {
+        settings: MoneySettings,
+    },
+    DecideRecount {
+        use_new: bool,
     },
 }
 
@@ -55,8 +69,19 @@ struct Envelope {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
     Report { report: Box<UsageReport> },
+    Metrics { metrics: Box<Metrics> },
     Done,
     Rejected { code: String },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Report { .. } => Some("usage.report"),
+        Action::Metrics { .. } => Some("usage.metrics"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -81,6 +106,23 @@ impl OwnerClient {
         };
         match self.usage_exchange(action).await? {
             Reply::Report { report } => Ok(*report),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads the Metrics page's task counts, tokens chart and run, account and harness rows
+    /// for one project, None for every project, over the range starting at `since_ms`.
+    /// Inputs: the project and the range start. Output: the metrics.
+    pub async fn usage_metrics(
+        &self,
+        project: Option<ProjectId>,
+        since_ms: i64,
+    ) -> Result<Metrics, EngineError> {
+        match self
+            .usage_exchange(Action::Metrics { project, since_ms })
+            .await?
+        {
+            Reply::Metrics { metrics } => Ok(*metrics),
             _ => Err(unknown()),
         }
     }
@@ -112,8 +154,29 @@ impl OwnerClient {
         }
     }
 
+    /// Stores the owner's main number and price source. Input: the settings. Output: done.
+    pub async fn usage_set_money(&self, settings: MoneySettings) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetMoney { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Applies the owner's choice of the recount, once. Input: whether to use the new
+    /// numbers. Output: done, or `usage_recount_not_ready`.
+    pub async fn usage_decide_recount(&self, use_new: bool) -> Result<(), EngineError> {
+        match self
+            .usage_exchange(Action::DecideRecount { use_new })
+            .await?
+        {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { usage: action })
                 .map_err(|_| failure("usage_request_bounds"))?;
             self.root.verify()?;
@@ -140,7 +203,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("usage_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -156,6 +221,27 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// A usage request read and checked once: a report or metrics already built, or a change
+/// still to make under the owner barrier, with the engine folder whose store it changes.
+enum Prepared {
+    Report(Box<UsageReport>),
+    Metrics(Box<Metrics>),
+    Change(PathBuf, Change),
+}
+
+/// A change a usage request makes to the usage store.
+enum Change {
+    Refresh,
+    SetReset(CredentialRef, WindowKind, Option<i64>),
+    SetMoney(MoneySettings),
+    DecideRecount(bool),
+}
+
+/// Serves one usage request. The report is built first; then, under the owner barrier, the
+/// grant is checked again, any change is made and the reply is written, so a revocation
+/// that returned saw every change and reply admitted before it and lets none through after.
+/// Inputs: the connection, engine, authority, packet, admission and request body.
+/// Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -164,7 +250,9 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let reply = match handle(engine, authority, packet, admission, bytes).await {
+    let prepared = prepare(engine, authority, packet, admission, bytes).await;
+    let _barrier = engine.owner_egress.write().await;
+    let reply = match finish(authority, packet, admission, prepared).await {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected { code: error.0 },
     };
@@ -175,16 +263,21 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
 }
 
-async fn handle(
+/// Reads and checks a usage request, and builds a report or metrics outside the owner
+/// barrier, each from one read transaction, so a usage scan that commits meanwhile never
+/// leaves the total and the rows of one reply at two different moments.
+/// Inputs: the engine, authority, packet, admission and request body.
+/// Output: the prepared request, or the refusal.
+async fn prepare(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
-) -> Result<Reply, EngineError> {
+) -> Result<Prepared, EngineError> {
     if bytes.len() > REQUEST_BYTES_MAX {
         return Err(failure("usage_request_bounds"));
     }
@@ -197,37 +290,104 @@ async fn handle(
         }
     }
     let root = super::changes::engine_root(authority)?;
+    Ok(match action {
+        Action::Report {
+            project,
+            since_ms,
+            offset_minutes,
+        } => {
+            let held = held_accounts(engine, admission).await?;
+            Prepared::Report(Box::new(
+                tokio::task::spawn_blocking(move || {
+                    let mut db = usage::open(&root)?;
+                    let snapshot = db.transaction().map_err(|_| failure("usage_unavailable"))?;
+                    usage::report::report(
+                        &snapshot,
+                        project.as_ref(),
+                        since_ms,
+                        offset_minutes,
+                        crate::team::now_ms(),
+                        &held,
+                    )
+                })
+                .await
+                .map_err(|_| failure("usage_unavailable"))??,
+            ))
+        }
+        Action::Metrics { project, since_ms } => Prepared::Metrics(Box::new(
+            tokio::task::spawn_blocking(move || {
+                let mut db = usage::open(&root)?;
+                let snapshot = db.transaction().map_err(|_| failure("usage_unavailable"))?;
+                usage::metrics::read(&snapshot, project.as_ref(), since_ms, crate::team::now_ms())
+            })
+            .await
+            .map_err(|_| failure("usage_unavailable"))??,
+        )),
+        Action::Refresh => Prepared::Change(root, Change::Refresh),
+        Action::SetReset {
+            account,
+            window,
+            at_ms,
+        } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
+        Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
+        Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
+    })
+}
+
+/// The accounts the live config holds, which storage alone knows, so the report shows
+/// limits only for accounts that exist now. Inputs: the engine and the owner admission.
+/// Output: the account ids, or storage's refusal.
+async fn held_accounts(
+    engine: &Engine,
+    admission: &Admission,
+) -> Result<Vec<CredentialRef>, EngineError> {
+    match engine
+        .native_auth_job(|reply| {
+            Job::Accounts(
+                admission.clone(),
+                crate::storage::accounts::Command::Held,
+                reply,
+            )
+        })
+        .await?
+    {
+        crate::storage::accounts::ResultValue::Held(held) => Ok(held),
+        _ => Err(unknown()),
+    }
+}
+
+/// Answers a prepared request under the owner barrier its caller holds: checks the grant
+/// again, then makes any change. Inputs: the authority, packet, admission and the prepared
+/// request. Output: the reply, or the refusal.
+async fn finish(
+    authority: &Authority,
+    packet: &[u8; 37],
+    admission: &Admission,
+    prepared: Result<Prepared, EngineError>,
+) -> Result<Reply, EngineError> {
+    let prepared = prepared?;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
+    }
+    let (root, change) = match prepared {
+        Prepared::Report(report) => return Ok(Reply::Report { report }),
+        Prepared::Metrics(metrics) => return Ok(Reply::Metrics { metrics }),
+        Prepared::Change(root, change) => (root, change),
+    };
     tokio::task::spawn_blocking(move || {
         let db = usage::open(&root)?;
-        let now = crate::team::now_ms();
-        Ok(match action {
-            Action::Report {
-                project,
-                since_ms,
-                offset_minutes,
-            } => Reply::Report {
-                report: Box::new(usage::report::report(
-                    &db,
-                    project.as_ref(),
-                    since_ms,
-                    offset_minutes,
-                    now,
-                )?),
-            },
-            Action::Refresh => {
-                usage::service::request_refresh(&db, now)?;
-                Reply::Done
+        match change {
+            Change::Refresh => usage::service::request_refresh(&db, crate::team::now_ms()),
+            Change::SetReset(account, window, at_ms) => {
+                usage::set_reset_override(&db, &account, window, at_ms)
             }
-            Action::SetReset {
-                account,
-                window,
-                at_ms,
-            } => {
-                usage::set_reset_override(&db, &account, window, at_ms)?;
-                Reply::Done
+            Change::SetMoney(settings) => usage::money::write(&db, settings),
+            Change::DecideRecount(use_new) => {
+                usage::recount::decide(&db, use_new, crate::team::now_ms())
             }
-        })
+        }
     })
     .await
-    .map_err(|_| failure("usage_unavailable"))?
+    .map_err(|_| failure("usage_unavailable"))??;
+    Ok(Reply::Done)
 }

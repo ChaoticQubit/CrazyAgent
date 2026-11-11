@@ -2,7 +2,7 @@ import { checkUnconfirmed, harnessCatalog, nextGeneration, poolSummaries, receip
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import {
-  failureCopy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, settledReceipt, setProjectPool, setupProject,
+  failureCopy, loadAgentPolicy, loadPools, loadProjectCatalog, loadProjects, needsReconcile, pickDocuments, receiptState, saveAgentPolicy, settledReceipt, setProjectPool, setupProject,
 } from "../../api-projects";
 import type { PoolChoice, ProjectCatalog } from "../../api-projects";
 import { SessionContext } from "../../state";
@@ -11,11 +11,12 @@ import { displayText } from "../conversation";
 import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
+import { AccessLevels, accessLabel } from "../project/access";
 import { PoolPicker } from "./pool-picker";
-import { BasicsFields, ResearchSwitches } from "./fields";
+import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
 import { TeamEditor } from "./team-editor";
 import {
-  STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, emptyDraft, poolName, preselectPool,
+  STEPS, addDocuments, basicsErrors, buildRequest, defaultTeam, documentType, draftAccess, emptyDraft, levelUnavailable, poolName, preselectPool,
   stepComplete, summary, teamValid,
 } from "./wizard";
 import type { ProjectDraft, StepId } from "./wizard";
@@ -163,6 +164,16 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
         message = `${name} created. Couldn't assign ${chosenPool ? poolName(chosenPool.pool) : draft.pool}. Choose it again in the project's Settings, Pool.`;
       }
     }
+    const access = draftAccess(draft, catalogValue?.agent_access);
+    if (access !== "sandboxed") {
+      const read = await loadAgentPolicy(id);
+      const saved = read.kind === "ok" ? await saveAgentPolicy(id, { access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }, read.value.version, nextGeneration()) : read;
+      const state = saved.kind === "ok" ? receiptState(saved.value) : null;
+      if (state?.kind !== "applied") {
+        const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";
+        message = `${message} Its agents stay Sandboxed: ${accessLabel(access)} wasn't saved.${why} Choose it again in the project's Settings, Agent access.`;
+      }
+    }
     kept = null;
     await session?.refreshProjects();
     flash(message);
@@ -246,6 +257,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
           <h2 id="pj-step-title">What should agents start on?</h2>
           <p className="pj-secondary">Each one starts a research agent as soon as the project is created. Results land in the project folder as Markdown with links and sources.</p>
           <ResearchSwitches prefix="np" catalog={catalog} value={draft.research} onChange={(research) => setDraft({ ...draft, research })} />
+          <RoadmapSwitch prefix="np" value={draft.roadmap} onChange={(roadmap) => setDraft({ ...draft, roadmap })} />
         </div>}
         {step === "pool" && <div className="pj-stack">
           <h2 id="pj-step-title">Which accounts should this project use?</h2>
@@ -268,6 +280,8 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
             onChange={(team) => { setTeamEdited(true); setDraft({ ...draft, team }); }} />
             : catalog === undefined ? <p className="pj-muted" role="status">Loading team defaults...</p> : <NotReady what="team defaults come from the engine, which isn't ready in this build." />}
           {teamEdited && catalogValue && <button type="button" className="btn quiet" onClick={() => { setTeamEdited(false); setDraft({ ...draft, team: defaultTeam(catalogValue.default_team, harnessValue) }); }}>Use smart defaults</button>}
+          <AccessLevels name="np-access" value={draftAccess(draft, catalogValue?.agent_access)} unavailable={(level) => levelUnavailable(catalogValue?.agent_access, level)} onChange={(access) => setDraft({ ...draft, access })} />
+          <p className="pj-help">You can change agent access later in the project's Settings, Agent access.</p>
           <p className="pj-summary">{summary(draft, chosenPool ? poolName(chosenPool.pool) : null)}</p>
         </div>}
         <footer className="pj-footer">

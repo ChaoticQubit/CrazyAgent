@@ -109,6 +109,44 @@ fn icacls(path: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn sddl(paths: &[&Path]) -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    let shell = format!(r"{root}\System32\WindowsPowerShell\v1.0\powershell.exe");
+    paths
+        .iter()
+        .map(|path| {
+            let read = Command::new(&shell)
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "(Get-Acl -LiteralPath $env:CRAZYAGENT_TEST_ACL_PATH).Sddl",
+                ])
+                .env("CRAZYAGENT_TEST_ACL_PATH", path)
+                .output();
+            let text = match read {
+                Ok(output) => format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                Err(error) => format!("powershell failed: {error}"),
+            };
+            format!("{} => {text}", path.display())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn ran(output: &Output) -> String {
+    format!(
+        "exit {:?} stdout {:?} stderr {:?}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 fn boundary(case: &Case) -> Command {
     let mut command = Command::new(HELPER);
     command
@@ -156,15 +194,33 @@ fn an_agent_writes_in_its_roots_but_not_outside_them_or_into_protected_paths() {
     let home = case.home.join("home.txt");
     let escape = case.outside.join("escape.txt");
     let brief = case.project.join("context").join("brief.md");
+    let context = case.project.join("context");
+    let temp = case.project.parent().unwrap();
+    let watched = [
+        temp.parent().unwrap(),
+        temp,
+        case.project.as_path(),
+        context.as_path(),
+        brief.as_path(),
+    ];
+    let before = sddl(&watched);
     run(&case, &["/C", "echo", "inside>", &plain(&inside)]);
+    let granted = sddl(&watched);
     run(&case, &["/C", "echo", "home>", &plain(&home)]);
     run(&case, &["/C", "echo", "escape>", &plain(&escape)]);
-    run(&case, &["/C", "echo", "changed>", &plain(&brief)]);
-    run(&case, &["/C", "del", "/F", "/Q", &plain(&brief)]);
+    let changed = run(&case, &["/C", "echo", "changed>", &plain(&brief)]);
+    let deleted = run(&case, &["/C", "del", "/F", "/Q", &plain(&brief)]);
     assert!(fs::read_to_string(&inside).unwrap().starts_with("inside"));
     assert!(fs::read_to_string(&home).unwrap().starts_with("home"));
     assert!(!escape.exists());
-    assert_eq!(fs::read_to_string(&brief).unwrap(), "brief\r\n");
+    assert_eq!(
+        fs::read_to_string(&brief).unwrap(),
+        "brief\r\n",
+        "write: {}\ndelete: {}\nbefore:\n{before}\nafter the first launch:\n{granted}\nafter:\n{}",
+        ran(&changed),
+        ran(&deleted),
+        sddl(&watched)
+    );
 }
 
 #[test]
@@ -232,6 +288,9 @@ fn a_bad_profile_or_batch_program_starts_nothing() {
 fn a_narrower_profile_takes_back_what_the_one_before_granted() {
     let case = case("crazyagent.test.contract");
     let before = icacls(&case.outside);
+    let temp = case.outside.parent().unwrap();
+    let watched = [temp.parent().unwrap(), temp, case.outside.as_path()];
+    let before_sddl = sddl(&watched);
     let first = case.outside.join("first.txt");
     let mut wide = case.base.clone();
     wide.write_roots.push(plain(&case.outside));
@@ -269,7 +328,8 @@ fn a_narrower_profile_takes_back_what_the_one_before_granted() {
     assert_eq!(
         icacls(&case.outside),
         before,
-        "a root the profile no longer names keeps no entry of the container"
+        "a root the profile no longer names keeps no entry of the container\nbefore:\n{before_sddl}\nafter:\n{}",
+        sddl(&watched)
     );
 }
 
@@ -278,6 +338,15 @@ fn releasing_a_profile_takes_back_every_grant_and_its_record() {
     let case = case("crazyagent.test.release");
     let context = case.project.join("context");
     let before = [&case.project, &context, &case.home].map(|path| icacls(path));
+    let temp = case.project.parent().unwrap();
+    let watched = [
+        temp.parent().unwrap(),
+        temp,
+        case.project.as_path(),
+        context.as_path(),
+        case.home.as_path(),
+    ];
+    let before_sddl = sddl(&watched);
     let readme = run(
         &case,
         &["/C", "type", &plain(&case.project.join("readme.txt"))],
@@ -293,11 +362,13 @@ fn releasing_a_profile_takes_back_every_grant_and_its_record() {
     }
     let record = case.grants.join("container-crazyagent.test.release.grants");
     assert!(record.is_file());
+    let granted_sddl = sddl(&watched);
     crazyagent_win_sandbox::release(&case.profile).unwrap();
     assert_eq!(
         [&case.project, &context, &case.home].map(|path| icacls(path)),
         before,
-        "every root and protected path is back to the access list it had"
+        "every root and protected path is back to the access list it had\nbefore:\n{before_sddl}\ngranted:\n{granted_sddl}\nafter:\n{}",
+        sddl(&watched)
     );
     assert!(!record.exists());
     crazyagent_win_sandbox::release(&case.profile).unwrap();

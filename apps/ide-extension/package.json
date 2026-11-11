@@ -1,0 +1,407 @@
+{
+  "name": "crazyagent-ide",
+  "displayName": "CrazyAgent",
+  "description": "CrazyAgent change sets, agents and memories inside the CrazyAgent IDE.",
+  "publisher": "crazyagent",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onTerminalProfile:crazyagent.sandboxed",
+    "onTerminalProfile:crazyagent.ownBranch"
+  ],
+  "main": "./out/extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    }
+  },
+  "contributes": {
+    "terminal": {
+      "profiles": [
+        {
+          "id": "crazyagent.sandboxed",
+          "title": "Sandboxed",
+          "icon": "shield"
+        },
+        {
+          "id": "crazyagent.ownBranch",
+          "title": "Own branch",
+          "icon": "shield"
+        }
+      ]
+    },
+    "themes": [
+      {
+        "label": "CrazyAgent Dark",
+        "uiTheme": "vs-dark",
+        "path": "./themes/crazyagent-dark.json"
+      },
+      {
+        "label": "CrazyAgent Light",
+        "uiTheme": "vs",
+        "path": "./themes/crazyagent-light.json"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "crazyagent",
+          "title": "CrazyAgent",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "crazyagent": [
+        {
+          "id": "crazyagent.memories",
+          "name": "Memories"
+        },
+        {
+          "id": "crazyagent.agents",
+          "name": "Agents"
+        },
+        {
+          "id": "crazyagent.changeSets",
+          "name": "Change sets"
+        },
+        {
+          "id": "crazyagent.context",
+          "name": "Brief and documents"
+        }
+      ]
+    },
+    "submenus": [
+      {
+        "id": "crazyagent.terminalLevels",
+        "label": "New terminal at access level",
+        "icon": "$(shield)"
+      }
+    ],
+    "commands": [
+      {
+        "command": "crazyagent.terminal.sandboxed",
+        "title": "Sandboxed",
+        "category": "New terminal at access level"
+      },
+      {
+        "command": "crazyagent.terminal.ownBranch",
+        "title": "Own branch",
+        "category": "New terminal at access level"
+      },
+      {
+        "command": "crazyagent.terminal.ownBranchRaise",
+        "title": "Own branch - Raise project access to use this",
+        "enablement": "false"
+      },
+      {
+        "command": "crazyagent.terminal.ownBranchAbove",
+        "title": "Own branch - Raise project access to use this",
+        "category": "New terminal at access level"
+      },
+      {
+        "command": "crazyagent.terminal.full",
+        "title": "Full access",
+        "category": "New terminal at access level"
+      },
+      {
+        "command": "crazyagent.terminal.fullRaise",
+        "title": "Full access - Raise project access to use this",
+        "enablement": "false"
+      },
+      {
+        "command": "crazyagent.terminal.fullAbove",
+        "title": "Full access - Raise project access to use this",
+        "category": "New terminal at access level"
+      },
+      {
+        "command": "crazyagent.extensions.request",
+        "title": "Install Extension from Open VSX",
+        "category": "CrazyAgent"
+      },
+      {
+        "command": "crazyagent.extensions.updates",
+        "title": "Show Extension Updates",
+        "category": "CrazyAgent"
+      },
+      {
+        "command": "crazyagent.memories.approve",
+        "title": "Approve",
+        "category": "CrazyAgent",
+        "icon": "$(check)"
+      },
+      {
+        "command": "crazyagent.memories.reject",
+        "title": "Reject",
+        "category": "CrazyAgent",
+        "icon": "$(close)"
+      },
+      {
+        "command": "crazyagent.agents.message",
+        "title": "Message",
+        "category": "CrazyAgent",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "crazyagent.agents.openWorktree",
+        "title": "Show worktree",
+        "category": "CrazyAgent",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "crazyagent.memories.refresh",
+        "title": "Refresh",
+        "category": "CrazyAgent",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.agents.refresh",
+        "title": "Refresh",
+        "category": "CrazyAgent",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.changeSets.refresh",
+        "title": "Refresh",
+        "category": "CrazyAgent",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.context.refresh",
+        "title": "Refresh",
+        "category": "CrazyAgent",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.changes.accept",
+        "title": "Accept",
+        "category": "CrazyAgent",
+        "icon": "$(check)"
+      },
+      {
+        "command": "crazyagent.changes.discard",
+        "title": "Discard",
+        "category": "CrazyAgent",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "crazyagent.changes.restore",
+        "title": "Restore",
+        "category": "CrazyAgent",
+        "icon": "$(history)"
+      },
+      {
+        "command": "crazyagent.changes.refresh",
+        "title": "Refresh changes",
+        "category": "CrazyAgent",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "crazyagent.comments.send",
+        "title": "Send to the agent",
+        "category": "CrazyAgent"
+      },
+      {
+        "command": "crazyagent.editAnyway",
+        "title": "Edit anyway",
+        "category": "CrazyAgent",
+        "icon": "$(unlock)"
+      }
+    ],
+    "menus": {
+      "crazyagent.terminalLevels": [
+        {
+          "command": "crazyagent.terminal.sandboxed",
+          "group": "levels@1"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranch",
+          "when": "crazyagent.ideAccess != sandboxed",
+          "group": "levels@2"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranchRaise",
+          "when": "crazyagent.ideAccess == sandboxed",
+          "group": "levels@2"
+        },
+        {
+          "command": "crazyagent.terminal.full",
+          "when": "crazyagent.ideAccess == full",
+          "group": "levels@3"
+        },
+        {
+          "command": "crazyagent.terminal.fullRaise",
+          "when": "crazyagent.ideAccess != full",
+          "group": "levels@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "crazyagent.memories.approve",
+          "when": "view == crazyagent.memories && viewItem == memory.pending",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.memories.reject",
+          "when": "view == crazyagent.memories && viewItem == memory.pending",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.agents.message",
+          "when": "view == crazyagent.agents && viewItem =~ /\\bagent\\.message\\b/",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.agents.openWorktree",
+          "when": "view == crazyagent.agents && viewItem =~ /\\bagent\\.worktree\\b/",
+          "group": "inline"
+        }
+      ],
+      "view/title": [
+        {
+          "submenu": "crazyagent.terminalLevels",
+          "when": "view == terminal",
+          "group": "navigation"
+        },
+        {
+          "command": "crazyagent.memories.refresh",
+          "when": "view == crazyagent.memories",
+          "group": "navigation"
+        },
+        {
+          "command": "crazyagent.agents.refresh",
+          "when": "view == crazyagent.agents",
+          "group": "navigation"
+        },
+        {
+          "command": "crazyagent.changeSets.refresh",
+          "when": "view == crazyagent.changeSets",
+          "group": "navigation"
+        },
+        {
+          "command": "crazyagent.context.refresh",
+          "when": "view == crazyagent.context",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "crazyagent.terminal.ownBranchRaise",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.terminal.fullRaise",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranch",
+          "when": "crazyagent.ideAccess != sandboxed"
+        },
+        {
+          "command": "crazyagent.terminal.ownBranchAbove",
+          "when": "crazyagent.ideAccess == sandboxed"
+        },
+        {
+          "command": "crazyagent.terminal.full",
+          "when": "crazyagent.ideAccess == full"
+        },
+        {
+          "command": "crazyagent.terminal.fullAbove",
+          "when": "crazyagent.ideAccess != full"
+        },
+        {
+          "command": "crazyagent.memories.approve",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.memories.reject",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.agents.message",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.agents.openWorktree",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.accept",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.discard",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.restore",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.changes.refresh",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.comments.send",
+          "when": "false"
+        },
+        {
+          "command": "crazyagent.editAnyway",
+          "when": "activeEditorIsReadonly"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "crazyagent.comments.send",
+          "when": "commentController == crazyagent.comments",
+          "group": "inline"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "crazyagent.changes.refresh",
+          "when": "scmProvider == crazyagent",
+          "group": "navigation"
+        }
+      ],
+      "scm/resourceGroup/context": [
+        {
+          "command": "crazyagent.changes.accept",
+          "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.open$/",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.changes.discard",
+          "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.(open|unread|waiting)$/",
+          "group": "inline"
+        },
+        {
+          "command": "crazyagent.changes.restore",
+          "when": "scmProvider == crazyagent && scmResourceGroup =~ /\\.restorable$/",
+          "group": "inline"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "crazyagent.editAnyway",
+          "when": "activeEditorIsReadonly && resourcePath =~ /\\/worktrees\\/agent-[1-9][0-9]*\\//",
+          "group": "navigation"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node ../desktop/node_modules/typescript/bin/tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/vscode": "1.140.0"
+  }
+}

@@ -38,14 +38,14 @@ fn ctx(width: u16, height: u16) -> Ctx {
     ctx
 }
 
-fn ready(width: u16, height: u16) -> Ctx {
+pub(in crate::tui) fn ready(width: u16, height: u16) -> Ctx {
     let mut ctx = ctx(width, height);
     ctx.link = Link::Ready;
     ctx.store.setup = Load::Ready(tools(&[]));
     ctx
 }
 
-fn render(shell: &mut Shell, width: u16, height: u16) -> Vec<String> {
+pub(in crate::tui) fn render(shell: &mut Shell, width: u16, height: u16) -> Vec<String> {
     let away = Position::new(u16::MAX, u16::MAX);
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.backend_mut().set_cursor_position(away).unwrap();
@@ -104,7 +104,7 @@ fn save(name: &str, rows: &[String]) {
     }
 }
 
-fn check(name: &str, actual: &[String], swaps: &[(&str, &str)]) {
+pub(in crate::tui) fn check(name: &str, actual: &[String], swaps: &[(&str, &str)]) {
     save(name, actual);
     let expected = fixture(name, swaps);
     let wrong: Vec<String> = expected
@@ -206,6 +206,9 @@ fn card(
         about: about.into(),
         platforms: platforms.to_vec(),
         pool: pool.map(Into::into),
+        pool_id: pool.map(|name| {
+            CredentialRef::new(format!("pool-{}", name.replace(' ', "-").to_lowercase())).unwrap()
+        }),
         research,
         created_ms: Some(clock::now_ms() - age_ms),
         activity: Default::default(),
@@ -291,7 +294,10 @@ fn project_swaps(old: &str) -> Vec<(&'static str, String)> {
         ),
         ("Updated 4 min ago", "Created 4 min ago".into()),
         ("Updated yesterday", "Created yesterday".into()),
-        ("Updated Oct 19", format!("Created {old}")),
+        (
+            "Updated Oct 19",
+            format!("{:>1$}", format!("Created {old}"), "Updated Oct 19".len()),
+        ),
     ]
 }
 
@@ -302,7 +308,7 @@ fn swapped<'a>(swaps: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a st
         .collect()
 }
 
-fn shell_at(ctx: Ctx, place: Place) -> Shell {
+pub(in crate::tui) fn shell_at(ctx: Ctx, place: Place) -> Shell {
     let mut ctx = ctx;
     let screen = open(&place, &mut ctx);
     Shell::with(ctx, screen)
@@ -553,7 +559,62 @@ fn home_cards_put_new_team_notifications_before_suggested_memories() {
         assert!(shown.contains("2 new team notifications"), "{shown}");
         assert_eq!(shown.matches("new team notification").count(), 2, "{shown}");
         assert!(!shown.contains("1 new team notifications"), "{shown}");
-        assert!(!shown.contains("3 suggested memories"), "{shown}");
+        assert!(shown.contains("3 suggested memories"), "{shown}");
+    }
+}
+
+#[test]
+fn home_cards_show_suggested_memories_beside_new_team_notifications() {
+    let mut cards = projects();
+    cards[0].activity = Activity {
+        working: Some(0),
+        suggestions: 3,
+        notifications: 2,
+    };
+    cards[1].activity = Activity {
+        working: Some(0),
+        suggestions: 1,
+        notifications: 1,
+    };
+    for (width, height, narrow) in [(80, 24, false), (120, 36, false), (80, 24, true)] {
+        let mut ctx = ready(width, height);
+        if narrow {
+            ctx.store.setup = Load::Ready(tools(&[Dependency::Uv]));
+            ctx.store.accounts = Load::Ready(accounts());
+        }
+        ctx.store.projects = Load::Ready(cards.clone());
+        ctx.store.pools = Load::Ready(pools());
+        let mut shell = shell_at(ctx, Place::Home);
+        shell.arrive(super::seam::Arrival::Pools(Ok(pools())));
+        let rows = render(&mut shell, width, height);
+        let shown = rows.join("\n");
+        if narrow {
+            assert!(
+                shown.contains("Get set up"),
+                "the setup panel narrows the cards: {shown}"
+            );
+        }
+        for (notifications, memories) in [(2, "3 suggested memories"), (1, "1 suggested memory")] {
+            let row = rows
+                .iter()
+                .find(|row| row.contains(memories))
+                .unwrap_or_else(|| {
+                    panic!("{memories} shows on its card at {width}x{height}: {shown}")
+                });
+            let notice = row
+                .find(&format!("{notifications} new team notification"))
+                .or_else(|| row.find(&format!("{notifications} notification")));
+            assert!(
+                notice.is_some_and(|at| at < row.find(memories).unwrap()),
+                "the card shows its unseen notifications first, then its suggested memories, at {width}x{height}: {shown}"
+            );
+        }
+        assert!(!shown.contains("1 new team notifications"), "{shown}");
+        assert!(!shown.contains("1 notifications"), "{shown}");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width as usize),
+            "{shown}"
+        );
     }
 }
 
@@ -1173,4 +1234,25 @@ fn a_profile_read_failure_is_not_shown_as_a_stopped_engine() {
     assert!(text.contains("r Try again"));
     assert!(!text.contains("engine isn't running"));
     assert!(!text.contains("Engine not running"));
+}
+
+#[test]
+fn a_tab_in_a_classic_status_line_shows_as_spaces_so_later_text_keeps_its_column() {
+    let mut app = super::app::App::new();
+    app.notice("step\tdone");
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| super::views::draw(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| !cell.symbol().contains(char::is_control))
+    );
+    let rows: Vec<String> = (0..40u16)
+        .map(|y| (0..120u16).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert!(rows.iter().any(|row| row.contains("step    done")));
 }

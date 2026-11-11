@@ -75,8 +75,16 @@ pub struct Status {
 
 /// Builds the PATH the service gives the engine for its harness lookup: the absolute
 /// entries of the installing shell's PATH, then `~/.local/bin` and the usual system
-/// folders, each once. Inputs: the current PATH and home folder. Output: the joined PATH.
-pub fn service_path(current: Option<&OsStr>, home: Option<&Path>) -> OsString {
+/// folders, each once. Folders inside the running AppImage's mount folder `appdir` and
+/// folders [`changeable_by_others`] names are left out, since the service outlives the
+/// mount and must not look harnesses up where another user can plant one.
+/// Inputs: the current PATH, home folder and mount folder. Output: the joined PATH.
+pub fn service_path(
+    current: Option<&OsStr>,
+    home: Option<&Path>,
+    appdir: Option<&Path>,
+) -> OsString {
+    let appdir = appdir.filter(|folder| folder.is_absolute()).map(canonical);
     let mut folders: Vec<PathBuf> = Vec::new();
     let extras = home
         .map(|home| home.join(".local").join("bin"))
@@ -88,7 +96,13 @@ pub fn service_path(current: Option<&OsStr>, home: Option<&Path>) -> OsString {
         .into_iter()
         .chain(extras)
     {
-        if folder.is_absolute() && !folders.contains(&folder) {
+        if folder.is_absolute()
+            && !folders.contains(&folder)
+            && !appdir
+                .as_ref()
+                .is_some_and(|appdir| canonical(&folder).starts_with(appdir))
+            && changeable_by_others(&folder).is_none()
+        {
             folders.push(folder);
         }
     }
@@ -196,7 +210,11 @@ impl Service {
             name,
             executable,
             root: layout.root().to_path_buf(),
-            path: service_path(std::env::var_os("PATH").as_deref(), home.as_deref()),
+            path: service_path(
+                std::env::var_os("PATH").as_deref(),
+                home.as_deref(),
+                std::env::var_os("APPDIR").as_deref().map(Path::new),
+            ),
             definition,
             user: user.filter(|_| platform == Platform::Windows),
         })
@@ -519,6 +537,26 @@ WantedBy=default.target\n",
         })
     }
 
+    /// Whether the installed definition file holds exactly what [`Service::install`] would
+    /// write now, so a caller can replace one that runs another executable, such as an
+    /// AppImage mount folder that is gone. Output: false when it is missing, unreadable,
+    /// different or this service cannot be defined.
+    pub fn current(&self) -> bool {
+        self.definition_text().is_ok_and(|text| {
+            std::fs::read(&self.definition)
+                .is_ok_and(|bytes| bytes == definition_bytes(&text, self.platform))
+        })
+    }
+
+    /// Whether a plain start must replace the installed definition instead of starting it:
+    /// only when this service runs a private copy in place of the `bundled` engine and the
+    /// file on disk is not [`Service::current`], as with a unit an older build left on an
+    /// AppImage mount path. Any other installed service starts as it is, so a launch PATH
+    /// that differs never stops or restarts a running engine. Input: the bundled engine.
+    pub fn stale(&self, bundled: &Path) -> bool {
+        self.executable != bundled && !self.current()
+    }
+
     fn loaded(&self) -> Result<bool, ServiceError> {
         Ok(run_quiet(&self.status_command(current_uid()))?.0)
     }
@@ -554,6 +592,8 @@ WantedBy=default.target\n",
                 self.executable.display()
             )));
         }
+        self.checked()?;
+        persisted(&self.executable)?;
         self.layout()?.prepare()?;
         let text = self.definition_text()?;
         if self.platform == Platform::MacOs && self.loaded()? {
@@ -627,6 +667,144 @@ WantedBy=default.target\n",
     }
 }
 
+/// The first entry on a path that someone other than this user or root can change: an
+/// entry another user owns, or a world-writable folder such as `/tmp`, where a name that
+/// goes away can be taken by anyone. It reads the path as written and with the links of its
+/// existing part resolved. A link's own mode bits, group-writable folders and missing
+/// entries are not counted (only who can change a folder can create an entry in it), and an
+/// entry that cannot be read counts as changeable. Input: the absolute path.
+/// Output: the entry, or none when only this user and the system can change it.
+#[cfg(unix)]
+pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let me = current_uid();
+    let resolved = canonical(path);
+    [path, resolved.as_path()]
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .find(|entry| match std::fs::symlink_metadata(entry) {
+            Ok(metadata) => {
+                (metadata.uid() != me && metadata.uid() != 0)
+                    || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
+            }
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        })
+        .map(Path::to_path_buf)
+}
+
+/// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
+/// runs from the folder the installer chose. Input unused. Output: none.
+#[cfg(not(unix))]
+pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Refuses an engine that a login service or the command line link would keep running
+/// after this app exits when another user can change its path ([`changeable_by_others`]).
+/// Input: the executable. Output: Ok, or an error naming the entry and the fix.
+fn persisted(executable: &Path) -> Result<(), ServiceError> {
+    match changeable_by_others(executable) {
+        Some(entry) => Err(failure(format!(
+            "{}: other users can change {}, so neither a login service nor the command line \
+             link may run the engine from there; install CrazyAgent in a folder only you and \
+             the system can change",
+            executable.display(),
+            entry.display()
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// The engine executable a login service or the command line link may keep naming: the
+/// bundled `executable` itself, unless it sits inside the running AppImage's mount folder
+/// `appdir`, which goes away when the app exits. Then it is a copy, private to this user,
+/// of the release executables beside it ([`crate::update::BINARIES`]) in `<data root>/bin`,
+/// one stable path across versions, each file refreshed by an atomic rename whenever it
+/// differs. Nothing is ever copied from another folder, so an engine other users can change
+/// is returned as it is and refused where it would be kept. Inputs: the bundled engine, the
+/// layout and the AppImage mount folder when there is one. Output: the executable to keep.
+pub fn persistable(
+    executable: &Path,
+    layout: &Layout,
+    appdir: Option<&Path>,
+) -> Result<PathBuf, ServiceError> {
+    let mounted = appdir
+        .filter(|folder| folder.is_absolute())
+        .is_some_and(|folder| canonical(executable).starts_with(canonical(folder)));
+    if !mounted || !executable.is_file() {
+        return Ok(executable.to_path_buf());
+    }
+    let (Some(source), Some(main)) = (executable.parent(), executable.file_name()) else {
+        return Err(failure("the engine executable has no folder"));
+    };
+    let names: Vec<String> = crate::update::BINARIES
+        .iter()
+        .map(|name| format!("{name}{}", std::env::consts::EXE_SUFFIX))
+        .filter(|name| source.join(name).is_file())
+        .collect();
+    if !names.iter().any(|name| OsStr::new(name) == main) {
+        return Err(failure(format!(
+            "{}: not a CrazyAgent engine executable",
+            executable.display()
+        )));
+    }
+    layout.prepare()?;
+    let copies = layout.root().join("bin");
+    crate::paths::private_folder(&copies)?;
+    for name in &names {
+        let copy = copies.join(name);
+        if kept(&source.join(name), &copy) {
+            continue;
+        }
+        let fail = |error: std::io::Error| failure(format!("{}: {error}", copy.display()));
+        let staged = copies.join(format!(".{name}.{}", std::process::id()));
+        if std::fs::symlink_metadata(&staged).is_ok() {
+            std::fs::remove_file(&staged).map_err(fail)?;
+        }
+        copy_private(&source.join(name), &staged).map_err(fail)?;
+        std::fs::rename(&staged, &copy).map_err(fail)?;
+    }
+    let installed = copies.join(main);
+    assert!(installed.starts_with(&copies) && installed.is_file());
+    Ok(installed)
+}
+
+/// Whether `copy` is a regular file with exactly the bytes of `source`, private to this
+/// user where Unix modes exist. Inputs: the bundled file and its copy. Output: the answer.
+fn kept(source: &Path, copy: &Path) -> bool {
+    let private = std::fs::symlink_metadata(copy).is_ok_and(|metadata| {
+        #[cfg(unix)]
+        let private = {
+            use std::os::unix::fs::MetadataExt;
+            metadata.uid() == current_uid() && metadata.mode() & 0o777 == 0o700
+        };
+        #[cfg(not(unix))]
+        let private = true;
+        metadata.is_file() && private
+    });
+    private
+        && std::fs::metadata(source)
+            .map(|metadata| metadata.len())
+            .ok()
+            == std::fs::metadata(copy).map(|metadata| metadata.len()).ok()
+        && match (std::fs::read(source), std::fs::read(copy)) {
+            (Ok(bundled), Ok(copied)) => bundled == copied,
+            _ => false,
+        }
+}
+
+/// Copies one file into a new file only this user can read, write or run (0700 on Unix).
+/// Inputs: the source and the new path, which must not exist. Output: Ok once synced.
+fn copy_private(source: &Path, copy: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o700);
+    let mut file = options.open(copy)?;
+    std::io::copy(&mut std::fs::File::open(source)?, &mut file)?;
+    file.sync_all()
+}
+
 fn xml(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
@@ -676,20 +854,26 @@ fn current_uid() -> u32 {
     0
 }
 
-fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
-    let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
-    let parent = path
-        .parent()
-        .ok_or_else(|| failure("the service definition has no folder"))?;
-    std::fs::create_dir_all(parent).map_err(fail)?;
-    let bytes = if platform == Platform::Windows {
+/// The bytes of a definition file: UTF-16LE with a byte order mark for the Windows task
+/// XML, UTF-8 elsewhere. Inputs: the definition text and platform. Output: the bytes.
+fn definition_bytes(text: &str, platform: Platform) -> Vec<u8> {
+    if platform == Platform::Windows {
         [0xff, 0xfe]
             .into_iter()
             .chain(text.encode_utf16().flat_map(u16::to_le_bytes))
             .collect()
     } else {
         text.as_bytes().to_vec()
-    };
+    }
+}
+
+fn write_definition(path: &Path, text: &str, platform: Platform) -> Result<(), ServiceError> {
+    let fail = |error: std::io::Error| failure(format!("{}: {error}", path.display()));
+    let parent = path
+        .parent()
+        .ok_or_else(|| failure("the service definition has no folder"))?;
+    std::fs::create_dir_all(parent).map_err(fail)?;
+    let bytes = definition_bytes(text, platform);
     let staged = parent.join(format!(
         ".{}.staged",
         path.file_name()
@@ -738,18 +922,28 @@ fn run_checked(command: &[OsString]) -> Result<(), ServiceError> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| failure("empty service command"))?;
+    run_process(std::process::Command::new(program).args(args))
+}
+
+/// Runs one service command to its end with no input, capturing its output. Input: the
+/// command. Output: Ok on success, else an error showing its program, arguments, status
+/// and error text, never its environment.
+fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
+    let program = process.get_program().to_string_lossy().into_owned();
     let output = crate::spawn_gate::output(
-        std::process::Command::new(program)
-            .args(args)
+        process
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped()),
     )
-    .map_err(|error| failure(format!("{}: {error}", program.to_string_lossy())))?;
+    .map_err(|error| failure(format!("{program}: {error}")))?;
     if output.status.success() {
         return Ok(());
     }
-    let shown: Vec<_> = command.iter().map(|part| part.to_string_lossy()).collect();
+    let shown: Vec<_> = std::iter::once(process.get_program())
+        .chain(process.get_args())
+        .map(|part| part.to_string_lossy())
+        .collect();
     let detail = String::from_utf8_lossy(&output.stderr);
     Err(failure(format!(
         "`{}` failed ({}): {}",
@@ -1011,6 +1205,7 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             executable.display()
         )));
     }
+    persisted(executable)?;
     std::fs::create_dir_all(bin).map_err(|error| fail(bin, error))?;
     let link = bin.join("crazyagent");
     if let Ok(metadata) = std::fs::symlink_metadata(&link)
@@ -1037,28 +1232,31 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
         .parent()
         .ok_or_else(|| failure("the executable has no folder"))?
         .to_path_buf();
-    run_checked(&windows_path_command(&folder))?;
+    run_process(&mut windows_path_command(&folder))?;
     Ok(folder)
 }
 
+/// The environment variable that hands the folder to the Windows PATH command. PowerShell
+/// joins every argument after `-Command` into the script text, so the folder never goes
+/// on the command line.
+pub const WINDOWS_PATH_FOLDER_VARIABLE: &str = "CRAZYAGENT_PATH_FOLDER";
+
 /// The PowerShell command that appends a folder to the user's PATH once. Input: the
-/// folder, passed as an argument rather than inside the script. Output: the command.
-pub fn windows_path_command(folder: &Path) -> Vec<OsString> {
-    let script = "$f=$args[0]; $p=[Environment]::GetEnvironmentVariable('Path','User'); \
-if ($null -eq $p) { $p='' }; \
-if (-not (($p -split ';') -contains $f)) { \
-[Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';'), $f) -join ';').TrimStart(';'), 'User') }";
-    [
-        "powershell.exe",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .chain(std::iter::once(folder.as_os_str().to_os_string()))
-    .collect()
+/// folder, handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never
+/// as script. Output: the command; it fails when that variable arrives empty.
+pub fn windows_path_command(folder: &Path) -> std::process::Command {
+    let script = format!(
+        "$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
+$p=[Environment]::GetEnvironmentVariable('Path','User'); \
+if ($null -eq $p) {{ $p='' }}; \
+if (-not (($p -split ';') -contains $f)) {{ \
+[Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';'), $f) -join ';').TrimStart(';'), 'User') }}"
+    );
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .env(WINDOWS_PATH_FOLDER_VARIABLE, folder);
+    command
 }
 
 #[cfg(test)]

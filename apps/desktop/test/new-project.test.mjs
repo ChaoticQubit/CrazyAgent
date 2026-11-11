@@ -167,14 +167,36 @@ test("switching to a harness whose tools can't be turned off and back restores t
 });
 
 test("harness choices list every harness and say why one can't be picked", () => {
-  assert.deepEqual(wizard.harnessChoices(catalog).map((choice) => [choice.id, choice.group, choice.disabled]), [
+  assert.deepEqual(wizard.harnessChoices(catalog, "agent").map((choice) => [choice.id, choice.group, choice.disabled]), [
     ["codex", "Ready", false],
     ["claude", "Ready", false],
     ["cursor", "Limited control", true],
     ["gemini", "Not installed", true],
   ]);
-  assert.equal(wizard.harnessChoices(catalog)[2].label, "Cursor CLI - Can't run team agents");
-  assert.equal(wizard.harnessChoices(catalog)[3].label, "Gemini CLI - Not installed");
+  assert.equal(wizard.harnessChoices(catalog, "agent")[2].label, "Cursor CLI - Can't run team agents");
+  assert.equal(wizard.harnessChoices(catalog, "agent")[3].label, "Gemini CLI - Not installed");
+});
+
+test("a master-only harness is offered and valid as the master but never for an agent row", () => {
+  const masterOnly = { kind: "master_only", reason: "runs only as a CrazyAgent master" };
+  const rcli = harness("rcli", "RCLI", { kind: "limited", reason: "runs only as a CrazyAgent master" }, { kind: "limited", reason: "runs without tools" },
+    ["api_key", "open_ai_compatible_url", "local"], masterOnly);
+  const withRcli = [...catalog, rcli];
+  const pick = (role) => wizard.harnessChoices(withRcli, role).find((choice) => choice.id === "rcli");
+  assert.deepEqual(pick("master"), { id: "rcli", label: "RCLI - Master only, no live terminal", group: "Limited control", disabled: false });
+  assert.deepEqual(pick("agent"), { id: "rcli", label: "RCLI - Runs only as the master", group: "Limited control", disabled: true });
+  for (const role of ["master", "agent"]) {
+    const cursor = wizard.harnessChoices(withRcli, role).find((choice) => choice.id === "cursor");
+    assert.deepEqual([cursor.label, cursor.disabled], ["Cursor CLI - Can't run team agents", true], role);
+  }
+  const led = engineTeam("rcli");
+  assert.deepEqual(wizard.teamErrors(led, withRcli), { rows: [] });
+  assert.equal(wizard.teamValid(led, withRcli), true);
+  const asAgent = { ...engineTeam("codex", 1), sub_harnesses: [{ harness: "rcli", agents: 1, tools: true }] };
+  assert.deepEqual(wizard.teamErrors(asAgent, withRcli).rows, ["RCLI runs only as the master. Pick another harness."]);
+  assert.equal(wizard.teamValid(asAgent, withRcli), false);
+  assert.equal(wizard.masterNote(led, withRcli), "RCLI has no terminal app. Its conversation stays on the Conversation tab.");
+  assert.equal(wizard.masterNote(engineTeam("codex"), withRcli), null);
 });
 
 test("team validation mirrors the engine agent range", () => {
@@ -254,9 +276,10 @@ test("the request carries every answer and no repositories", () => {
     spec: { name: "Harbor Notes", repositories: [] },
     setup: {
       about: "Notes for marine engineers.\n\nOther platform: Smart watch", tech_stack: ["Rust", "React"],
-      platforms: ["mobile_app", "other"], research: ["market_research"], pool: "main", team: engineTeam("codex", 1), documents: ["/d/brief.pdf"],
+      platforms: ["mobile_app", "other"], research: ["market_research", "roadmap_planning"], pool: "main", team: engineTeam("codex", 1), documents: ["/d/brief.pdf"],
     },
   });
+  assert.deepEqual(wizard.buildRequest({ ...draft, roadmap: false }).setup.research, ["market_research"]);
   assert.equal(wizard.buildRequest({ ...draft, platforms: ["website"], otherPlatform: "ignored" }).setup.about, "Notes for marine engineers.");
 });
 
@@ -335,7 +358,7 @@ test("project Settings starts from the saved project and sends nothing until som
   const draft = wizard.draftOf(stored);
   assert.deepEqual(draft, {
     name: "Harbor Notes", about: "Notes for marine engineers.", stack: ["Rust", "SQLite"], platforms: ["desktop_app"], otherPlatform: "", documents: [],
-    research: ["market_research"], pool: "main-pool", poolChosen: true, team: stored.team,
+    research: ["market_research"], roadmap: false, pool: "main-pool", poolChosen: true, team: stored.team,
   });
   assert.notEqual(draft.stack, stored.tech_stack);
   assert.equal(wizard.editRequest(stored, draft).changed, false);
@@ -373,4 +396,37 @@ test("a pool with one account runs every agent of the team and never tells them 
   assert.match(html, /This team has 3 agents\./);
   assert.doesNotMatch(html, /wait for a free account/i);
   assert.doesNotMatch(html, /Agents beyond/);
+});
+
+test("a plan that names a harness by its alias shows the one catalog entry, not a second raw option", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const named = [harness("codex", "Codex", ready), harness("claude-code", "Claude Code", ready, undefined, undefined, undefined, ["claude"])];
+  assert.equal(wizard.entry(named, "claude")?.id, "claude-code");
+  assert.equal(wizard.entry(named, "claude-code")?.id, "claude-code");
+  assert.equal(wizard.entry(named, "gemini"), undefined);
+  assert.equal(wizard.entry(null, "claude"), undefined);
+  const team = { master: "claude", master_tools: true, sub_harnesses: [{ harness: "claude", agents: 1, tools: true }], min_agents: 1, max_agents: 2 };
+  const html = renderToStaticMarkup(createElement(TeamEditor, { team, harnesses: named, pool: null, research: [], onChange: () => {}, prefix: "np" }));
+  assert.equal(html.match(/<option value="claude">/g), null);
+  assert.equal(html.match(/<option value="claude-code" selected="">Claude Code<\/option>/g)?.length, 2);
+});
+
+test("a master stored as the alias claude gets the pool warning and the fixed Tools switch that claude-code gets (OP-28 F1)", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const limited = { kind: "limited", reason: "tools can't be turned off" };
+  const named = [harness("codex", "Codex", ready), harness("claude-code", "Claude Code", ready, limited, undefined, undefined, ["claude"])];
+  const member = { id: "cx", provider: "openai", harness: "codex", protocol: "x", account_ref: "cx", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: { method: "native_managed", profile_ref: "r" } };
+  const pool = { pool: { id: "codex-pool", name: "Codex only", members: ["cx"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
+  for (const master of ["claude-code", "claude"]) {
+    const team = { master, master_tools: false, sub_harnesses: [], min_agents: 1, max_agents: 2 };
+    const html = renderToStaticMarkup(createElement(TeamEditor, { team, harnesses: named, pool, research: [], onChange: () => {}, prefix: "np" }));
+    assert.match(html, /Codex only has no account Claude Code can use\./, `${master}: the pool warning names Claude Code`);
+    const tools = html.match(/<[^>]*id="np-master-tools"[^>]*>/)?.[0] ?? "";
+    assert.match(tools, /aria-disabled="true"/, `${master}: the master Tools switch is fixed`);
+    assert.match(tools, /aria-checked="true"/, `${master}: the fixed master Tools switch reads on`);
+  }
 });

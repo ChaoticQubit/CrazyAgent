@@ -254,7 +254,8 @@ pub enum PackState {
 }
 
 /// One default-pack entry as the setup screen and Settings list it: its id, kind and
-/// group, where it comes from, its license, whether it starts ticked and its state.
+/// group, where it comes from, its license, whether it starts ticked, its state and, for
+/// an installed entry whose hooks were refused, the plain reason they were not added.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackEntry {
@@ -265,16 +266,21 @@ pub struct PackEntry {
     pub license: String,
     pub on_by_default: bool,
     pub state: PackState,
+    #[serde(default)]
+    pub hooks_refused: Option<String>,
 }
 
-/// Everything the setup screen shows: each dependency, each pack entry, and whether a
-/// setup run is going on now.
+/// Everything the setup screen shows: each dependency, each pack entry, whether a setup
+/// run is going on now, and the pack's version that a switch or removal names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetupStatus {
     pub dependencies: Vec<DependencyStatus>,
     pub pack: Vec<PackEntry>,
     pub running: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    pub version: u64,
 }
 
 /// One Python tool setup installs only from its bundled lock: the package, its version,
@@ -374,7 +380,11 @@ pub trait Installer: Send + Sync {
 /// The code every setup step reports on a system setup has no installer for yet.
 pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 
-const REASONS: [(&str, &str); 25] = [
+/// The code for a Mac with no Command Line Tools git, the only git whose helpers an agent
+/// profile reads: the Setup note, and a refused agent git step.
+pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
+
+const REASONS: [(&str, &str); 26] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -457,6 +467,10 @@ const REASONS: [(&str, &str); 25] = [
         "Setup can't install this on this system yet. Install it yourself, then check again.",
     ),
     (
+        AGENT_GIT_NEEDS_TOOLS,
+        "Agent git needs the Command Line Tools: run xcode-select --install.",
+    ),
+    (
         "setup_local_app_data_missing",
         "Windows did not say where your local app data folder is, so setup can't install here.",
     ),
@@ -466,6 +480,18 @@ const REASONS: [(&str, &str); 25] = [
 /// as `setup_checksum_mismatch`. Output: its sentence, or a general one for other codes.
 pub fn plain_reason(code: &str) -> &'static str {
     known_reason(code).unwrap_or("Something went wrong during setup.")
+}
+
+/// Turns a pack install or hooks code into the plain sentence a pack entry shows: a setup
+/// or pack code from the setup table, any other from the plugin table first. Input: the
+/// code. Output: its sentence, or the general setup sentence.
+pub fn pack_reason(code: &str) -> String {
+    if code.starts_with("setup_") || code.starts_with("pack_") {
+        return plain_reason(code).to_owned();
+    }
+    crate::plugins::plain_problem(code)
+        .unwrap_or_else(|| plain_reason(code))
+        .to_owned()
 }
 
 /// Finds the setup sentence for a code. Input: a code such as `setup_checksum_mismatch`.
@@ -574,13 +600,14 @@ pub fn platform_pin(dep: Dependency) -> Option<Pin> {
 }
 
 /// One owner change to the default pack, as the owner mutations carry it: start setup
-/// with the ticked entries, switch an installed entry, or remove one.
+/// with the ticked entries, or switch or remove an installed entry at the pack version the
+/// screen showed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetupAction {
     Run { pack: Vec<String> },
-    Set { id: String, on: bool },
-    Remove { id: String },
+    Set { id: String, on: bool, version: u64 },
+    Remove { id: String, version: u64 },
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;
@@ -607,7 +634,7 @@ impl SetupAction {
                         .enumerate()
                         .all(|(index, id)| !pack[..index].contains(id))
             }
-            Self::Set { id, .. } | Self::Remove { id } => valid_pack_id(id),
+            Self::Set { id, .. } | Self::Remove { id, .. } => valid_pack_id(id),
         };
         if !valid {
             return Err(InstallError("pack_unknown"));

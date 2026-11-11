@@ -63,9 +63,11 @@ impl OwnerController {
     }
 
     /// Ends each holder through its own owner action: a research job is cancelled and a
-    /// master conversation is closed. A holder that already ended is refused, which is not
-    /// an error. Inputs: the holders and the client generation. Output: Ok once each was
-    /// answered, or `controller_pending_uncertain` when one may still be recorded.
+    /// master conversation is closed. What a Full access agent left running has no action
+    /// of its own; stopping the account's agents lets go of it. A holder that already ended
+    /// is refused, which is not an error. Inputs: the holders and the client generation.
+    /// Output: Ok once each was answered, or `controller_pending_uncertain` when one may
+    /// still be recorded.
     pub async fn end_holders(
         &mut self,
         holders: &[Holder],
@@ -77,6 +79,7 @@ impl OwnerController {
                     self.cancel_research(project.clone(), *job, generation)
                         .await?
                 }
+                Holder::Leftover { .. } => continue,
                 Holder::Master { project, session } => {
                     self.read(OwnerRead::ProjectMaster {
                         project_id: project.clone(),
@@ -133,10 +136,14 @@ impl OwnerController {
 mod tests {
     use super::*;
     use crate::agents::AgentState;
+    #[cfg(target_os = "macos")]
     use crate::agents::tests::{alive, install_fixture, pids, spec, until};
     use crate::engine::bootstrap::EngineService;
     use std::os::unix::fs::PermissionsExt;
 
+    /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+    /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn agent_controls_reach_the_engine_and_touch_only_one_agent() {
         let root = tempfile::Builder::new()

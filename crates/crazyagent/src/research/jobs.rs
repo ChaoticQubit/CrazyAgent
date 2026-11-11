@@ -1,3 +1,5 @@
+use crate::activity::ActivityKind;
+use crate::planning::AFTER_RESEARCH;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 use std::fmt;
 use std::path::Path;
@@ -11,6 +13,7 @@ const ERROR_BYTES_MAX: usize = 512;
 const REPORT_PATH_BYTES_MAX: usize = 512;
 const RUNNING_MAX: u32 = 64;
 const ATTEMPTS_MAX: u32 = 10;
+const STALE_ERROR: &str = "Agent stopped responding";
 
 const COLUMNS: &str = "id, project, kind, harness, tools, status, attempts, claimer, report_path, error, cancel_requested, output_bytes, created_ms, started_ms, heartbeat_ms, finished_ms";
 
@@ -187,7 +190,8 @@ impl ResearchJobs {
     }
 
     /// Atomically moves the oldest queued job of `project` to running for
-    /// `claimer`, unless `running_max` jobs of that project already run.
+    /// `claimer`, unless `running_max` jobs of that project already run; a
+    /// roadmap planning job waits until the project's other jobs end.
     pub fn claim(
         &self,
         project: &str,
@@ -233,6 +237,7 @@ impl ResearchJobs {
                      WHERE id = (SELECT id FROM research_jobs
                                  WHERE project = ?1 AND status = 'queued'
                                    AND (?5 IS NULL OR harness = ?5)
+                                   AND {AFTER_RESEARCH}
                                  ORDER BY id LIMIT 1)
                        AND (SELECT count(*) FROM research_jobs
                             WHERE project = ?1 AND status = 'running') < ?4
@@ -247,6 +252,8 @@ impl ResearchJobs {
             assert_eq!(job.claimer.as_deref(), Some(claimer));
             assert!(harness.is_none_or(|harness| job.harness == harness));
             assert!(job.attempts >= 1);
+            let started = ActivityKind::ResearchStarted;
+            crate::activity::note_research(&self.connection, job.id, started, now);
         }
         Ok(job)
     }
@@ -277,19 +284,25 @@ impl ResearchJobs {
     }
 
     /// Marks the job of the claim `held` done with its report path inside the
-    /// project folder.
+    /// project folder, and records the saved run in the project's activity.
     pub fn finish(&self, held: &ResearchJob, report_path: &str) -> Result<(), JobError> {
         bounded(report_path, REPORT_PATH_BYTES_MAX)?;
+        let now = now_ms();
         self.transition(
             held,
             "status = 'done', report_path = ?4, finished_ms = ?5, claimer = NULL",
-            &[&report_path, &now_ms()],
-        )
+            &[&report_path, &now],
+        )?;
+        let saved = ActivityKind::ResearchSaved;
+        crate::activity::note_research(&self.connection, held.id, saved, now);
+        Ok(())
     }
 
     /// Records a failed attempt of the claim `held`: a job whose cancel was
     /// requested ends cancelled, otherwise it requeues while attempts remain under
-    /// `attempts_max`, otherwise it is marked failed. Returns the new status.
+    /// `attempts_max`, otherwise it is marked failed; a failed or cancelled run is
+    /// recorded in the project's activity as stopped, a requeued one not at all. Returns
+    /// the new status.
     pub fn fail(
         &self,
         held: &ResearchJob,
@@ -301,6 +314,7 @@ impl ResearchJobs {
         }
         let error: String = error.chars().take(ERROR_BYTES_MAX / 4).collect();
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
         let status = self
             .connection
             .query_row(
@@ -310,14 +324,7 @@ impl ResearchJobs {
                      error = ?4, finished_ms = ?6, claimer = NULL
                  WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
-                params![
-                    held.id,
-                    claimer,
-                    held.attempts,
-                    error,
-                    attempts_max,
-                    now_ms()
-                ],
+                params![held.id, claimer, held.attempts, error, attempts_max, now],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -327,14 +334,20 @@ impl ResearchJobs {
             status,
             ResearchStatus::Queued | ResearchStatus::Failed | ResearchStatus::Cancelled
         ));
+        if status != ResearchStatus::Queued {
+            let stopped = ActivityKind::ResearchStopped;
+            crate::activity::note_research(&self.connection, held.id, stopped, now);
+        }
         Ok(status)
     }
 
     /// Parks the job of the claim `held` until its project has a pool, without
-    /// using an attempt; a job whose cancel was requested ends cancelled instead.
-    /// Returns the new status.
+    /// using an attempt; a job whose cancel was requested ends cancelled instead. The
+    /// project's activity says the run waits for a pool, or that it stopped. Returns the
+    /// new status.
     pub fn needs_pool(&self, held: &ResearchJob) -> Result<ResearchStatus, JobError> {
         let claimer = held.claimer.as_deref().ok_or(JobError::NotHeld)?;
+        let now = now_ms();
         let status = self
             .connection
             .query_row(
@@ -344,7 +357,7 @@ impl ResearchJobs {
                      attempts = attempts - 1, claimer = NULL, started_ms = NULL, heartbeat_ms = NULL
                  WHERE id = ?1 AND claimer = ?2 AND attempts = ?3 AND status = 'running'
                  RETURNING status",
-                params![held.id, claimer, held.attempts, now_ms()],
+                params![held.id, claimer, held.attempts, now],
                 |row| row.get::<_, String>(0),
             )
             .optional()?
@@ -354,6 +367,12 @@ impl ResearchJobs {
             status,
             ResearchStatus::NeedsPool | ResearchStatus::Cancelled
         ));
+        if status == ResearchStatus::NeedsPool {
+            crate::activity::note_research_waiting(&self.connection, held.id, now);
+        } else {
+            let stopped = ActivityKind::ResearchStopped;
+            crate::activity::note_research(&self.connection, held.id, stopped, now);
+        }
         Ok(status)
     }
 
@@ -387,28 +406,47 @@ impl ResearchJobs {
     }
 
     /// Returns the job of the claim `held` to the queue without spending its
-    /// attempt, for a run the engine itself interrupted.
-    pub fn release(&self, held: &ResearchJob) -> Result<(), JobError> {
+    /// attempt, for a run the engine itself interrupted, with `reason` as the plain
+    /// line the queued job shows until it runs again; a job whose cancel was
+    /// requested ends cancelled instead, without the reason.
+    pub fn release(&self, held: &ResearchJob, reason: Option<&str>) -> Result<(), JobError> {
+        if let Some(reason) = reason {
+            bounded(reason, ERROR_BYTES_MAX)?;
+        }
         self.transition(
             held,
-            "status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, attempts = attempts - 1, claimer = NULL",
-            &[],
+            "status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END, attempts = attempts - 1, claimer = NULL,
+             error = CASE WHEN cancel_requested = 1 THEN error ELSE ?4 END",
+            &[&reason],
         )
     }
 
+    /// Tells whether a projects home move holds `folder`, so no job of its project launches
+    /// there until the move is finished or forgotten. Takes the project folder. Returns the
+    /// answer.
+    pub(crate) fn home_moving(&self, folder: &Path) -> Result<bool, JobError> {
+        Ok(crate::projects_home::move_holds(&self.connection, folder)?)
+    }
+
     /// Returns the job of the claim `held` to the queue without spending its attempt after
-    /// its account hit a rate or usage limit, and pauses that pool account in the pause
-    /// master and team turns share before the job is free, so the next pick fails over to
-    /// another account; a claim lost meanwhile keeps the pause. Takes the claim and the
-    /// account's connection. Returns the new status and when the pause
-    /// ends, in ms since the epoch.
+    /// its account hit a rate or usage limit, and holds that pool account for the job's own
+    /// project before the job is free, so the project's next pick fails over to another
+    /// account; a claim lost meanwhile keeps the hold. The limit is read from what the run's
+    /// harness wrote, which its agent can write too in a terminal run, so the hold reaches no
+    /// other project (SECAUDIT-RATELIMIT-FORGE). Takes the claim and the account's
+    /// connection. Returns the new status and when the hold ends, in ms since the epoch.
     pub fn rate_limited(
         &self,
         held: &ResearchJob,
         account: &crate::protocol::CredentialRef,
     ) -> Result<(ResearchStatus, i64), JobError> {
-        let until = crate::team::pause_account(&self.connection, account)?;
-        self.release(held)?;
+        let until = crate::team::hold_for_project(
+            &self.connection,
+            &held.project,
+            account,
+            crate::team::runtime::TeamLimits::default().rate_limit_pause,
+        )?;
+        self.release(held, None)?;
         let status = self
             .get(held.id)?
             .map_or(ResearchStatus::Queued, |job| job.status);
@@ -416,12 +454,13 @@ impl ResearchJobs {
     }
 
     /// Each project and harness pair with queued or waiting research, in
-    /// order, at most 1000.
+    /// order, at most 1000; a planning job still waiting for research is left out.
     pub fn work(&self) -> Result<Vec<(String, String)>, JobError> {
-        let mut statement = self.connection.prepare(
+        let mut statement = self.connection.prepare(&format!(
             "SELECT DISTINCT project, harness FROM research_jobs
-             WHERE status IN ('queued', 'needs_pool') ORDER BY project, harness LIMIT 1000",
-        )?;
+             WHERE status IN ('queued', 'needs_pool') AND {AFTER_RESEARCH}
+             ORDER BY project, harness LIMIT 1000"
+        ))?;
         let work = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -448,37 +487,57 @@ impl ResearchJobs {
     }
 
     /// Marks the cancel-flagged job of the claim `held` cancelled after its
-    /// process stopped.
+    /// process stopped, and records the stopped run in the project's activity.
     pub fn cancelled(&self, held: &ResearchJob) -> Result<(), JobError> {
+        let now = now_ms();
         self.transition(
             held,
             "status = 'cancelled', finished_ms = ?4, claimer = NULL",
-            &[&now_ms()],
-        )
+            &[&now],
+        )?;
+        let stopped = ActivityKind::ResearchStopped;
+        crate::activity::note_research(&self.connection, held.id, stopped, now);
+        Ok(())
     }
 
-    /// Requeues running jobs whose heartbeat is older than `stale_ms`, so work
-    /// held by a runner that died is not lost.
-    pub fn recover_stale(&self, stale_ms: u64) -> Result<usize, JobError> {
-        let cutoff = now_ms().saturating_sub(stale_ms.min(i64::MAX as u64) as i64);
+    /// Takes back running jobs whose heartbeat is older than `stale_ms`, so work held by a
+    /// runner that died is not lost: a job requeues while its attempts stay under
+    /// `attempts_max`, else it ends failed, and a job whose cancel was requested ends
+    /// cancelled. Returns how many jobs were taken back.
+    pub fn recover_stale(&self, stale_ms: u64, attempts_max: u32) -> Result<usize, JobError> {
+        if !(1..=ATTEMPTS_MAX).contains(&attempts_max) {
+            return Err(JobError::Invalid("attempt limit must be 1..10"));
+        }
+        let now = now_ms();
+        let cutoff = now.saturating_sub(stale_ms.min(i64::MAX as u64) as i64);
         Ok(self.connection.execute(
             "UPDATE research_jobs
-             SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled' ELSE 'queued' END,
+             SET status = CASE WHEN cancel_requested = 1 THEN 'cancelled'
+                               WHEN attempts < ?2 THEN 'queued' ELSE 'failed' END,
+                 error = CASE WHEN cancel_requested = 0 AND attempts >= ?2 THEN ?3
+                              ELSE error END,
+                 finished_ms = CASE WHEN cancel_requested = 1 OR attempts >= ?2 THEN ?4
+                                    ELSE finished_ms END,
                  claimer = NULL
              WHERE status = 'running' AND heartbeat_ms <= ?1",
-            params![cutoff],
+            params![cutoff, attempts_max, STALE_ERROR, now],
         )?)
     }
 
     /// Reads what every agent launched for `project` receives, its approved
-    /// skills, MCP servers, brief and memories, from the engine database this
+    /// skills, MCP servers, brief and memories with the landing rules of a
+    /// linked worktree, where research runs, from the engine database this
     /// queue lives in. Returns the context, or a plain launch code such as
     /// `plugin_project_unknown` for a project the engine does not know.
     pub fn project_context(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> Result<crate::launch_context::AgentContext, crate::harnesses::launch::LaunchError> {
-        crate::launch_context::for_project(&self.connection, project)
+        crate::launch_context::for_project(
+            &self.connection,
+            project,
+            crate::agent_git::Layout::Linked,
+        )
     }
 
     /// Reads the extra read-only folders the owner saved for a project's agents, see
@@ -488,6 +547,35 @@ impl ResearchJobs {
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
         crate::sandbox::extra_paths::load(&self.connection, project.as_str())
+    }
+
+    /// Reads the folders the owner keeps a project's agents out of, see
+    /// [`crate::sandbox::hidden_paths::load`]. Takes the project. Returns the folders.
+    pub fn hidden_paths(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
+        crate::sandbox::hidden_paths::load(&self.connection, project.as_str())
+    }
+
+    /// Reads the terminal display the owner chose for a project's terminals
+    /// (N-D9), Classic when none is saved. Takes the project. Returns the display, or
+    /// `coord_settings_invalid` for a stored row this build cannot read.
+    pub fn terminal_display(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> Result<crate::coord::settings::TerminalDisplay, crate::engine::EngineError> {
+        crate::coord::settings::read(&self.connection, project)
+            .map(|settings| settings.terminal_display)
+    }
+
+    /// Reads the agent policy the owner saved for a project, see
+    /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
+    pub fn agent_policy(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<crate::sandbox::policy::AgentPolicy> {
+        crate::sandbox::policy::load(&self.connection, project.as_str())
     }
 
     /// Proves a managed connection is signed in for the running engine, with

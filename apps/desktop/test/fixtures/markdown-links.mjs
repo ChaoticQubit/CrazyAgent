@@ -6,12 +6,12 @@ import { MarkdownView } from "../../src/screens/project/markdown.tsx";
 export const opened = [];
 let root = null;
 
-export function mount(source) {
+export function mount(source, sources = false) {
   root?.unmount();
   opened.length = 0;
   document.body.innerHTML = '<div id="root"></div>';
   root = createRoot(document.getElementById("root"));
-  flushSync(() => root.render(createElement(MarkdownView, { source, onOpenLink: (href) => opened.push(href) })));
+  flushSync(() => root.render(createElement(MarkdownView, { source, sources, onOpenLink: (href) => opened.push(href) })));
 }
 
 export function state() {

@@ -1,6 +1,7 @@
 use super::error;
 use super::settings::SettingsSources;
 use crate::engine::EngineError;
+use crate::protocol::ProjectId;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -47,7 +48,144 @@ pub(crate) const STEPS: &[Step] = &[
         to: 4,
         run: master_sessions_parked,
     },
+    Step {
+        to: 5,
+        run: widen_file_trash_kinds,
+    },
+    Step {
+        to: 6,
+        run: sweep_orphan_project_plugins,
+    },
+    Step {
+        to: 7,
+        run: widen_hook_kinds,
+    },
+    Step {
+        to: 8,
+        run: nest_team_agents,
+    },
+    Step {
+        to: 9,
+        run: widen_trash_for_account_files,
+    },
+    Step {
+        to: 10,
+        run: usage_counts_by_model,
+    },
 ];
+
+/// Step 10 (CODEBURN-COUNT): usage rows gain the model and estimated dollars. A database that
+/// never opened the usage store gets the new shape when the store first opens.
+/// Input: the open upgrade transaction. Output: done, or the store's failure.
+fn usage_counts_by_model(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "usage_tokens")? {
+        return Ok(());
+    }
+    crate::usage::capture::migrate_counts(tx)
+}
+
+/// Says whether a table of that name exists. Inputs: the open transaction and the name.
+/// Output: true when `sqlite_schema` holds a table row for it.
+fn has_table(tx: &Transaction<'_>, name: &str) -> Result<bool, EngineError> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(error)
+}
+
+/// Step 5 (PP-2): a removed project's skill store folder is now queued in the transactional
+/// file trash, as its secrets already are, so the `skill_folder` kind must pass the check.
+/// An existing `file_trash` is rebuilt with the wider check, keeping its pending rows; a
+/// database that never had the table gets it from the current schema, which already lists
+/// the kind. Runs before step 6, which queues that kind for orphaned projects.
+fn widen_file_trash_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "file_trash")? {
+        return super::trash::initialize(tx);
+    }
+    tx.execute_batch(
+        "CREATE TABLE file_trash_new (
+            kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
+            name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+            PRIMARY KEY(kind, name)
+         ) WITHOUT ROWID;
+         INSERT INTO file_trash_new SELECT kind, name FROM file_trash;
+         DROP TABLE file_trash;
+         ALTER TABLE file_trash_new RENAME TO file_trash;",
+    )
+    .map_err(error)
+}
+
+/// Step 8 (N1): a sub-agent can lead workers of its own, so team tasks and agents record
+/// the lead that started them.
+fn nest_team_agents(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    crate::team::add_parent_columns(tx)
+}
+
+/// Step 9: a removed account's sign-in files and generated SDK home go through the file
+/// trash, so `file_trash` must take their two kinds. An existing table is rebuilt with the
+/// current check, keeping its rows; a missing one gets the current schema when the engine
+/// opens it. Input: the transaction. Output: any SQLite failure.
+fn widen_trash_for_account_files(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if has_table(tx, "file_trash")? {
+        tx.execute_batch(super::trash::WIDEN).map_err(error)?;
+    }
+    Ok(())
+}
+
+/// Step 7 (H2): hooks are plugin items, and their stored folder copies go through the file
+/// trash, so `plugin_items` must take the `hook` kind and `file_trash` the `hook_folder`
+/// kind. Each existing table is rebuilt with the current check, keeping its rows; a missing
+/// one gets the current schema when the engine opens it.
+fn widen_hook_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if has_table(tx, "plugin_items")? {
+        tx.execute_batch(super::plugins::WIDEN_ITEMS)
+            .map_err(error)?;
+    }
+    if has_table(tx, "file_trash")? {
+        tx.execute_batch(super::trash::WIDEN).map_err(error)?;
+    }
+    Ok(())
+}
+
+/// Step 6 (PP-1): clears plugin rows that removals before `remove_project` held them left
+/// behind, which a reused id would otherwise inherit. For every project scope present in
+/// `plugin_items` or `plugin_switches` with no `projects` row, `remove_project` drops the
+/// rows and queues the stale secrets, check folders and skill folder for the post-start
+/// sweep. Runs after step 5, which widened `file_trash`. A database without the plugin
+/// tables yet has no rows to sweep.
+fn sweep_orphan_project_plugins(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "plugin_items")? {
+        return Ok(());
+    }
+    for id in orphan_project_ids(tx)? {
+        let project = ProjectId::new(id).map_err(error)?;
+        super::plugins::remove_project(tx, &project)?;
+    }
+    Ok(())
+}
+
+/// The project ids that own plugin rows or switches but have no `projects` row, each once.
+/// Input: the transaction, whose `plugin_items`, `plugin_switches` and `projects` tables
+/// exist. Output: the orphaned ids.
+fn orphan_project_ids(tx: &Transaction<'_>) -> Result<Vec<String>, EngineError> {
+    let mut statement = tx
+        .prepare(
+            "SELECT id FROM (
+                 SELECT substr(scope, 9) AS id FROM plugin_items WHERE scope LIKE 'project:%'
+                 UNION
+                 SELECT project AS id FROM plugin_switches)
+             WHERE id NOT IN (SELECT id FROM projects)",
+        )
+        .map_err(error)?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    Ok(ids)
+}
 
 /// Step 3 (DEC-096 addendum 3): an empty sub-harness list now means any harness, so a saved
 /// plan that lists none and allows at most one agent, the old "master only" default, gets the

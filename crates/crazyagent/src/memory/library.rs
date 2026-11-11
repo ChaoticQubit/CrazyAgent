@@ -17,7 +17,9 @@ pub const SCOPE_ITEMS_MAX: usize = 200;
 pub const LIBRARY_ITEMS_MAX: usize = 2000;
 pub const LAUNCH_ITEMS_MAX: usize = 24;
 pub const LAUNCH_BYTES_MAX: usize = 12288;
-const TEXT_BYTES_MAX: usize = 4096;
+pub const RECALL_ITEMS_MAX: usize = 12;
+const AGENT_LABEL_BYTES_MAX: usize = 256;
+pub const TEXT_BYTES_MAX: usize = 4096;
 const PAGE_BYTES_MAX: usize = FRAME_BYTES_MAX - 8192;
 const RENDER_HEADER_BYTES_MAX: usize = 1024;
 const RESEARCH_ROWS_MAX: i64 = 4096;
@@ -31,7 +33,11 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_library (
     origin TEXT NOT NULL CHECK(length(CAST(origin AS BLOB)) BETWEEN 2 AND 1024),
     text TEXT NOT NULL CHECK(length(CAST(text AS BLOB)) BETWEEN 1 AND 4096)
 );
-CREATE INDEX IF NOT EXISTS memory_library_scope ON memory_library(project, ordinal);";
+CREATE INDEX IF NOT EXISTS memory_library_scope ON memory_library(project, ordinal);
+CREATE TABLE IF NOT EXISTS memory_settings (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    agent_writes TEXT NOT NULL CHECK(agent_writes IN ('save','ask'))
+);";
 
 /// Where a saved memory applies: everywhere, or inside one project only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,8 +56,10 @@ impl MemoryScope {
     }
 }
 
-/// How a saved memory came to exist: typed by the owner, or promoted by the
-/// owner from a kept project memory at the named entry version.
+/// How a saved memory came to exist: typed by the owner, promoted by the owner from a kept
+/// project memory at the named entry version, selected in a project file, imported from a
+/// markdown file of a folder the owner chose, saved by the named agent with its `remember`
+/// tool, or asked for by that agent and waiting for the owner's approval.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MemoryOrigin {
@@ -64,6 +72,42 @@ pub enum MemoryOrigin {
     Selected {
         path: String,
     },
+    Imported {
+        file: String,
+    },
+    Agent {
+        agent: String,
+    },
+    Requested {
+        agent: String,
+    },
+}
+
+impl MemoryOrigin {
+    /// Tells whether the memory waits for the owner's approval, so no agent reads it yet.
+    pub fn waiting(&self) -> bool {
+        matches!(self, Self::Requested { .. })
+    }
+}
+
+/// What an agent's `remember` call does, the owner's Agent memory writes setting: save the
+/// memory at once, or hold it until the owner approves it in the Memory tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWrites {
+    #[default]
+    Save,
+    Ask,
+}
+
+impl AgentWrites {
+    /// The stored word for the choice. Output: `save` or `ask`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Save => "save",
+            Self::Ask => "ask",
+        }
+    }
 }
 
 /// One memory the owner saved by hand or promoted to global memory.
@@ -84,9 +128,11 @@ pub struct SavedMemory {
 pub struct MemoryPage {
     pub items: Vec<SavedMemory>,
     pub next: Option<u64>,
+    pub agent_writes: AgentWrites,
 }
 
-/// An explicit owner change to saved memory. Nothing else writes this store.
+/// An explicit owner change to saved memory. Agents add to this store only through their
+/// `remember` tool, under the owner's Agent memory writes setting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LibraryAction {
@@ -105,6 +151,7 @@ pub enum LibraryAction {
     Forget {
         project_id: ProjectId,
         entry_id: RequestId,
+        version: u64,
     },
     Remember {
         project_id: ProjectId,
@@ -115,6 +162,17 @@ pub enum LibraryAction {
         project_id: ProjectId,
         path: String,
         text: String,
+    },
+    Import {
+        project_id: ProjectId,
+        file: String,
+        text: String,
+    },
+    Approve {
+        memory_id: RequestId,
+    },
+    AgentWrites {
+        writes: AgentWrites,
     },
 }
 
@@ -133,6 +191,13 @@ impl LibraryAction {
                 }
                 validate_note(text)
             }
+            Self::Import { file, text, .. } => {
+                if super::import::file_name_valid(file) && super::import::text_valid(text) {
+                    Ok(())
+                } else {
+                    Err(error("memory_import_invalid"))
+                }
+            }
             Self::Promote { version: 0, .. } => Err(error("memory_changed")),
             Self::Remember {
                 project_id,
@@ -144,7 +209,11 @@ impl LibraryAction {
                 section: section.clone(),
             }
             .validate(),
-            Self::Promote { .. } | Self::Delete { .. } | Self::Forget { .. } => Ok(()),
+            Self::Promote { .. }
+            | Self::Delete { .. }
+            | Self::Forget { .. }
+            | Self::Approve { .. }
+            | Self::AgentWrites { .. } => Ok(()),
         }
     }
 }
@@ -283,7 +352,11 @@ pub fn validate_page(search: Option<&str>, limit: u8) -> Result<(), EngineError>
     Ok(())
 }
 
-const CODES: [&str; 14] = [
+const CODES: [&str; 18] = [
+    "memory_not_requested",
+    "memory_agent_invalid",
+    "memory_import_invalid",
+    "memory_import_folder_invalid",
     "memory_selection_stale",
     "memory_source_removed",
     "memory_note_blank",
@@ -328,9 +401,17 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "memory_project_missing" => Some("That project no longer exists."),
         "memory_search_invalid" => Some("Keep the search on one line, up to 100 characters."),
         "memory_page_invalid" => Some("Show between 1 and 20 memories at a time."),
+        "memory_import_invalid" => Some(
+            "This file can't be imported. Keep it under 4096 characters without hidden characters.",
+        ),
+        "memory_import_folder_invalid" => {
+            Some("Choose a folder that exists. A link to a folder can't be imported.")
+        }
         "memory_selection_stale" => {
             Some("This text is no longer in that file. Open the file again and select it again.")
         }
+        "memory_not_requested" => Some("Only a memory an agent asked to save can be approved."),
+        "memory_agent_invalid" => Some("The agent's name could not be kept with the memory."),
         "memory_source_removed" => Some(
             "This memory's source was removed. Delete the memory, then save the research again.",
         ),
@@ -370,7 +451,8 @@ pub(crate) fn execute(
         LibraryAction::Forget {
             project_id,
             entry_id,
-        } => forget(tx, project_id, entry_id),
+            version,
+        } => forget(tx, project_id, entry_id, *version),
         LibraryAction::Remember {
             project_id,
             research,
@@ -388,7 +470,178 @@ pub(crate) fn execute(
             path,
             text,
         } => save_selection(tx, project_id, path, text.trim(), revision),
+        LibraryAction::Import {
+            project_id,
+            file,
+            text,
+        } => import(tx, project_id, file, text),
+        LibraryAction::Approve { memory_id } => approve(tx, memory_id),
+        LibraryAction::AgentWrites { writes } => set_agent_writes(tx, *writes),
     }
+}
+
+fn import(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    file: &str,
+    text: &str,
+) -> Result<Outcome, EngineError> {
+    if !project_exists(tx, project)? {
+        return rejected("memory_project_missing");
+    }
+    let scope = MemoryScope::Project {
+        project_id: project.clone(),
+    };
+    let digest = hash(format!("{}\n{file}\n{text}", project.as_str()).as_bytes());
+    let id = RequestId::new(format!("import-{}", &digest[..32])).map_err(error)?;
+    if let Some(code) = blocked(tx, &id, &scope, text, "memory_duplicate")? {
+        return rejected(code);
+    }
+    let origin = MemoryOrigin::Imported { file: file.into() };
+    insert(tx, &id, &scope, &origin, text)
+}
+
+/// Approves one memory an agent asked to save, so agents read it from their next launch
+/// and its `recall` on. Input: the transaction and memory id. Output: Applied, or
+/// `memory_missing` or `memory_not_requested`.
+fn approve(tx: &Transaction<'_>, id: &RequestId) -> Result<Outcome, EngineError> {
+    let Some(memory) = get(tx, id)? else {
+        return rejected("memory_missing");
+    };
+    let MemoryOrigin::Requested { agent } = memory.origin else {
+        return rejected("memory_not_requested");
+    };
+    let origin = MemoryOrigin::Agent { agent };
+    let count = tx
+        .execute(
+            "UPDATE memory_library SET origin=?2 WHERE id=?1",
+            params![id.as_str(), serde_json::to_string(&origin).map_err(error)?],
+        )
+        .map_err(error)?;
+    assert_eq!(count, 1);
+    assert!(get(tx, id)?.is_some_and(|saved| saved.origin == origin));
+    Ok(Outcome::Applied)
+}
+
+/// Saves the owner's Agent memory writes setting. Input: the transaction and the choice.
+/// Output: Applied.
+fn set_agent_writes(tx: &Transaction<'_>, writes: AgentWrites) -> Result<Outcome, EngineError> {
+    tx.execute(
+        "INSERT INTO memory_settings(singleton,agent_writes) VALUES(1,?1)
+        ON CONFLICT(singleton) DO UPDATE SET agent_writes=excluded.agent_writes",
+        [writes.as_str()],
+    )
+    .map_err(error)?;
+    assert_eq!(agent_writes(tx)?, writes);
+    Ok(Outcome::Applied)
+}
+
+/// Reads the owner's Agent memory writes setting, Save directly until the owner chose.
+/// Input: the engine connection. Output: the choice.
+pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWrites, EngineError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT agent_writes FROM memory_settings WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(match stored.as_deref() {
+        Some("ask") => AgentWrites::Ask,
+        _ => AgentWrites::Save,
+    })
+}
+
+/// Saves one memory an agent gave with its `remember` tool, with the agent named as its
+/// origin: held for the owner's approval under Ask me first, else saved at once. The text is
+/// untrusted and checked like a hand-written note. Inputs: the engine connection, the
+/// agent's project, its label, whether the memory is app-wide and the text. Output: whether
+/// it waits for approval, or a refusal code `plain_problem` explains.
+pub(crate) fn agent_remember(
+    connection: &mut rusqlite::Connection,
+    project: &ProjectId,
+    agent: &str,
+    app: bool,
+    text: &str,
+) -> Result<Result<bool, String>, EngineError> {
+    let text = text.trim();
+    if let Err(problem) = validate_note(text) {
+        return Ok(Err(problem.0));
+    }
+    let agent = agent.trim();
+    if agent.is_empty()
+        || agent.len() > AGENT_LABEL_BYTES_MAX
+        || agent.chars().any(char::is_control)
+    {
+        return Ok(Err("memory_agent_invalid".into()));
+    }
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if !project_exists(&tx, project)? {
+        return Ok(Err("memory_project_missing".into()));
+    }
+    let scope = if app {
+        MemoryScope::Global
+    } else {
+        MemoryScope::Project {
+            project_id: project.clone(),
+        }
+    };
+    let digest = hash(format!("agent\n{}\n{text}", scope.project().unwrap_or("")).as_bytes());
+    let id = RequestId::new(format!("agent-{}", &digest[..32])).map_err(error)?;
+    if let Some(code) = blocked(&tx, &id, &scope, text, "memory_duplicate")? {
+        return Ok(Err(code.into()));
+    }
+    let ask = agent_writes(&tx)? == AgentWrites::Ask;
+    let origin = if ask {
+        MemoryOrigin::Requested {
+            agent: agent.into(),
+        }
+    } else {
+        MemoryOrigin::Agent {
+            agent: agent.into(),
+        }
+    };
+    insert(&tx, &id, &scope, &origin, text)?;
+    tx.commit().map_err(error)?;
+    Ok(Ok(ask))
+}
+
+/// Finds the saved memories an agent of a project may read for its `recall` tool: the
+/// project's and the app-wide ones not waiting for the owner's approval, whose text holds
+/// the query, newest first, at most `RECALL_ITEMS_MAX`. Inputs: the engine connection, the
+/// project and the untrusted query, blank for the newest. Output: the memories, or a refusal
+/// code for a query that is not one line of up to 100 bytes.
+pub(crate) fn recall(
+    connection: &mut rusqlite::Connection,
+    project: &ProjectId,
+    query: &str,
+) -> Result<Result<Vec<SavedMemory>, String>, EngineError> {
+    let query = query.trim();
+    let search = (!query.is_empty()).then_some(query);
+    if let Err(problem) = validate_page(search, PAGE_ITEMS_MAX) {
+        return Ok(Err(problem.0));
+    }
+    let tx = connection.transaction().map_err(error)?;
+    let mut found = Vec::new();
+    for scope in [
+        MemoryScope::Project {
+            project_id: project.clone(),
+        },
+        MemoryScope::Global,
+    ] {
+        found.extend(
+            scoped(&tx, &scope, search, None, SCOPE_ITEMS_MAX)?
+                .into_iter()
+                .filter(|memory| !memory.origin.waiting() && !super::hidden_text(&memory.text)),
+        );
+    }
+    found.sort_by_key(|memory| std::cmp::Reverse(memory.ordinal));
+    found.truncate(RECALL_ITEMS_MAX);
+    assert!(found.iter().all(|memory| !memory.origin.waiting()));
+    Ok(Ok(found))
 }
 
 fn save_selection(
@@ -733,12 +986,16 @@ fn forget(
     tx: &Transaction<'_>,
     project: &ProjectId,
     entry_id: &RequestId,
+    version: u64,
 ) -> Result<Outcome, EngineError> {
     let Some(entry) = load_entry(tx, entry_id)? else {
         return rejected("memory_missing");
     };
     if &entry.project_id != project {
         return rejected("memory_missing");
+    }
+    if entry.version != version {
+        return rejected("memory_changed");
     }
     let versions = tx
         .execute(
@@ -944,7 +1201,11 @@ pub(crate) fn page(
     assert!(items.len() <= usize::from(limit));
     assert!(bytes <= PAGE_BYTES_MAX);
     Ok(OwnerData::Memories {
-        page: MemoryPage { items, next },
+        page: MemoryPage {
+            items,
+            next,
+            agent_writes: agent_writes(tx)?,
+        },
     })
 }
 
@@ -961,6 +1222,9 @@ struct Collector {
 
 impl Collector {
     fn push(&mut self, scope: ApprovedScope, kind: ApprovedKind, text: &str) {
+        if super::hidden_text(text) {
+            return;
+        }
         if !self.seen.insert(hash(text.trim().as_bytes())) {
             return;
         }
@@ -1009,7 +1273,10 @@ fn kept_research(
 
 fn kind_of(origin: &MemoryOrigin) -> ApprovedKind {
     match origin {
-        MemoryOrigin::Written => ApprovedKind::Note,
+        MemoryOrigin::Written
+        | MemoryOrigin::Imported { .. }
+        | MemoryOrigin::Agent { .. }
+        | MemoryOrigin::Requested { .. } => ApprovedKind::Note,
         MemoryOrigin::Promoted { .. } => ApprovedKind::Promoted,
         MemoryOrigin::Selected { .. } => ApprovedKind::Selection,
     }
@@ -1018,6 +1285,8 @@ fn kind_of(origin: &MemoryOrigin) -> ApprovedKind {
 /// Returns the bounded owner-approved memories an agent in this project may read.
 /// Input: the engine transaction and project id. Output: project notes and kept
 /// project research first, then global memory, newest first, within the launch bounds.
+/// A memory saved before the hidden-text check that still holds hidden characters is
+/// never delivered.
 pub(crate) fn approved_for_project(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -1031,7 +1300,10 @@ pub(crate) fn approved_for_project(
     let local = MemoryScope::Project {
         project_id: project.clone(),
     };
-    for memory in scoped(tx, &local, None, None, SCOPE_ITEMS_MAX)? {
+    for memory in scoped(tx, &local, None, None, SCOPE_ITEMS_MAX)?
+        .into_iter()
+        .filter(|memory| !memory.origin.waiting())
+    {
         collector.push(
             ApprovedScope::Project,
             kind_of(&memory.origin),
@@ -1041,7 +1313,10 @@ pub(crate) fn approved_for_project(
     for entry in kept_research(tx, project)? {
         collector.push(ApprovedScope::Project, ApprovedKind::Research, &entry.text);
     }
-    for memory in scoped(tx, &MemoryScope::Global, None, None, SCOPE_ITEMS_MAX)? {
+    for memory in scoped(tx, &MemoryScope::Global, None, None, SCOPE_ITEMS_MAX)?
+        .into_iter()
+        .filter(|memory| !memory.origin.waiting())
+    {
         collector.push(ApprovedScope::Global, kind_of(&memory.origin), &memory.text);
     }
     let memories = ApprovedMemories {

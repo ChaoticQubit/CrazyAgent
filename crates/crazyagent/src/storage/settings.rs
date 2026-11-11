@@ -52,6 +52,26 @@ impl SourceState {
     }
 }
 
+/// The id of one pair of settings sources: a hash of each file's path and its folder's
+/// (device, inode). Inputs: the two sources and the folder identities to hash. Output: the
+/// id, or the encoding failure.
+fn source_id(
+    global: &SourceFile,
+    global_folder: (u64, u64),
+    project: &SourceFile,
+    project_folder: (u64, u64),
+) -> Result<String, EngineError> {
+    Ok(crate::memory::hash(
+        &serde_json::to_vec(&(
+            global.path.join(&global.name),
+            global_folder,
+            project.path.join(&project.name),
+            project_folder,
+        ))
+        .map_err(error)?,
+    ))
+}
+
 struct SourceFile {
     #[cfg(unix)]
     parent: std::fs::File,
@@ -239,15 +259,7 @@ impl SettingsSources {
         if global.path.join(&global.name) == project.path.join(&project.name) {
             return Err(error("settings_sources_overlap"));
         }
-        let source_id = crate::memory::hash(
-            &serde_json::to_vec(&(
-                global.path.join(&global.name),
-                global.identity,
-                project.path.join(&project.name),
-                project.identity,
-            ))
-            .map_err(error)?,
-        );
+        let source_id = source_id(&global, global.identity, &project, project.identity)?;
         let lease_name = OsString::from(format!(
             ".crazyagent-settings-{}.lock",
             crate::memory::hash(global.name.as_encoded_bytes())
@@ -322,6 +334,49 @@ impl SettingsSources {
         self.snapshot()?.config()
     }
 
+    /// Finds whether an interrupted publication's journal names these sources on their
+    /// volume renumbered at mount after a restart: every journal pin is on one device, the
+    /// folders pass `file_identity::same_files`, and the journal's source id is these sources'
+    /// id with that device. Input: the journal. Output: the renumber, or none for other files.
+    #[cfg(unix)]
+    fn renumber(&self, pending: &Pending) -> Result<Option<Renumber>, EngineError> {
+        if pending.old.source_id == self.source_id {
+            return Ok(None);
+        }
+        let pins: Vec<(u64, u64)> = [
+            pending.old.global.identity,
+            pending.old.project.identity,
+            pending.new_identity,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let Some(&(pinned, _)) = pins.first() else {
+            return Ok(None);
+        };
+        let live = self.global.identity.0;
+        let folders = [
+            (pinned, self.global.identity.1),
+            (pinned, self.project.identity.1),
+        ];
+        if pinned == live
+            || pins.iter().any(|(device, _)| *device != pinned)
+            || !crate::file_identity::same_files(
+                &folders,
+                &[self.global.identity, self.project.identity],
+            )
+            || source_id(&self.global, folders[0], &self.project, folders[1])?
+                != pending.old.source_id
+        {
+            return Ok(None);
+        }
+        Ok(Some(Renumber {
+            pinned,
+            live,
+            source_id: self.source_id.clone(),
+        }))
+    }
+
     /// Refuses to publish a settings change without directory-relative renames.
     /// Takes the database and pending change, both unused.
     /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
@@ -347,7 +402,7 @@ impl SettingsSources {
     /// temporary name that the rename would have moved. Input: the pending change.
     #[cfg(unix)]
     fn unpublished(&self, pending: &Pending) -> Result<bool, EngineError> {
-        if pending.old.source_id != self.source_id {
+        if pending.live_old().source_id != self.source_id {
             return Ok(false);
         }
         let Some(staged) = pending.new_identity else {
@@ -360,7 +415,9 @@ impl SettingsSources {
             AtFlags::SYMLINK_NOFOLLOW,
         ) {
             #[allow(clippy::unnecessary_cast)]
-            Ok(named) => Ok((named.st_dev as u64, named.st_ino) == staged),
+            Ok(named) => {
+                Ok(Some((named.st_dev as u64, named.st_ino)) == pending.live(Some(staged)))
+            }
             Err(rustix::io::Errno::NOENT) => Ok(false),
             Err(e) => Err(error(e)),
         }
@@ -401,17 +458,18 @@ impl SettingsSources {
     #[cfg(unix)]
     fn replace(&self, db: &Connection, pending: &mut Pending) -> Result<(), EngineError> {
         let current = self.snapshot()?;
-        if current.source_id != pending.old.source_id || current.project != pending.old.project {
+        let old = pending.live_old();
+        if current.source_id != old.source_id || current.project != old.project {
             return Err(error("settings_source_conflict"));
         }
         if current.global.bytes == pending.new_global
-            && current.global.identity == pending.new_identity
+            && current.global.identity == pending.live(pending.new_identity)
             && pending.new_identity.is_some()
         {
             self.global.parent.sync_all().map_err(error)?;
             return Ok(());
         }
-        if current.global != pending.old.global {
+        if current.global != old.global {
             return Err(error("settings_source_conflict"));
         }
         let name = OsString::from(&pending.temporary);
@@ -445,14 +503,16 @@ impl SettingsSources {
             }
             file.sync_all().map_err(error)?;
             self.global.parent.sync_all().map_err(error)?;
-            pending.new_identity = temporary.identity;
+            pending.new_identity = pending.pinned(temporary.identity)?;
             save_pending(db, pending)?;
         }
         let temporary = self.global.read_name(&name)?;
-        if temporary.identity != pending.new_identity || temporary.bytes != pending.new_global {
+        if temporary.identity != pending.live(pending.new_identity)
+            || temporary.bytes != pending.new_global
+        {
             return Err(error("settings_temporary_conflict"));
         }
-        if self.snapshot()? != pending.old {
+        if self.snapshot()? != old {
             return Err(error("settings_source_conflict"));
         }
         rustix::fs::renameat(
@@ -464,9 +524,9 @@ impl SettingsSources {
         .map_err(error)?;
         self.global.parent.sync_all().map_err(error)?;
         let published = self.snapshot()?;
-        if published.global.identity != pending.new_identity
+        if published.global.identity != pending.live(pending.new_identity)
             || published.global.bytes != pending.new_global
-            || published.project != pending.old.project
+            || published.project != old.project
         {
             return Err(error("settings_publication_unknown"));
         }
@@ -485,6 +545,68 @@ struct Pending {
     new_global: String,
     temporary: String,
     new_identity: Option<(u64, u64)>,
+    #[cfg(unix)]
+    #[serde(skip)]
+    renumber: Option<Renumber>,
+}
+
+/// A whole-volume device renumber found when an interrupted publication resumes after a
+/// restart: the journal's pins name the same files on device `pinned` that now read as
+/// device `live`, under the sources' id `source_id`. The journal keeps its own numbers.
+#[cfg(unix)]
+struct Renumber {
+    pinned: u64,
+    live: u64,
+    source_id: String,
+}
+
+#[cfg(unix)]
+impl Pending {
+    /// A journal pin as the live files number it, its device moved to the live one when the
+    /// resume found the volume renumbered. Input: the pin. Output: the live pin.
+    fn live(&self, pin: Option<(u64, u64)>) -> Option<(u64, u64)> {
+        let Some(renumber) = &self.renumber else {
+            return pin;
+        };
+        pin.map(|(device, inode)| {
+            assert_eq!(
+                device, renumber.pinned,
+                "a renumbered journal pins one device"
+            );
+            (renumber.live, inode)
+        })
+    }
+
+    /// A live pin in the journal's numbering, for a file staged while a publication resumes
+    /// on a renumbered volume, so the journal keeps one device. Input: the live pin. Output:
+    /// the journal pin, or `settings_temporary_conflict` for a file on another device.
+    fn pinned(&self, pin: Option<(u64, u64)>) -> Result<Option<(u64, u64)>, EngineError> {
+        match (&self.renumber, pin) {
+            (Some(renumber), Some((device, inode))) if device == renumber.live => {
+                Ok(Some((renumber.pinned, inode)))
+            }
+            (Some(_), Some(_)) => Err(error("settings_temporary_conflict")),
+            _ => Ok(pin),
+        }
+    }
+
+    /// The journal's old sources as the live files number them. Output: the state.
+    fn live_old(&self) -> SourceState {
+        let Some(renumber) = &self.renumber else {
+            return self.old.clone();
+        };
+        SourceState {
+            source_id: renumber.source_id.clone(),
+            global: FileState {
+                identity: self.live(self.old.global.identity),
+                bytes: self.old.global.bytes.clone(),
+            },
+            project: FileState {
+                identity: self.live(self.old.project.identity),
+                bytes: self.old.project.bytes.clone(),
+            },
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -594,6 +716,10 @@ pub(super) fn recover(
     if u64::try_from(revision).map_err(error)? != pending.revision {
         return Err(error("settings_pending_revision_conflict"));
     }
+    #[cfg(unix)]
+    {
+        pending.renumber = sources.renumber(&pending)?;
+    }
     if !sources.publish(db, &mut pending)? {
         abandon(db, sources, &pending)?;
         return Ok(());
@@ -622,6 +748,9 @@ fn finalize(
         .filter(|n| *n <= i64::MAX as u64)
         .ok_or_else(|| error("revision_exhausted"))?;
     store_config(&tx, next)?;
+    if let Some(access) = &next.settings.model_access {
+        crate::scheduling::forget_removed(&tx, access)?;
+    }
     let request = &pending.request;
     let hash = request.mutation_hash()?;
     let provenance = OwnerProvenance {
@@ -739,6 +868,8 @@ pub(super) fn apply(
                 new_global,
                 temporary: format!(".crazyagent-publication-{hash}"),
                 new_identity: None,
+                #[cfg(unix)]
+                renumber: None,
             },
             next,
         ))
@@ -871,15 +1002,7 @@ pub(super) fn verified_source_hash_at(
     if global.path.join(&global.name) == project.path.join(&project.name) {
         return Err(error("settings_sources_overlap"));
     }
-    let source_id = crate::memory::hash(
-        &serde_json::to_vec(&(
-            global.path.join(&global.name),
-            global.identity,
-            project.path.join(&project.name),
-            project.identity,
-        ))
-        .map_err(error)?,
-    );
+    let source_id = source_id(&global, global.identity, &project, project.identity)?;
     let snapshot = SourceState {
         source_id,
         global: global.read()?,
