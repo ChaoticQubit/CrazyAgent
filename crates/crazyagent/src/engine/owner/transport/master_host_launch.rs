@@ -1261,7 +1261,8 @@ fn default_master_tool_caches(runtime: &Path, repository: &Path) -> Vec<PathBuf>
     }
     #[cfg(not(target_os = "macos"))]
     {
-        assert!(runtime.is_dir() && repository.is_dir());
+        assert!(runtime.is_dir());
+        assert!(repository.is_dir());
         Vec::new()
     }
 }
