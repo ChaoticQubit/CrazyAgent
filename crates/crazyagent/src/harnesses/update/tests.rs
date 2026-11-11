@@ -58,7 +58,13 @@ fn claude_from_the_latest_cask_updates_with_that_prefixs_brew_and_that_cask() {
         .unwrap();
     assert_eq!(
         check.args,
-        ["outdated", "--cask", "--json=v2", "claude-code@latest"]
+        [
+            "outdated",
+            "--cask",
+            "--greedy-auto-updates",
+            "--json=v2",
+            "claude-code@latest"
+        ]
     );
 }
 
@@ -111,8 +117,11 @@ fn a_native_claude_install_updates_itself_through_its_own_launcher() {
 fn a_standalone_codex_install_updates_itself_and_the_installer_script_is_never_a_command() {
     let machine = Machine::new();
     let real = machine.program("home/.codex/packages/standalone/0.167.1/codex", 0o755);
-    let entry = machine.program("home/.local/bin/codex", 0o755);
+    let entry = machine.root.path().join("home/.local/bin/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &entry).unwrap();
     let fixed = update_command("codex", &entry, &real, &machine.roots()).unwrap();
+    assert_eq!(fixed.program, entry);
     assert_eq!(fixed.args, ["update"]);
     assert!(!shown(&fixed).contains("install.sh"));
 }
@@ -805,6 +814,7 @@ fn script(machine: &Machine, relative: &str, body: &str, args: &[&'static str]) 
         program: path.clone(),
         args: args.to_vec(),
         search: vec![path.parent().unwrap().to_path_buf()],
+        prefix: None,
     }
 }
 
@@ -1069,6 +1079,100 @@ fn a_pointer_url_that_is_not_https_or_loopback_is_refused_before_any_request() {
     assert_eq!(
         read_pointer("file:///etc/hosts", 64, POINTER_TIME).unwrap_err(),
         LOOKUP_FAILED
+    );
+}
+
+const NPM_LIKE: &str = "#!/bin/sh\ntarget=\"${npm_config_prefix:-$(/usr/bin/sed -n 's/^prefix=//p' \"$HOME/.npmrc\")}\"\n/bin/mkdir -p \"$target\" && echo \"$*\" > \"$target/installed\"\n";
+
+#[test]
+fn a_cask_check_also_asks_about_casks_that_update_themselves() {
+    let machine = Machine::new();
+    machine.program("brew/bin/brew", 0o755);
+    let droid = machine.program("brew/Caskroom/droid/1.7.1/droid", 0o755);
+    let check = check_command("droid", &droid, &machine.roots())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        check.args,
+        [
+            "outdated",
+            "--cask",
+            "--greedy-auto-updates",
+            "--json=v2",
+            "droid"
+        ]
+    );
+    assert!(check.args.len() <= ARGS_MAX);
+    assert!(shown(&check).ends_with("--greedy-auto-updates --json=v2 droid"));
+}
+
+#[test]
+fn a_self_update_is_refused_when_the_entry_leads_to_another_install() {
+    let machine = Machine::new();
+    let real = machine.program("home/.local/share/claude/versions/2.1.322", 0o755);
+    let other = machine.program("home/.local/share/claude/versions/2.1.300", 0o755);
+    let entry = machine.root.path().join("home/.local/bin/claude");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&other, &entry).unwrap();
+    assert_eq!(
+        update_command("claude-code", &entry, &real, &machine.roots()).unwrap_err(),
+        UNKNOWN_INSTALL
+    );
+    assert!(update_command("claude-code", &entry, &other, &machine.roots()).is_ok());
+}
+
+#[test]
+fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npmrc_says() {
+    let machine = Machine::new();
+    let home = machine.roots().home;
+    let elsewhere = machine.root.path().join("elsewhere");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".npmrc"),
+        format!("prefix={}\n", elsewhere.display()),
+    )
+    .unwrap();
+    executable(&machine.npm("node"), NPM_LIKE);
+    let real = machine.program("node/lib/node_modules/@openai/codex/bin/codex.js", 0o755);
+    let update = update_command("codex", &real, &real, &machine.roots()).unwrap();
+    assert!(run(&update, &home, CHECK_TIME).unwrap().success);
+    assert!(machine.root.path().join("node/installed").exists());
+    executable(&machine.npm("brew"), NPM_LIKE);
+    let install = install_command("codex", &machine.roots()).unwrap();
+    assert_eq!(install.program, machine.root.path().join("brew/bin/npm"));
+    assert!(run(&install, &home, CHECK_TIME).unwrap().success);
+    assert!(machine.root.path().join("brew/installed").exists());
+    assert!(!elsewhere.join("installed").exists());
+}
+
+#[test]
+fn a_tool_folder_that_another_group_can_write_is_refused() {
+    let machine = Machine::new();
+    let brew = machine.program("brew/bin/brew", 0o755);
+    let real = machine.program("brew/Caskroom/codex/0.167.1/bin/codex", 0o755);
+    let folder = brew.parent().unwrap();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o775)).unwrap();
+    assert!(update_command("codex", &real, &real, &machine.roots()).is_ok());
+    let own = rustix::process::getegid().as_raw();
+    let listed = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/id")
+            .arg("-G")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let other = String::from_utf8_lossy(&listed.stdout)
+        .split_whitespace()
+        .filter_map(|group| group.parse::<u32>().ok())
+        .find(|group| *group != own && *group != ADMIN_GROUP);
+    let Some(other) = other else {
+        return;
+    };
+    std::os::unix::fs::chown(folder, None, Some(other)).unwrap();
+    assert_eq!(
+        update_command("codex", &real, &real, &machine.roots()).unwrap_err(),
+        TOOL_UNSAFE
     );
 }
 

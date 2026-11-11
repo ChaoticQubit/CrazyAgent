@@ -93,6 +93,8 @@ mod unix {
     const DRAIN_TIME: Duration = Duration::from_secs(2);
     const CHUNK_BYTES: usize = 8192;
     const SEARCH_MAX: usize = 4;
+    /// The environment name npm reads its global prefix from, ahead of every npmrc file.
+    const NPM_PREFIX: &str = "npm_config_prefix";
     const SYSTEM_PATH: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
     const LANGUAGE: &str = "C.UTF-8";
 
@@ -211,7 +213,8 @@ mod unix {
     }
 
     /// Builds the child: no shell, the fixed arguments only, an environment of exactly HOME,
-    /// USER, LOGNAME, LANG, TMPDIR and PATH, no input, its own process group.
+    /// USER, LOGNAME, LANG, TMPDIR and PATH, plus npm's global prefix for an npm command,
+    /// no input, its own process group.
     /// Inputs: the command, the home folder and the search path. Output: the command to start.
     fn command(fixed: &Fixed, home: &Path, path: OsString) -> Command {
         let mut command = Command::new(&fixed.program);
@@ -230,6 +233,9 @@ mod unix {
         if let Some(name) = user_name() {
             command.env("USER", &name).env("LOGNAME", &name);
         }
+        if let Some(prefix) = &fixed.prefix {
+            command.env(NPM_PREFIX, prefix);
+        }
         command
     }
 
@@ -246,6 +252,7 @@ mod unix {
         assert!(fixed.args.len() <= ARGS_MAX);
         assert!(fixed.search.len() <= SEARCH_MAX);
         assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
+        assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
         let path = search_path(fixed).ok_or(TOOL_UNSAFE)?;
         let mut child =
             crate::spawn_gate::spawn(&mut command(fixed, home, path)).map_err(|_| START_FAILED)?;

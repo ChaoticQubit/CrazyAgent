@@ -151,6 +151,7 @@ fn version_of(executable: &Path, home: &Path) -> Option<String> {
         program: executable.to_path_buf(),
         args: VERSION_ARGS.to_vec(),
         search: vec![executable.parent()?.to_path_buf()],
+        prefix: None,
     };
     let raw = run_raw(&fixed, home, VERSION_TIME).ok()?;
     installed_version(&String::from_utf8_lossy(&raw.stdout))

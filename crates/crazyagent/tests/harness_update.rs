@@ -48,6 +48,7 @@ fn version_at(executable: &Path, home: &Path) -> String {
         program: executable.to_path_buf(),
         args: vec!["--version"],
         search: vec![executable.parent().unwrap().to_path_buf()],
+        prefix: None,
     };
     let ran = update::run(&fixed, home, VERSION_TIME).unwrap();
     assert!(ran.success);
@@ -100,6 +101,20 @@ impl FakeNative {
         }
     }
 
+    fn path_value(&self) -> std::ffi::OsString {
+        std::env::join_paths([self.launcher().parent().unwrap()]).unwrap()
+    }
+
+    fn engine_entry(&self) -> PathBuf {
+        crazyagent::paths::resolve_harnesses(
+            crazyagent::paths::Harnesses::default(),
+            Some(&self.path_value()),
+            None,
+        )
+        .claude
+        .unwrap()
+    }
+
     fn search(&self) -> Search {
         let folder = self.launcher().parent().unwrap().to_path_buf();
         Search::new(vec![folder], None, Vec::new())
@@ -126,6 +141,22 @@ impl FakeNative {
         assert!(last.ok, "{last:?}");
         assert_eq!(last.to.as_deref(), Some("2.0.0"));
     }
+}
+
+#[test]
+fn an_updated_harness_is_launched_from_its_new_install_without_an_engine_restart() {
+    let machine = FakeNative::install("claude", "1.0.0");
+    let path = machine.path_value();
+    let entry = machine.engine_entry();
+    assert_eq!(entry, machine.launcher());
+    let first = crazyagent::paths::launch_executable(&entry, Some(&path)).unwrap();
+    assert!(first.ends_with("versions/A/claude"));
+    machine.run_update_through_the_engine();
+    assert_eq!(machine.engine_entry(), entry);
+    let second = crazyagent::paths::launch_executable(&entry, Some(&path)).unwrap();
+    assert_ne!(first, second);
+    assert!(second.ends_with("versions/B/claude"));
+    assert_eq!(version_at(&second, &machine.home()), "2.0.0");
 }
 
 #[test]
