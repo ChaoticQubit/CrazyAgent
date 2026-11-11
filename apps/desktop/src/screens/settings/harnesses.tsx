@@ -1,7 +1,12 @@
-import { useState } from "react";
-import { harnessCatalog, type HarnessAccountKind, type HarnessEntry } from "../../api";
+import { useEffect, useState } from "react";
+import { harnessCatalog, type HarnessAccountKind, type HarnessEntry, type Result } from "../../api";
+import { openLink } from "../../api-projects";
+import {
+  harnessVersions, installedWith, loadHarnessUpdateSettings, pollWhileRunning, setHarnessUpdateSettings, updateCopy, updateHarness, versionLine,
+  UPDATE_SETTINGS_DEFAULT, type CheckWhen, type HarnessVersions, type OnlineLookup, type UpdateMode, type UpdateSettings,
+} from "../../api-harness-updates";
 import { useLoad, type Loaded } from "../../state";
-import { Button, LoadError, NotReady, ProviderMark, SettingSection, Skeleton, StatusBadge } from "../../ui";
+import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
 import { SettingRow } from "../../ui/setting";
 import "../project/projects.css";
 
@@ -18,6 +23,24 @@ const GROUPS: { kind: HarnessEntry["status"]["kind"]; title: string }[] = [
   { kind: "not_installed", title: "Not installed" },
 ];
 
+const MODES: { value: UpdateMode; label: string }[] = [
+  { value: "check_and_update", label: "Check and update" },
+  { value: "check_only", label: "Check only" },
+  { value: "off", label: "Off" },
+];
+const WHENS: { value: CheckWhen; label: string }[] = [
+  { value: "on_button", label: "Only when I choose Check for updates" },
+  { value: "on_open", label: "Each time this page opens" },
+];
+const LOOKUPS: { value: OnlineLookup; label: string }[] = [
+  { value: "on", label: "Look them up on the vendor's site" },
+  { value: "off", label: "Don't look them up" },
+];
+const LOOKUP_HELP = "Claude Code's own installer and Codex's standalone installer have no check command, so CrazyAgent reads one small public file from downloads.claude.ai or releases.openai.com. It sends no account, project or file details. It never downloads or runs anything from there.";
+const PURPOSE = "CrazyAgent finds harnesses installed on this Mac. It does not install them. It can update one with that harness's own updater when you choose Update.";
+
+type Save = (settings: UpdateSettings) => Promise<Result<void>>;
+
 /** Shows a path with the home folder as "~". Input: an absolute path. Output: the display path. */
 export function homePath(path: string): string {
   return path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
@@ -30,21 +53,68 @@ export function harnessGroups(entries: HarnessEntry[]): { title: string; entries
     .filter((group) => group.entries.length > 0);
 }
 
+/** Saves a new online lookup choice and keeps the other settings as they are.
+ * Inputs: the shown settings, the choice and the save call. Output: the save's result. */
+export function chooseOnline(current: UpdateSettings, online: OnlineLookup, save: Save): Promise<Result<void>> {
+  return save({ ...current, online });
+}
+
 function statusWord(entry: HarnessEntry): string {
   return entry.status.kind === "ready" ? "Ready" : entry.status.kind === "not_installed" ? "Not installed" : `Limited control: ${entry.status.reason}`;
 }
 
-function HarnessRow({ entry }: { entry: HarnessEntry }) {
+function lastLine(versions: HarnessVersions): string | null {
+  const last = versions.last;
+  if (last === null) return null;
+  if (last.ok) return `Updated from ${last.from ?? "an unknown version"} to ${last.to ?? "an unknown version"}. New agents use it now; no restart needed.`;
+  return updateCopy(last.code ?? "harness_update_failed");
+}
+
+function refusalLine(versions: HarnessVersions): string | null {
+  if (versions.method.kind === "with_app") return updateCopy("harness_update_with_app");
+  if (versions.refusal === null || versions.command !== null) return null;
+  const line = updateCopy(versions.refusal);
+  return versions.refusal === "harness_update_unknown_install" ? `${line} Update it with its own installer.` : line;
+}
+
+/** One harness line: what it is, its version, and Check for updates and Update when the settings
+ * and the install allow them. Inputs: the catalog entry, its versions (null until read), the
+ * update mode, a failure to show, whether a check runs, and the actions. Output: the row. */
+export function HarnessRowView({ entry, versions, mode, problem, checking = false, onCheck, onUpdate, onGuide }: {
+  entry: HarnessEntry; versions: HarnessVersions | null; mode: UpdateMode; problem?: string; checking?: boolean;
+  onCheck: () => void; onUpdate: () => void; onGuide: (url: string) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const shown = entry.status.kind !== "not_installed" && versions !== null && mode !== "off" ? versions : null;
+  const checkable = shown !== null && shown.method.kind !== "with_app" && shown.method.kind !== "unknown";
+  const updatable = shown !== null && mode === "check_and_update" && shown.command !== null;
+  const running = shown?.running === true;
+  const refusal = shown === null ? null : refusalLine(shown);
+  const last = shown === null || running ? null : lastLine(shown);
+  const guide = shown?.guide ?? null;
   return <>
     <SettingRow label={entry.name}>
       <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>
       <span className="set-help">
         <span>Tools: {entry.tools.kind === "switchable" ? "Can turn on or off" : entry.tools.reason}</span>
         <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
+        {shown !== null && shown.method.kind !== "with_app" && <span>{versionLine(shown)}</span>}
+        {refusal !== null && <span>{refusal}</span>}
+        {running && <span role="status">Updating...</span>}
+        {last !== null && <span role="status">{last}</span>}
+        {problem && <span className="pj-error" role="alert">{problem}</span>}
+        {guide !== null && <span><a href={guide} onClick={(event) => { event.preventDefault(); onGuide(guide); }}>How to update it yourself</a></span>}
       </span>
-      <div className="set-ctl set-line-ctl"><StatusBadge word={statusWord(entry)} /></div>
+      <div className="set-ctl set-line-ctl">
+        {checkable && <Button aria-label={`Check ${entry.name} for updates`} disabled={running || checking} onClick={onCheck}>Check for updates</Button>}
+        {updatable && <Button aria-label={`Update ${entry.name}`} disabled={running || checking} onClick={onUpdate}>Update</Button>}
+        <StatusBadge word={statusWord(entry)} />
+      </div>
     </SettingRow>
+    {shown?.last && !shown.last.ok && shown.last.output && !running && <details className="set-body">
+      <summary>What the updater said</summary>
+      <pre className="mono">{shown.last.output}</pre>
+    </details>}
     {open && <dl className="details-grid">
       <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</dd>
       <dt>Runs in the background with</dt><dd className="mono">{entry.headless}</dd>
@@ -53,29 +123,128 @@ function HarnessRow({ entry }: { entry: HarnessEntry }) {
   </>;
 }
 
-/** The harness list as a pure view of the catalog read, with a Check again action.
- * Inputs: the catalog read, when it was checked and the recheck action. */
-export function HarnessesView({ catalog, checkedAt, onCheck }: { catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void }) {
+/** Asks before an update: the exact line CrazyAgent runs, how the harness was installed and what
+ * running agents do. Inputs: the versions with the command, the harness name, open, pending and
+ * the two actions. Output: the dialog, focus starting on Cancel. */
+export function UpdateConfirm({ versions, name, open, pending, onConfirm, onCancel }: {
+  versions: HarnessVersions; name: string; open: boolean; pending: boolean; onConfirm: () => void; onCancel: () => void;
+}) {
+  return <Dialog open={open} title={`Update ${name}?`} onClose={onCancel} busy={pending}
+    footer={<><Button disabled={pending} onClick={onCancel} data-autofocus>Cancel</Button><Button variant="primary" pending={pending} onClick={onConfirm}>Update</Button></>}>
+    <p>CrazyAgent runs exactly this line:</p>
+    <pre className="mono">{versions.command}</pre>
+    <p>{installedWith(versions.method)}</p>
+    <p>When it finishes, new agents use the new version with no restart. Agents that are running keep their version until they start again.</p>
+  </Dialog>;
+}
+
+/** The Updates section: the three harness update settings, each saved as soon as it is chosen.
+ * Inputs: the shown settings, a save failure to show and the save call. Output: the section. */
+export function UpdateSettingsView({ settings, problem, save }: { settings: UpdateSettings; problem?: string; save: Save }) {
+  return <SettingSection title="Updates">
+    <SettingLine label="Harness updates" changed={settings.mode !== UPDATE_SETTINGS_DEFAULT.mode}>
+      <Segmented label="Harness updates" value={settings.mode} options={MODES} onValue={(mode) => void save({ ...settings, mode })} />
+    </SettingLine>
+    <SettingLine wide label="Check for harness updates" changed={settings.when !== UPDATE_SETTINGS_DEFAULT.when}>
+      <Segmented label="Check for harness updates" value={settings.when} options={WHENS} onValue={(when) => void save({ ...settings, when })} />
+    </SettingLine>
+    <SettingLine wide label="Newer versions of self-updating installs" help={LOOKUP_HELP} changed={settings.online !== UPDATE_SETTINGS_DEFAULT.online}>
+      <Segmented label="Newer versions of self-updating installs" value={settings.online} options={LOOKUPS} onValue={(online) => void chooseOnline(settings, online, save)} />
+    </SettingLine>
+    {problem && <div className="set-body"><p className="pj-error" role="alert">{problem}</p></div>}
+  </SettingSection>;
+}
+
+function failureCopy(result: Exclude<Result<unknown>, { kind: "ok" }>): string | undefined {
+  if (result.kind === "not_ready") return undefined;
+  return result.code.startsWith("harness_update_") ? updateCopy(result.code) : result.message;
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function HarnessRow({ entry, settings, onCatalog }: { entry: HarnessEntry; settings: UpdateSettings | null; onCatalog: () => void }) {
+  const [versions, setVersions] = useState<HarnessVersions | null>(null);
+  const [problem, setProblem] = useState<string>();
+  const [checking, setChecking] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [pending, setPending] = useState(false);
+  const mode = settings?.mode ?? "off";
+  const look = settings?.when === "on_open";
+  const installed = entry.status.kind !== "not_installed";
+  const show = (read: Result<HarnessVersions>) => {
+    if (read.kind === "ok") { setVersions(read.value); setProblem(undefined); } else setProblem(failureCopy(read));
+    return read;
+  };
+  useEffect(() => {
+    if (!installed || mode === "off") return;
+    let live = true;
+    void harnessVersions(entry.id, look).then((read) => { if (live) show(read); });
+    return () => { live = false; };
+  }, [entry.id, installed, mode, look]);
+  const check = async () => {
+    setChecking(true);
+    show(await harnessVersions(entry.id, true));
+    setChecking(false);
+  };
+  const update = async () => {
+    setPending(true);
+    const started = await updateHarness(entry.id);
+    setPending(false);
+    setAsking(false);
+    if (started.kind !== "ok") { setProblem(failureCopy(started)); return; }
+    show(await pollWhileRunning(entry.id, (id, again) => harnessVersions(id, again).then(show), wait));
+    onCatalog();
+  };
+  return <>
+    <HarnessRowView entry={entry} versions={versions} mode={mode} problem={problem} checking={checking}
+      onCheck={() => void check()} onUpdate={() => setAsking(true)} onGuide={(url) => void openLink(url)} />
+    {versions?.command && <UpdateConfirm versions={versions} name={entry.name} open={asking} pending={pending}
+      onConfirm={() => void update()} onCancel={() => setAsking(false)} />}
+  </>;
+}
+
+function UpdateSettingsRows({ settings, onSaved }: { settings: UpdateSettings; onSaved: (settings: UpdateSettings) => void }) {
+  const [problem, setProblem] = useState<string>();
+  const save: Save = async (next) => {
+    const saved = await setHarnessUpdateSettings(next);
+    if (saved.kind === "ok") { setProblem(undefined); onSaved(next); } else setProblem(failureCopy(saved) ?? "Couldn't save the setting.");
+    return saved;
+  };
+  return <UpdateSettingsView settings={settings} problem={problem} save={save} />;
+}
+
+/** The harness list as a pure view of the catalog read, with a Check again action, and the update
+ * settings when the engine has them. Inputs: the catalog read, when it was checked, the recheck
+ * action, the update settings (null when this engine has none) and what to do once one is saved. */
+export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, onSettings }: {
+  catalog: Loaded<HarnessEntry[]>; checkedAt?: string; onCheck: () => void; settings?: UpdateSettings | null; onSettings?: (settings: UpdateSettings) => void;
+}) {
   return <div className="stack">
     <div className="settings-top">
-      <div><h2>Harnesses</h2><p>CrazyAgent finds harnesses installed on this Mac. It never installs them. Install one yourself, then choose Check again.</p></div>
+      <div><h2>Harnesses</h2><p>{PURPOSE}</p></div>
       <span className="row">{checkedAt && <span className="muted small">Checked {checkedAt}</span>}
         <Button icon="refresh-cw" onClick={onCheck} disabled={catalog.kind === "loading"}>Check again</Button></span>
     </div>
+    {settings !== null && onSettings && <UpdateSettingsRows settings={settings} onSaved={onSettings} />}
     {catalog.kind === "loading" ? <Skeleton shape="row" count={8} />
       : catalog.kind === "not_ready" ? <NotReady what="The harness list" />
       : catalog.kind === "error" ? <LoadError message="Couldn't check harnesses." onRetry={onCheck} />
       : harnessGroups(catalog.value).map((group) => <SettingSection key={group.title} title={`${group.title} (${group.entries.length})`}>
-        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} />)}
+        {group.entries.map((entry) => <HarnessRow key={entry.id} entry={entry} settings={settings} onCatalog={onCheck} />)}
       </SettingSection>)}
   </div>;
 }
 
 /** Settings, Harnesses: has the engine look for harnesses again on every visit and on Check
- * again, so a harness installed a moment ago shows at once. */
+ * again, so a harness installed a moment ago shows at once, and reads the update settings. */
 export function Harnesses() {
   const [catalog, reload] = useLoad(() => harnessCatalog(true), [], "harness-check");
+  const [loaded] = useLoad(loadHarnessUpdateSettings, []);
+  const [settings, setSettings] = useState<UpdateSettings | null>(null);
   const [checkedAt, setCheckedAt] = useState<string>();
-  return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)}
+  useEffect(() => { if (loaded.kind === "ok") setSettings(loaded.value); }, [loaded]);
+  return <HarnessesView catalog={catalog} checkedAt={checkedAt ?? (catalog.kind === "ok" ? "just now" : undefined)} settings={settings} onSettings={setSettings}
     onCheck={() => { reload(); setCheckedAt(`at ${new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`); }} />;
 }
