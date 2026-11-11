@@ -41,6 +41,7 @@ for (const option of OPTIONS) {
       await me.capture(`tool-cache-${option.scope}`);
       const earlier = caches(runtime);
       await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
+      await me.unfold("Agents and tasks");
       await me.waitFor("the Hand off form on the Agents tab", (text) => text.includes("Hand off"));
       await handOff(me, page, project, runtime);
       const made = caches(runtime).filter((name) => !earlier.includes(name));
