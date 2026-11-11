@@ -5,24 +5,32 @@ import { POLL_MS } from "./e2e-harness.mjs";
 import { USAGE_MS, handOff, onEngine, pricesOff, tileParts, turnsOf } from "./codex-task-engine.mjs";
 
 const CACHE_LINE = "87% of everything read; billed far lower, not in Tokens";
-const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Share of tokens"];
+const RELOAD_MS = 10_000;
+const PROJECT_HEAD = ["Project", "Tokens", "Input", "Cache write", "Output", "Cache read", "Agents", "Runs", "Merges", "Last used", "Share of tokens"];
 
-/** Reads what a Metrics page shows: the range line, each tile's lines, the project filter's
- * value and choices, and the breakdown's header and rows. Input: the page. Output: the
- * reading, its parts null while missing. */
+/** Reads what a Metrics page shows: the range line, the Tokens figure and each tile's lines,
+ * the project filter's value and choices, and the By project breakdown's header and rows.
+ * The app page shows Tokens in its lead panel, read in the project tab's Tokens tile shape,
+ * and keeps the breakdown behind All columns, so its cells are read as text, open or not.
+ * Input: the page. Output: the reading, its parts null while missing. */
 function metricsShown(page) {
   return page.evaluate(`(() => {
     const words = (node) => (node.innerText ?? "").replace(/\\s+/g, " ").trim();
-    const table = document.querySelector(".mx-table");
+    const cell = (node) => (node.textContent ?? "").replace(/\\s+/g, " ").trim();
+    const lead = document.querySelector(".mx-lead-numbers");
+    const mix = Object.fromEntries([...(lead?.querySelectorAll(".mx-mix > div") ?? [])].map((pair) => [words(pair.querySelector("dt")), words(pair.querySelector("dd"))]));
+    const tokens = lead ? [[words(lead.querySelector(".mx-lead-key")), words(lead.querySelector(".mx-lead-value")),
+      Object.keys(mix).length ? mix.Input + " input, " + mix["Cache write"] + " cache write, " + mix.Output + " output" : ""]] : [];
+    const table = document.querySelector('.mx-table[data-by="project"]');
     const filter = document.getElementById("mx-project");
     return {
       heading: words(document.querySelector("h1") ?? document.createElement("span")),
       line: words(document.querySelector(".mx-count") ?? document.createElement("span")),
-      tiles: [...document.querySelectorAll(".mx-tile")].map((tile) => [...tile.children].map(words)),
+      tiles: [...tokens, ...[...document.querySelectorAll(".mx-tile")].map((tile) => [...tile.children].map(words))],
       filter: filter ? filter.value : null,
       choices: filter ? [...filter.options].map((option) => [option.value, option.text]) : [],
-      head: table ? [...table.querySelectorAll("thead th")].map(words) : null,
-      rows: table ? [...table.querySelectorAll("tbody tr")].map((row) => [...row.children].map(words)) : [],
+      head: table ? [...table.querySelectorAll("thead th")].map(cell) : null,
+      rows: table ? [...table.querySelectorAll("tbody tr")].map((row) => [...row.children].map(cell)) : [],
       current: document.querySelector(".app-nav a[aria-current=page]")?.getAttribute("href") ?? null,
     };
   })()`);
@@ -47,15 +55,20 @@ function oneProject(runs) {
   };
 }
 
-/** Waits until a reading of the page passes the check, reloading between reads since usage
- * rows land on the engine's own schedule. Inputs: the page, the check, what it waits for and
- * whether to reload. Output: the last reading. */
+/** Waits until a reading of the page passes the check, reloading at most every 10 s between
+ * reads since usage rows land on the engine's own schedule and each load asks the engine for
+ * every read the page shows. Inputs: the page, the check, what it waits for and whether to
+ * reload. Output: the last reading. */
 async function tilesShow(page, ready, what, reload) {
+  let reloaded = Date.now();
   for (const deadline = Date.now() + USAGE_MS; ; await pause(POLL_MS * 20)) {
     const shown = await metricsShown(page).catch(() => null);
     if (ready(shown)) return shown;
     assert.ok(Date.now() < deadline, `the Metrics page never showed ${what}: ${JSON.stringify(shown)}`);
-    if (reload) await page.send("Page.reload", { ignoreCache: true });
+    if (reload && Date.now() - reloaded >= RELOAD_MS) {
+      await page.send("Page.reload", { ignoreCache: true });
+      reloaded = Date.now();
+    }
   }
 }
 
@@ -89,7 +102,7 @@ test("the sidebar's Metrics page adds up every project, and its filter shows one
     let shown = await tilesShow(page, everyProject, "both projects added up", true);
     await me.capture("app-metrics-all");
     assert.equal(shown.tiles[1][2], CACHE_LINE);
-    assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Merges", "Lines"], "the same six tiles as the project tab (mockup note 13)");
+    assert.deepEqual(shown.tiles.map((tile) => tile[0]), ["Tokens", "Re-read from cache", "Runs", "Tasks", "Merges", "Lines"], "Tokens leads, then the same five tiles as the project tab (mockup note 13)");
     assert.deepEqual(shown.tiles[4].slice(1), ["0", "0 into main, 0 undone"], "nothing was merged yet");
     assert.equal(shown.heading, "Metrics");
     assert.equal(shown.current, "#/metrics", "the sidebar marks Metrics as the open page");

@@ -210,6 +210,7 @@ const REFUSALS: Record<string, string> = {
   usage_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
   usage_request_invalid: "The engine didn't accept this usage request. Reload the page and try again.",
   usage_unavailable: "Usage isn't available in this engine yet.",
+  owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
 };
 
 const POLL_FAILURES: Record<string, string> = {

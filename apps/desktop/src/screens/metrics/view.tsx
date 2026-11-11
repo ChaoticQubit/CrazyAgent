@@ -101,9 +101,10 @@ export function limitLeft(limits: AccountLimits | undefined, nowMs: number): { l
 }
 
 /** How long ago the page last read its numbers. Inputs: that time, null before the first
- * read, and now. Output: "Updated 10 s ago", "Updated 5 min ago" or "Updating". */
-function updatedText(updatedMs: number | null, nowMs: number): string {
-  if (updatedMs === null) return "Updating";
+ * read, now and whether the latest read failed. Output: "Updated 10 s ago", "Updated 5 min
+ * ago", "Not updated" when no read has succeeded and one failed, or "Updating". */
+function updatedText(updatedMs: number | null, nowMs: number, failed: boolean): string {
+  if (updatedMs === null) return failed ? "Not updated" : "Updating";
   const passed = Math.max(0, nowMs - updatedMs);
   return passed < MINUTE ? `Updated ${Math.floor(passed / 1000)} s ago` : `Updated ${agoText(updatedMs, nowMs)}`;
 }
@@ -497,7 +498,7 @@ export function MetricsPage({ projectId, usage, metrics, adoption, range, by, na
         options={[{ value: "", label: "All projects" }, ...filter.projects.map((project) => ({ value: project.id, label: displayText(project.name) }))]} />
     </div> : ranges}
     {moneyTools}
-    <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs)} · provider-reported usage per turn</span>
+    <span className="mx-count">{covers} · {updatedText(updatedMs, nowMs, usage.kind === "error" || metrics.kind === "error")} · provider-reported usage per turn</span>
   </div>;
   const head = <>{tools}{refused && <LoadError message={refused} onRetry={() => { setRefused(""); onRetry(); }} />}</>;
   const kept = filter && <LimitsWhileReading usage={usage} filter={filter} names={names} nowMs={nowMs} />;
