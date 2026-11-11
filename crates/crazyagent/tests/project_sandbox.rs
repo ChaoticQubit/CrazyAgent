@@ -541,6 +541,10 @@ fn sandboxed_child_cannot_read_outside_files_or_the_owner_codex_and_claude_dirs(
     }
 }
 
+/// A sandboxed child commits in a worktree inside the project that the engine's own git
+/// step added, since only that step's profile may register a worktree
+/// (SECAUDIT-WORKTREE-ADMIN-PLANT): the child's own `git worktree add` is refused. It
+/// still cannot write the project's hooks or config.
 #[test]
 fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
     let case = case();
@@ -570,8 +574,32 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
         .unwrap();
         assert!(status.success());
     }
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent-one",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let planted = case.project.join("worktrees").join("agent-two");
+    let refused = run(
+        &sandbox,
+        &profile,
+        &format!("git worktree add -q -b agent-two {}", quoted(&planted)),
+    );
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Operation not permitted"),
+        "{refused:?}"
+    );
     let script = format!(
-        "git worktree add -q -b agent-one {wt} && cd {wt} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
+        "cd {wt} && echo work > work.txt && git add work.txt && git -c user.email=agent@local -c user.name=agent commit -q -m work && echo ok",
         wt = quoted(&worktree)
     );
     let output = run(&sandbox, &profile, &script);
