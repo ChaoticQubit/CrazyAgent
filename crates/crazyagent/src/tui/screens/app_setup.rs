@@ -1776,9 +1776,14 @@ impl AppSetup {
             bottom.extend(self.pack_notes(limit, ctx));
         }
         let (asked, at) = self.ask_rows(limit, ctx);
+        let asking = !asked.is_empty();
+        let window_min = if ready.is_some() && !asking {
+            WINDOW_MIN
+        } else {
+            0
+        };
         if !self.first_run {
             let full = self.account_rows(limit, true, ctx);
-            let window_min = if ready.is_some() { WINDOW_MIN } else { 0 };
             let used = top.len() + bottom.len() + asked.len() + window_min;
             if used + full.len() <= height {
                 bottom.extend(full);
@@ -1793,16 +1798,36 @@ impl AppSetup {
         if ready.is_some() {
             let window = height
                 .saturating_sub(top.len() + bottom.len())
-                .max(WINDOW_MIN);
-            rows = self.pack_rows(limit, window, ctx);
+                .max(window_min);
+            if window > 0 {
+                rows = self.pack_rows(limit, window, ctx);
+            }
         }
-        let cursor =
-            at.map(|at| Position::new(at.x, at.y + (top.len() + rows.len() + asked_from) as u16));
+        let ask_top = top.len() + rows.len() + asked_from;
         let mut lines = top;
         lines.extend(rows);
         lines.extend(bottom);
+        let skip = if asking {
+            ask_skip(lines.len(), ask_top, height)
+        } else {
+            0
+        };
+        lines.drain(..skip);
+        let cursor = at.map(|at| Position::new(at.x, at.y + (ask_top - skip) as u16));
         (lines, cursor)
     }
+}
+
+/// Counts the body lines left out above an open ask, so the ask is drawn whole at the bottom
+/// of the body, or from its first line when it alone is taller than the body. Takes the
+/// body's line count, the index of the ask's first line and the body height. Returns the
+/// count, never past the ask's first line.
+fn ask_skip(lines: usize, ask_top: usize, height: usize) -> usize {
+    assert!(ask_top < lines);
+    let skip = lines.saturating_sub(height).min(ask_top);
+    assert!(skip <= ask_top);
+    assert!(lines - skip <= height || skip == ask_top);
+    skip
 }
 
 impl Screen for AppSetup {

@@ -1486,3 +1486,143 @@ fn a_stored_master_time_limit_this_version_does_not_know_is_not_offered() {
     assert!(jobs(&mut shell).is_empty());
     assert_eq!(lead(&shell), "The master time limit is not known yet.");
 }
+
+const ASK_SIZES: [(u16, u16); 3] = [(80, 24), (80, 27), (120, 31)];
+
+/// Renders Settings and checks the open ask is drawn whole inside the body rows: its first
+/// needle (the cursor glyph for a field ask) above or on its last needle's row, and that
+/// last row the last filled body row. Takes the shell, the size and both needles.
+/// Returns nothing; panics with the frame when the ask is cut.
+fn ask_in_body(shell: &mut Shell, width: u16, height: u16, first: &str, last: &str) {
+    let rows = render(shell, width, height);
+    assert_eq!(rows.len(), usize::from(height));
+    let body = &rows[2..rows.len() - 2];
+    let shown = |needle: &str| {
+        body.iter()
+            .rposition(|row| row.contains(needle))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{width}x{height}: no body row has {needle:?}:\n{}",
+                    rows.join("\n")
+                )
+            })
+    };
+    let (top, end) = (shown(first), shown(last));
+    assert!(top <= end, "{width}x{height}:\n{}", rows.join("\n"));
+    let filled = body.iter().rposition(|row| !row.trim().is_empty());
+    assert_eq!(
+        filled,
+        Some(end),
+        "{width}x{height}: the ask ends the body:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
+fn the_remove_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('d'));
+        let first = "Remove Graphify skill for agents?";
+        ask_in_body(&mut shell, width, height, first, "stop getting it.");
+    }
+}
+
+#[test]
+fn the_sign_out_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('g'));
+        let (first, last) = ("Sign out of GitHub?", "projects stay.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
+fn the_home_path_field_and_its_cursor_are_inside_the_body_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('h'));
+        ask_in_body(&mut shell, width, height, "█", "you choose next.");
+    }
+}
+
+#[test]
+fn the_home_choice_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('h'));
+        shell.key(Key::Ctrl('u'));
+        typed(&mut shell, "/Users/owner/Work");
+        shell.key(Key::Enter);
+        let first = "Use /Users/owner/Work as the projects home?";
+        let last = "Measuring the projects in the current home";
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
+fn the_sockets_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('l'));
+        let (first, last) = ("Linux limited-network sockets:", "other sockets reach any");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
+fn the_cleanup_ask_and_its_days_field_are_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('f'));
+        let first = "Finished agents: when";
+        ask_in_body(&mut shell, width, height, first, "shows why.");
+        shell.key(Key::Up);
+        shell.key(Key::Up);
+        shell.key(Key::Enter);
+        ask_in_body(&mut shell, width, height, "█", "days after it finishes.");
+    }
+}
+
+#[test]
+fn the_quit_asks_and_the_hours_field_are_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('q'));
+        let (first, last) = ("When CrazyAgent quits:", "back to the queue.");
+        ask_in_body(&mut shell, width, height, first, last);
+        shell.key(Key::Enter);
+        let (first, last) = ("Left running: how long agents", "did not quit cleanly.");
+        ask_in_body(&mut shell, width, height, first, last);
+        shell.key(Key::Up);
+        shell.key(Key::Enter);
+        ask_in_body(
+            &mut shell,
+            width,
+            height,
+            "█",
+            "quits ends with its terminal.",
+        );
+    }
+}
+
+#[test]
+fn the_master_step_limit_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('m'));
+        let (first, last) = ("Master step limit:", "counts no steps.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+#[test]
+fn the_master_time_limit_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('t'));
+        let (first, last) = ("Master time limit:", "Codex and rcli.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
