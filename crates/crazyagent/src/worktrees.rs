@@ -1547,30 +1547,32 @@ fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError
 
 /// How long a lease check that failed on a read waits before its one more try.
 const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
-/// The codes of a Git command that failed or ran out of time, which is no rule of the
-/// engine's about the repository.
-const GIT_READ_FAILURES: [&str; 3] = [
-    "git_deadline",
-    "git_reader_failed",
-    "git_operation_failed_or_output_capacity",
-];
 /// The most digits of a system error number a lease log line shows.
 const LOGGED_OS_ERROR_DIGITS_MAX: usize = 5;
-/// The last lease log line written, so a lease that keeps failing the same way is logged
-/// once and not on every read.
-static LEASE_LOGGED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// The most leases whose failed checks one engine run logs.
+const LOGGED_LEASES_MAX: usize = 256;
+/// The most log lines the failed checks of one lease get in one engine run.
+const LOGGED_LINES_PER_LEASE_MAX: u32 = 8;
+/// What this engine run has logged of failed lease checks.
+static LEASE_LOGGED: std::sync::Mutex<LeaseLog> = std::sync::Mutex::new(LeaseLog {
+    leases: std::collections::BTreeMap::new(),
+    full: false,
+});
 
-/// Whether a lease check failed on a read and not on a rule. A rule answers a plain code,
-/// some with `:` and a detail; a read answers the system's own words or one of
-/// `GIT_READ_FAILURES`. Input: the failure. Output: the answer.
+/// Whether a lease check failed on a read and not on a rule or on Git. A rule and every
+/// failure of a Git command, its deadline among them, answer a plain code, some with `:`
+/// and a detail; a read answers the system's own words. A Git command that ran out of
+/// time has already held its caller for its whole deadline, so it is never run again.
+/// Input: the failure. Output: the answer.
 fn read_failure(problem: &EngineError) -> bool {
     let code = problem.0.split(':').next().unwrap_or_default();
-    crate::protocol::plain_code(code) != code || GIT_READ_FAILURES.contains(&code)
+    crate::protocol::plain_code(code) != code
 }
 
 /// Runs one lease check and, when it failed on a read, once more after
-/// `VERIFY_RETRY_WAIT`: Git and the file system fail a read for a moment while they work,
-/// and that says nothing about the repository. A failure on a rule is never tried again.
+/// `VERIFY_RETRY_WAIT`: the file system fails a read for a moment while Git works, and
+/// that says nothing about the repository. A failure on a rule or of a Git command is
+/// never tried again.
 /// Input: the check. Output: nothing, or the last failure and whether a second try ran.
 fn checked(mut check: impl FnMut() -> Result<(), EngineError>) -> Result<(), (EngineError, bool)> {
     let Err(first) = check() else {
@@ -1620,29 +1622,46 @@ fn logged_failure(problem: &EngineError) -> String {
     code.to_owned()
 }
 
-/// Remembers a log line in `last`. Inputs: the line remembered before and the new line.
-/// Output: true when the new line differs, and `last` then holds it; false for a repeat.
-fn fresh_line(last: &mut String, line: &str) -> bool {
-    if *last == line {
-        return false;
-    }
-    line.clone_into(last);
-    true
+/// The failed lease checks one engine run has logged: for each lease, by task and
+/// repository, the last line written and how many lines it got, and whether the line
+/// that says the log has no place for more leases was written. Both are bounded, by
+/// `LOGGED_LEASES_MAX` and `LOGGED_LINES_PER_LEASE_MAX`, so failing leases never fill the
+/// engine log however often they are read.
+struct LeaseLog {
+    leases: std::collections::BTreeMap<(String, String), (String, u32)>,
+    full: bool,
 }
 
-/// Remembers a lease log line for the whole engine. Input: the line. Output: true when it
-/// differs from the last one, so the caller writes it; false for a repeat.
-fn log_once(line: &str) -> bool {
-    let mut last = LEASE_LOGGED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    fresh_line(&mut last, line)
+impl LeaseLog {
+    /// Decides what to write for one failed check of a lease. Inputs: the lease's task and
+    /// repository, which are remembered and never written, the cause words and whether a
+    /// second try ran. Output: the line when the lease's last line differs and the lease
+    /// has lines left; `worktree_lease_log_full` once when no place is left for another
+    /// lease; else None.
+    fn line(&mut self, task: &str, repository: &str, cause: &str, retried: bool) -> Option<String> {
+        let key = (task.to_owned(), repository.to_owned());
+        if !self.leases.contains_key(&key) && self.leases.len() >= LOGGED_LEASES_MAX {
+            let first = !self.full;
+            self.full = true;
+            return first.then(|| "worktree_lease_log_full".to_owned());
+        }
+        let line = format!("worktree_lease_uncertain cause={cause} retried={retried}");
+        let (last, lines) = self.leases.entry(key).or_default();
+        if *last == line || *lines >= LOGGED_LINES_PER_LEASE_MAX {
+            return None;
+        }
+        *lines += 1;
+        last.clone_from(&line);
+        assert!(self.leases.len() <= LOGGED_LEASES_MAX);
+        Some(line)
+    }
 }
 
 /// Reads a task's leases. A Ready or RecoveryRequired lease is checked against the file
-/// system and Git through [`checked`] and reads as Uncertain when the check fails, with
-/// one engine log line that names the cause. Inputs: the connection and the task. Output:
-/// the leases, or `lease_capacity`.
+/// system and Git through [`checked`] and reads as Uncertain when the check fails. The
+/// failure it ends with is written to the engine log once for that lease, through
+/// [`LeaseLog`]. Inputs: the connection and the task. Output: the leases, or
+/// `lease_capacity`.
 pub(crate) fn leases(connection: &Connection, task: &TaskId) -> Result<Outcome, EngineError> {
     let mut statement = connection
         .prepare("SELECT body FROM worktree_leases WHERE task=?1 ORDER BY repository LIMIT 129")
@@ -1659,11 +1678,16 @@ pub(crate) fn leases(connection: &Connection, task: &TaskId) -> Result<Outcome, 
                 LeaseState::Ready | LeaseState::RecoveryRequired
             ) && let Err((problem, retried)) = checked(|| verify_record(&record))
             {
-                let line = format!(
-                    "worktree_lease_uncertain cause={} retried={retried}",
-                    logged_failure(&problem)
-                );
-                if log_once(&line) {
+                let line = LEASE_LOGGED
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .line(
+                        record.lease.task_id.as_str(),
+                        &record.lease.repository,
+                        &logged_failure(&problem),
+                        retried,
+                    );
+                if let Some(line) = line {
                     eprintln!("{line}");
                 }
                 record.lease.state = LeaseState::Uncertain;
@@ -3178,7 +3202,6 @@ mod tests {
         let missing = "No such file or directory (os error 2)";
         assert_eq!(run(&[Ok(())]), (Ok(()), 1));
         assert_eq!(run(&[Err(missing), Ok(())]), (Ok(()), 2));
-        assert_eq!(run(&[Err("git_deadline"), Ok(())]), (Ok(()), 2));
         assert_eq!(
             run(&[Err(missing), Err("Permission denied (os error 13)")]),
             (Err(("Permission denied (os error 13)".to_owned(), true)), 2)
@@ -3188,6 +3211,9 @@ mod tests {
             (Err(("untrusted_git_entry:index.lock".to_owned(), true)), 2)
         );
         for rule in [
+            "git_deadline",
+            "git_reader_failed",
+            "git_operation_failed_or_output_capacity",
             "untrusted_git_entry:index.lock",
             "git_metadata_capacity",
             "unsupported_shared_or_partial_git_metadata",
@@ -3236,15 +3262,62 @@ mod tests {
         ] {
             assert_eq!(logged_failure(&error(failure)), logged, "{failure}");
         }
-        let mut last = String::new();
-        let line = "worktree_lease_uncertain cause=git_deadline retried=true";
-        assert!(fresh_line(&mut last, line));
-        assert!(!fresh_line(&mut last, line), "a repeat was written again");
-        assert!(fresh_line(
-            &mut last,
-            "worktree_lease_uncertain cause=other retried=false"
-        ));
-        assert!(fresh_line(&mut last, line));
+    }
+
+    #[test]
+    fn a_failing_lease_is_logged_once_per_cause_and_the_log_is_bounded() {
+        let new = || LeaseLog {
+            leases: std::collections::BTreeMap::new(),
+            full: false,
+        };
+        let mut log = new();
+        let lost = "worktree_lease_uncertain cause=lease_read_failed_os_2 retried=true";
+        let linked = "worktree_lease_uncertain cause=untrusted_git_entry:index retried=false";
+        let mut written = Vec::new();
+        for _ in 0..50 {
+            written.extend(log.line("task-a", "/repo", "lease_read_failed_os_2", true));
+            written.extend(log.line("task-b", "/repo", "untrusted_git_entry:index", false));
+            written.extend(log.line("task-a", "/other", "untrusted_git_entry:index", false));
+        }
+        assert_eq!(written, [lost, linked, linked], "one line a lease");
+        assert!(
+            written
+                .iter()
+                .all(|line| !line.contains("task") && !line.contains("repo"))
+        );
+
+        let mut log = new();
+        let mut flapping = 0;
+        for turn in 0..50 {
+            let cause = if turn % 2 == 0 {
+                "git_deadline"
+            } else {
+                "git_reader_failed"
+            };
+            flapping += usize::from(log.line("task-a", "/repo", cause, false).is_some());
+        }
+        assert_eq!(flapping, LOGGED_LINES_PER_LEASE_MAX as usize);
+
+        let mut log = new();
+        for lease in 0..LOGGED_LEASES_MAX {
+            assert!(
+                log.line(&format!("task-{lease}"), "/repo", "git_deadline", false)
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            log.line("task-late", "/repo", "git_deadline", false)
+                .as_deref(),
+            Some("worktree_lease_log_full")
+        );
+        assert_eq!(log.line("task-late", "/repo", "git_deadline", false), None);
+        assert_eq!(log.line("task-later", "/repo", "git_deadline", false), None);
+        assert_eq!(log.line("task-0", "/repo", "git_deadline", false), None);
+        assert!(
+            log.line("task-0", "/repo", "git_reader_failed", false)
+                .is_some()
+        );
+        assert_eq!(log.leases.len(), LOGGED_LEASES_MAX);
     }
 
     #[test]
