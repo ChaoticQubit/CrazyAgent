@@ -437,3 +437,71 @@ fn a_codex_edit_runs_the_guard_alone() {
         "CrazyAgent: files this patch writes are claimed by Linus (src/**). Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files."
     );
 }
+
+/// PA1213R2-F1: under Block or Wait an edit the engine does not answer for, with an
+/// unreadable answer or none in time, is held with `PATCH_UNCHECKED`, for a Codex patch and
+/// a Claude Code edit alike, and the unanswered question is withdrawn.
+#[test]
+fn an_edit_the_engine_does_not_answer_for_is_held_never_run() {
+    let (root, folder) = mailbox();
+    let base = root.path().to_path_buf();
+    let who = Identity {
+        inbox: Some(LEAD_TAG.to_owned()),
+        activity: Some(LEAD_TAG.to_owned()),
+        teammate: None,
+        cwd: None,
+        unnamed: false,
+        part: relay::Part::Single,
+    };
+    let patch = json!({
+        "tool_name": "apply_patch",
+        "tool_input": {"command": "*** Begin Patch\n*** Add File: src/a.rs\n+x\n*** End Patch\n"},
+        "cwd": base,
+    });
+    let claude = json!({"tool_name": "Edit", "tool_input": {"file_path": base.join("src/a.rs")}});
+    let reason = |answer: Option<Value>| {
+        answer.expect("the edit is held")["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    for overlaps in [Overlaps::Block, Overlaps::Wait] {
+        let bytes = serde_json::to_vec(&relay::Roster {
+            overlaps,
+            nudges: Nudges::Off,
+            root: Some(base.to_string_lossy().into_owned()),
+        })
+        .unwrap();
+        relay::put(&folder, relay::ROSTER_FILE, &bytes).unwrap();
+        let garbled = {
+            let path = base.clone();
+            std::thread::spawn(move || {
+                let folder = Mailbox::open(&path).unwrap();
+                for _ in 0..250 {
+                    if let Some((_, stem)) = folder.entries(ASK).into_iter().next() {
+                        let _ = folder.remove(&format!("{stem}{ASK}"));
+                        relay::put(&folder, &format!("{stem}{ANSWER}"), b"not an answer").unwrap();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                panic!("the guard asked nothing");
+            })
+        };
+        let held = in_mailbox(Event::CodexEdit, &folder, &who, &patch);
+        garbled.join().unwrap();
+        assert_eq!(
+            reason(held),
+            PATCH_UNCHECKED,
+            "{overlaps:?} unreadable answer"
+        );
+    }
+    let started = Instant::now();
+    let held = in_mailbox(Event::Edit, &folder, &who, &claude);
+    assert!(
+        started.elapsed() >= ASK_WAIT,
+        "it waited for the engine first"
+    );
+    assert_eq!(reason(held), PATCH_UNCHECKED, "no answer in time");
+    assert!(folder.entries(ASK).is_empty(), "the question is withdrawn");
+}

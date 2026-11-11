@@ -61,7 +61,7 @@ const UNPLACED_PATCH: &str = "CrazyAgent: overlapping edits are checked in this 
 /// Why a patch naming more files than one engine question covers is refused (PA1213-F2).
 const PATCH_TOO_LARGE: &str = "CrazyAgent: overlapping edits are checked in this project, and this patch names more than 32 files. Split it into smaller patches.";
 /// Why a patch is held when the engine did not answer for all its files in one wait.
-const PATCH_UNCHECKED: &str = "CrazyAgent: the engine did not check every file of this patch in time, so it is held. Try again in a moment, or split it.";
+const PATCH_UNCHECKED: &str = "CrazyAgent: the engine did not answer whether other agents claim this edit's files, so it is held. Try again in a moment, or split a large patch.";
 const _: () = assert!(PATCH_PATHS_MAX == 32);
 const _: () = assert!(
     PANE_WAIT.as_millis() + ASK_WAIT.as_millis() + REQUEST_WAIT.as_millis()
@@ -876,14 +876,14 @@ fn guard_files(
             let mut held: Vec<Held> = Vec::new();
             for relative in &relatives {
                 let wait = deadline.saturating_duration_since(Instant::now());
-                if wait.is_zero() {
+                let answer = (!wait.is_zero())
+                    .then(|| request(mailbox, &format!("ask {relative}"), wait))
+                    .flatten()
+                    .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok());
+                let Some(answer) = answer else {
                     return Some(PATCH_UNCHECKED.to_owned());
-                }
-                let answer = request(mailbox, &format!("ask {relative}"), wait)
-                    .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
-                    .map(|answer| answer.held)
-                    .unwrap_or_default();
-                for one in answer {
+                };
+                for one in answer.held {
                     if !held.contains(&one) {
                         held.push(one);
                     }
@@ -891,7 +891,10 @@ fn guard_files(
             }
             held
         }
-        (None, _) => ask(folder, tag, &relatives),
+        (None, _) => match ask(folder, tag, &relatives) {
+            Some(held) => held,
+            None => return Some(PATCH_UNCHECKED.to_owned()),
+        },
     };
     if held.is_empty() {
         return None;
@@ -919,44 +922,40 @@ fn guard_files(
 }
 
 /// Asks the engine in one question which other active agents claim any of an edit's files
-/// and waits up to `ASK_WAIT` for its answer; with no answer in time the question is
-/// withdrawn and the edit runs, and a question too large to send is held by CrazyAgent.
-/// Takes the mailbox, the tag and the repository-relative paths, 1 to `PATCH_PATHS_MAX`.
-/// Returns the claims.
-fn ask(folder: &Mailbox, tag: &str, paths: &[&str]) -> Vec<Held> {
+/// and waits up to `ASK_WAIT` for its answer; a question too large to send is held by
+/// CrazyAgent, and one that cannot be sent, or gets no readable answer in time, is
+/// withdrawn and answered None so the edit is held, never run (PA1213R2-F1). Takes the
+/// mailbox, the tag and the relative paths, 1 to `PATCH_PATHS_MAX`. Returns the claims.
+fn ask(folder: &Mailbox, tag: &str, paths: &[&str]) -> Option<Vec<Held>> {
     assert!(!paths.is_empty() && paths.len() <= PATCH_PATHS_MAX);
-    let Ok(id) = call_id() else {
-        return Vec::new();
-    };
-    let Ok(bytes) = serde_json::to_vec(&Ask {
+    let id = call_id().ok()?;
+    let bytes = serde_json::to_vec(&Ask {
         to: tag.to_owned(),
         path: paths[0].to_owned(),
         more: paths[1..].iter().map(|path| (*path).to_owned()).collect(),
-    }) else {
-        return Vec::new();
-    };
+    })
+    .ok()?;
     if bytes.len() as u64 > relay::ASK_BYTES_MAX {
-        return vec![Held {
+        return Some(vec![Held {
             by: "CrazyAgent".to_owned(),
             pattern: "more file names than one check reads; split the patch".to_owned(),
-        }];
+        }]);
     }
-    if relay::put(folder, &format!("{id}{ASK}"), &bytes).is_err() {
-        return Vec::new();
-    }
+    let asked = format!("{id}{ASK}");
+    relay::put(folder, &asked, &bytes).ok()?;
     let answered = format!("{id}{ANSWER}");
     let deadline = Instant::now() + ASK_WAIT;
     while Instant::now() < deadline {
         if let Some(bytes) = relay::read_entry(folder, &answered, ANSWER_BYTES_MAX) {
             let _ = folder.remove(&answered);
             return serde_json::from_slice::<Answer>(&bytes)
-                .map(|answer| answer.held)
-                .unwrap_or_default();
+                .ok()
+                .map(|answer| answer.held);
         }
         std::thread::sleep(ASK_POLL);
     }
-    let _ = folder.remove(&format!("{id}{ASK}"));
-    Vec::new()
+    let _ = folder.remove(&asked);
+    None
 }
 
 /// A path with `.` and `..` resolved by name, then its longest existing start resolved by
