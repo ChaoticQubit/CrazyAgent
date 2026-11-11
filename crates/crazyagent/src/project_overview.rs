@@ -510,7 +510,39 @@ pub fn offer(
     tab: Tab,
     text: &str,
 ) -> Result<Offered, EngineError> {
-    Ok(Offered::Same)
+    checked(text)?;
+    let place = tabs_folder(folder, true).ok_or_else(|| failure(TAB_BLOCKED))?;
+    let now = match found_in(&place, tab) {
+        Found::Blocked => return Err(failure(TAB_BLOCKED)),
+        Found::Missing => None,
+        Found::Text(now) => Some(now),
+    };
+    if now.as_deref() == Some(text) {
+        reject(db, project, tab)?;
+        return Ok(Offered::Same);
+    }
+    let replaces = match &now {
+        None => true,
+        Some(now) => {
+            let (seal, _) = tab_row(db, project, tab)?;
+            let edited = seal.as_deref() != Some(overview_seal(now).as_str());
+            !edited && state(db, project)?.apply == Apply::WhenUnedited
+        }
+    };
+    if replaces {
+        write_tab(&place, tab, text)?;
+        wrote(db, project, tab, text)?;
+        return Ok(Offered::Written);
+    }
+    let stored = db
+        .execute(
+            "INSERT INTO project_overview_tabs(project,tab,seal,proposal) VALUES(?1,?2,NULL,?3)
+             ON CONFLICT(project,tab) DO UPDATE SET proposal=excluded.proposal",
+            params![project.as_str(), tab.name(), text],
+        )
+        .map_err(unavailable)?;
+    assert_eq!(stored, 1);
+    Ok(Offered::Proposed)
 }
 
 /// Saves the owner's edit of a tab as its file, only at the version the owner saw. The
@@ -525,6 +557,18 @@ pub fn save(
     text: &str,
     version: &str,
 ) -> Result<(), EngineError> {
+    checked(text)?;
+    let place = tabs_folder(folder, true).ok_or_else(|| failure(TAB_BLOCKED))?;
+    if version_of(&found_in(&place, tab))? != version {
+        return Err(failure(TAB_CHANGED));
+    }
+    write_tab(&place, tab, text)?;
+    db.execute(
+        "UPDATE project_overview_tabs SET proposal=NULL
+         WHERE project=?1 AND tab=?2 AND proposal=?3",
+        params![project.as_str(), tab.name(), text],
+    )
+    .map_err(unavailable)?;
     Ok(())
 }
 
@@ -539,12 +583,27 @@ pub fn accept(
     tab: Tab,
     version: &str,
 ) -> Result<(), EngineError> {
-    Ok(())
+    let (_, proposal) = tab_row(db, project, tab)?;
+    let proposal = proposal.ok_or_else(|| failure(NO_PROPOSAL))?;
+    checked(&proposal)?;
+    let place = tabs_folder(folder, true).ok_or_else(|| failure(TAB_BLOCKED))?;
+    if version_of(&found_in(&place, tab))? != version {
+        return Err(failure(TAB_CHANGED));
+    }
+    write_tab(&place, tab, &proposal)?;
+    wrote(db, project, tab, &proposal)
 }
 
 /// Drops a tab's proposal; the file is untouched. Inputs: the connection, the project and
 /// the tab. Output: unit, also when there was none, or `overview_unavailable`.
 pub fn reject(db: &Connection, project: &ProjectId, tab: Tab) -> Result<(), EngineError> {
+    let dropped = db
+        .execute(
+            "UPDATE project_overview_tabs SET proposal=NULL WHERE project=?1 AND tab=?2",
+            params![project.as_str(), tab.name()],
+        )
+        .map_err(unavailable)?;
+    assert!(dropped <= 1);
     Ok(())
 }
 
@@ -557,6 +616,16 @@ pub fn mark_stale(
     project: &ProjectId,
     now_ms: i64,
 ) -> Result<(), EngineError> {
+    assert!(now_ms >= 0);
+    let due_ms = now_ms.saturating_add(QUIET_MS);
+    assert!(due_ms >= now_ms);
+    tx.execute(
+        "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,?2)
+         ON CONFLICT(project) DO UPDATE SET stale=1, due_ms=excluded.due_ms
+         WHERE refresh='after_landing'",
+        params![project.as_str(), due_ms],
+    )
+    .map_err(unavailable)?;
     Ok(())
 }
 
@@ -564,6 +633,17 @@ pub fn mark_stale(
 /// project. Output: unit, `overview_off` while the project's Overview tabs are off, or
 /// `overview_unavailable`.
 pub fn refresh(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
+    if state(db, project)?.refresh == Refresh::Off {
+        return Err(failure(OFF));
+    }
+    let stored = db
+        .execute(
+            "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,0)
+             ON CONFLICT(project) DO UPDATE SET stale=1, due_ms=0",
+            [project.as_str()],
+        )
+        .map_err(unavailable)?;
+    assert_eq!(stored, 1);
     Ok(())
 }
 
@@ -610,24 +690,43 @@ pub fn read(
     folder: &Path,
     now_ms: i64,
 ) -> Result<Overview, EngineError> {
+    assert!(now_ms >= 0);
+    db.execute(
+        "INSERT OR IGNORE INTO project_overview(project,stale,due_ms) VALUES(?1,1,0)",
+        [project.as_str()],
+    )
+    .map_err(unavailable)?;
+    let state = state(db, project)?;
+    let mut tabs = Vec::with_capacity(Tab::ALL.len());
+    for tab in Tab::ALL {
+        let (seal, proposal) = tab_row(db, project, tab)?;
+        let text = tab_text(folder, tab);
+        let version = text.as_deref().map(overview_seal).unwrap_or_default();
+        let edited = text.is_some() && seal.as_deref() != Some(version.as_str());
+        tabs.push(TabState {
+            tab,
+            text,
+            version,
+            edited,
+            proposal,
+        });
+    }
+    assert_eq!(tabs.len(), Tab::ALL.len());
+    assert!(
+        state
+            .failure
+            .as_ref()
+            .is_none_or(|failure| failure.len() <= FAILURE_BYTES_MAX)
+    );
     Ok(Overview {
         readme: None,
-        tabs: Tab::ALL
-            .into_iter()
-            .map(|tab| TabState {
-                tab,
-                text: None,
-                version: String::new(),
-                edited: false,
-                proposal: None,
-            })
-            .collect(),
+        tabs,
         competitors: Competitors::Missing,
-        running: false,
-        stale: false,
-        checked_ms: None,
-        failure: None,
-        refresh: Refresh::AfterLanding,
-        apply: Apply::AlwaysAsk,
+        running: state.running_ms.is_some(),
+        stale: state.stale,
+        checked_ms: state.checked_ms,
+        failure: state.failure,
+        refresh: state.refresh,
+        apply: state.apply,
     })
 }
