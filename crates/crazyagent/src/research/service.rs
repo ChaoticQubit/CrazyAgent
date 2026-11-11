@@ -3,8 +3,12 @@ use super::accounts::AccountPick;
 use super::accounts::SettingsResolver;
 use super::jobs::{JobError, ResearchJobs, ResearchStatus};
 #[cfg(unix)]
+use super::runner::ResearchAccount;
+#[cfg(unix)]
 use super::runner::ResearchLimits;
 use super::runner::{ResearchHarness, ResearchRun, ResearchRunner, RunError, kind_label, utc_date};
+#[cfg(unix)]
+use crate::protocol::ProjectId;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -17,6 +21,13 @@ const STALE_MS: u64 = 180_000;
 const RUNS_MAX: usize = 256;
 #[cfg(unix)]
 const ENGINE_TICK: Duration = Duration::from_secs(1);
+#[cfg(unix)]
+const STATUS_EVERY_TICKS: u32 = 5;
+#[cfg(unix)]
+const CHECKS_MAX: usize = 8;
+#[cfg(unix)]
+const STATUS_HARNESSES: [ResearchHarness; 2] =
+    [ResearchHarness::Codex, ResearchHarness::ClaudeCode];
 
 /// One research job as the UI polls it: plain title, plain status, an
 /// optional plain reason, the report path inside the project folder and
@@ -131,6 +142,8 @@ where
     let Ok(jobs) = ResearchJobs::open(runner.database()) else {
         return;
     };
+    #[cfg(unix)]
+    let mut status = StatusUpkeep::open(runner.database());
     while !stop.load(Ordering::SeqCst) {
         let _ = jobs.recover_stale(STALE_MS, runner.attempts_max());
         for (project, harness) in jobs.work().unwrap_or_default() {
@@ -174,10 +187,224 @@ where
             }
         }
         runs.retain(|run| !run.is_finished());
+        #[cfg(unix)]
+        status.tick(runner, resolve);
         std::thread::sleep(tick);
     }
     for run in runs {
         let _ = run.join();
+    }
+    #[cfg(unix)]
+    status.join();
+}
+
+/// What a project's pool gives one roadmap status check: its folder and an account to run
+/// on, the time the earliest paused account is free again, or nothing.
+#[cfg(unix)]
+#[derive(Debug)]
+enum Picked {
+    Account(PathBuf, ResearchAccount),
+    Paused(i64),
+    Nothing,
+}
+
+/// Picks what a status check runs on from what each harness resolved to, in harness order:
+/// the first account, else the earliest end of a pause. Input: each harness's resolution.
+/// Output: the pick.
+#[cfg(unix)]
+fn picked(resolved: impl Iterator<Item = Option<(PathBuf, AccountPick)>>) -> Picked {
+    let mut paused: Option<i64> = None;
+    for (root, pick) in resolved.flatten() {
+        match pick {
+            AccountPick::Account { account, .. } => return Picked::Account(root, *account),
+            AccountPick::Paused { until_ms } => {
+                paused = Some(paused.map_or(until_ms, |earliest| earliest.min(until_ms)));
+            }
+            AccountPick::NeedsPool | AccountPick::NoUsableAccount => {}
+        }
+    }
+    paused.map_or(Picked::Nothing, Picked::Paused)
+}
+
+/// Which store a started run belongs to: the roadmap status check or the Overview tabs'
+/// writing run. Both are claimed by their store's `tick` and run on the same accounts.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Upkeep {
+    Roadmap,
+    Overview,
+}
+
+/// The roadmap status and Overview tabs upkeep of the research loop: its own engine
+/// connection, the runs going now and the loop passes counted, so each store is asked for
+/// due runs every `STATUS_EVERY_TICKS` passes.
+#[cfg(unix)]
+struct StatusUpkeep {
+    db: Option<rusqlite::Connection>,
+    checks: Vec<JoinHandle<()>>,
+    passes: u32,
+    failed: bool,
+    overview_failed: bool,
+}
+
+#[cfg(unix)]
+impl StatusUpkeep {
+    /// Opens the upkeep on the engine database and closes the runs an engine that stopped
+    /// left open. Input: the database path. Output: the upkeep, idle for good when the
+    /// database cannot be opened.
+    fn open(database: &Path) -> Self {
+        let db = database
+            .parent()
+            .and_then(|root| crate::questions::open(root).ok());
+        if let Some(db) = &db
+            && let Err(error) = crate::roadmap_status::close_orphans(db)
+        {
+            eprintln!(
+                "roadmap_status_close_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
+        if let Some(db) = &db
+            && let Err(error) = crate::project_overview::close_orphans(db)
+        {
+            eprintln!(
+                "project_overview_close_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
+        Self {
+            db,
+            checks: Vec::new(),
+            passes: 0,
+            failed: false,
+            overview_failed: false,
+        }
+    }
+
+    /// Counts one loop pass and, on every `STATUS_EVERY_TICKS`th with room for more checks,
+    /// starts the due ones. A store failure is logged once by its plain code. Inputs: the
+    /// runner and the account resolver.
+    fn tick<F>(&mut self, runner: &Arc<ResearchRunner>, resolve: &F)
+    where
+        F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
+    {
+        self.checks.retain(|check| !check.is_finished());
+        self.passes = self.passes.wrapping_add(1);
+        let Some(db) = &self.db else {
+            return;
+        };
+        if !self.passes.is_multiple_of(STATUS_EVERY_TICKS) || self.checks.len() >= CHECKS_MAX {
+            return;
+        }
+        let mut starts = StatusStarts {
+            runner,
+            resolve,
+            db,
+            checks: &mut self.checks,
+            upkeep: Upkeep::Roadmap,
+        };
+        let now = crate::team::now_ms();
+        if let Err(error) = crate::roadmap_status::tick(db, &mut starts, now)
+            && !self.failed
+        {
+            self.failed = true;
+            eprintln!(
+                "roadmap_status_tick_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
+        starts.upkeep = Upkeep::Overview;
+        if let Err(error) = crate::project_overview::tick(db, &mut starts, now)
+            && !self.overview_failed
+        {
+            self.overview_failed = true;
+            eprintln!(
+                "project_overview_tick_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
+        }
+        assert!(
+            self.checks.len()
+                <= CHECKS_MAX
+                    + crate::roadmap_status::STARTS_PER_TICK_MAX
+                    + crate::project_overview::STARTS_PER_TICK_MAX
+        );
+    }
+
+    /// Waits for every running check; the runner's shutdown stops their agents first.
+    fn join(self) {
+        for check in self.checks {
+            let _ = check.join();
+        }
+    }
+}
+
+/// Starts the runs a store hands out, for the store `upkeep` names: on the first account a
+/// harness resolves for the project, later when every fitting account is paused, and with
+/// a plain failure when the pool has none.
+#[cfg(unix)]
+struct StatusStarts<'a, F> {
+    runner: &'a Arc<ResearchRunner>,
+    resolve: &'a F,
+    db: &'a rusqlite::Connection,
+    checks: &'a mut Vec<JoinHandle<()>>,
+    upkeep: Upkeep,
+}
+
+#[cfg(unix)]
+impl<F> crate::roadmap_status::Runs for StatusStarts<'_, F>
+where
+    F: Fn(&str, &str) -> Option<(PathBuf, AccountPick)>,
+{
+    fn start(&mut self, project: &ProjectId, claim: crate::roadmap_status::Claim) {
+        let resolved = STATUS_HARNESSES
+            .into_iter()
+            .filter(|harness| self.runner.can_run(*harness))
+            .map(|harness| (self.resolve)(project.as_str(), harness.id()));
+        let now = crate::team::now_ms();
+        let stored = match picked(resolved) {
+            Picked::Account(root, account) => {
+                let (runner, project, upkeep) = (self.runner.clone(), project.clone(), self.upkeep);
+                self.checks.push(std::thread::spawn(move || match upkeep {
+                    Upkeep::Roadmap => {
+                        crate::roadmap_status::run::check(
+                            &runner, &project, claim, &root, &account,
+                        );
+                    }
+                    Upkeep::Overview => {
+                        crate::project_overview::agent::write(
+                            &runner, &project, claim, &root, &account,
+                        );
+                    }
+                }));
+                Ok(true)
+            }
+            Picked::Paused(until_ms) => match self.upkeep {
+                Upkeep::Roadmap => {
+                    crate::roadmap_status::requeue(self.db, project, claim, until_ms.max(now))
+                }
+                Upkeep::Overview => {
+                    crate::project_overview::requeue(self.db, project, claim, until_ms.max(now))
+                }
+            },
+            Picked::Nothing => match self.upkeep {
+                Upkeep::Roadmap => {
+                    let failed = Err(crate::roadmap_status::NO_ACCOUNT);
+                    crate::roadmap_status::finish(self.db, project, claim, failed, now)
+                }
+                Upkeep::Overview => {
+                    let words = crate::project_overview::NO_ACCOUNT;
+                    crate::project_overview::fail(self.db, project, claim, words, now)
+                }
+            },
+        };
+        if let Err(error) = stored {
+            eprintln!(
+                "upkeep_start_failed store={:?} cause={}",
+                self.upkeep,
+                crate::protocol::plain_code(&error.0)
+            );
+        }
     }
 }
 
@@ -270,4 +497,52 @@ pub fn start_for_engine(
     _lookup: Option<crate::paths::HarnessLookup>,
 ) -> Result<ResearchService, String> {
     Err("research_runtime_unavailable".into())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn account() -> AccountPick {
+        AccountPick::Account {
+            connection: crate::protocol::CredentialRef::new("pool-account").unwrap(),
+            account: Box::new(ResearchAccount::Endpoint {
+                base_url: "http://127.0.0.1:9".into(),
+                model: "local".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_status_check_runs_on_the_first_account_any_harness_resolves() {
+        let root = PathBuf::from("/projects/alpha");
+        let resolved = vec![
+            None,
+            Some((root.clone(), AccountPick::Paused { until_ms: 900 })),
+            Some((root.clone(), account())),
+        ];
+        match picked(resolved.into_iter()) {
+            Picked::Account(folder, ResearchAccount::Endpoint { model, .. }) => {
+                assert_eq!((folder, model.as_str()), (root, "local"));
+            }
+            other => panic!("expected an account, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_status_check_waits_for_the_earliest_pause_and_has_nothing_without_an_account() {
+        let root = PathBuf::from("/projects/alpha");
+        let paused = vec![
+            Some((root.clone(), AccountPick::Paused { until_ms: 900 })),
+            Some((root.clone(), AccountPick::NoUsableAccount)),
+            Some((root.clone(), AccountPick::Paused { until_ms: 400 })),
+        ];
+        assert!(matches!(picked(paused.into_iter()), Picked::Paused(400)));
+        let none = vec![
+            None,
+            Some((root.clone(), AccountPick::NeedsPool)),
+            Some((root, AccountPick::NoUsableAccount)),
+        ];
+        assert!(matches!(picked(none.into_iter()), Picked::Nothing));
+    }
 }

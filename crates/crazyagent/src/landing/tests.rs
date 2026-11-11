@@ -15071,3 +15071,46 @@ fn a_filter_driver_is_still_switched_off_after_the_listing_narrows() {
     }
     assert_eq!(overrides.len(), 3 * 8);
 }
+
+#[test]
+fn a_landed_change_set_marks_the_projects_roadmap_status_stale() {
+    let case = Case::new();
+    crate::roadmap_status::initialize(&case.db).unwrap();
+    let project = case.workspace.project.clone();
+    let stale = || {
+        crate::roadmap_status::read(&case.db, &project)
+            .unwrap()
+            .stale
+    };
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(!stale(), "a set that only waits for review changes nothing");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert!(stale(), "a landing asks for a new roadmap status check");
+}
+
+#[test]
+fn a_change_set_still_lands_when_the_roadmap_status_cannot_be_marked() {
+    let case = Case::new();
+    let tables: i64 = case
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'roadmap_status%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "this store has no roadmap status tables");
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Landed { .. }
+    ));
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+}

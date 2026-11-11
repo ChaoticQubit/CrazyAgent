@@ -12,11 +12,13 @@ pub const TREE_PATHS_MAX: usize = 400;
 const FILES_BYTES_MAX: usize = 16 * 1024;
 const PATH_BYTES_MAX: usize = 512;
 const RESEARCH_FILES_MAX: usize = crate::project_setup::links::LINKS_MAX;
-const RESEARCH_PART_BYTES_MAX: usize =
-    RESEARCH_BYTES_MAX + RESEARCH_FILES_MAX * (PATH_BYTES_MAX + 128) + 64;
+const RESEARCH_PART_BYTES_MAX: usize = RESEARCH_BYTES_MAX
+    + RESEARCH_BYTES_MAX / (TICKS_MAX - 1)
+    + RESEARCH_FILES_MAX * (PATH_BYTES_MAX + 128)
+    + 64;
 const TICKS_MAX: usize = 30;
 const FENCE: &str = "~~~";
-const DEFANGED: &str = "~~ ~";
+const TILDES_MAX: usize = FENCE.len() - 1;
 const EDITED: &str =
     "The owner edited this tab. Keep the owner's wording unless the evidence contradicts it.";
 const RULES: &str = "You write the Overview tabs of a software project for its owner. Use only the evidence.
@@ -36,6 +38,28 @@ const _: () = assert!(FILES_BYTES_MAX + RESEARCH_PART_BYTES_MAX < EVIDENCE_BYTES
 /// One linked competitor research file as the links store reads it: its path below the
 /// project folder and its text.
 pub use crate::project_setup::links::LinkedText as Research;
+
+/// The text with a space put inside every run of `mark` longer than `run_max`, so no run
+/// of it is longer, whatever its length was. Inputs: the text, the character and the
+/// longest run to leave. Output: the text.
+fn broken(text: &str, mark: char, run_max: usize) -> String {
+    assert!(run_max >= 1);
+    let mut out = String::with_capacity(text.len());
+    let mut run = 0usize;
+    for character in text.chars() {
+        if character != mark {
+            run = 0;
+        } else if run == run_max {
+            out.push(' ');
+            run = 1;
+        } else {
+            run += 1;
+        }
+        out.push(character);
+    }
+    assert!(out.len() >= text.len());
+    out
+}
 
 /// Whether a path is short plain text the evidence can show on one line. Input: the path.
 /// Output: the answer.
@@ -82,8 +106,9 @@ fn files_part(tree: &[String]) -> String {
 }
 
 /// The Competitor research part: each file under its path in a backtick fence longer than
-/// the backtick runs in its text (up to [`TICKS_MAX`]), the texts together within
-/// [`RESEARCH_BYTES_MAX`]. Input: the research read. Output: the text.
+/// any backtick run in its text, whose longer runs are broken up first so the fence stays
+/// within [`TICKS_MAX`]; the texts together within [`RESEARCH_BYTES_MAX`]. Input: the
+/// research read. Output: the text.
 fn research_part(research: &[Research]) -> String {
     let mut text = String::from("\n# Competitor research\n");
     let mut left = RESEARCH_BYTES_MAX;
@@ -97,6 +122,7 @@ fn research_part(research: &[Research]) -> String {
         }
         let body = clipped(file.text.clone(), left);
         left -= body.len();
+        let body = broken(&body, '`', TICKS_MAX - 1);
         let run = body
             .split(|character| character != '`')
             .map(str::len)
@@ -133,10 +159,11 @@ pub fn evidence(folder: &Path, research: &[Research], tree: &[String]) -> String
     text
 }
 
-/// One `~~~` block of data: a run of three tildes inside the data is broken up, so no line
-/// of it closes the block or opens another. Input: the data. Output: the block.
+/// One `~~~` block of data: every run of three or more tildes inside the data is broken
+/// up, whatever its length, so no line of it closes the block or opens another. Input: the
+/// data. Output: the block.
 fn block(data: &str) -> String {
-    let data = data.replace(FENCE, DEFANGED);
+    let data = broken(data, '~', TILDES_MAX);
     assert!(!data.contains(FENCE));
     format!("{FENCE}\n{}\n{FENCE}\n", data.trim_end())
 }
@@ -204,4 +231,19 @@ pub fn parse_reply(reply: &str) -> Vec<(Tab, String)> {
     assert!(tabs.len() <= Tab::ALL.len());
     assert!(tabs.iter().all(|(_, text)| text.len() <= TAB_BYTES_MAX));
     tabs
+}
+
+/// The tabs a reply opens a block for, whether or not [`parse_reply`] kept their text.
+/// Input: the reply. Output: each named tab once, in tab order.
+pub fn named_tabs(reply: &str) -> Vec<Tab> {
+    let named: Vec<Tab> = Tab::ALL
+        .into_iter()
+        .filter(|tab| {
+            reply
+                .lines()
+                .any(|line| line.trim_end().strip_prefix(FENCE) == Some(tab.stem()))
+        })
+        .collect();
+    assert!(named.len() <= Tab::ALL.len());
+    named
 }

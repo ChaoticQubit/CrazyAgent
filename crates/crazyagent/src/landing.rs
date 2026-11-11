@@ -9,6 +9,7 @@ use std::time::Duration;
 mod clone;
 #[cfg(unix)]
 mod diff;
+pub(crate) mod evidence;
 #[cfg(unix)]
 mod flow;
 #[cfg(unix)]

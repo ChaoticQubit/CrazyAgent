@@ -19,6 +19,7 @@ pub const OVERVIEW_CODES: &[&str] = &[
     "overview_no_proposal",
     "overview_off",
     "overview_project_unknown",
+    "overview_proposal_changed",
     "overview_reply_bounds",
     "overview_request_bounds",
     "overview_request_invalid",
@@ -72,6 +73,7 @@ enum Action {
         project: ProjectId,
         tab: Tab,
         version: String,
+        proposal_version: String,
     },
     Reject {
         project: ProjectId,
@@ -170,7 +172,12 @@ impl OwnerClient {
                 state.text = text;
             }
             if proposals.contains(&tab) {
-                state.proposal = self.overview_text(project, Part::Proposal { tab }).await?.0;
+                let (text, version, _, _) =
+                    self.overview_text(project, Part::Proposal { tab }).await?;
+                if text.is_none() || version != state.proposal_version {
+                    return Ok(None);
+                }
+                state.proposal = text;
             }
         }
         Ok(Some(*overview))
@@ -224,18 +231,22 @@ impl OwnerClient {
         .await
     }
 
-    /// Writes a tab's proposal as its file at the version its diff was made from. Inputs:
-    /// the project, the tab and the version. Output: unit, or the refusal.
+    /// Writes a tab's proposal as its file, when it is still the proposal the owner
+    /// reviewed and the file is at the version its diff was made from. Inputs: the project,
+    /// the tab, the file's version and the proposal's version, both as read. Output: unit,
+    /// or the refusal (`overview_proposal_changed` for a newer proposal).
     pub async fn overview_accept(
         &self,
         project: ProjectId,
         tab: Tab,
         version: String,
+        proposal_version: String,
     ) -> Result<(), EngineError> {
         self.overview_done(Action::Accept {
             project,
             tab,
             version,
+            proposal_version,
         })
         .await
     }
@@ -347,6 +358,8 @@ fn state_reply(mut overview: Overview) -> Reply {
         }
         if tab.proposal.take().is_some_and(|text| fits(&text)) {
             proposals.push(tab.tab);
+        } else {
+            tab.proposal_version = String::new();
         }
     }
     assert!(proposals.len() <= Tab::ALL.len());
@@ -393,7 +406,7 @@ fn text_reply(overview: Overview, part: Part) -> Reply {
                 return none;
             };
             let (text, version) = match part {
-                Part::Proposal { .. } => (found.proposal, String::new()),
+                Part::Proposal { .. } => (found.proposal, found.proposal_version),
                 _ => (found.text, found.version),
             };
             match text {
@@ -462,9 +475,11 @@ fn act(root: &Path, action: Action) -> Result<Reply, EngineError> {
             project,
             tab,
             version,
+            proposal_version,
         } => {
             let folder = folder(&db, &project)?;
-            project_overview::accept(&db, &project, &folder, tab, &version).map(|()| Reply::Done)
+            project_overview::accept(&db, &project, &folder, tab, &version, &proposal_version)
+                .map(|()| Reply::Done)
         }
         Action::Reject { project, tab } => {
             folder(&db, &project)?;
@@ -551,6 +566,7 @@ mod tests {
                 version: text.map(|_| "v1".to_owned()).unwrap_or_default(),
                 edited: false,
                 proposal: proposal.map(str::to_owned),
+                proposal_version: proposal.map(|_| "p1".to_owned()).unwrap_or_default(),
                 blocked: None,
             })
             .collect();
@@ -623,7 +639,11 @@ mod tests {
                     panic!("a text request answers with a text");
                 };
                 assert_eq!(text.as_deref(), Some(full.as_str()));
-                assert_eq!(version.is_empty(), matches!(part, Part::Proposal { .. }));
+                let wanted = match part {
+                    Part::Proposal { .. } => "p1",
+                    _ => "v1",
+                };
+                assert_eq!(version, wanted);
             }
         }
         let Reply::Text {
@@ -654,11 +674,11 @@ mod tests {
             panic!("a read answers with the state");
         };
         assert!(proposals.is_empty());
-        assert!(
-            sent.tabs.iter().all(|tab| {
-                tab.version.is_empty() && tab.blocked.as_deref() == Some("too_large")
-            })
-        );
+        assert!(sent.tabs.iter().all(|tab| {
+            tab.version.is_empty()
+                && tab.proposal_version.is_empty()
+                && tab.blocked.as_deref() == Some("too_large")
+        }));
         let Reply::Text { text, cut, .. } = text_reply(read, Part::Readme) else {
             panic!("a text request answers with a text");
         };
@@ -666,6 +686,142 @@ mod tests {
         assert!(cut);
         assert!(!text.is_empty() && text.ends_with('\n'));
         assert!(fits(&text));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_overview_is_read_and_changed_over_the_owner_socket_one_text_a_frame() {
+        use super::super::usage_tests::Usage;
+        let owner = Usage::start().await;
+        let project = ProjectId::new("alpha").unwrap();
+        assert_eq!(
+            owner
+                .client
+                .overview_read(project.clone())
+                .await
+                .unwrap_err()
+                .0,
+            "overview_project_unknown"
+        );
+        let folder = owner.root.path().join("alpha");
+        std::fs::create_dir_all(folder.join(".crazyagent")).unwrap();
+        std::fs::write(folder.join("README.md"), "# Alpha\n").unwrap();
+        {
+            let db = crate::landing::open(&owner.engine_root).unwrap();
+            crate::ide::workspace::tests::add_project(&db, "alpha", &folder);
+        }
+        let full = format!("{}\n", "\"".repeat(TAB_BYTES_MAX - 1));
+        owner
+            .client
+            .overview_save(project.clone(), Tab::Features, full.clone(), String::new())
+            .await
+            .unwrap();
+        let read = owner.client.overview_read(project.clone()).await.unwrap();
+        assert_eq!(read.readme.as_ref().unwrap().text, "# Alpha\n");
+        assert!(!read.needs_home);
+        let features = read
+            .tabs
+            .iter()
+            .find(|tab| tab.tab == Tab::Features)
+            .unwrap();
+        assert_eq!(features.text.as_deref(), Some(full.as_str()));
+        assert!(features.edited && !features.version.is_empty());
+        assert!(
+            read.tabs
+                .iter()
+                .filter(|tab| tab.tab != Tab::Features)
+                .all(|tab| tab.text.is_none() && tab.version.is_empty())
+        );
+        assert_eq!(
+            owner
+                .client
+                .overview_save(
+                    project.clone(),
+                    Tab::Features,
+                    "- late\n".into(),
+                    "old".into()
+                )
+                .await
+                .unwrap_err()
+                .0,
+            "overview_tab_changed"
+        );
+        assert_eq!(
+            owner
+                .client
+                .overview_accept(
+                    project.clone(),
+                    Tab::Features,
+                    features.version.clone(),
+                    String::new()
+                )
+                .await
+                .unwrap_err()
+                .0,
+            "overview_no_proposal"
+        );
+        {
+            let db = crate::landing::open(&owner.engine_root).unwrap();
+            project_overview::offer(&db, &project, &folder, Tab::Features, "- B\n").unwrap();
+        }
+        let shown = owner.client.overview_read(project.clone()).await.unwrap();
+        let reviewed = shown
+            .tabs
+            .iter()
+            .find(|tab| tab.tab == Tab::Features)
+            .unwrap();
+        assert_eq!(reviewed.proposal.as_deref(), Some("- B\n"));
+        assert!(!reviewed.proposal_version.is_empty());
+        {
+            let db = crate::landing::open(&owner.engine_root).unwrap();
+            project_overview::offer(&db, &project, &folder, Tab::Features, "- C\n").unwrap();
+        }
+        assert_eq!(
+            owner
+                .client
+                .overview_accept(
+                    project.clone(),
+                    Tab::Features,
+                    reviewed.version.clone(),
+                    reviewed.proposal_version.clone()
+                )
+                .await
+                .unwrap_err()
+                .0,
+            "overview_proposal_changed"
+        );
+        owner
+            .client
+            .overview_reject(project.clone(), Tab::Features)
+            .await
+            .unwrap();
+        owner
+            .client
+            .overview_set_apply(project.clone(), Apply::WhenUnedited)
+            .await
+            .unwrap();
+        owner
+            .client
+            .overview_set_refresh(project.clone(), Refresh::Off)
+            .await
+            .unwrap();
+        assert_eq!(
+            owner
+                .client
+                .overview_refresh(project.clone())
+                .await
+                .unwrap_err()
+                .0,
+            "overview_off"
+        );
+        let read = owner.client.overview_read(project.clone()).await.unwrap();
+        assert_eq!(
+            (read.apply, read.refresh),
+            (Apply::WhenUnedited, Refresh::Off)
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join(".crazyagent/overview/features.md")).unwrap(),
+            full
+        );
     }
 
     #[test]

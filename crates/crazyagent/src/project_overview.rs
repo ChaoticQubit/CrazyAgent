@@ -5,18 +5,26 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::{self, LinkKind};
 use crate::protocol::ProjectId;
 use crate::roadmap_status::{QUIET_MS, Refresh};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+#[cfg(unix)]
+pub(crate) mod agent;
 mod pack;
+mod run;
 #[cfg(test)]
 mod tests;
 
 pub use pack::{
-    EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, parse_reply, prompt,
+    EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, named_tabs,
+    parse_reply, prompt,
+};
+pub use run::{
+    Ended, NO_ACCOUNT, NO_TABS, NOT_WRITTEN, REPLY_BYTES_MAX, REPLY_TOO_LONG, RUN_TIME,
+    STARTS_PER_TICK_MAX, UNFINISHED, brief, close_orphans, fail, finish, requeue, tick,
 };
 
 /// The folder inside a project's `.crazyagent` that holds the tab files.
@@ -39,6 +47,8 @@ pub const TAB_TOO_LARGE: &str = "overview_tab_too_large";
 pub const TAB_EMPTY: &str = "overview_tab_empty";
 /// The tab has no proposal to accept.
 pub const NO_PROPOSAL: &str = "overview_no_proposal";
+/// The tab's proposal is not the one the owner reviewed: a newer one took its place.
+pub const PROPOSAL_CHANGED: &str = "overview_proposal_changed";
 /// The project has no `.crazyagent` folder to hold tab files: it was made before the
 /// projects home and has to move into it first.
 pub const NEEDS_HOME: &str = "overview_needs_project_home";
@@ -172,8 +182,9 @@ impl Apply {
 }
 
 /// One tab as the owner sees it: the file's text, the version an edit or an accept must
-/// name, whether the owner changed it since the engine last wrote it, a waiting proposal,
-/// and for a file the engine does not read the reason code (`blank`, `too_large`,
+/// name, whether the owner changed it since the engine last wrote it, a waiting proposal
+/// with the version an accept must name for it (empty without a proposal), and for a file
+/// the engine does not read the reason code (`blank`, `too_large`,
 /// `not_utf8`, `not_a_file`, `not_a_folder`), `None` for a readable or missing file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabState {
@@ -182,6 +193,7 @@ pub struct TabState {
     pub version: String,
     pub edited: bool,
     pub proposal: Option<String>,
+    pub proposal_version: String,
     pub blocked: Option<String>,
 }
 
@@ -562,6 +574,16 @@ fn version_of(found: &Found) -> Result<String, EngineError> {
     }
 }
 
+/// The version an owner's write must name: as [`version_of`], with a blank file counted
+/// as no text, so the owner can put text back into a tab whose file was emptied. Input:
+/// what was found. Output: the version, or `overview_tab_blocked`.
+fn owner_version(found: &Found) -> Result<String, EngineError> {
+    match found {
+        Found::Blocked(BLOCKED_BLANK) => Ok(String::new()),
+        other => version_of(other),
+    }
+}
+
 /// The project's stored row. Inputs: the connection and the project. Output: the row, the
 /// defaults while there is none, or `overview_unavailable`.
 fn state(db: &Connection, project: &ProjectId) -> Result<State, EngineError> {
@@ -703,7 +725,7 @@ pub fn save(
     let _writing = writing();
     let place = place(folder)?;
     let found = found_in(&place, tab);
-    if version_of(&found)? != version {
+    if owner_version(&found)? != version {
         return Err(failure(TAB_CHANGED));
     }
     write_tab(&place, tab, text, matches!(found, Found::Missing))?;
@@ -716,24 +738,30 @@ pub fn save(
     Ok(())
 }
 
-/// Writes a tab's proposal as its file, only at the version the diff was made from, checked
-/// under the one-writer lock, then stores its seal and drops the proposal. Inputs: the
-/// connection, the project, its folder, the tab and the version. Output: unit,
-/// `overview_no_proposal`, `overview_tab_changed` or another refusal.
+/// Writes a tab's proposal as its file, only when it is the proposal the owner reviewed and
+/// the file is at the version the diff was made from, both checked under the one-writer
+/// lock, then stores its seal and drops the proposal. Inputs: the connection, the project,
+/// its folder, the tab, the file's version and the proposal's version. Output: unit,
+/// `overview_no_proposal`, `overview_proposal_changed`, `overview_tab_changed` or another
+/// refusal.
 pub fn accept(
     db: &Connection,
     project: &ProjectId,
     folder: &Path,
     tab: Tab,
     version: &str,
+    proposal_version: &str,
 ) -> Result<(), EngineError> {
     let _writing = writing();
     let (_, proposal) = tab_row(db, project, tab)?;
     let proposal = proposal.ok_or_else(|| failure(NO_PROPOSAL))?;
+    if overview_seal(&proposal) != proposal_version {
+        return Err(failure(PROPOSAL_CHANGED));
+    }
     checked(&proposal)?;
     let place = place(folder)?;
     let found = found_in(&place, tab);
-    if version_of(&found)? != version {
+    if owner_version(&found)? != version {
         return Err(failure(TAB_CHANGED));
     }
     write_tab(&place, tab, &proposal, matches!(found, Found::Missing))?;
@@ -754,25 +782,37 @@ pub fn reject(db: &Connection, project: &ProjectId, tab: Tab) -> Result<(), Engi
 }
 
 /// Marks the project's Overview stale after a landed change set, due once the quiet period
-/// has passed, only while its tabs refresh after landings (the default with no row).
-/// Inputs: the landing's transaction, the project and the time. Output: unit, or
+/// has passed, only while its tabs refresh after landings (the default with no row). A
+/// run that already waits to start at once (the first read, a Refresh) keeps its time.
+/// Inputs: the landing's connection, the project and the time. Output: unit, or
 /// `overview_unavailable`.
-pub fn mark_stale(
-    tx: &Transaction<'_>,
-    project: &ProjectId,
-    now_ms: i64,
-) -> Result<(), EngineError> {
+pub fn mark_stale(db: &Connection, project: &ProjectId, now_ms: i64) -> Result<(), EngineError> {
     assert!(now_ms >= 0);
     let due_ms = now_ms.saturating_add(QUIET_MS);
     assert!(due_ms >= now_ms);
-    tx.execute(
+    db.execute(
         "INSERT INTO project_overview(project,stale,due_ms) VALUES(?1,1,?2)
-         ON CONFLICT(project) DO UPDATE SET stale=1, due_ms=excluded.due_ms
+         ON CONFLICT(project) DO UPDATE SET stale=1,
+           due_ms=CASE WHEN stale=1 AND due_ms=0 THEN 0 ELSE excluded.due_ms END
          WHERE refresh='after_landing'",
         params![project.as_str(), due_ms],
     )
     .map_err(unavailable)?;
     Ok(())
+}
+
+/// Marks a project's tabs stale after one of its change sets landed, making the Overview
+/// tables first. A failure is logged by its plain code and never fails the landing. Inputs:
+/// the landing's connection and the project.
+pub fn mark_landed(db: &Connection, project: &ProjectId) {
+    let marked =
+        initialize(db).and_then(|()| mark_stale(db, project, crate::team::now_ms().max(0)));
+    if let Err(error) = marked {
+        eprintln!(
+            "project_overview_mark_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// Asks for a writing run at once (the Refresh button). Inputs: the connection and the
@@ -900,10 +940,18 @@ fn present(db: &Connection, table: &str) -> Result<bool, EngineError> {
     .map_err(unavailable)
 }
 
+/// The text of a research job's report. The stored path is relative to the project's
+/// state folder, where the research runner writes it, and is opened with no link followed
+/// from that folder down. Inputs: the project folder and the stored path. Output: the
+/// text, or none for a report that is missing or that the links reader refuses.
+pub(crate) fn report_text(folder: &Path, path: &str) -> Option<String> {
+    links::read_linked(&crate::projects_home::state_folder(folder), path)
+}
+
 /// What the Competitors tab can build on: the report of the project's newest finished
-/// competitor research job, else the competitor research files the owner linked that
-/// read as text through no link, else nothing. Inputs: the connection, the project and
-/// its folder. Output: the state, or `overview_unavailable`.
+/// competitor research job when it reads as text, else the competitor research files the
+/// owner linked that read as text through no link, else nothing. Inputs: the connection,
+/// the project and its folder. Output: the state, or `overview_unavailable`.
 pub fn competitors(
     db: &Connection,
     project: &ProjectId,
@@ -920,7 +968,10 @@ pub fn competitors(
             )
             .optional()
             .map_err(unavailable)?;
-        if let Some(path) = report.filter(|path| path.len() <= REPORT_PATH_BYTES_MAX) {
+        let readable = |path: &String| {
+            path.len() <= REPORT_PATH_BYTES_MAX && report_text(folder, path).is_some()
+        };
+        if let Some(path) = report.filter(readable) {
             return Ok(Competitors::Report { path });
         }
     }
@@ -980,18 +1031,22 @@ pub fn read(
         };
         let version = text.as_deref().map(overview_seal).unwrap_or_default();
         let edited = text.is_some() && seal.as_deref() != Some(version.as_str());
+        let proposal_version = proposal.as_deref().map(overview_seal).unwrap_or_default();
+        assert_eq!(proposal.is_none(), proposal_version.is_empty());
         tabs.push(TabState {
             tab,
             text,
             version,
             edited,
             proposal,
+            proposal_version,
             blocked,
         });
     }
     assert_eq!(tabs.len(), Tab::ALL.len());
     let failure = state
         .failure
+        .filter(|_| !needs_home)
         .map(|failure| clipped(failure, FAILURE_BYTES_MAX));
     assert!(
         failure
@@ -1002,8 +1057,10 @@ pub fn read(
         readme: readme(folder),
         tabs,
         competitors: competitors(db, project, folder)?,
-        running: state.running_ms.is_some(),
-        stale: state.stale,
+        running: state
+            .running_ms
+            .is_some_and(|started| now_ms.saturating_sub(started) < run::RUN_MS),
+        stale: state.stale && !needs_home,
         checked_ms: state.checked_ms,
         failure,
         refresh: state.refresh,
