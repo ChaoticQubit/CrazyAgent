@@ -463,7 +463,7 @@ test("Install from the app Don't offer Install: no Install button anywhere, and 
     assert.equal(await refused(bridge, "desktop_harness_install", "aider"), "harness_install_off");
   }));
 
-const NO_TEST_PREFIX = "the engine takes Homebrew and npm for an install only from the fixed Homebrew prefixes (Roots::system), so a fake brew or npm on a test prefix is never used; running the install would run the owner's real Homebrew";
+const NO_TEST_PREFIX = "backlog H-E2E-1: the engine takes Homebrew and npm for an install only from the fixed Homebrew prefixes (Roots::system), and v2.3.0 adds no test prefix because redirecting the install root is security-sensitive; running the install would run the owner's real Homebrew";
 
 test("Install from the app with Homebrew: after the confirm the row shows a version and Ready with no engine restart", { skip: NO_TEST_PREFIX }, () => {});
 
