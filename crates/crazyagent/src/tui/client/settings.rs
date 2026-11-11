@@ -45,6 +45,9 @@ pub(in crate::tui) enum SettingsJob {
     HarnessUpdate {
         id: String,
     },
+    HarnessInstall {
+        id: String,
+    },
     HarnessUpdateSettings,
     Usage {
         since_ms: Option<i64>,
@@ -207,6 +210,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Harnesses => "Harnesses",
             Self::HarnessVersions { .. } => "HarnessVersions",
             Self::HarnessUpdate { .. } => "HarnessUpdate",
+            Self::HarnessInstall { .. } => "HarnessInstall",
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
@@ -328,6 +332,7 @@ pub(in crate::tui) enum SettingsEvent {
     Harnesses(Result<Vec<HarnessEntry>, String>),
     HarnessVersions(String, Result<HarnessVersions, String>),
     HarnessUpdated(String, Result<(), String>),
+    HarnessInstalled(String, Result<(), String>),
     HarnessUpdateSettings(Result<UpdateSettings, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
@@ -384,6 +389,7 @@ impl SettingsEvent {
                 Self::HarnessVersions(id.clone(), Err(problem))
             }
             SettingsJob::HarnessUpdate { id } => Self::HarnessUpdated(id.clone(), Err(problem)),
+            SettingsJob::HarnessInstall { id } => Self::HarnessInstalled(id.clone(), Err(problem)),
             SettingsJob::HarnessUpdateSettings => Self::HarnessUpdateSettings(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
@@ -560,6 +566,16 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 };
                 SettingsEvent::HarnessUpdated(id, result)
+            }
+            SettingsJob::HarnessInstall { id } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_install(&id)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessInstalled(id, result)
             }
             SettingsJob::HarnessUpdateSettings => {
                 SettingsEvent::HarnessUpdateSettings(match self.settings_controller() {

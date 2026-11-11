@@ -214,6 +214,7 @@ const BREW_LINE: &str = "/opt/homebrew/bin/brew upgrade --cask claude-code@lates
 enum Sent {
     Versions(String, bool),
     Update(String),
+    Install(String),
     Settings,
     Other,
 }
@@ -225,6 +226,7 @@ fn sent(ctx: &mut Ctx) -> Vec<Sent> {
             all.push(match *job {
                 SettingsJob::HarnessVersions { id, look } => Sent::Versions(id, look),
                 SettingsJob::HarnessUpdate { id } => Sent::Update(id),
+                SettingsJob::HarnessInstall { id } => Sent::Install(id),
                 SettingsJob::HarnessUpdateSettings => Sent::Settings,
                 _ => Sent::Other,
             });
@@ -277,6 +279,10 @@ fn deliver(shell: &mut Shell, versions: HarnessVersions) {
 }
 
 fn on_claude(found: &Found) -> Shell {
+    on(found, "claude-code")
+}
+
+fn on(found: &Found, id: &str) -> Shell {
     let mut shell = Shell::with(
         harness_ctx(120, 36),
         Box::new(Harnesses::with(found.entries.clone())),
@@ -284,7 +290,7 @@ fn on_claude(found: &Found) -> Shell {
     let at = found
         .entries
         .iter()
-        .position(|entry| entry.id == "claude-code")
+        .position(|entry| entry.id == id)
         .unwrap();
     for _ in 0..at {
         shell.key(Key::Down);
@@ -447,11 +453,14 @@ fn the_settings_decide_the_keys_and_whether_opening_the_page_checks() {
         settings_with(UpdateMode::CheckAndUpdate, CheckWhen::OnOpen),
     ))));
     let looks = sent(&mut shell.ctx);
-    assert_eq!(looks.len(), installed);
-    assert!(
+    assert_eq!(looks.len(), found.entries.len(), "every row is read once");
+    assert_eq!(
         looks
             .iter()
-            .all(|call| matches!(call, Sent::Versions(_, true)))
+            .filter(|call| matches!(call, Sent::Versions(_, true)))
+            .count(),
+        installed,
+        "only installed harnesses look for a newer version"
     );
     shell.refresh();
     assert!(sent(&mut shell.ctx).is_empty(), "one read per page opening");
@@ -484,7 +493,11 @@ fn the_settings_decide_the_keys_and_whether_opening_the_page_checks() {
     shell.arrive(arrival(SettingsEvent::HarnessUpdateSettings(Ok(
         settings_with(UpdateMode::Off, CheckWhen::OnOpen),
     ))));
-    assert!(sent(&mut shell.ctx).is_empty(), "Off reads nothing");
+    assert_eq!(
+        sent(&mut shell.ctx).len(),
+        found.entries.len() - installed,
+        "Off reads only the harnesses that are not installed, for Install"
+    );
     let hints = footer(&mut shell);
     assert!(!hints.contains("Check for updates"), "{hints}");
     shell.key(Key::Char('c'));
@@ -563,4 +576,144 @@ fn a_refused_update_says_the_engine_reason() {
     );
     shell.refresh();
     assert!(sent(&mut shell.ctx).is_empty());
+}
+
+fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
+    HarnessVersions {
+        id: id.into(),
+        method: Method::Unknown,
+        installed: None,
+        latest: Latest::NotChecked,
+        command: None,
+        install: install.map(str::to_owned),
+        refusal: Some(
+            if install.is_some() {
+                "harness_update_not_installed"
+            } else {
+                "harness_install_no_tool"
+            }
+            .into(),
+        ),
+        guide: Some(guide.into()),
+        running: false,
+        last: None,
+    }
+}
+
+const AIDER_LINE: &str = "/opt/homebrew/bin/brew install --formula aider";
+const AIDER_GUIDE: &str = "https://aider.chat/docs/install.html";
+
+#[test]
+fn i_on_a_missing_harness_shows_the_exact_install_line_and_installs_only_after_y() {
+    let found = found();
+    let mut shell = on(&found, "aider");
+    deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
+    assert!(footer(&mut shell).contains("i Install"));
+    shell.key(Key::Char('i'));
+    let shown = frame(&mut shell);
+    assert!(shown.contains(AIDER_LINE), "{shown}");
+    assert!(shown.contains("It never uses sudo and never runs a script from a website."));
+    assert!(shown.contains("When it finishes, new agents can use Aider with no engine restart."));
+    assert!(shown.contains("Install Aider? y to install, any other key to cancel."));
+    shell.key(Key::Esc);
+    assert!(!frame(&mut shell).contains(AIDER_LINE));
+    assert!(
+        sent(&mut shell.ctx)
+            .iter()
+            .all(|call| !matches!(call, Sent::Install(_)))
+    );
+    shell.key(Key::Char('i'));
+    shell.key(Key::Char('y'));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Install("aider".into())]);
+}
+
+#[test]
+fn i_without_an_install_line_shows_the_guide_address_and_sends_nothing() {
+    let found = found();
+    let guide = "https://docs.openhands.dev/openhands/usage/cli/installation";
+    let mut shell = on(&found, "openhands");
+    deliver(&mut shell, missing("openhands", None, guide));
+    assert!(!footer(&mut shell).contains("i Install"));
+    shell.key(Key::Char('i'));
+    let shown = frame(&mut shell);
+    assert!(shown.contains(guide), "{shown}");
+    assert!(shown.contains("CrazyAgent installs with Homebrew or npm and found no way to install this one."));
+    assert!(sent(&mut shell.ctx).is_empty());
+}
+
+#[test]
+fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
+    let found = found();
+    let mut shell = on(&found, "aider");
+    deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
+    shell.key(Key::Char('i'));
+    shell.key(Key::Char('y'));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessInstalled(
+        "aider".into(),
+        Ok(()),
+    )));
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Versions("aider".into(), false)]);
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            running: true,
+            ..missing("aider", Some(AIDER_LINE), AIDER_GUIDE)
+        },
+    );
+    assert!(frame(&mut shell).contains("Installing..."));
+    let lost = LastUpdate {
+        ok: false,
+        code: Some("harness_install_not_found".into()),
+        output: String::new(),
+        from: None,
+        to: None,
+        ended_ms: 1,
+    };
+    deliver(
+        &mut shell,
+        HarnessVersions {
+            last: Some(lost),
+            ..missing("aider", Some(AIDER_LINE), AIDER_GUIDE)
+        },
+    );
+    assert_eq!(sent(&mut shell.ctx), vec![Sent::Other], "the catalog is read again");
+    assert!(frame(&mut shell).contains(
+        "The install finished, but CrazyAgent can't find Aider. Choose Check again."
+    ));
+    let done = HarnessVersions {
+        installed: Some("0.86.2".into()),
+        last: Some(LastUpdate {
+            ok: true,
+            code: None,
+            output: String::new(),
+            from: None,
+            to: Some("0.86.2".into()),
+            ended_ms: 2,
+        }),
+        ..newer()
+    };
+    assert_eq!(
+        last_line(&done, "Aider").as_deref(),
+        Some("Installed version 0.86.2. No restart needed.")
+    );
+}
+
+#[test]
+fn a_refused_install_says_the_engine_reason() {
+    let found = found();
+    let mut shell = on(&found, "aider");
+    deliver(&mut shell, missing("aider", Some(AIDER_LINE), AIDER_GUIDE));
+    shell.key(Key::Char('i'));
+    shell.key(Key::Char('y'));
+    sent(&mut shell.ctx);
+    shell.arrive(arrival(SettingsEvent::HarnessInstalled(
+        "aider".into(),
+        Err("harness_install_off".into()),
+    )));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(
+        (message.lead.as_str(), message.rest.as_str()),
+        ("Could not install Aider.", "Install from the app is off in settings.")
+    );
 }

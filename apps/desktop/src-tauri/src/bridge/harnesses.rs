@@ -5,7 +5,7 @@ use crazyagent::harnesses::update::{HarnessVersions, UpdateSettings};
 const HARNESS_ID_BYTES_MAX: usize = 64;
 const UNKNOWN_HARNESS: &str = "harness_update_unknown_harness";
 const OUTCOME_UNKNOWN: &str = "harness_update_outcome_unknown";
-const HARNESS_CODES: [&str; 17] = [
+const HARNESS_CODES: [&str; 22] = [
     "harness_update_unknown_install",
     "harness_update_with_app",
     "harness_update_tool_missing",
@@ -23,6 +23,11 @@ const HARNESS_CODES: [&str; 17] = [
     "harness_update_check_unreadable",
     UNKNOWN_HARNESS,
     OUTCOME_UNKNOWN,
+    "harness_install_no_tool",
+    "harness_install_off",
+    "harness_install_already",
+    "harness_install_not_found",
+    "harness_install_failed",
 ];
 
 /// Refuses a harness id the catalog could never hold before it reaches the engine.
@@ -105,6 +110,20 @@ impl NativeBridge {
         }
         self.reader()?
             .harness_update(id)
+            .await
+            .map_err(|error| harness_failure(&error.0))
+    }
+
+    /// Starts the install the owner confirmed for a harness that is not on this machine; the
+    /// engine runs it in the background. Input: the catalog id. Output: Ok once it runs, or a
+    /// harness code.
+    pub async fn harness_install(&self, id: &str) -> Result<(), BridgeError> {
+        harness_id(id)?;
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.reader()?
+            .harness_install(id)
             .await
             .map_err(|error| harness_failure(&error.0))
     }
