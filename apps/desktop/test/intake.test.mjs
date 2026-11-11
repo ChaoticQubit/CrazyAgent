@@ -781,6 +781,34 @@ test("the setup review links a found roadmap and hides roadmap planning while it
   assert.doesNotMatch(saved, /Roadmap found/);
 });
 
+test("a roadmap planning group is shown as a found roadmap, hides roadmap planning while used and is kept as its own kind", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "ScholarScope", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const planning = { kind: "roadmap_planning", files: ["docs/next.md"] };
+  const facts = { ...view().facts, research: [{ kind: "market_research", files: ["docs/market.md"] }, planning] };
+  const mapped = view({ facts });
+  const repo = intake.inRepo(facts);
+  assert.deepEqual(repo.roadmap, ["docs/next.md"]);
+  assert.deepEqual(repo.research, { market_research: ["docs/market.md"] });
+  const draft = intake.onboardingDraft(mapped, stored());
+  const linked = html(OnboardingReviewView, { ...base, view: ok(mapped), draft });
+  assert.match(linked, /<legend>Roadmap found<\/legend><p class="pj-help">Linked: docs\/next\.md\. /);
+  assert.match(linked, /<input type="checkbox" checked=""\/><span>Use these files<\/span>/);
+  assert.doesNotMatch(linked, /id="ob-roadmap"/);
+  const off = html(OnboardingReviewView, { ...base, view: ok(mapped), draft, dropped: ["roadmap"] });
+  assert.match(off, /In the repo: docs\/next\.md/);
+  assert.match(off, /id="ob-roadmap"/);
+  const market = { path: "docs/market.md", research: "market_research" };
+  const next = { path: "docs/next.md", research: "roadmap_planning" };
+  assert.deepEqual(intake.confirmKept(mapped, []), [next, market]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap"]), [market], "unticked with the roadmap, the planning file is linked as nothing");
+  assert.deepEqual(intake.confirmKept(mapped, ["market_research"]), [next]);
+  const both = view({ facts: { ...facts, roadmap: ["docs/next.md", "ROADMAP.md"] } });
+  assert.deepEqual(intake.inRepo(both.facts).roadmap, ["docs/next.md", "ROADMAP.md"], "a file found both ways is shown once");
+  assert.deepEqual(intake.confirmKept(both, ["market_research"]), [{ path: "docs/next.md", research: null }, { path: "ROADMAP.md", research: null }, next]);
+  assert.deepEqual(intake.confirmKept(both, ["roadmap", "market_research"]), []);
+});
+
 test("the first confirm keeps the found roadmap and research files the owner left ticked", () => {
   const facts = {
     ...view().facts,
@@ -791,9 +819,14 @@ test("the first confirm keeps the found roadmap and research files the owner lef
     ],
   };
   const mapped = view({ facts });
-  assert.deepEqual(intake.confirmKept(mapped, []), ["research/docs/ss-phase1-revision/report.md", "docs/rivals.md", "docs/market.md"]);
-  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "market_research"]), ["docs/rivals.md", "research/docs/ss-phase1-revision/report.md"]);
+  const roadmap = "research/docs/ss-phase1-revision/report.md";
+  const rivals = [{ path: "docs/rivals.md", research: "competitor_research" }, { path: roadmap, research: "competitor_research" }];
+  assert.deepEqual(intake.confirmKept(mapped, []), [{ path: roadmap, research: null }, ...rivals, { path: "docs/market.md", research: "market_research" }]);
+  assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "market_research"]), rivals, "a file also found as the roadmap goes only with the group left on");
+  assert.deepEqual(intake.confirmKept(mapped, ["competitor_research"]), [{ path: roadmap, research: null }, { path: "docs/market.md", research: "market_research" }]);
   assert.deepEqual(intake.confirmKept(mapped, ["roadmap", "competitor_research", "market_research"]), []);
+  const twice = view({ facts: { ...facts, roadmap: [roadmap, roadmap] } });
+  assert.deepEqual(intake.confirmKept(twice, ["competitor_research", "market_research"]), [{ path: roadmap, research: null }], "a file named twice in one group is kept once");
   assert.equal(intake.confirmKept(view({ facts, finished: true }), []), null, "a saved setup leaves its links alone");
   assert.equal(intake.confirmKept(view(), []), null, "nothing found, nothing to link");
   const many = view({ facts: { ...view().facts, research: [{ kind: "market_research", files: Array.from({ length: 40 }, (_, at) => `docs/${at}.md`) }] } });

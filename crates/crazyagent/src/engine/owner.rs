@@ -188,7 +188,7 @@ pub enum OwnerMutation {
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        kept: Option<Vec<String>>,
+        kept: Option<Vec<crate::project_setup::KeptFile>>,
     },
     RemoveProject {
         project_id: ProjectId,

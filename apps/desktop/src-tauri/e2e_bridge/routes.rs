@@ -16,6 +16,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::owner_profile::OwnerProfile;
     use crazyagent::plugins::Scope;
     use crazyagent::plugins::ServerSpec;
+    use crazyagent::project_setup::KeptFile;
     use crazyagent::project_setup::ProjectSetup;
     use crazyagent::project_setup::ResearchKind;
     use crazyagent::projects_home::AddMode;
@@ -1326,7 +1327,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 name: Option<String>,
                 revision: Option<u64>,
                 generation: u64,
-                kept: Option<Vec<String>>,
+                kept: Option<Vec<KeptFile>>,
             }
             let Args { id, setup, name, revision, generation, kept } = match parse(args) {
                 Ok(args) => args,

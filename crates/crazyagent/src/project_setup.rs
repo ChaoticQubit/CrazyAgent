@@ -784,6 +784,16 @@ pub enum SetupView {
     LiveWithoutSession(String),
 }
 
+/// One file the setup mapping found that the owner kept linked, with the group it was found
+/// under: `research` is the research kind, none for a file found as the roadmap. A file
+/// found under two groups is kept once per group the owner left on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptFile {
+    pub path: String,
+    pub research: Option<ResearchKind>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum SetupAction {
@@ -811,7 +821,7 @@ pub enum SetupAction {
         name: Option<String>,
         setup: ProjectSetup,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        kept: Option<Vec<String>>,
+        kept: Option<Vec<KeptFile>>,
     },
     Remove {
         project_id: ProjectId,
@@ -925,7 +935,7 @@ impl SetupAction {
                     kept.len() > links::LINKS_MAX
                         || kept
                             .iter()
-                            .any(|path| path.len() > links::LINK_PATH_BYTES_MAX)
+                            .any(|file| file.path.len() > DOCUMENT_PATH_BYTES_MAX)
                 }) {
                     return Err(failure("project_setup_bounds"));
                 }
@@ -2100,10 +2110,12 @@ fn rejected(code: &str) -> Outcome {
 }
 
 /// Changes an existing project's name, description, stack, platforms, research, pool and team.
-/// With `kept`, the files the setup mapping found that the owner kept become the project's
-/// links, replacing earlier ones, and no research job is queued for a kind they cover.
+/// With `kept` on the first confirm, the files the setup mapping found that the owner kept
+/// become the project's links, each under the group it was kept in, and no research job is
+/// queued for a kind they cover. Once the owner saved the setup, `kept` is left unread, so
+/// no later update from any client replaces or clears the links.
 /// Takes the transaction, configuration, project, the setup revision the owner edited, an
-/// optional new name, the new setup and the kept paths, none to leave the links alone;
+/// optional new name, the new setup and the kept files, none to leave the links alone;
 /// documents keep their own add and delete actions. Returns Applied, or a plain rejection
 /// such as `stale_revision` after a concurrent change.
 fn update(
@@ -2113,7 +2125,7 @@ fn update(
     expected_revision: u64,
     name: Option<&str>,
     setup: &ProjectSetup,
-    kept: Option<&[String]>,
+    kept: Option<&[KeptFile]>,
 ) -> Result<Outcome, EngineError> {
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
@@ -2121,6 +2133,7 @@ fn update(
     if stored.revision != expected_revision {
         return Ok(rejected("stale_revision"));
     }
+    let first_confirm = !stored.saved();
     if setup.pool != stored.pool
         && setup
             .pool
@@ -2150,7 +2163,9 @@ fn update(
         .collect();
     stored.platforms = setup.platforms.clone();
     stored.research = setup.research.clone();
-    if let Some(kept) = kept {
+    if let Some(kept) = kept
+        && first_confirm
+    {
         let linked = crate::onboarding::found_links(tx, project_id, kept)?;
         links::set(tx, project_id, &linked)?;
         stored.research.retain(|kind| {
