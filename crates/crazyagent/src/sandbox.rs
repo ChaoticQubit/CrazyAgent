@@ -1067,6 +1067,7 @@ impl ProjectSandbox {
     /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Only the engine's own worktree-add step installs it,
     /// and its callers confine and reinstall the profile before any agent runs.
     /// Output: the sandbox with that exemption.
+    #[cfg(unix)]
     pub(crate) fn adding_worktrees(mut self) -> Self {
         self.adds_worktrees = true;
         self

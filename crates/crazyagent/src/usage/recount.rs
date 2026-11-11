@@ -745,7 +745,7 @@ pub(super) fn forget_copy(db: &Connection, now_ms: i64) -> Result<(), EngineErro
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod tests_support {
     use super::*;
     use crate::usage::capture::RunKind;

@@ -1660,6 +1660,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 /// stopped after a removal leaves no row (HB-S5-I). Apart from [`initialize`] because it
 /// reads `projects`, which only the engine's own schema has. Takes the engine database.
 /// Returns a SQLite failure.
+#[cfg(unix)]
 pub(crate) fn log_status_changes(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(

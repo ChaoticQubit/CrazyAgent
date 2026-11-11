@@ -782,7 +782,7 @@ pub(super) fn session_name(path: &Path) -> String {
 /// A replaced or shortened record starts over; one whose volume a reboot renumbered keeps
 /// its place. A line longer than the read is skipped.
 /// Inputs: the record, its progress and the time. Output: the records and the last limits.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn read_record(
     path: &Path,
     format: Format,
@@ -831,7 +831,7 @@ fn read_record_with(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn read_opened(
     opened: (File, (u64, u64), u64),
     format: Format,
@@ -1475,6 +1475,7 @@ pub(super) fn filed_model<'a>(
 /// spellings of one harness become one row, and the message a transcript was counting moves
 /// to `usage_messages`. A store already in the new shape only gets what it lacks.
 /// Input: the open upgrade transaction. Output: done, or `usage_unavailable`.
+#[cfg(any(unix, test))]
 pub(crate) fn migrate_counts(tx: &Connection) -> Result<(), EngineError> {
     let shaped: bool = tx
         .query_row(
