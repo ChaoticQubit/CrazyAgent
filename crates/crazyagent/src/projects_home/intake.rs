@@ -1,7 +1,9 @@
-use super::platform::{copy_link, permission_bits, private_folder, writable_folder};
+use super::platform::{Stamp, copy_link, permission_bits, private_folder, stamp, writable_folder};
 use super::{AddMode, holds_owner_home, owner_home, path_text, real_folder, refused};
 use crate::engine::EngineError;
+use std::collections::HashMap;
 use std::fs;
+use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -96,7 +98,8 @@ impl AddPlan {
                 &self.destination,
                 Copying::Standalone,
                 self.bounds,
-            ),
+            )
+            .map(drop),
         }
     }
 }
@@ -178,14 +181,100 @@ pub fn move_by_copy(source: &Path, destination: &Path) -> Result<(), EngineError
     move_within(source, destination, COPY_BOUNDS)
 }
 
-/// `move_by_copy` within the given bounds: the source is removed only after every
-/// entry of the copy matched it. Inputs: the source, the destination and the bounds.
-/// Output: as `move_by_copy`.
+/// `move_by_copy` within the given bounds: only source entries the check of the copy
+/// matched, and still as it saw them, are removed. Inputs: the source, the destination and
+/// the bounds. Output: as `move_by_copy`.
 fn move_within(source: &Path, destination: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
-    copy_into(source, destination, Copying::Exact, bounds)?;
-    make_writable(source)
-        .and_then(|()| fs::remove_dir_all(source))
-        .map_err(|_| refused("home_move_source_left"))
+    let verified = copy_into(source, destination, Copying::Exact, bounds)?;
+    make_writable(source).map_err(|_| source_left(1))?;
+    remove_verified(source, &verified, bounds)
+}
+
+/// The source files and links a move's check found equal in the copy, each under a hash of
+/// its path with the stamp it had when checked. The move deletes only entries still carrying
+/// that stamp, so a file iCloud syncs in or changes after the check stays. Two paths sharing
+/// a hash keep one stamp, so the other entry stays too.
+#[derive(Debug, Default)]
+struct Verified(HashMap<u64, Stamp>);
+
+impl Verified {
+    fn key(path: &Path) -> u64 {
+        BuildHasherDefault::<DefaultHasher>::default().hash_one(path)
+    }
+
+    fn record(&mut self, path: &Path, metadata: &fs::Metadata) {
+        assert!(!metadata.is_dir() || metadata.file_type().is_symlink());
+        if let Some(checked) = stamp(metadata) {
+            self.0.insert(Self::key(path), checked);
+        }
+    }
+
+    fn holds(&self, path: &Path, metadata: &fs::Metadata) -> bool {
+        assert!(!metadata.is_dir() || metadata.file_type().is_symlink());
+        stamp(metadata).is_some_and(|now| self.0.get(&Self::key(path)) == Some(&now))
+    }
+}
+
+/// Deletes the files and links of a moved source that still carry the stamp its check saw,
+/// then each folder left empty, deepest first. An entry the check never saw or that changed
+/// since, such as a file iCloud synced in, stays with its folders.
+/// Inputs: the source, what the check matched and the bounds. Output: Ok once the source is
+/// gone, else `home_move_source_left`, logged with the count of entries kept.
+fn remove_verified(
+    source: &Path,
+    verified: &Verified,
+    bounds: CopyBounds,
+) -> Result<(), EngineError> {
+    assert!(source.is_absolute());
+    let mut folders = vec![source.to_path_buf()];
+    let mut stack = vec![(source.to_path_buf(), 0usize)];
+    let mut entries = 0u64;
+    let mut kept = 0u64;
+    while let Some((folder, depth)) = stack.pop() {
+        let Ok(listing) = fs::read_dir(&folder) else {
+            kept += 1;
+            continue;
+        };
+        for entry in listing {
+            entries += 1;
+            if entries > bounds.entries {
+                return Err(source_left(kept + 1));
+            }
+            let Ok(path) = entry.map(|entry| entry.path()) else {
+                kept += 1;
+                continue;
+            };
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                kept += 1;
+                continue;
+            };
+            let inner = metadata.is_dir() && !metadata.file_type().is_symlink();
+            if inner && !super::icloud::dataless(&metadata) && depth < bounds.depth {
+                folders.push(path.clone());
+                stack.push((path, depth + 1));
+            } else if inner || !verified.holds(&path, &metadata) || fs::remove_file(&path).is_err()
+            {
+                kept += 1;
+            }
+        }
+    }
+    for folder in folders.iter().rev() {
+        if fs::remove_dir(folder).is_err() {
+            kept += 1;
+        }
+    }
+    assert!(entries <= bounds.entries);
+    assert_eq!(folders.first().map(PathBuf::as_path), Some(source));
+    if kept > 0 {
+        return Err(source_left(kept));
+    }
+    Ok(())
+}
+
+fn source_left(kept: u64) -> EngineError {
+    assert!(kept > 0);
+    eprintln!("home_move_source_left kept={kept}");
+    refused("home_move_source_left")
 }
 
 /// Makes a source whole again after `move_by_copy` landed its checked copy
@@ -273,7 +362,7 @@ fn copy_into(
     destination: &Path,
     how: Copying,
     bounds: CopyBounds,
-) -> Result<(), EngineError> {
+) -> Result<Verified, EngineError> {
     let parent = destination
         .parent()
         .ok_or_else(|| refused("home_copy_failed"))?;
@@ -291,13 +380,16 @@ fn copy_into(
             &staging,
             &|path, kind| left_out(source, path, kind),
             bounds,
-        ),
+        )
+        .map(|()| Verified::default()),
     }
-    .and_then(|()| {
+    .and_then(|verified| {
         if fs::symlink_metadata(destination).is_ok() {
             return Err(refused("home_destination_exists"));
         }
-        fs::rename(&staging, destination).map_err(|e| failed_step("place", &e, "home_copy_failed"))
+        fs::rename(&staging, destination)
+            .map(|()| verified)
+            .map_err(|e| failed_step("place", &e, "home_copy_failed"))
     });
     if result.is_err() && fs::symlink_metadata(&staging).is_ok() {
         let _ = make_writable(&staging);
@@ -321,6 +413,15 @@ fn failed_step(step: &str, error: &std::io::Error, other: &'static str) -> Engin
     let errno = error.raw_os_error().unwrap_or(0);
     eprintln!("home_add_step_failed step={step} code={code} errno={errno}");
     refused(code)
+}
+
+/// The refusal for a placeholder an add step met: its data lives only in iCloud, and
+/// reading it would fail or fetch it, so nothing of it is copied, checked or deleted.
+/// Input: the step. Output: `home_icloud_not_downloaded`, logged by step, never by path.
+fn still_in_icloud(step: &str) -> EngineError {
+    assert!(!step.is_empty());
+    eprintln!("home_add_step_failed step={step} code=home_icloud_not_downloaded cause=dataless");
+    refused("home_icloud_not_downloaded")
 }
 
 fn make_writable(root: &Path) -> std::io::Result<()> {
@@ -436,6 +537,9 @@ fn copy_entries(
     if !root.is_dir() || root.file_type().is_symlink() {
         return Err(refused("home_source_not_folder"));
     }
+    if super::icloud::dataless(&root) {
+        return Err(still_in_icloud("copy"));
+    }
     fs::create_dir(target).map_err(failed)?;
     private_folder(target).map_err(failed)?;
     let mut folders = vec![(target.to_path_buf(), root.permissions())];
@@ -454,6 +558,9 @@ fn copy_entries(
             let kind = metadata.file_type();
             if skip(&path, kind) {
                 continue;
+            }
+            if super::icloud::dataless(&metadata) {
+                return Err(still_in_icloud("copy"));
             }
             if kind.is_symlink() {
                 let link = fs::read_link(&path).map_err(failed)?;
@@ -486,18 +593,23 @@ fn copy_entries(
 /// kinds, permission bits, symlink targets and file bytes; otherwise
 /// `home_copy_unverified`.
 pub fn verify_tree(source: &Path, copy: &Path) -> Result<(), EngineError> {
-    verify_within(source, copy, COPY_BOUNDS)
+    verify_within(source, copy, COPY_BOUNDS).map(drop)
 }
 
 /// `verify_tree` within the given bounds. Inputs: the source, the copy and the bounds.
-/// Output: as `verify_tree`.
-fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<(), EngineError> {
+/// Output: the source files and links found equal, or the code of `verify_tree`, or
+/// `home_icloud_not_downloaded` for a source entry whose data lives only in iCloud.
+fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<Verified, EngineError> {
     let differs = || refused("home_copy_unverified");
+    let mut verified = Verified::default();
     let mut stack = vec![(source.to_path_buf(), copy.to_path_buf(), 0usize)];
     let mut entries = 0u64;
     while let Some((left, right, depth)) = stack.pop() {
         let a = fs::symlink_metadata(&left).map_err(|_| differs())?;
         let b = fs::symlink_metadata(&right).map_err(|_| differs())?;
+        if super::icloud::dataless(&a) {
+            return Err(still_in_icloud("verify"));
+        }
         if a.file_type().is_symlink() != b.file_type().is_symlink()
             || a.is_dir() != b.is_dir()
             || a.is_file() != b.is_file()
@@ -508,6 +620,7 @@ fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<(), E
             if fs::read_link(&left).ok() != fs::read_link(&right).ok() {
                 return Err(differs());
             }
+            verified.record(&left, &a);
             continue;
         }
         if permission_bits(&a) != permission_bits(&b) {
@@ -517,6 +630,7 @@ fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<(), E
             if a.len() != b.len() || !same_bytes(&left, &right)? {
                 return Err(differs());
             }
+            verified.record(&left, &a);
             continue;
         }
         if depth > bounds.depth {
@@ -542,7 +656,8 @@ fn verify_within(source: &Path, copy: &Path, bounds: CopyBounds) -> Result<(), E
             stack.push((left.join(&name), right.join(&name), depth + 1));
         }
     }
-    Ok(())
+    assert!(verified.0.len() as u64 <= entries + 1);
+    Ok(verified)
 }
 
 fn same_bytes(left: &Path, right: &Path) -> Result<bool, EngineError> {
@@ -579,10 +694,11 @@ pub struct Measured {
 }
 
 /// Adds up the bytes of the files in a folder without following links, and counts its
-/// iCloud placeholders. Input: the owner's path text and the time by which to give up.
-/// Output: the measure, `folder_size_unsafe` for `/`, the user's home folder or any folder
-/// holding it, `folder_size_unreadable`, `folder_size_timeout` or `folder_size_too_large`
-/// past the entry bound.
+/// iCloud placeholders; a folder that is a placeholder itself counts as one.
+/// Input: the owner's path text and the time by which to give up. Output: the measure,
+/// `folder_size_unsafe` for `/`, the user's home folder or any folder holding it,
+/// `folder_size_unreadable`, `folder_size_timeout` or `folder_size_too_large` past the
+/// entry bound.
 pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineError> {
     path_text(path, "folder_size_path_invalid")?;
     let root = real_folder(
@@ -592,6 +708,13 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
     )?;
     if holds_owner_home(&root, &owner_home()?) {
         return Err(refused("folder_size_unsafe"));
+    }
+    let top = fs::symlink_metadata(&root).map_err(|_| refused("folder_size_unreadable"))?;
+    if super::icloud::dataless(&top) {
+        return Ok(Measured {
+            bytes: 0,
+            placeholders: 1,
+        });
     }
     let mut bytes = 0u64;
     let mut placeholders = 0u64;
@@ -628,3 +751,6 @@ pub fn folder_size(path: &str, deadline: Instant) -> Result<Measured, EngineErro
         placeholders,
     })
 }
+
+#[cfg(all(test, unix))]
+mod tests;

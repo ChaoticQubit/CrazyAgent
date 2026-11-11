@@ -15,6 +15,7 @@ const SF_DATALESS: u32 = 0x4000_0000;
 const BRCTL: &str = "/usr/bin/brctl";
 pub const BATCH_PATHS_MAX: usize = 128;
 pub const STALL_MAX: Duration = Duration::from_secs(10 * 60);
+const STALL_FLOOR_BYTES_PER_SEC: u64 = 1024 * 1024;
 pub const DOWNLOAD_TIME_MAX: Duration = Duration::from_secs(4 * 60 * 60);
 const POLL_EVERY: Duration = Duration::from_secs(2);
 const CANCEL_EVERY: Duration = Duration::from_millis(100);
@@ -157,12 +158,28 @@ impl Drop for Claim<'_> {
     }
 }
 
+/// The placeholders one listing found: their paths and the logical size of the largest,
+/// which sets how long the wait allows its download.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Placeholders {
+    pub paths: Vec<PathBuf>,
+    pub largest_bytes: u64,
+}
+
 /// Lists the placeholders under a folder without following links and without listing a
-/// placeholder folder, which a process that may not download cannot read.
-/// Input: the real folder. Output: their paths, `home_copy_too_large` past the copy bounds,
-/// or the code of the read that failed.
-pub fn placeholders(root: &Path) -> Result<Vec<PathBuf>, EngineError> {
-    let mut found = Vec::new();
+/// placeholder folder, which a process that may not download cannot read; a folder that is
+/// a placeholder itself is the one placeholder found.
+/// Input: the real folder. Output: the placeholders, `home_copy_too_large` past the copy
+/// bounds, or the code of the read that failed.
+pub fn placeholders(root: &Path) -> Result<Placeholders, EngineError> {
+    let top = fs::symlink_metadata(root).map_err(|e| read_failed(&e))?;
+    if dataless(&top) {
+        return Ok(Placeholders {
+            paths: vec![root.to_path_buf()],
+            largest_bytes: top.len(),
+        });
+    }
+    let mut found = Placeholders::default();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     let mut entries = 0u64;
     while let Some((folder, depth)) = stack.pop() {
@@ -174,7 +191,8 @@ pub fn placeholders(root: &Path) -> Result<Vec<PathBuf>, EngineError> {
             let path = entry.map_err(|e| read_failed(&e))?.path();
             let metadata = fs::symlink_metadata(&path).map_err(|e| read_failed(&e))?;
             if dataless(&metadata) {
-                found.push(path);
+                found.largest_bytes = found.largest_bytes.max(metadata.len());
+                found.paths.push(path);
             } else if metadata.is_dir() && !metadata.file_type().is_symlink() {
                 if depth + 1 > COPY_BOUNDS.depth {
                     return Err(refused("home_copy_too_large"));
@@ -183,7 +201,8 @@ pub fn placeholders(root: &Path) -> Result<Vec<PathBuf>, EngineError> {
             }
         }
     }
-    assert!(found.len() as u64 <= entries);
+    assert!(found.paths.len() as u64 <= entries);
+    assert!(found.largest_bytes == 0 || !found.paths.is_empty());
     Ok(found)
 }
 
@@ -192,9 +211,10 @@ pub fn placeholders(root: &Path) -> Result<Vec<PathBuf>, EngineError> {
 /// placeholder is left, recording progress as it goes.
 /// Inputs: the owner's folder text and the claimed download. Output: how many placeholders
 /// were downloaded, `home_icloud_not_downloaded` when cancelled, when no file arrives for
-/// `STALL_MAX`, after `DOWNLOAD_TIME_MAX` or when brctl fails, `home_permission_denied` when
-/// macOS keeps the folder from CrazyAgent, or the folder check's code. The folder's files are
-/// never moved or changed; downloads macOS already started may still finish after a stop.
+/// `STALL_MAX` plus the largest file's time at 1 MiB/s, after `DOWNLOAD_TIME_MAX` or when
+/// brctl fails, `home_permission_denied` when macOS keeps the folder from CrazyAgent, or the
+/// folder check's code. The folder's files are never moved or changed; downloads macOS
+/// already started may still finish after a stop.
 pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
     path_text(path, "icloud_path_invalid")?;
     let root = real_folder(
@@ -212,14 +232,15 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
     for _ in 0..PASSES_MAX {
         let left = placeholders(&root)?;
         let fresh: Vec<PathBuf> = left
+            .paths
             .iter()
             .filter(|path| asked.insert(hasher.hash_one(path)))
             .cloned()
             .collect();
         let total = asked.len() as u64;
-        let done = total.saturating_sub(left.len() as u64);
+        let done = total.saturating_sub(left.paths.len() as u64);
         download.record(total, done);
-        if left.is_empty() {
+        if left.paths.is_empty() {
             return Ok(total);
         }
         if download.cancelled() {
@@ -228,7 +249,7 @@ pub fn download(path: &str, download: &Download) -> Result<u64, EngineError> {
         for batch in fresh.chunks(BATCH_PATHS_MAX) {
             request(batch, download)?;
         }
-        match watch.observe(done, Instant::now()) {
+        match watch.observe(done, left.largest_bytes, Instant::now()) {
             Verdict::Wait => pause(download, POLL_EVERY)?,
             Verdict::Stalled => return Err(stopped("stalled")),
             Verdict::TimedOut => return Err(stopped("timed_out")),
@@ -310,8 +331,9 @@ fn pause(download: &Download, span: Duration) -> Result<(), EngineError> {
 }
 
 /// Decides after each pass whether a download keeps waiting: it stops as stalled once no
-/// more files arrived for `STALL_MAX`, which on a lost connection ends the wait instead of
-/// holding it for hours, and as timed out at its deadline, which bounds a very slow trickle.
+/// more files arrived for `STALL_MAX` plus the time the largest file left takes at
+/// `STALL_FLOOR_BYTES_PER_SEC`, which on a lost connection ends the wait instead of holding
+/// it for hours, and as timed out at its deadline, which bounds a very slow trickle.
 #[derive(Debug)]
 struct Watch {
     deadline: Instant,
@@ -336,17 +358,21 @@ impl Watch {
         }
     }
 
-    /// Takes one pass's count of files on this Mac. Inputs: the count and the time.
-    /// Output: the verdict.
-    fn observe(&mut self, done: u64, now: Instant) -> Verdict {
+    /// Takes one pass's count of files on this Mac. Inputs: the count, the logical size of
+    /// the largest placeholder left and the time. Output: the verdict.
+    fn observe(&mut self, done: u64, largest_bytes: u64, now: Instant) -> Verdict {
         assert!(now >= self.since);
         if done > self.most {
             self.most = done;
             self.since = now;
         }
+        let quiet_max = STALL_MAX.saturating_add(Duration::from_secs(
+            largest_bytes / STALL_FLOOR_BYTES_PER_SEC,
+        ));
+        assert!(quiet_max >= STALL_MAX);
         if now >= self.deadline {
             Verdict::TimedOut
-        } else if now.duration_since(self.since) >= STALL_MAX {
+        } else if now.duration_since(self.since) >= quiet_max {
             Verdict::Stalled
         } else {
             Verdict::Wait

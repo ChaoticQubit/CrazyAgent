@@ -8,13 +8,13 @@ fn seconds(count: u64) -> Duration {
 fn a_download_keeps_waiting_while_files_arrive_and_stops_after_ten_quiet_minutes() {
     let start = Instant::now();
     let mut watch = Watch::new(start, start + DOWNLOAD_TIME_MAX);
-    assert_eq!(watch.observe(0, start), Verdict::Wait);
-    assert_eq!(watch.observe(5, start + seconds(300)), Verdict::Wait);
-    assert_eq!(watch.observe(5, start + seconds(899)), Verdict::Wait);
-    assert_eq!(watch.observe(6, start + seconds(1199)), Verdict::Wait);
-    assert_eq!(watch.observe(6, start + seconds(1798)), Verdict::Wait);
+    assert_eq!(watch.observe(0, 0, start), Verdict::Wait);
+    assert_eq!(watch.observe(5, 0, start + seconds(300)), Verdict::Wait);
+    assert_eq!(watch.observe(5, 0, start + seconds(899)), Verdict::Wait);
+    assert_eq!(watch.observe(6, 0, start + seconds(1199)), Verdict::Wait);
+    assert_eq!(watch.observe(6, 0, start + seconds(1798)), Verdict::Wait);
     assert_eq!(
-        watch.observe(6, start + seconds(1199) + STALL_MAX),
+        watch.observe(6, 0, start + seconds(1199) + STALL_MAX),
         Verdict::Stalled
     );
 }
@@ -23,9 +23,9 @@ fn a_download_keeps_waiting_while_files_arrive_and_stops_after_ten_quiet_minutes
 fn a_download_whose_count_drops_back_is_not_progress() {
     let start = Instant::now();
     let mut watch = Watch::new(start, start + DOWNLOAD_TIME_MAX);
-    assert_eq!(watch.observe(10, start), Verdict::Wait);
-    assert_eq!(watch.observe(4, start + seconds(60)), Verdict::Wait);
-    assert_eq!(watch.observe(9, start + STALL_MAX), Verdict::Stalled);
+    assert_eq!(watch.observe(10, 0, start), Verdict::Wait);
+    assert_eq!(watch.observe(4, 0, start + seconds(60)), Verdict::Wait);
+    assert_eq!(watch.observe(9, 0, start + STALL_MAX), Verdict::Stalled);
 }
 
 #[test]
@@ -33,8 +33,30 @@ fn a_download_still_making_progress_stops_at_its_deadline() {
     let start = Instant::now();
     let deadline = start + seconds(100);
     let mut watch = Watch::new(start, deadline);
-    assert_eq!(watch.observe(1, start + seconds(99)), Verdict::Wait);
-    assert_eq!(watch.observe(2, deadline), Verdict::TimedOut);
+    assert_eq!(watch.observe(1, 0, start + seconds(99)), Verdict::Wait);
+    assert_eq!(watch.observe(2, 0, deadline), Verdict::TimedOut);
+}
+
+#[test]
+fn a_large_file_left_gets_time_for_its_bytes_before_the_wait_reads_stalled() {
+    let start = Instant::now();
+    let mut watch = Watch::new(start, start + DOWNLOAD_TIME_MAX);
+    let large = 4096 * STALL_FLOOR_BYTES_PER_SEC;
+    assert_eq!(watch.observe(3, large, start), Verdict::Wait);
+    assert_eq!(watch.observe(3, large, start + STALL_MAX), Verdict::Wait);
+    assert_eq!(
+        watch.observe(3, large, start + STALL_MAX + seconds(4095)),
+        Verdict::Wait
+    );
+    assert_eq!(
+        watch.observe(3, large, start + STALL_MAX + seconds(4096)),
+        Verdict::Stalled
+    );
+    let mut small = Watch::new(start, start + DOWNLOAD_TIME_MAX);
+    assert_eq!(
+        small.observe(0, STALL_FLOOR_BYTES_PER_SEC - 1, start + STALL_MAX),
+        Verdict::Stalled
+    );
 }
 
 #[test]
@@ -74,6 +96,7 @@ fn one_download_runs_at_a_time_and_a_dropped_claim_cancels_it_and_frees_the_slot
     assert!(again.download().cancelled());
 }
 
+#[cfg(unix)]
 #[test]
 fn brctl_runs_by_absolute_path_with_each_placeholder_as_its_own_argument() {
     let batch = vec![
@@ -97,7 +120,10 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
     fs::create_dir_all(folder.path().join("src/deep")).unwrap();
     fs::write(folder.path().join("src/deep/main.rs"), "fn main() {}\n").unwrap();
     std::os::unix::fs::symlink("/", folder.path().join("root-link")).unwrap();
-    assert_eq!(placeholders(folder.path()).unwrap(), Vec::<PathBuf>::new());
+    assert_eq!(
+        placeholders(folder.path()).unwrap(),
+        Placeholders::default()
+    );
     let download = Download::default();
     let path = folder.path().to_str().unwrap();
     assert_eq!(super::download(path, &download).unwrap(), 0);
@@ -115,22 +141,67 @@ fn a_folder_with_no_placeholders_downloads_nothing_and_never_runs_brctl() {
     }
 }
 
+/// A folder of this test's own in iCloud Drive, removed when dropped.
+#[cfg(target_os = "macos")]
+struct Probe(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl Probe {
+    fn new() -> Self {
+        let drive = PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join("Library/Mobile Documents/com~apple~CloudDocs");
+        let mut token = [0u8; 4];
+        getrandom::fill(&mut token).unwrap();
+        let name = format!(
+            "ca-probe-test-{:02x}{:02x}{:02x}{:02x}",
+            token[0], token[1], token[2], token[3]
+        );
+        let folder = drive.join(&name);
+        assert!(folder.starts_with(&drive) && name.starts_with("ca-probe-test-"));
+        fs::create_dir(&folder).unwrap();
+        eprintln!("probe folder {name}");
+        Self(folder)
+    }
+
+    /// Waits for each file to upload, then makes it a placeholder.
+    fn evict(&self, files: &[PathBuf]) {
+        assert!(files.iter().all(|file| file.starts_with(&self.0)));
+        let asked = |file: &PathBuf| {
+            crate::spawn_gate::status(
+                Command::new(BRCTL)
+                    .arg("evict")
+                    .arg(file)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            )
+            .is_ok_and(|status| status.success())
+        };
+        let evicted =
+            |file: &PathBuf| fs::symlink_metadata(file).is_ok_and(|metadata| dataless(&metadata));
+        let done = (0..90).any(|_| {
+            std::thread::sleep(seconds(2));
+            files.iter().filter(|file| asked(file)).count() == files.len()
+                && files.iter().all(evicted)
+        });
+        assert!(done, "the probe files never became placeholders");
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Probe {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Makes files placeholders in a folder of iCloud Drive and downloads them again, on a Mac
 /// signed in to iCloud Drive. Run with `--ignored`; it waits for the upload before evicting.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "needs iCloud Drive on this Mac and a network"]
 fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wait() {
-    let drive = PathBuf::from(std::env::var_os("HOME").unwrap())
-        .join("Library/Mobile Documents/com~apple~CloudDocs");
-    let mut token = [0u8; 4];
-    getrandom::fill(&mut token).unwrap();
-    let name = format!(
-        "ca-probe-test-{:02x}{:02x}{:02x}{:02x}",
-        token[0], token[1], token[2], token[3]
-    );
-    let folder = drive.join(&name);
-    assert!(folder.starts_with(&drive) && name.starts_with("ca-probe-test-"));
+    let probe = Probe::new();
+    let folder = probe.0.clone();
     fs::create_dir_all(folder.join("deep/er")).unwrap();
     let mut files = Vec::new();
     for index in 0..40 {
@@ -142,22 +213,10 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
         fs::write(&file, format!("probe {index}\n")).unwrap();
         files.push(file);
     }
-    let evict = |file: &Path| {
-        crate::spawn_gate::status(
-            Command::new(BRCTL)
-                .arg("evict")
-                .arg(file)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )
-        .is_ok_and(|status| status.success())
-    };
-    let uploaded = (0..60).any(|_| {
-        std::thread::sleep(seconds(2));
-        files.iter().all(|file| evict(file))
-    });
-    assert!(uploaded, "the probe files never finished uploading");
-    assert_eq!(placeholders(&folder).unwrap().len(), files.len());
+    probe.evict(&files);
+    let left = placeholders(&folder).unwrap();
+    assert_eq!(left.paths.len(), files.len());
+    assert_eq!(left.largest_bytes, "probe 10\n".len() as u64);
     let measured =
         super::super::folder_size(folder.to_str().unwrap(), Instant::now() + seconds(30)).unwrap();
     assert_eq!(measured.placeholders, files.len() as u64);
@@ -174,7 +233,7 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
         super::download(folder.to_str().unwrap(), &download).unwrap(),
         files.len() as u64
     );
-    assert_eq!(placeholders(&folder).unwrap(), Vec::<PathBuf>::new());
+    assert_eq!(placeholders(&folder).unwrap(), Placeholders::default());
     assert_eq!(
         download.progress(),
         Progress {
@@ -183,5 +242,29 @@ fn placeholders_in_icloud_drive_are_counted_downloaded_and_a_cancel_stops_the_wa
         }
     );
     assert_eq!(fs::read_to_string(&files[3]).unwrap(), "probe 3\n");
-    fs::remove_dir_all(&folder).unwrap();
+}
+
+/// Copies and moves a folder of iCloud Drive holding a placeholder, on a Mac signed in to
+/// iCloud Drive: both refuse before reading it, so nothing is fetched, copied or deleted.
+/// Run with `--ignored`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "needs iCloud Drive on this Mac and a network"]
+fn a_copy_or_move_meeting_a_placeholder_refuses_and_leaves_the_source_as_it_was() {
+    let probe = Probe::new();
+    let folder = probe.0.clone();
+    fs::create_dir(folder.join("sub")).unwrap();
+    fs::write(folder.join("a.txt"), "kept\n").unwrap();
+    let only_in_icloud = folder.join("sub/b.txt");
+    fs::write(&only_in_icloud, "only in iCloud\n").unwrap();
+    probe.evict(std::slice::from_ref(&only_in_icloud));
+    let target = tempfile::tempdir().unwrap();
+    let copied = super::super::copy_tree(&folder, &target.path().join("copied"));
+    let moved = super::super::move_by_copy(&folder, &target.path().join("moved"));
+    let still = fs::symlink_metadata(&only_in_icloud).map(|metadata| dataless(&metadata));
+    assert_eq!(copied.unwrap_err().0, "home_icloud_not_downloaded");
+    assert_eq!(moved.unwrap_err().0, "home_icloud_not_downloaded");
+    assert!(still.unwrap(), "the placeholder was fetched");
+    assert_eq!(fs::read_to_string(folder.join("a.txt")).unwrap(), "kept\n");
+    assert!(fs::symlink_metadata(target.path().join("moved")).is_err());
 }

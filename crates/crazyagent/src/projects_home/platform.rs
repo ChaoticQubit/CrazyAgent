@@ -40,6 +40,50 @@ pub(super) fn permission_bits(metadata: &fs::Metadata) -> u32 {
     u32::from(metadata.permissions().readonly())
 }
 
+/// What tells an entry left as it was from one changed or replaced between a move's check
+/// of its copy and the delete of its source: any write, rename over, chmod or eviction gives
+/// it a new stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Stamp {
+    inode: u64,
+    bytes: u64,
+    changed: (i64, i64),
+    modified: (i64, i64),
+}
+
+/// The stamp of an entry. Unix: its inode, size, and change and modify times to the
+/// nanosecond. Input: the entry's own metadata, links not followed. Output: the stamp.
+#[cfg(unix)]
+pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    Some(Stamp {
+        inode: metadata.ino(),
+        bytes: metadata.size(),
+        changed: (metadata.ctime(), metadata.ctime_nsec()),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+    })
+}
+
+/// The stamp of an entry. Windows: its size and modify time; none when the time is
+/// unreadable, so that entry is never deleted. Written, not tested.
+#[cfg(target_os = "windows")]
+pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
+    let since = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(Stamp {
+        inode: 0,
+        bytes: metadata.len(),
+        changed: (0, 0),
+        modified: (
+            i64::try_from(since.as_secs()).ok()?,
+            i64::from(since.subsec_nanos()),
+        ),
+    })
+}
+
 /// Makes a folder being filled by a copy private to the owner and writable.
 /// The folder's real permissions are applied after its contents are copied.
 #[cfg(unix)]
