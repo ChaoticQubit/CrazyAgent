@@ -2744,15 +2744,19 @@ impl TeamView {
                         .to_owned(),
                     "",
                 ),
-                CoordRow::TerminalDisplay => (
-                    "Terminal display".to_owned(),
-                    format!(
-                        "{}{}",
-                        display_words(view.settings.terminal_display),
-                        display_kept(view, view.settings.terminal_display)
-                    ),
-                    "",
-                ),
+                CoordRow::TerminalDisplay => {
+                    let words = display_words(view.settings.terminal_display);
+                    let kept = display_kept(view, view.settings.terminal_display);
+                    (
+                        "Terminal display".to_owned(),
+                        if kept.is_empty() {
+                            words.to_owned()
+                        } else {
+                            format!("{words}.{kept}")
+                        },
+                        "",
+                    )
+                }
                 CoordRow::Questions => (
                     "Sub-agent questions go to".to_owned(),
                     match view.settings.questions_to {

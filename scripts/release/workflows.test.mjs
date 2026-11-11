@@ -197,16 +197,9 @@ test("on a self-hosted runner CI and release install nothing globally, and CI ke
       }
     }
   }
-  for (const job of ["linux", "macos"]) {
-    const text = steps(ci, job).join("\n");
-    assert.match(text, /"\$RUNNER_TOOL_CACHE\/claude-code\/\$CLAUDE_CODE_VERSION\/(x64|arm64)"/, job);
-    assert.match(text, />> "\$GITHUB_PATH"/, job);
-    assert.doesNotMatch(text, /\/usr\/local\/bin\/claude/, job);
-  }
   const linux = steps(ci, "linux").join("\n");
   assert.match(linux, /dpkg -s "\$package"/);
   assert.match(linux, /sudo -n true/);
-  assert.match(linux, /"\$RUNNER_TOOL_CACHE\/tmux\/\$TMUX_VERSION\/x64"/);
   assert.doesNotMatch(release, /"target\/\$TARGET/, "release paths follow CARGO_TARGET_DIR");
 });
 
@@ -225,8 +218,7 @@ test("a self-hosted release builds in a clean Rust folder and Cargo home, never 
 });
 
 test("tools kept in the runner tool cache are checked against their pinned SHA-256 on every use, not once per version", async () => {
-  for (const [name, job, title] of [["ci.yml", "linux", "Install Claude Code"], ["ci.yml", "linux", "Install Codex"], ["ci.yml", "macos", "Install Claude Code"], ["ci.yml", "macos", "Install Codex"],
-    ["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
+  for (const [name, job, title] of [["ci.yml", "macos", "Install pinned Node on the owner's runner"], ["ci.yml", "macos", "Install pinned arm64 bun on the owner's runner"],
     ["release.yml", "build", "Install x86_64 bun for the Intel rcli host"], ["release.yml", "build", "Install pinned Node on the owner's runner"],
     ["release.yml", "build", "Install pinned arm64 bun for macOS"]]) {
     const step = steps(await workflow(name), job).find((text) => text.includes(`name: ${title}`));
@@ -236,46 +228,6 @@ test("tools kept in the runner tool cache are checked against their pinned SHA-2
     assert.match(step, /\n\s+cp "\$work\/([a-z.]+)" "\$prefix\/\1\.\$\$"\n\s+mv "\$prefix\/\1\.\$\$" "\$prefix\/\1"\n/, `${job}: ${title} replaces the cached archive in one rename`);
     assert.match(step, /"\$work\/bin" >> "\$GITHUB_PATH"|bun-path=\$work\/bin\/bun/, `${job}: ${title} runs the copy it just checked`);
   }
-});
-
-test("macOS CI names the Codex and Claude Code it installed, and a graphify installed by the pinned uv from the repo lock, to the rows that run them", async () => {
-  const ci = await workflow("ci.yml");
-  const macos = steps(ci, "macos");
-  const step = (title) => macos.find((text) => text.includes(`name: ${title}`));
-  assert.match(step("Install Codex"), /\n\s+echo "CRAZYAGENT_CODEX=\$work\/bin\/codex" >> "\$GITHUB_ENV"$/);
-  assert.match(step("Install Claude Code"), /\n\s+echo "CRAZYAGENT_CLAUDE=\$work\/bin\/claude" >> "\$GITHUB_ENV"$/);
-  const graphify = step("Install pinned graphify for the graph rows");
-  assert(graphify, "macOS CI installs graphify");
-  const engine = await readFile(new URL("../../crates/crazyagent/src/setup.rs", import.meta.url), "utf8");
-  const pin = graphify.match(/\n\s+UV_SHA256: ([0-9a-f]{64})\n/);
-  assert(pin && engine.includes(`"aarch64-apple-darwin",\n        "${pin[1]}",`), "CI checks uv against the engine's own uv pin");
-  assert.match(graphify, /\n\s+if ! echo "\$UV_SHA256  \$work\/uv\.tar\.gz" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n/);
-  assert.match(graphify, / UV_PYTHON_PREFERENCE=only-managed\n/, "no system Python");
-  assert.match(graphify, / venv --no-project --no-config --python 3\.12\.15 "\$venv"\n/, "an exact Python, not the newest 3.12 the uv table knows");
-  assert.match(graphify, /pip install --no-config --python "\$venv\/bin\/python" --require-hashes --no-build --requirements crates\/crazyagent\/src\/setup\/locks\/graphifyy-0\.9\.9\.txt\n/);
-  assert.match(graphify, /\n\s+echo "CRAZYAGENT_GRAPHIFY=\$venv\/bin\/graphify" >> "\$GITHUB_ENV"$/);
-  assert.doesNotMatch(graphify, /GITHUB_PATH|\$HOME/, "graphify reaches only the rows that name it");
-  assert(macos.indexOf(graphify) < macos.findIndex((text) => text.includes("name: Test engine and desktop crates")));
-});
-
-test("macOS CI installs the context-mode the default pack pins from the committed lock with no package scripts, then builds only better-sqlite3, and names it to the shared-install rows", async () => {
-  const macos = steps(await workflow("ci.yml"), "macos");
-  const step = macos.find((text) => text.includes("name: Install the pinned context-mode for the shared-install rows"));
-  assert(step, "macOS CI installs context-mode");
-  assert.match(step, /' crates\/crazyagent\/src\/setup\/pack\.toml\)\n/, "version and hash come from the default pack");
-  const copy = step.indexOf("cp .github/ci/context-mode/package.json .github/ci/context-mode/package-lock.json \"$install/\"");
-  const locked = step.indexOf('test "$locked" = "$version $integrity"');
-  const install = step.indexOf("npm ci --prefix \"$install\" --ignore-scripts --no-audit");
-  const compare = step.indexOf('test "$recorded" = "$integrity"');
-  const rebuild = step.indexOf("npm rebuild better-sqlite3 --prefix \"$install\" --no-audit");
-  assert(copy > 0 && copy < locked && locked < install && install < compare && compare < rebuild, "the lock is checked against the pin, installed with no scripts and checked again before the one build");
-  assert.equal(step.match(/npm rebuild/g)?.length, 1, "one rebuild");
-  assert.doesNotMatch(step, /npm install|npm i |npx /, "nothing resolves a version outside the lock");
-  assert.match(step, /npm_config_build_from_source=true npm_config_nodedir=/, "the native module builds from source against the pinned Node's own headers");
-  assert.match(step, /\n\s+install="\$RUNNER_TEMP\/context-mode"\n/);
-  assert.match(step, /\n\s+echo "CRAZYAGENT_CONTEXT_MODE_INSTALL=\$install" >> "\$GITHUB_ENV"$/);
-  assert.doesNotMatch(step, /GITHUB_PATH|\$HOME|npm install -g|--global/);
-  assert(macos.indexOf(step) < macos.findIndex((text) => text.includes("name: Test engine and desktop crates")));
 });
 
 test("the committed context-mode lock CI installs from holds the default pack's version and hash and pins every package by hash from the npm registry", async () => {
@@ -301,39 +253,6 @@ test("the committed context-mode lock CI installs from holds the default pack's 
     assert.equal(new URL(locked.resolved).origin, "https://registry.npmjs.org", `${path} comes from the npm registry`);
     assert.notEqual(locked.link, true, `${path} is no link`);
   }
-});
-
-test("Linux CI installs Codex from the pinned, checksum-checked release archive and names it and Claude Code to the rows that run them, before the tests", async () => {
-  const linux = steps(await workflow("ci.yml"), "linux");
-  const step = (title) => linux.find((text) => text.includes(`name: ${title}`));
-  const codex = step("Install Codex");
-  assert(codex, "Linux CI installs Codex");
-  assert.match(codex, /\n\s+CODEX_PACKAGE: codex-package-x86_64-unknown-linux-musl\.tar\.gz\n\s+CODEX_SHA256: [0-9a-f]{64}\n/);
-  assert.match(codex, /"https:\/\/github\.com\/openai\/codex\/releases\/download\/rust-v\$CODEX_VERSION\/\$CODEX_PACKAGE"/);
-  assert.match(codex, /\n\s+test "\$\("\$work\/bin\/codex" --version\)" = "codex-cli \$CODEX_VERSION"\n/);
-  assert.match(codex, /\n\s+echo "CRAZYAGENT_CODEX=\$work\/bin\/codex" >> "\$GITHUB_ENV"$/);
-  const claude = step("Install Claude Code");
-  assert.match(claude, /\n\s+echo "CRAZYAGENT_CLAUDE=\$work\/bin\/claude" >> "\$GITHUB_ENV"$/);
-  const tests = linux.findIndex((text) => text.includes("name: Test engine and desktop crates"));
-  assert(linux.indexOf(codex) < tests && linux.indexOf(claude) < tests);
-});
-
-test("macOS CI runs a Codex release in codex::VERSIONS, from the pinned, checksum-checked release archive", async () => {
-  const ci = await workflow("ci.yml");
-  const pinned = ci.match(/^ {2}CODEX_VERSION: "(\d+)\.(\d+)\.(\d+)"$/m);
-  assert(pinned, "CI pins an exact Codex version");
-  const source = await readFile(new URL("../../crates/crazyagent/src/coord/delivery/codex.rs", import.meta.url), "utf8");
-  const versions = source.match(/^pub const VERSIONS: \[\(u64, u64\); \d+\] = \[(.+)\];$/m);
-  assert(versions, "codex::VERSIONS is one line");
-  const supported = [...versions[1].matchAll(/\((\d+), (\d+)\)/g)].map((pair) => `${pair[1]}.${pair[2]}`);
-  assert(supported.length > 0, "codex::VERSIONS names a release");
-  assert(supported.includes(`${pinned[1]}.${pinned[2]}`), `CI Codex ${pinned[0]} is one of codex::VERSIONS ${supported.join(", ")}`);
-  const step = steps(ci, "macos").find((text) => text.includes("name: Install Codex"));
-  assert(step, "macOS CI installs Codex");
-  assert.match(step, /\n\s+CODEX_SHA256: [0-9a-f]{64}\n/);
-  assert.match(step, /"https:\/\/github\.com\/openai\/codex\/releases\/download\/rust-v\$CODEX_VERSION\/\$CODEX_PACKAGE"/);
-  assert.match(step, /\n\s+test "\$\("\$work\/bin\/codex" --version\)" = "codex-cli \$CODEX_VERSION"\n/);
-  assert.doesNotMatch(ci, /codex[^\n]*latest/i, "no unpinned Codex");
 });
 
 test("a release signs with pinned, checksum-checked Node and Rust on the owner's runner and embeds a checksum-checked bun on every macOS runner, never the tool cache, rustup or Cargo settings CI left on the runner", async () => {
@@ -437,12 +356,11 @@ test("macOS CI on the owner's runner builds with the release's pinned, checksum-
   for (const index of [node, bun]) assert.match(all[index], /\n {8}if: runner\.environment != 'github-hosted'\n/);
   assert.match(all[node], /\n\s+prefix="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/node\/\$NODE_VERSION\/arm64"\n[^]*node-v\$NODE_VERSION-darwin-arm64\.tar\.gz/);
   assert.match(all[bun], /\n\s+prefix="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/bun\/\$BUN_VERSION\/arm64"\n[^]*bun-darwin-aarch64\.zip/);
-  assert(node < at(/\bnpm ci\b/) && node < at(/\bnode --input-type/), "no node or npm run comes before the pinned Node");
+  assert(node < at(/\bnpm ci\b/), "no npm run comes before the pinned Node");
   assert(bun < at(/\bbun install\b/), "no bun run comes before the pinned bun");
   assert(at(/name: Install pinned Rust/) < at(/\bcargo fetch\b/) && at(/name: Install pinned Rust/) < at(/\bmake lint\b/), "no cargo run comes before the pinned Rust");
   const bunPaths = all.join("\n").split("\n").filter((line) => line.includes("outputs.bun-path"));
-  assert.equal(bunPaths.length, 2, "the Node and Bun suites name their bun");
-  for (const line of bunPaths) assert.equal(line.trim(), "BUN: ${{ steps.bun.outputs.bun-path || steps.bun-arm64.outputs.bun-path }}");
+  assert.equal(bunPaths.length, 0, "lint-only CI runs no Node or Bun suite, so no step names a bun");
 });
 
 test("nothing macOS CI runs on the owner's runner installs globally or reads or writes the runner user's home", async () => {
@@ -520,11 +438,11 @@ test("macOS CI on the owner's runner builds with line tables only, starts with n
   assert.match(home, /\n\s+free_kib="\$\(df -Pk "\$RUNNER_TOOL_CACHE" \| awk 'NR == 2 \{ print \$4 \}'\)"\n\s+echo "[^"\n]*\$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*"\n/, "the free space shows before the build");
   assert.match(home, /\n\s+if \(\( free_kib < 10 \* 1024 \* 1024 \)\); then\n\s+echo "::error::badal has \$\(\( free_kib \/ 1024 \/ 1024 \)\) GiB free[^"\n]*needs 10 GiB[^"\n]*free disk on badal[^"\n]*"\n\s+exit 1\n\s+fi\n/);
   assert(home.indexOf("free_kib < 10") < home.indexOf('>> "$GITHUB_ENV"'), "the refusal comes before the job sets anything up");
-  const tests = all.findIndex((step) => /- name: Test Bun suites\n/.test(step));
-  assert(tests > 0 && tests === all.length - 2, "the cleanup is the last step, right after the tests");
+  const lint = all.findIndex((step) => /- name: Lint workspace\n/.test(step));
+  assert(lint > 0 && lint === all.length - 2, "the cleanup is the last step, right after the lint");
   const last = all.at(-1);
   assert.equal((last.match(/df -Pk "\$RUNNER_TOOL_CACHE"/g) ?? []).length, 1, "one free-space reader");
-  assert.equal((last.match(/\$\(free_gib\) GiB free/g) ?? []).length, 2, "free space after the tests and after the cleanup");
+  assert.equal((last.match(/\$\(free_gib\) GiB free/g) ?? []).length, 2, "free space after the lint and after the cleanup");
   assert.match(last, /\n\s+target="\$RUNNER_TOOL_CACHE\/crazyagent-ci\/target-line-tables"\n\s+if \[ -d "\$target" \]; then\n\s+du -sk "\$target" \| awk '\{ printf "Rust target: %\.1f GiB\\n", \$1 \/ 1048576 \}'\n\s+fi\n/, "the target size shows, so the floor can follow the real need");
   assert(last.indexOf('du -sk "$target"') < last.indexOf("rm -rf"), "the size is read before anything goes");
   assertDeletesEverything(all, "CI");
@@ -536,7 +454,7 @@ test("a release on the owner's runner deletes every file it made after the last 
   assertDeletesEverything(all, "release");
 });
 
-test("Linux CI frees the hosted runner's unused toolsets first, builds with line tables only and shows the free disk and target size at the end", async () => {
+test("Linux CI frees the hosted runner's unused toolsets first, builds with line tables only and shows the free disk and target size after the lint", async () => {
   const ci = await workflow("ci.yml");
   const linux = block(block(ci, 0, "jobs").join("\n"), 2, "linux").join("\n");
   const env = block(linux, 4, "env");
@@ -553,7 +471,7 @@ test("Linux CI frees the hosted runner's unused toolsets first, builds with line
   const removals = free.split("\n").filter((line) => /\brm\b/.test(line)).map((line) => line.trim());
   assert.deepEqual(removals, ["sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL"], "only the five literal toolset folders");
   const last = all.at(-1);
-  assert.match(all.at(-2), /^ {6}- name: Test engine and desktop crates\n/, "the disk report comes right after the tests");
+  assert.match(all.at(-2), /^ {6}- name: Lint workspace\n/, "the disk report comes right after the lint");
   assert.match(last, /^ {6}- name: [^\n]+\n {8}if: always\(\)\n/, "it runs even when a step failed");
   assert.match(last, /\n\s+df -h \/\n/);
   assert.match(last, /\n\s+target="\$\{CARGO_TARGET_DIR:-target\}"\n\s+if \[ -d "\$target" \]; then\n\s+du -sh "\$target"\n\s+fi\n/, "the target size shows, so the disk need is known");
@@ -638,41 +556,6 @@ test("the Intel macOS release runs a pinned, checksum-verified x86_64 bun under 
   for (const name of ["Install rcli source dependencies", "Build rcli host"]) {
     assert.match(all.find((step) => step.includes(`name: ${name}`)), /BUN_PATH: \$\{\{ steps\.bun-x64\.outputs\.bun-path \|\| steps\.bun-arm64\.outputs\.bun-path \|\| steps\.bun\.outputs\.bun-path \}\}/, name);
   }
-});
-
-test("macOS CI provisions the pinned VSCodium build the IDE server tests need from builds.json, checked on every use, before the Rust tests", async () => {
-  const root = new URL("../../", import.meta.url);
-  const manifest = JSON.parse(await readFile(new URL("crates/crazyagent/src/ide/builds.json", root), "utf8"));
-  const server = await readFile(new URL("crates/crazyagent/src/ide/server/tests.rs", root), "utf8");
-  assert(server.includes(`const BUILD: &str = "vscodium-${manifest.version}";`), "the server tests read the build that builds.json pins");
-  const all = steps(await workflow("ci.yml"), "macos");
-  const at = (found) => all.findIndex(found);
-  const read = at((step) => step.includes("name: Read the pinned IDE build"));
-  const cache = at((step) => step.includes("uses: actions/cache@") && step.includes("vscodium-reh-web"));
-  const provision = at((step) => step.includes("name: Provision the pinned IDE build"));
-  const tests = at((step) => step.includes("name: Test engine and desktop crates"));
-  assert(read >= 0 && read < cache && cache < provision && provision < tests, `${read} ${cache} ${provision} ${tests}`);
-  assert.match(all[read], /^ {6}- id: ide\n/);
-  assert.match(all[read], /readFileSync\("crates\/crazyagent\/src\/ide\/builds\.json", "utf8"\)/);
-  assert.match(all[read], /manifest\.builds\["aarch64-apple-darwin"\]/);
-  assert.match(all[read], /build\?\.url === url/, "only the official release URL is fetched");
-  assert.match(all[cache], /^ {6}- if: runner\.environment == 'github-hosted'\n/);
-  assert.match(all[cache], /key: ci-macos-vscodium-reh-web-darwin-arm64-\$\{\{ steps\.ide\.outputs\.version \}\}\n?$/);
-  const step = all[provision];
-  for (const name of ["VERSION", "URL", "SHA256", "BYTES"]) {
-    assert.match(step, new RegExp(`IDE_${name}: \\$\\{\\{ steps\\.ide\\.outputs\\.${name.toLowerCase()} \\}\\}`), name);
-  }
-  assert.match(step, /prefix="\$RUNNER_TOOL_CACHE\/vscodium-reh-web\/\$IDE_VERSION\/arm64"/);
-  assert.match(step, /\n\s+if ! echo "\$IDE_SHA256  \$work\/vscodium\.tgz" \| shasum -a 256 -s -c - 2>\/dev\/null; then\n/, "the cached archive is checked on every use");
-  assert.match(step, /--proto '=https' --proto-redir '=https'/);
-  assert.match(step, /--max-filesize "\$IDE_BYTES"/);
-  assert.match(step, /\n\s+test "\$\(stat -f %z "\$work\/vscodium\.tgz"\)" = "\$IDE_BYTES"\n/);
-  assert.match(step, /\n\s+echo "\$IDE_SHA256  \$work\/vscodium\.tgz" \| shasum -a 256 -c -\n/, "a download that does not match fails the job");
-  assert(step.indexOf("| shasum -a 256 -c -\n") < step.indexOf('cp "$work/vscodium.tgz" "$prefix/'), "only a checked archive reaches the tool cache");
-  assert.match(step, /\n\s+cp "\$work\/vscodium\.tgz" "\$prefix\/vscodium\.tgz\.\$\$"\n\s+mv "\$prefix\/vscodium\.tgz\.\$\$" "\$prefix\/vscodium\.tgz"\n/);
-  assert.match(step, /build="\.local-state\/ide-cache\/vscodium-\$IDE_VERSION"/);
-  assert.match(step, /\n\s+tar -xzf "\$work\/vscodium\.tgz" -C "\$build"\n\s+test -f "\$build\/out\/server-main\.js"/);
-  assert.match(step, /\n\s+test -f "\$build\/out\/server-main\.js"\n\s+find "\$RUNNER_TOOL_CACHE\/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "\$IDE_VERSION" -exec rm -rf \{\} \+$/, "once the pinned build is provisioned, the tool cache drops the archives of every other version");
 });
 
 /**
