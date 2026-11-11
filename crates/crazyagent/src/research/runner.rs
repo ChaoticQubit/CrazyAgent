@@ -915,10 +915,12 @@ impl ResearchRunner {
             .allow_tools(&Toolchains::grant(&homes, &granted.toolchains))?
             .allow_scratch(scratch.path())?
             .allow_extra_reads(&extra)?;
-        for folder in read_folders(executable, &context, job.tools)? {
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
+        for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
-        sandbox = sandbox.allow_exec(&executable.canonicalize()?)?;
+        sandbox = sandbox.allow_exec(&program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
@@ -949,7 +951,7 @@ impl ResearchRunner {
             let (binding, model) = pane_account(account, &home);
             let request = LaunchRequest {
                 harness: harness.id().to_owned(),
-                executable: executable.to_path_buf(),
+                executable: program.clone(),
                 working_dir: worktree.clone(),
                 account: binding,
                 model,
@@ -1008,7 +1010,7 @@ impl ResearchRunner {
             drop(lease);
             return Ok((ending?, group, output));
         }
-        let mut launch = Command::new(executable);
+        let mut launch = Command::new(&program);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
@@ -1516,7 +1518,8 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(run.account)?]),
         )?
         .allow_read(&folder)?;
-        let program = executable.canonicalize()?;
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())?;
         if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
@@ -1536,7 +1539,7 @@ impl ResearchRunner {
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, executable);
+        let mut command = sandbox.command(&profile, &program);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");

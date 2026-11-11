@@ -7490,9 +7490,9 @@ impl TeamRuntime {
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
-        let program = executable
-            .canonicalize()
-            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?;
+        let program =
+            crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
+                .map_err(|_| "harness is not installed")?;
         let install = program
             .parent()
             .map(Path::to_path_buf)
@@ -7699,7 +7699,7 @@ impl TeamRuntime {
             .claude_display;
         let plan = Plan {
             harness: launch.into(),
-            executable: executable.to_path_buf(),
+            executable: program,
             working_dir,
             model,
             tools,
