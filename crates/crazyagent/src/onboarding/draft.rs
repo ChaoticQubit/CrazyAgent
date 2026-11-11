@@ -184,15 +184,27 @@ pub(crate) struct Evidence {
     pub ignores_unknown: bool,
 }
 
+/// What the local heading scan took a document for before any model read it: a roadmap
+/// planning versions, milestones or phases, research, or anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum FoundKind {
+    Roadmap,
+    Research,
+    Other,
+}
+
 /// One of the project's own documents as the mapping reads it: its path below the
-/// folder with `/` between names, its size in bytes, the start of its text and whether
-/// that text was cut at its bound.
+/// folder with `/` between names, its size in bytes, the start of its text, whether
+/// that text was cut at its bound, what the local heading scan took it for and, for a
+/// roadmap, the milestone headings it found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Document {
     pub path: String,
     pub size: u64,
     pub text: String,
     pub cut: bool,
+    pub kind: FoundKind,
+    pub marks: Vec<String>,
 }
 
 /// What the agent's answer held: its overview text and the draft fields it

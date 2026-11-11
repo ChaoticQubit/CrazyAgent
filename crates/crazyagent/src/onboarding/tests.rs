@@ -149,11 +149,15 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
     write_file(root, "docs/spec.pdf", "%PDF-1.7 PDF_BYTES_3390");
     write_file(root, "private/salaries.md", "PRIVATE_TEXT_6602");
     write_file(root, "docs/Private/board.md", "PRIVATE_TEXT_6602");
-    write_file(root, ".notes/hidden.md", "HIDDEN_TEXT_1207");
+    write_file(root, ".notes/hidden.md", "HIDDEN_FOLDER_TEXT_4471");
     write_file(root, "docs/.draft.md", "HIDDEN_TEXT_1207");
     write_file(root, "node_modules/pkg/README.md", "VENDOR_TEXT_7781");
-    write_file(root, "docs/a/b/c/deep.md", "DEPTH_FOUR_TEXT_2290");
-    write_file(root, "docs/a/b/c/d/deeper.md", "DEPTH_FIVE_TEXT_8121");
+    write_file(root, "docs/a/b/c/d/e/f/g/deep.md", "DEPTH_EIGHT_TEXT_2290");
+    write_file(
+        root,
+        "docs/a/b/c/d/e/f/g/h/deeper.md",
+        "DEPTH_NINE_TEXT_8121",
+    );
     std::fs::write(root.join("docs/huge.md"), "x".repeat(1024 * 1024 + 1)).unwrap();
     symlink(outside.path().join("token"), root.join("notes/linked.md")).unwrap();
     symlink(outside.path(), root.join("docs/linked-folder")).unwrap();
@@ -165,7 +169,8 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
         "COMPETITOR_TEXT_5521",
         "MARKET_TEXT_8830",
         "PLAN_TEXT_4410",
-        "DEPTH_FOUR_TEXT_2290",
+        "DEPTH_EIGHT_TEXT_2290",
+        "HIDDEN_FOLDER_TEXT_4471",
         "### research/landscape-2026.md (",
         "docs/spec.pdf (",
         "\"research\"",
@@ -177,7 +182,7 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
         "PRIVATE_TEXT_6602",
         "HIDDEN_TEXT_1207",
         "VENDOR_TEXT_7781",
-        "DEPTH_FIVE_TEXT_8121",
+        "DEPTH_NINE_TEXT_8121",
         "PDF_BYTES_3390",
         "docs/huge.md",
         "salaries",
@@ -336,7 +341,7 @@ fn mapping_prompt(root: &Path) -> String {
 }
 
 #[test]
-fn git_ignored_documents_are_neither_read_nor_listed() {
+fn git_ignored_markdown_is_read_as_tracked_and_other_ignored_documents_are_not() {
     let dir = rust_repo();
     let root = dir.path();
     git_init(root);
@@ -345,7 +350,11 @@ fn git_ignored_documents_are_neither_read_nor_listed() {
         ".gitignore",
         "notes/private-*.md\n!notes/private-ok.md\ndocs/scratch/\n*.log.md\n",
     );
-    write_file(root, ".git/info/exclude", "docs/excluded.md\n");
+    write_file(
+        root,
+        ".git/info/exclude",
+        "docs/excluded.md\ndocs/excluded.txt\n",
+    );
     write_file(
         root,
         "docs/plan.md",
@@ -362,12 +371,19 @@ fn git_ignored_documents_are_neither_read_nor_listed() {
         "Kept by a rule. NEGATED_TEXT_1414\n",
     );
     write_file(root, "docs/spec.pdf", "%PDF-1.7");
-    let ignored = [
+    let ignored_markdown = [
         "notes/private-plan.md",
         "docs/scratch/idea.md",
-        "docs/scratch/spec.pdf",
         "docs/run.log.md",
         "docs/excluded.md",
+    ];
+    for path in ignored_markdown {
+        write_file(root, path, &format!("IGNORED_MARKDOWN_3141 {path}\n"));
+    }
+    let ignored = [
+        "docs/scratch/spec.pdf",
+        "docs/scratch/notes.txt",
+        "docs/excluded.txt",
     ];
     for path in ignored {
         write_file(root, path, "IGNORED_TEXT_3141 api_key=sk-test-0000\n");
@@ -381,6 +397,12 @@ fn git_ignored_documents_are_neither_read_nor_listed() {
         "docs/spec.pdf (",
     ] {
         assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    for path in ignored_markdown {
+        assert!(
+            prompt.contains(&format!("IGNORED_MARKDOWN_3141 {path}")),
+            "the git-ignored Markdown {path} was not read"
+        );
     }
     assert!(
         !prompt.contains("IGNORED_TEXT_3141"),
@@ -453,7 +475,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
     let dir = rust_repo();
     let root = dir.path();
     git_init(root);
-    write_file(root, ".gitignore", "private/\nlocal-notes.md\n");
+    write_file(root, ".gitignore", "private/\nlocal-notes.txt\n");
     write_file(
         root,
         "notes/api-keys.md",
@@ -464,9 +486,9 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         "notes/ui-direction.md",
         "Dark theme first. UI_TEXT_2718\nThe keys for it sit in notes/api-keys.md.\n",
     );
-    write_file(root, "private/plan.md", "PRIVATE_TEXT_1618\n");
+    write_file(root, "private/plan.txt", "PRIVATE_TEXT_1618\n");
     write_file(root, "secrets.txt", "SECRET_TEXT_9001\n");
-    write_file(root, "local-notes.md", "PRIVATE_TEXT_1618\n");
+    write_file(root, "local-notes.txt", "PRIVATE_TEXT_1618\n");
     write_file(
         root,
         "README.md",
@@ -474,7 +496,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
             "# Demo\n\nA small greeting tool. README_KEPT_1111\n",
             "See notes/ui-direction.md for the look.\n",
             "The keys sit in `notes/api-keys.md`.\n",
-            "Drafts go to [the plan](private/plan.md).\n",
+            "Drafts go to [the plan](private/plan.txt).\n",
         ),
     );
     write_file(
@@ -487,7 +509,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         "graphify-out/GRAPH_REPORT.md",
         concat!(
             "# Graph Report\n\n## God Nodes\n",
-            "- api-keys.md\n- notes/api-keys.md\n- private/plan.md\n- ApiKeys\n",
+            "- api-keys.md\n- notes/api-keys.md\n- private/plan.txt\n- ApiKeys\n",
             "- ui-direction.md GRAPH_KEPT_4242\n",
         ),
     );
@@ -512,7 +534,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
             "the entry {entry} is missing"
         );
     }
-    for entry in ["secrets.txt", "local-notes.md", "private/"] {
+    for entry in ["secrets.txt", "local-notes.txt", "private/"] {
         assert!(
             !evidence.entries.contains(&entry.to_owned()),
             "the entry {entry} is listed"
@@ -534,11 +556,11 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         "api-keys",
         "apikeys",
         "secret_text_9001",
-        "private/plan.md",
+        "private/plan.txt",
         "private_text_1618",
         "secrets.txt",
         "secrets.toml",
-        "local-notes.md",
+        "local-notes.txt",
     ] {
         assert!(!lower.contains(name), "{name} reached the mapping prompt");
     }
