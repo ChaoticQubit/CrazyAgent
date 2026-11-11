@@ -228,6 +228,11 @@ test("An owner's edit survives a refresh: the tab keeps the owner's text, the re
     await me.waitFor("the written tab", (seen) => seen.includes("Sells fruit"));
     await me.click("Edit", "button");
     await me.type("#ov-edit", `${OWNER_LINE}\n`);
+    await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/settings` });
+    await me.waitFor("the Overview left behind", (seen) => !seen.includes("Edit Features"));
+    await openTab(page, site, me, project, "Features");
+    await me.waitFor("the editor reopened", (seen) => seen.includes("Edit Features"));
+    assert.ok((await page.evaluate(`document.querySelector("#ov-edit")?.value ?? ""`)).includes(OWNER_LINE), "the typed text survived leaving the Overview");
     await me.click("Save", "button");
     const saved = await until(bridge, project, "Save never stored the owner's text", (read) => tabOf(read, "features").edited && tabOf(read, "features").text.includes(OWNER_LINE), STEP_MS);
     const mine = tabOf(saved, "features").text;

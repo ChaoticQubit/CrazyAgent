@@ -37,22 +37,30 @@ export interface OverviewActions {
   reload: () => void;
 }
 
+/** What one diff is made from: the tab version and the proposal version. */
+export interface Shown { version: string; proposal_version: string }
+
 /** An open review of one tab's proposal: whether a choice is being sent, why the last one was
- * refused, and the proposal version the owner has seen, null once the engine said a newer one
- * replaced it and the owner was told. */
-export interface TabReview { busy: boolean; note: string; seen: string | null }
+ * refused or held, what the diff the owner was last told about is made from, and whether the
+ * engine said that diff is gone and the read that shows the new one has not come yet. */
+export interface TabReview { busy: boolean; note: string; seen: Shown; told: boolean }
 
 /** What one generated tab's panel shows for the keyboard's sake: its mode, and whether a
  * refresh proposal's banner is on it. */
 export interface PanelState { mode: "idle" | "editing" | "reviewing"; proposal: boolean }
 
-/** How an accept or a reject ended: done, or refused and why; `replaced` marks the refusal of
- * an accept whose proposal a newer one took the place of. */
-export interface ChoiceOutcome { done: boolean; note: string; replaced?: true }
+/** How an accept or a reject ended: done, or refused and why; `stale` marks the refusal of an
+ * accept whose diff is gone, because a newer proposal took its place or the tab changed. */
+export interface ChoiceOutcome { done: boolean; note: string; stale?: true }
 
-/** An open editor of one tab: the version it opened at, the typed text, whether a save is
- * being sent, why the last save was refused, and whether the tab changed since it opened. */
-export interface TabDraft { version: string; text: string; busy: boolean; note: string; changed: boolean }
+/** An open editor of one tab: the tab version the owner last compared the text with (the one
+ * it opened at, then each changed one the page showed), the typed text, whether a save is
+ * being sent, why the last save was refused or held, whether the tab changed since it opened,
+ * and whether the engine said it changed and the read that shows the change has not come yet. */
+export interface TabDraft { version: string; text: string; busy: boolean; note: string; changed: boolean; told: boolean }
+
+/** The open editors of one project, by tab. */
+export type OpenDrafts = Partial<Record<OverviewTabId, TabDraft>>;
 
 /** How a save ended: saved, or refused with the typed text kept, why, and whether the tab
  * changed since the editor opened. */
@@ -68,10 +76,15 @@ export interface TabStore {
  * with the engine source. The limit an owner reads is this number in KB. */
 export const TAB_BYTES_MAX = 24 * 1024;
 
+/** The most characters of one open editor's text that are kept for the session; a longer text
+ * is not kept. */
+export const DRAFT_CHARS_MAX = 8 * TAB_BYTES_MAX;
+
 /** The most command lines of one text that get Copy and Run. */
 export const COMMAND_LINES_MAX = 200;
 
 const TAB_FILES: Record<OverviewTabId, string> = { quick_info: "quick-info", features: "features", competitors: "competitors", install_and_use: "install-and-use" };
+const TAB_IDS = Object.keys(TAB_FILES) as OverviewTabId[];
 const BLOCKED: Record<string, string> = {
   blank: "its file is empty", too_large: `its file is larger than ${TAB_BYTES_MAX / 1024} KB`, not_utf8: "its file is not plain text",
   not_a_file: "a link or folder is where its file goes", not_a_folder: "the folder for the tabs is a link or a file",
@@ -85,6 +98,8 @@ const EDIT_OPEN = "ov-edit-open";
 const REVIEW_OPEN = "ov-review-open";
 const REVIEW_PANEL = "ov-review";
 const TAB_KEY = "crazyagent.overview-tab.";
+const DRAFTS_KEY = "crazyagent.overview-drafts.";
+const DIFF_CHANGED = "This tab changed since this diff was made. The diff now shows the change against the tab as it is; choose again.";
 const FIRST: StripId = "quick_info";
 const LOADING = "Loading the Overview tabs...";
 const READ_ONLY = "This is the project's own file. Edit it in the project.";
@@ -125,6 +140,49 @@ export function storeTab(projectId: string, tab: StripId, store?: TabStore): voi
   assert(STRIP.some((item) => item.id === tab), "only a tab of the strip is kept");
   try {
     (store ?? window.sessionStorage).setItem(TAB_KEY + projectId, tab);
+  } catch {
+    return;
+  }
+}
+
+/** Reads the editors the owner left open for a project in this session, so typed text
+ * survives leaving the Overview. Each comes back unlocked, with no note, at the tab version it
+ * was last compared with. Inputs: the project and, for tests, the store. Output: the editors
+ * by tab; none when nothing is kept or the storage refuses, and a kept entry that is no editor
+ * or is over `DRAFT_CHARS_MAX` is left out. */
+export function storedDrafts(projectId: string, store?: TabStore): OpenDrafts {
+  const drafts: OpenDrafts = {};
+  let kept: unknown;
+  try {
+    kept = JSON.parse((store ?? window.sessionStorage).getItem(DRAFTS_KEY + projectId) ?? "null");
+  } catch {
+    return drafts;
+  }
+  if (typeof kept !== "object" || kept === null) return drafts;
+  for (const tab of TAB_IDS) {
+    const entry = (kept as Record<string, unknown>)[tab];
+    if (typeof entry !== "object" || entry === null) continue;
+    const { version, text, changed } = entry as Record<string, unknown>;
+    if (typeof version !== "string" || typeof text !== "string" || typeof changed !== "boolean" || text.length > DRAFT_CHARS_MAX) continue;
+    drafts[tab] = { version, text, busy: false, note: "", changed, told: false };
+  }
+  assert(Object.keys(drafts).length <= TAB_IDS.length, "more kept editors than generated tabs");
+  return drafts;
+}
+
+/** Keeps a project's open editors for this session: per tab the typed text, the tab version it
+ * was last compared with and whether the tab changed. A closed editor leaves the kept set; a
+ * text over `DRAFT_CHARS_MAX` is not kept, and a storage that refuses is left alone.
+ * Inputs: the project, its open editors and, for tests, the store. Output: none. */
+export function storeDrafts(projectId: string, drafts: OpenDrafts, store?: TabStore): void {
+  const kept: Partial<Record<OverviewTabId, Pick<TabDraft, "version" | "text" | "changed">>> = {};
+  for (const tab of TAB_IDS) {
+    const draft = drafts[tab];
+    if (draft !== undefined && draft.text.length <= DRAFT_CHARS_MAX) kept[tab] = { version: draft.version, text: draft.text, changed: draft.changed };
+  }
+  assert(Object.keys(kept).length <= TAB_IDS.length, "more editors to keep than generated tabs");
+  try {
+    (store ?? window.sessionStorage).setItem(DRAFTS_KEY + projectId, JSON.stringify(kept));
   } catch {
     return;
   }
@@ -228,6 +286,37 @@ export async function saveTab(projectId: string, opened: { tab: OverviewTabId; v
   return refused(overviewCopy(result), result.code === TAB_CHANGED);
 }
 
+/** The editor after a read of the tabs: once the engine said the tab changed, the first read
+ * that shows another version is the changed tab the owner was told to compare with; any later
+ * change is found at Save. Inputs: the open editor and the tab's state.
+ * Output: the editor, the same one when nothing is taken. */
+export function draftOnRead(draft: TabDraft, state: TabState): TabDraft {
+  if (!draft.told || draft.version === state.version) return draft;
+  return { ...draft, version: state.version, told: false };
+}
+
+/** What a Save does: sends the tab version the owner compared the text with, or, when a read
+ * put another version under the open editor, holds the Save, says so and counts that version
+ * as compared, so the next Save is made against it. Every such change holds a Save again.
+ * Inputs: the open editor and the tab's state. Output: the version to send, or the editor to
+ * show instead. */
+export function saveStep(draft: TabDraft, state: TabState): { send: string } | { hold: TabDraft } {
+  assert(!draft.busy, "a save was started while another was still sent");
+  const compared = draftOnRead(draft, state).version;
+  if (compared === state.version) return { send: compared };
+  return { hold: { ...draft, version: state.version, note: overviewCopy(TAB_CHANGED), changed: true } };
+}
+
+/** The editor after a save came back: closed when it was saved, else open with the typed text
+ * and the reason; after the engine said the tab changed, it waits for the read that shows the
+ * change. Inputs: the editor the save was made from and the outcome.
+ * Output: the editor, or null to close it. */
+export function afterSave(draft: TabDraft, outcome: SaveOutcome): TabDraft | null {
+  if (outcome.saved) return null;
+  assert(outcome.note !== "", "a refused save says why");
+  return { ...draft, busy: false, note: outcome.note, changed: draft.changed || outcome.changed, told: draft.told || outcome.changed };
+}
+
 /** Where the keyboard goes when a panel changes and the control it was on left the page:
  * into the review when it opens, back to Review when it closes with the proposal still
  * waiting, else back to Edit after an editor or a review closes or a banner leaves. The
@@ -257,41 +346,62 @@ function useReturnFocus(current: PanelState): void {
 }
 
 /** Says how an accept or a reject ended. A tab changed since the diff was made gets its own
- * sentence, since the page then shows a new diff. Input: the result. Output: the outcome. */
+ * sentence, since the page then shows a new diff; that refusal and a replaced proposal are
+ * marked stale. Input: the result. Output: the outcome. */
 function choiceOutcome(result: Result<void>): ChoiceOutcome {
   if (result.kind === "ok") return { done: true, note: "" };
   if (result.kind === "not_ready") return { done: false, note: `${NOT_READY} Nothing changed.` };
-  if (result.code === PROPOSAL_CHANGED) return { done: false, note: overviewCopy(PROPOSAL_CHANGED), replaced: true };
-  const note = result.code === TAB_CHANGED ? "This tab changed since this diff was made. The diff now shows the change against the tab as it is; choose again." : overviewCopy(result);
-  return { done: false, note };
+  if (result.code === PROPOSAL_CHANGED) return { done: false, note: overviewCopy(PROPOSAL_CHANGED), stale: true };
+  if (result.code === TAB_CHANGED) return { done: false, note: DIFF_CHANGED, stale: true };
+  return { done: false, note: overviewCopy(result) };
 }
 
-/** Opens the review of a tab's proposal on the proposal version shown. Input: the tab's state
- * with a proposal. Output: the review. */
+/** What the diff of a tab's state is made from. Input: the state. Output: the two versions. */
+function shownOf(state: TabState): Shown {
+  return { version: state.version, proposal_version: state.proposal_version };
+}
+
+/** Opens the review of a tab's proposal on the diff shown. Input: the tab's state with a
+ * proposal. Output: the review. */
 export function openReview(state: TabState): TabReview {
   assert(state.proposal !== null, "a review was opened for a tab with no proposal");
-  return { busy: false, note: "", seen: state.proposal_version };
+  return { busy: false, note: "", seen: shownOf(state), told: false };
 }
 
-/** What an Accept does: sends the proposal version the owner has seen, or, when a re-read put
- * a newer proposal under an open review, holds the Accept, says so and counts the newer one as
- * seen, so the next Accept sends it. Inputs: the open review and the tab's state.
- * Output: the version to send, or the review to show instead. */
-export function acceptStep(review: TabReview, state: TabState): { send: string } | { hold: TabReview } {
+/** The review after a read of the tabs: once the engine said the reviewed diff is gone, the
+ * first read that shows another one is the diff the owner was told about; any later change is
+ * found at Accept. Inputs: the open review and the tab's state with a proposal.
+ * Output: the review, the same one when nothing is taken. */
+export function reviewOnRead(review: TabReview, state: TabState): TabReview {
+  assert(state.proposal !== null, "a review was read against a tab with no proposal");
+  const shown = shownOf(state);
+  if (!review.told || (review.seen.version === shown.version && review.seen.proposal_version === shown.proposal_version)) return review;
+  return { ...review, seen: shown, told: false };
+}
+
+/** What an Accept does: sends the two versions of the diff the owner was told about, or, when
+ * a read put a newer proposal or a changed tab under an open review, holds the Accept, says
+ * which and counts the diff now shown as told, so the next Accept sends it. Every such change
+ * holds an Accept again. Inputs: the open review and the tab's state.
+ * Output: the versions to send, or the review to show instead. */
+export function acceptStep(review: TabReview, state: TabState): { send: Shown } | { hold: TabReview } {
   assert(state.proposal !== null, "an Accept was chosen for a tab with no proposal");
   assert(!review.busy, "an Accept was chosen while another choice was still sent");
-  if (review.seen === null || review.seen === state.proposal_version) return { send: state.proposal_version };
-  return { hold: { busy: false, note: overviewCopy(PROPOSAL_CHANGED), seen: state.proposal_version } };
+  const seen = reviewOnRead(review, state).seen;
+  const shown = shownOf(state);
+  if (seen.proposal_version !== shown.proposal_version) return { hold: { busy: false, note: overviewCopy(PROPOSAL_CHANGED), seen: shown, told: false } };
+  if (seen.version !== shown.version) return { hold: { busy: false, note: DIFF_CHANGED, seen: shown, told: false } };
+  return { send: shown };
 }
 
-/** The review after a choice came back: closed when it was done, else open with the reason;
- * after the engine said a newer proposal replaced the reviewed one, the owner has been told,
- * so the next Accept takes the proposal then shown. Inputs: the review the choice was made in
- * and the outcome. Output: the review, or null to close it. */
+/** The review after a choice came back: closed when it was done, else open with the reason on
+ * the diff the choice was made for; after the engine said that diff is gone, it waits for the
+ * read that shows the new one. Inputs: the review the choice was made in and the outcome.
+ * Output: the review, or null to close it. */
 export function afterChoice(review: TabReview, outcome: ChoiceOutcome): TabReview | null {
   if (outcome.done) return null;
   assert(outcome.note !== "", "a refused choice says why");
-  return { busy: false, note: outcome.note, seen: outcome.replaced ? null : review.seen };
+  return { busy: false, note: outcome.note, seen: review.seen, told: review.told || outcome.stale === true };
 }
 
 /** Accepts a refresh's proposal for a tab at the tab version and the proposal version the
@@ -476,8 +586,9 @@ function TabBody({ data, overview, state, runMode, onSelect, quickInfo }: {
 }
 
 /** The banner of a tab whose refresh proposal waits, or the open review of it. Accept sends
- * the tab version of the shown diff and the proposal version the owner has seen; either choice
- * reads the tabs again, and a refused one keeps the review open on what the engine holds now.
+ * the two versions of the diff the owner was told about and is held whenever a read changed
+ * the diff since; either choice reads the tabs again, and a refused one keeps the review open
+ * on what the engine holds now.
  * Inputs: the project data, the tab's label and state, the open review or null, the review
  * handler and the actions. Output: the banner or the review. */
 function Proposal({ data, label, state, review, onReview, actions }: {
@@ -489,6 +600,11 @@ function Proposal({ data, label, state, review, onReview, actions }: {
   actions: OverviewActions;
 }) {
   assert(state.proposal !== null, "a proposal banner was shown for a tab with none");
+  useEffect(() => {
+    if (review === null) return;
+    const read = reviewOnRead(review, state);
+    if (read !== review) onReview(read);
+  }, [review, state.version, state.proposal_version]);
   if (review === null) return <div className="pj-need"><span>A refresh proposes changes to this tab.</span>
     <button type="button" className="btn" id={REVIEW_OPEN} onClick={() => onReview(openReview(state))}>Review</button></div>;
   const choose = async (send: () => Promise<ChoiceOutcome>, told: string) => {
@@ -503,7 +619,7 @@ function Proposal({ data, label, state, review, onReview, actions }: {
     onAccept={() => {
       const step = acceptStep(review, state);
       if ("hold" in step) return onReview(step.hold);
-      void choose(() => acceptTab(data.id, { tab: state.tab, version: state.version, proposal_version: step.send }, actions.accept), `${label} now shows the refreshed text.`);
+      void choose(() => acceptTab(data.id, { tab: state.tab, ...step.send }, actions.accept), `${label} now shows the refreshed text.`);
     }}
     onReject={() => void choose(() => rejectTab(data.id, state.tab, actions.reject), `The proposal for ${label} is rejected. The tab is unchanged.`)} />;
 }
@@ -511,8 +627,8 @@ function Proposal({ data, label, state, review, onReview, actions }: {
 /** One generated tab: the move line for a project outside the CrazyAgent folder, why its file
  * can't be shown, or its body with Edit and, when a refresh proposal waits, its banner or
  * review. An open editor takes the body's place; once the tab changed under it, the changed
- * tab shows above the editor so the owner can compare, and the next Save is made against
- * that shown version.
+ * tab shows above the editor so the owner can compare, and a Save is made only against the
+ * version the owner was told about: each later change holds the Save and says so again.
  * Inputs: the project data, the overview, the tab, its open editor and review or null with
  * their handlers, the actions, the Run mode, the tab pick handler and how Quick info renders
  * a text. Output: the panel body. */
@@ -533,6 +649,11 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
   const facts = tab === "quick_info";
   const shown = state !== undefined && !overview.needs_home && !state.blocked;
   useReturnFocus({ mode: draft !== null ? "editing" : review !== null && shown && state.proposal !== null ? "reviewing" : "idle", proposal: shown && draft === null && state.proposal !== null });
+  useEffect(() => {
+    if (draft === null || state === undefined) return;
+    const read = draftOnRead(draft, state);
+    if (read !== draft) onDraft(read);
+  }, [draft, state?.version]);
   if (overview.needs_home) return <><NeedsHome data={data} />{facts && quickInfo(null)}</>;
   if (!state) return <><p className="pj-muted">{unwritten(overview)}</p>{facts && quickInfo(null)}</>;
   if (state.blocked) return <><Blocked tab={tab} reason={state.blocked} />{facts && quickInfo(null)}</>;
@@ -540,14 +661,15 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
   const label = STRIP.find((item) => item.id === tab)?.label ?? "";
   if (draft === null) return <>
     {state.proposal !== null && <Proposal data={data} label={label} state={state} review={review} onReview={onReview} actions={actions} />}
-    <div className="ov-edit-row"><button type="button" className="btn" id={EDIT_OPEN} onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false })}>Edit</button></div>
+    <div className="ov-edit-row"><button type="button" className="btn" id={EDIT_OPEN} onClick={() => onDraft({ version: state.version, text: state.text ?? "", busy: false, note: "", changed: false, told: false })}>Edit</button></div>
     {body}
   </>;
   const save = async () => {
-    assert(!draft.busy, "a save was started while another was still sent");
+    const step = saveStep(draft, state);
+    if ("hold" in step) return onDraft(step.hold);
     onDraft({ ...draft, busy: true, note: "" });
-    const outcome = await saveTab(data.id, { tab, version: draft.changed ? state.version : draft.version }, draft.text, actions.save);
-    onDraft(outcome.saved ? null : { ...draft, busy: false, note: outcome.note, changed: draft.changed || outcome.changed });
+    const outcome = await saveTab(data.id, { tab, version: step.send }, draft.text, actions.save);
+    onDraft(afterSave(draft, outcome));
     actions.reload();
   };
   return <>
@@ -558,11 +680,13 @@ function GeneratedPanel({ data, overview, tab, draft, onDraft, review, onReview,
 
 /** The Overview's tab strip and the picked tab: Quick info, Features, Competitors, Install &
  * use, README and Activity, with when the tabs were checked and the Refresh button. README and
- * Activity show even when the tabs could not be read.
+ * Activity show even when the tabs could not be read. Open editors are kept for the session,
+ * so typed text survives leaving the Overview until it is saved or cancelled.
  * Inputs: the project data, the overview or null, why it is null, now, the picked tab, the
- * pick handler, the actions, the Run in project terminal mode, how Quick info renders a text
- * and the Activity panel. Output: the strip and its panel. */
-export function OverviewTabs({ data, overview, problem, now, selected, onSelect, actions, runMode, quickInfo, activity }: {
+ * pick handler, the actions, the Run in project terminal mode, how Quick info renders a text,
+ * the Activity panel and, for tests, the store of the open editors.
+ * Output: the strip and its panel. */
+export function OverviewTabs({ data, overview, problem, now, selected, onSelect, actions, runMode, quickInfo, activity, store }: {
   data: ProjectData;
   overview: ProjectOverview | null;
   problem?: string;
@@ -573,11 +697,20 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
   runMode: RunMode;
   quickInfo: (text: string | null) => ReactNode;
   activity: ReactNode;
+  store?: TabStore;
 }) {
   const [asking, setAsking] = useState(false);
-  const [drafts, setDrafts] = useState<Partial<Record<OverviewTabId, TabDraft>>>({});
+  const [drafts, setDrafts] = useState<OpenDrafts>(() => storedDrafts(data.id, store));
+  const open = useRef(drafts);
   const [reviews, setReviews] = useState<Partial<Record<OverviewTabId, TabReview>>>({});
   assert(STRIP.some((item) => item.id === selected), "the picked Overview tab is not in the strip");
+  const keepDraft = (tab: StripId, draft: TabDraft | null) => {
+    assert(tab !== "readme" && tab !== "activity", "only a generated tab has an editor");
+    const next: OpenDrafts = { ...open.current, [tab]: draft ?? undefined };
+    open.current = next;
+    setDrafts(next);
+    storeDrafts(data.id, next, store);
+  };
   const status = overview === null ? null : checked(overview, now);
   const off = overview === null || overview.running || overview.refresh === "off" || overview.needs_home;
   const refresh = async () => {
@@ -614,7 +747,7 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
       {overview === null && selected === "quick_info" && quickInfo(null)}
       {overview !== null && selected === "readme" && <ReadmePanel projectId={data.id} readme={overview.readme} />}
       {overview !== null && selected !== "readme" && selected !== "activity" && <GeneratedPanel key={selected} data={data} overview={overview} tab={selected} draft={drafts[selected] ?? null}
-        onDraft={(draft) => setDrafts((open) => ({ ...open, [selected]: draft ?? undefined }))} review={reviews[selected] ?? null}
+        onDraft={(draft) => keepDraft(selected, draft)} review={reviews[selected] ?? null}
         onReview={(review) => setReviews((open) => ({ ...open, [selected]: review ?? undefined }))} actions={actions} runMode={runMode} onSelect={onSelect} quickInfo={quickInfo} />}
     </div>
   </section>;
@@ -654,7 +787,7 @@ export function ProjectOverviewTabs({ data, quickInfo, activity, load = loadOver
   }, [every]);
   const problem = read?.kind === "not_ready" ? "Not ready yet: the Overview tabs aren't in this build."
     : read?.kind === "error" ? `Couldn't load the Overview tabs. ${overviewCopy(read)}` : undefined;
-  return <OverviewTabs data={data} overview={overview} problem={problem} now={data.now} selected={selected}
+  return <OverviewTabs key={data.id} data={data} overview={overview} problem={problem} now={data.now} selected={selected}
     onSelect={(tab) => { storeTab(data.id, tab); setSelected(tab); }}
     actions={{ refresh: () => refreshOverview(data.id), save: saveOverviewTab, accept: acceptOverviewTab, reject: rejectOverviewTab, reload: () => setRound((count) => count + 1) }}
     runMode={runMode} quickInfo={quickInfo} activity={activity} />;

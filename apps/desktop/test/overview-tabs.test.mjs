@@ -35,12 +35,12 @@ const projectData = (jobs = [], research = ["market_research"]) => ({
 const idle = () => Promise.resolve({ kind: "ok", value: undefined });
 const actions = { refresh: idle, save: idle, accept: idle, reject: idle, reload: () => {} };
 
-function page({ selected, overview, about = "", mappingOverview = null, researchRunning = false, jobs, research, runMode = "off", problem }) {
+function page({ selected, overview, about = "", mappingOverview = null, researchRunning = false, jobs, research, runMode = "off", problem, store }) {
   const data = projectData(jobs ?? (researchRunning ? [job("competitor_research", "running")] : []), research ?? (researchRunning || jobs ? ["market_research", "competitor_research"] : ["market_research"]));
   return renderToStaticMarkup(createElement(view.OverviewTabs, {
     data, overview, problem, now: NOW, selected, onSelect: () => {}, actions, runMode,
     quickInfo: (text) => createElement(screen.OverviewFacts, { about, overview: text ?? mappingOverview }),
-    activity: createElement("p", null, "Today's activity"),
+    activity: createElement("p", null, "Today's activity"), store,
   }));
 }
 
@@ -490,6 +490,91 @@ test("Save sends the text with the version the editor opened at", async () => {
   assert.deepEqual(outcome, { saved: true, changed: false, kept: "", note: "" });
 });
 
+const draftAt = (version, more = {}) => ({ version, text: "- typed", busy: false, note: "", changed: false, told: false, ...more });
+const tabAt = (version) => ({ ...base().tabs.find((tab) => tab.tab === "features"), text: "- Search\n", version });
+
+test("a tab that changed under an open editor holds the Save, says so and sends nothing; every later change holds it again", () => {
+  const notice = api.overviewCopy("overview_tab_changed");
+  assert.deepEqual(view.saveStep(draftAt("v1"), tabAt("v1")), { send: "v1" });
+  const held = view.saveStep(draftAt("v1"), tabAt("v2"));
+  assert.deepEqual(held, { hold: draftAt("v2", { note: notice, changed: true }) });
+  assert.deepEqual(view.saveStep(held.hold, tabAt("v2")), { send: "v2" }, "the second Save is made against the version now shown");
+  assert.deepEqual(view.saveStep({ ...held.hold, note: "" }, tabAt("v3")), { hold: draftAt("v3", { note: notice, changed: true }) }, "a further change holds the Save again");
+  assert.throws(() => view.saveStep(draftAt("v1", { busy: true }), tabAt("v1")), /while another was still sent/);
+});
+
+test("after the engine said the tab changed, the next read is the tab the owner compares with, and a further change before Save shows the notice again and sends nothing", async () => {
+  const outcome = await view.saveTab("alpha", { tab: "features", version: "v1" }, "- typed", () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
+  const told = view.afterSave(draftAt("v1", { busy: true }), outcome);
+  assert.deepEqual(told, draftAt("v1", { note: api.overviewCopy("overview_tab_changed"), changed: true, told: true }));
+  assert.equal(view.draftOnRead(told, tabAt("v1")), told, "the read that shows the change has not come yet");
+  assert.deepEqual(view.saveStep(told, tabAt("v1")), { send: "v1" }, "until then a Save still names the version the engine refuses");
+  const compared = view.draftOnRead(told, tabAt("v2"));
+  assert.deepEqual(compared, draftAt("v2", { note: outcome.note, changed: true }));
+  assert.equal(view.draftOnRead(compared, tabAt("v3")), compared, "a later read is not taken as compared");
+  const held = view.saveStep(compared, tabAt("v3"));
+  assert.deepEqual(held, { hold: draftAt("v3", { note: api.overviewCopy("overview_tab_changed"), changed: true }) });
+  assert.deepEqual(view.saveStep(held.hold, tabAt("v3")), { send: "v3" });
+});
+
+test("a saved editor closes, and a save refused for another reason keeps the editor as it was with the reason", () => {
+  assert.equal(view.afterSave(draftAt("v1", { busy: true }), { saved: true, changed: false, kept: "", note: "" }), null);
+  const refused = { saved: false, changed: false, kept: "- typed", note: "No." };
+  assert.deepEqual(view.afterSave(draftAt("v1", { busy: true }), refused), draftAt("v1", { note: "No." }));
+  assert.deepEqual(view.afterSave(draftAt("v1", { busy: true, changed: true, told: true }), refused), draftAt("v1", { note: "No.", changed: true, told: true }), "an editor waiting for the changed tab keeps waiting");
+  assert.throws(() => view.afterSave(draftAt("v1"), { ...refused, note: "" }), /says why/);
+});
+
+test("an open editor's text is kept per project and tab for the session, and a saved or cancelled one leaves", () => {
+  const stored = new Map();
+  const store = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
+  assert.deepEqual(view.storedDrafts("alpha", store), {});
+  view.storeDrafts("alpha", { features: draftAt("v1", { busy: true, note: "No.", changed: true, told: true }), competitors: draftAt("v4", { text: "- Beta" }) }, store);
+  assert.deepEqual(view.storedDrafts("alpha", store), { features: draftAt("v1", { changed: true }), competitors: draftAt("v4", { text: "- Beta" }) }, "kept unlocked, with no note, at the version last compared");
+  assert.deepEqual(view.storedDrafts("beta", store), {}, "another project has its own editors");
+  view.storeDrafts("alpha", { features: undefined, competitors: draftAt("v4", { text: "- Beta" }) }, store);
+  assert.deepEqual(view.storedDrafts("alpha", store), { competitors: draftAt("v4", { text: "- Beta" }) });
+  view.storeDrafts("alpha", {}, store);
+  assert.deepEqual(view.storedDrafts("alpha", store), {});
+});
+
+test("a kept editor that is no editor, is too long or sits in a storage that refuses reads as none", () => {
+  const stored = new Map();
+  const store = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
+  view.storeDrafts("alpha", { features: draftAt("v1") }, store);
+  const [key] = [...stored.keys()];
+  for (const kept of ["nonsense", "null", "7", "[]", JSON.stringify({ features: null }), JSON.stringify({ features: { version: 7, text: "- typed", changed: false } }),
+    JSON.stringify({ features: { version: "v1", text: ["- typed"], changed: false } }), JSON.stringify({ features: { version: "v1", text: "- typed" } }),
+    JSON.stringify({ readme: { version: "v1", text: "- typed", changed: false } }), JSON.stringify({ features: { version: "v1", text: "x".repeat(view.DRAFT_CHARS_MAX + 1), changed: false } })]) {
+    stored.set(key, kept);
+    assert.deepEqual(view.storedDrafts("alpha", store), {}, kept.slice(0, 60));
+  }
+  stored.set(key, JSON.stringify({ features: { version: "v1", text: "x".repeat(view.DRAFT_CHARS_MAX), changed: false, busy: true, note: "No.", told: true } }));
+  assert.deepEqual(view.storedDrafts("alpha", store), { features: draftAt("v1", { text: "x".repeat(view.DRAFT_CHARS_MAX) }) });
+  view.storeDrafts("alpha", { features: draftAt("v1", { text: "x".repeat(view.DRAFT_CHARS_MAX + 1) }) }, store);
+  assert.deepEqual(view.storedDrafts("alpha", store), {}, "a text over the bound is not kept");
+  const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+  assert.deepEqual(view.storedDrafts("alpha", broken), {});
+  assert.doesNotThrow(() => view.storeDrafts("alpha", { features: draftAt("v1") }, broken));
+});
+
+test("coming back to the Overview reopens a kept editor with the typed text, and shows the tab as it is now once it changed", () => {
+  const stored = new Map();
+  const store = { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
+  const overview = withTab(base(), "features", "- Search\n");
+  assert.doesNotMatch(page({ selected: "features", overview, store }), /<textarea/);
+  view.storeDrafts("alpha", { features: draftAt("v-features", { text: "- typed and not saved" }) }, store);
+  const back = page({ selected: "features", overview, store });
+  assert.match(back, /<label[^>]*for="ov-edit"[^>]*>Edit Features<\/label>/);
+  assert.match(back, /<textarea[^>]*id="ov-edit"[^>]*>- typed and not saved<\/textarea>/);
+  assert.doesNotMatch(back, /The tab as it is now:/);
+  assert.doesNotMatch(page({ selected: "install_and_use", overview, store }), /<textarea/, "only the tab it was typed in");
+  view.storeDrafts("alpha", { features: draftAt("v0", { text: "- typed and not saved", changed: true }) }, store);
+  const changed = page({ selected: "features", overview, store });
+  assert.match(changed, /The tab as it is now:/);
+  assert.match(changed, /<textarea[^>]*id="ov-edit"[^>]*>- typed and not saved<\/textarea>/);
+});
+
 test("a tab changed since the editor opened keeps the typed text and says to compare", async () => {
   const outcome = await view.saveTab("alpha", { tab: "features", version: "v7" }, "- typed\n", () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
   assert.equal(outcome.saved, false);
@@ -621,27 +706,66 @@ test("Reject names the tab and keeps the tab's text", async () => {
   assert.deepEqual(refused, { done: false, note: api.overviewCopy("overview_no_proposal") });
 });
 
-test("an Accept is sent only for the proposal the owner opened; a newer one is shown first and needs a second Accept", () => {
-  const state = (seal) => featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n", false, seal));
-  assert.deepEqual(view.acceptStep({ busy: false, note: "", seen: "p1" }, state("p1")), { send: "p1" });
-  const held = view.acceptStep({ busy: false, note: "", seen: "p1" }, state("p2"));
-  assert.deepEqual(held, { hold: { busy: false, note: api.overviewCopy("overview_proposal_changed"), seen: "p2" } });
-  assert.deepEqual(view.acceptStep(held.hold, state("p2")), { send: "p2" }, "the second Accept sends the proposal now shown");
-  assert.deepEqual(view.acceptStep({ busy: false, note: "x", seen: null }, state("p9")), { send: "p9" }, "after the engine said it changed, the owner was told once");
+const reviewAt = (seal, more = {}, version = "v-features") => ({ busy: false, note: "", seen: { version, proposal_version: seal }, told: false, ...more });
+const proposed = (seal) => featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n", false, seal));
+
+test("an Accept is sent only for the diff the owner was shown; a newer proposal is shown first and needs a second Accept, every time", () => {
+  const notice = api.overviewCopy("overview_proposal_changed");
+  assert.deepEqual(view.acceptStep(reviewAt("p1"), proposed("p1")), { send: { version: "v-features", proposal_version: "p1" } });
+  const held = view.acceptStep(reviewAt("p1"), proposed("p2"));
+  assert.deepEqual(held, { hold: reviewAt("p2", { note: notice }) });
+  assert.deepEqual(view.acceptStep(held.hold, proposed("p2")), { send: { version: "v-features", proposal_version: "p2" } }, "the second Accept sends the proposal now shown");
+  assert.deepEqual(view.acceptStep({ ...held.hold, note: "" }, proposed("p3")), { hold: reviewAt("p3", { note: notice }) }, "a further proposal holds the Accept again");
+  assert.throws(() => view.acceptStep(reviewAt("p1", { busy: true }), proposed("p1")), /while another choice was still sent/);
 });
 
-test("a proposal the engine says was replaced keeps the review open with a sentence, and the next Accept takes the one shown", async () => {
-  const refused = await view.acceptTab("alpha", { tab: "features", version: "v7", proposal_version: "p1" }, () => Promise.resolve({ kind: "error", code: "overview_proposal_changed" }));
-  assert.deepEqual(refused, { done: false, note: api.overviewCopy("overview_proposal_changed"), replaced: true });
-  assert.equal(api.overviewCopy("overview_proposal_changed"), "A newer proposal replaced the one you opened. The diff now shows it; look it over and choose again.");
-  assert.deepEqual(view.afterChoice({ busy: true, note: "", seen: "p1" }, refused), { busy: false, note: refused.note, seen: null });
-  assert.deepEqual(view.afterChoice({ busy: true, note: "", seen: "p1" }, { done: false, note: "No." }), { busy: false, note: "No.", seen: "p1" });
-  assert.equal(view.afterChoice({ busy: true, note: "", seen: "p1" }, { done: true, note: "" }), null);
+test("a tab that changed under an open review holds the Accept and says the diff is new", () => {
+  const moved = { ...proposed("p1"), version: "v8", text: "- Other\n" };
+  const held = view.acceptStep(view.openReview(proposed("p1")), moved);
+  assert.deepEqual(held, { hold: reviewAt("p1", { note: "This tab changed since this diff was made. The diff now shows the change against the tab as it is; choose again." }, "v8") });
+  assert.deepEqual(view.acceptStep(held.hold, moved), { send: { version: "v8", proposal_version: "p1" } });
+  const both = view.acceptStep(view.openReview(proposed("p1")), { ...moved, proposal_version: "p2" });
+  assert.deepEqual(both, { hold: reviewAt("p2", { note: api.overviewCopy("overview_proposal_changed") }, "v8") }, "a newer proposal on a changed tab is one hold on the diff shown");
 });
 
-test("Review opens on the proposal version the banner was shown for", () => {
-  const state = featuresOf(withProposal(withTab(base(), "features", "- Search\n"), "features", "- New\n", false, "p4"));
-  assert.deepEqual(view.openReview(state), { busy: false, note: "", seen: "p4" });
+test("after the engine said a proposal was replaced, the next read is the one the owner was told about, and a later one holds the Accept again", async () => {
+  const notice = api.overviewCopy("overview_proposal_changed");
+  const refused = await view.acceptTab("alpha", { tab: "features", version: "v-features", proposal_version: "p1" }, () => Promise.resolve({ kind: "error", code: "overview_proposal_changed" }));
+  assert.deepEqual(refused, { done: false, note: notice, stale: true });
+  assert.equal(notice, "A newer proposal replaced the one you opened. The diff now shows it; look it over and choose again.");
+  const told = view.afterChoice(reviewAt("p1", { busy: true }), refused);
+  assert.deepEqual(told, reviewAt("p1", { note: notice, told: true }));
+  assert.equal(view.reviewOnRead(told, proposed("p1")), told, "the read that shows the newer proposal has not come yet");
+  const first = view.reviewOnRead(told, proposed("p2"));
+  assert.deepEqual(first, reviewAt("p2", { note: notice }));
+  assert.equal(view.reviewOnRead(first, proposed("p3")), first, "a later read is not taken as seen");
+  const held = view.acceptStep(first, proposed("p3"));
+  assert.deepEqual(held, { hold: reviewAt("p3", { note: notice }) }, "the second Accept is held and says a newer proposal is shown");
+  assert.deepEqual(view.acceptStep(held.hold, proposed("p3")), { send: { version: "v-features", proposal_version: "p3" } }, "the third sends the last version");
+});
+
+test("after the engine said the tab changed under a diff, the next read is the diff the owner was told about, and a later change holds the Accept again", async () => {
+  const refused = await view.acceptTab("alpha", { tab: "features", version: "v-features", proposal_version: "p1" }, () => Promise.resolve({ kind: "error", code: "overview_tab_changed" }));
+  assert.equal(refused.stale, true);
+  const told = view.afterChoice(reviewAt("p1", { busy: true }), refused);
+  assert.deepEqual(told, reviewAt("p1", { note: refused.note, told: true }));
+  const first = view.reviewOnRead(told, { ...proposed("p1"), version: "v8" });
+  assert.deepEqual(first, reviewAt("p1", { note: refused.note }, "v8"));
+  const held = view.acceptStep(first, { ...proposed("p1"), version: "v9" });
+  assert.deepEqual(held, { hold: reviewAt("p1", { note: refused.note }, "v9") });
+  assert.deepEqual(view.acceptStep(held.hold, { ...proposed("p1"), version: "v9" }), { send: { version: "v9", proposal_version: "p1" } });
+});
+
+test("a choice refused for another reason keeps the review on its diff with the reason, and a done one closes it", () => {
+  assert.deepEqual(view.afterChoice(reviewAt("p1", { busy: true }), { done: false, note: "No." }), reviewAt("p1", { note: "No." }));
+  assert.deepEqual(view.afterChoice(reviewAt("p1", { busy: true, told: true }), { done: false, note: "No." }), reviewAt("p1", { note: "No.", told: true }), "a review waiting for the new diff keeps waiting");
+  assert.equal(view.afterChoice(reviewAt("p1", { busy: true }), { done: true, note: "" }), null);
+  assert.throws(() => view.afterChoice(reviewAt("p1", { busy: true }), { done: false, note: "" }), /says why/);
+});
+
+test("Review opens on the tab version and the proposal version the banner was shown for", () => {
+  assert.deepEqual(view.openReview(proposed("p4")), reviewAt("p4"));
+  assert.throws(() => view.openReview(featuresOf(withTab(base(), "features", "- Search\n"))), /no proposal/);
 });
 
 test("opening the editor puts the keyboard in its text box, and the review in its panel", () => {
