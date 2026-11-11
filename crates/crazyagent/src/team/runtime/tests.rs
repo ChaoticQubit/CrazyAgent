@@ -4984,7 +4984,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
 /// harness conversation by its id and hands it only that turn, in its launch
 /// instructions, also with On harness switch set to Start fresh, and records no switch.
 /// OB6-R2-F2: a later start of the same conversation reads that turn again, since only
-/// launch instructions carry it, and stores no second divider.
+/// launch instructions carry it, and stores no further divider.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries_the_turn() {
@@ -5063,6 +5063,20 @@ fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries
         })
         .unwrap();
     assert_eq!(switches, 0, "a change of mode records no harness switch");
+    let dividers = |connection: &rusqlite::Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE session='s-one' AND speaker='switch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        dividers(&fixture.connection),
+        2,
+        "the one-turn master's takeover and the live terminal's are each stored once"
+    );
 
     stop_live(&fixture, &mut team);
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
@@ -5087,15 +5101,11 @@ fn a_one_turn_turn_between_live_starts_resumes_the_kept_conversation_and_carries
         "a later start still reads the turn its record does not hold: {again}"
     );
     assert!(!again.contains("You: Done."), "{again}");
-    let dividers: i64 = fixture
-        .connection
-        .query_row(
-            "SELECT COUNT(*) FROM session_messages WHERE session='s-one' AND speaker='switch'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(dividers, 1, "the takeover is stored once");
+    assert_eq!(
+        dividers(&fixture.connection),
+        2,
+        "a later start of the kept conversation stores no divider"
+    );
     assert_eq!(masters(&fixture.connection), [master]);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
@@ -12959,6 +12969,20 @@ struct LevelRun {
     codes: BTreeMap<String, i32>,
 }
 
+/// The exit code the agent's `cargo build` must end with: 0, as on the owner's Mac, where
+/// the engine hands the account's Rust to agents. A runner whose account has no Rust says so
+/// with `CRAZYAGENT_TEST_OWNER_RUST=absent`, and the build must then end with 127, the
+/// shell's code for a command it cannot find. No product code decides the value. Takes
+/// nothing. Returns the code; panics on any other value of the variable.
+#[cfg(target_os = "macos")]
+fn built() -> i32 {
+    match std::env::var("CRAZYAGENT_TEST_OWNER_RUST") {
+        Err(std::env::VarError::NotPresent) => 0,
+        Ok(stated) if stated == "absent" => 127,
+        other => panic!("CRAZYAGENT_TEST_OWNER_RUST is unset or \"absent\", got {other:?}"),
+    }
+}
+
 /// Starts one tools-on sub-agent of a project saved at `access`, through `TeamRuntime`
 /// and real sandbox-exec (none at Full access). The project is a committed tiny crate; the
 /// stand-in codex script edits a file, builds the crate offline with the owner's
@@ -13275,7 +13299,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
 
     let (next, _, codes) = requeued_run(&mut run.fixture, &mut run.team, member);
     run.member = next;
-    assert_eq!(codes["build"], 0, "{codes:?}");
+    assert_eq!(codes["build"], built(), "{codes:?}");
     assert_eq!(
         codes["told"], 0,
         "the next start is told the Own branch rules"
@@ -13583,7 +13607,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         scratch_pin: None,
         proxy: None,
         relay: None,
-        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
     };
     let account = || AccountBinding::Subscription {
@@ -13736,8 +13760,8 @@ fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_th
     for name in ["home_flags", "skills_flags", "system_flags"] {
         assert_ne!(run.code(name), 0, "{name}: {:?}", run.codes);
     }
+    assert_eq!(run.code("build"), built(), "build: {:?}", run.codes);
     for name in [
-        "build",
         "home_files",
         "work_files",
         "mkdir_roots",
@@ -13793,8 +13817,8 @@ fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_the
     assert!(!config.contains("planted"), "{config}");
     assert_ne!(run.code("clone_away"), 0, "{:?}", run.codes);
     assert!(!store.contains("planted"), "{store}");
+    assert_eq!(run.code("build"), built(), "build: {:?}", run.codes);
     for name in [
-        "build",
         "commit",
         "home_files",
         "work_files",
@@ -13813,7 +13837,7 @@ fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_the
 #[test]
 fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
-    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
         1,
@@ -13836,7 +13860,7 @@ fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets()
 #[test]
 fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
-    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
         0,
@@ -13887,7 +13911,7 @@ fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
 #[test]
 fn a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt() {
     let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
-    assert_eq!(run.code("build"), 0, "{:?}", run.codes);
+    assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
         0,
@@ -20986,7 +21010,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         toolchains: Vec::new(),
         proxy: None,
         relay: None,
-        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
     }
 }
@@ -21474,7 +21498,7 @@ fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
 /// starts it, and builds its pane command from the plan and the kept context the runtime
 /// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
 #[cfg(target_os = "macos")]
-fn team_claude_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(String, String)> {
+fn team_terminal_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(String, String)> {
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let (_, plan, mode) = runtime
         .prepare(
@@ -21524,7 +21548,7 @@ fn a_team_claude_code_terminal_starts_classic_by_default() {
     let fixture = Fixture::new(1);
     let mut runtime = exiting_claude_runtime(&fixture);
     assert_eq!(
-        team_claude_display(&fixture, &runtime),
+        team_terminal_display(&fixture, &runtime),
         [(
             "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
             "1".to_owned()
@@ -21539,32 +21563,32 @@ fn a_team_claude_code_terminal_starts_classic_by_default() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
-    use crate::coord::settings::{ClaudeDisplay, CoordSettings, write};
+    use crate::coord::settings::{CoordSettings, TerminalDisplay, write};
     let fixture = Fixture::new(1);
     let project = ProjectId::new(PROJECT).unwrap();
     let mut runtime = exiting_claude_runtime(&fixture);
-    let choose = |claude_display: ClaudeDisplay| {
+    let choose = |terminal_display: TerminalDisplay| {
         write(
             &fixture.connection,
             &project,
             &CoordSettings {
-                claude_display,
+                terminal_display,
                 ..CoordSettings::default()
             },
         )
         .unwrap();
     };
-    choose(ClaudeDisplay::Fullscreen);
+    choose(TerminalDisplay::Fullscreen);
     assert_eq!(
-        team_claude_display(&fixture, &runtime),
+        team_terminal_display(&fixture, &runtime),
         [
             ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
             ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned())
         ]
     );
-    choose(ClaudeDisplay::Classic);
+    choose(TerminalDisplay::Classic);
     assert_eq!(
-        team_claude_display(&fixture, &runtime),
+        team_terminal_display(&fixture, &runtime),
         [(
             "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
             "1".to_owned()
@@ -22700,7 +22724,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         toolchains: Vec::new(),
         proxy: None,
         relay: None,
-        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
         task_start: None,
     };
     let account = || AccountBinding::Subscription {

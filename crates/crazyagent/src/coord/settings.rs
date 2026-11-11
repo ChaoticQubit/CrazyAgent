@@ -158,34 +158,22 @@ pub enum Overlaps {
     Wait,
 }
 
-/// How every Claude Code terminal of the project draws (N-D9): Classic on the normal
-/// screen, so the app's terminal view scrolls with the wheel at once and a plain drag
-/// selects text, or Fullscreen, Claude Code's own view, which takes the mouse. Classic is
-/// the default.
+/// How every agent terminal of the project draws, whatever harness runs in it (N-D9,
+/// DEC-141): Classic on the normal screen, so the app's terminal view scrolls with the
+/// wheel at once and a plain drag selects text, or Fullscreen, the harness's own view, which
+/// takes the mouse. Classic is the default. Each harness kind's own switches for a display
+/// are `harnesses::interactive::display_switches`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClaudeDisplay {
+pub enum TerminalDisplay {
     #[default]
     Classic,
     Fullscreen,
 }
 
-impl ClaudeDisplay {
-    /// The variables a Claude Code terminal starts with for this display: Classic turns its
-    /// alternate screen off, which makes Claude Code 2.1.309 use its classic renderer;
-    /// Fullscreen sets 3 rows a wheel notch, the step Claude Code picks itself for xterm.js,
-    /// and asks for the fullscreen renderer, which Claude Code otherwise picks per account
-    /// from its own settings and rollout (R8-FS). Takes the display. Returns the names and
-    /// values.
-    pub fn variables(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            Self::Classic => &[("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")],
-            Self::Fullscreen => &[
-                ("CLAUDE_CODE_SCROLL_SPEED", "3"),
-                ("CLAUDE_CODE_NO_FLICKER", "1"),
-            ],
-        }
-    }
+impl TerminalDisplay {
+    /// Every display, in the order settings list them.
+    pub const ALL: [Self; 2] = [Self::Classic, Self::Fullscreen];
 }
 
 /// A team role whose skills the owner chooses (DEC-111 R3): the master, a lead (a
@@ -312,8 +300,9 @@ impl TaskStart {
 }
 
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic Claude Code display and
-/// the Task-start reminder On.
+/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic terminal display and
+/// the Task-start reminder On. A row stored before DEC-141 names the display
+/// `claude_display`; it reads as `terminal_display`, so the owner's choice is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
@@ -323,8 +312,8 @@ pub struct CoordSettings {
     pub counted_tools: Vec<String>,
     #[serde(default)]
     pub role_skills: RoleSkills,
-    #[serde(default)]
-    pub claude_display: ClaudeDisplay,
+    #[serde(default, alias = "claude_display")]
+    pub terminal_display: TerminalDisplay,
     #[serde(default)]
     pub task_start: TaskStart,
 }
@@ -337,7 +326,7 @@ impl Default for CoordSettings {
             nudges: Nudges::Off,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
             role_skills: RoleSkills::default(),
-            claude_display: ClaudeDisplay::Classic,
+            terminal_display: TerminalDisplay::Classic,
             task_start: TaskStart::On,
         }
     }

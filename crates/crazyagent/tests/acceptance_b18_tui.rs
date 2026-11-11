@@ -447,8 +447,10 @@ fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
         screen.contains("Sandboxed") && screen.contains("c Agent access")
     });
     pty.keys(&["c"]);
-    let screen = pty.until("c opens the Agent access box", |screen| {
-        screen.contains("< Sandboxed >") && screen.contains("Toolchains agents may use")
+    let screen = pty.until("c opens the whole Agent access box", |screen| {
+        screen.contains("< Sandboxed >")
+            && screen.contains("Toolchains agents may use")
+            && screen.contains("[> Save ]")
     });
     assert!(screen.contains("[ ] Rust"), "{screen}");
     assert!(screen.contains("[> Save ]"), "{screen}");

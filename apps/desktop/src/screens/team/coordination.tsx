@@ -2,13 +2,14 @@ import { useState, type ReactNode } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, setTerminalsPerWindow, type Result, type SkillView } from "../../api";
 import { loadTeamStatus } from "../../api-projects";
 import { BARE_NO_HOOKS, OVERLAP_CHOICES } from "../../engine-client";
-import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
+import type { TerminalDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, IntentReceipt, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { sameJson, useHeld, useLoad, type Loaded } from "../../state";
-import { Button, Checkbox, Segmented, Select } from "../../ui";
+import { Button, Checkbox, Segmented, Select, isMac } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { SettingRow, useChange } from "./controls";
 import { McpServersSetting } from "./setup-rows";
+import { dragKey } from "./terminal-io";
 
 export const COUNTED_TOOLS_MAX = 32;
 const COUNTED_TOOL = /^[A-Za-z0-9_*-]{1,64}$/;
@@ -27,7 +28,7 @@ export const COORD_DEFAULTS: CoordSettings = {
   nudges: "off",
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
   role_skills: { master: null, lead: null, worker: null },
-  claude_display: "classic",
+  terminal_display: "classic",
   task_start: "on",
 };
 
@@ -141,16 +142,34 @@ export function modeHelper(harness: CoordHarness, native: boolean): string {
   return reason ?? NATIVE_HELPERS[harness];
 }
 
-/** The Claude Code terminal display choices, Classic first as the default. */
+/** The Terminal display choices of every harness, Classic first as the default. */
 export const DISPLAY_OPTIONS: SelectOption[] = [
   { value: "classic", label: "Classic" },
   { value: "fullscreen", label: "Fullscreen" },
 ];
 
-const DISPLAY_HELPER: Record<ClaudeDisplay, string> = {
-  classic: "Classic: the mouse wheel scrolls the terminal at once and a plain drag selects text. A change applies when a Claude Code terminal next starts.",
-  fullscreen: "Fullscreen: Claude Code draws its own view and takes the mouse; the wheel scrolls 3 rows a notch and Option-drag selects text. A change applies when a Claude Code terminal next starts.",
-};
+const DISPLAY_APPLIES = "A change applies when a terminal next starts.";
+
+/** Joins harness names as a sentence lists them. Input: the names. Output: "A", "A and B" or
+ * "A, B and C". */
+function listed(names: string[]): string {
+  return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+}
+
+/** The words under the Terminal display setting, the same setting for every harness (DEC-141):
+ * what the chosen display does in the app's terminal view and, for Fullscreen, which harness
+ * kinds draw it and which cannot and so stay Classic. A row without the engine's list of
+ * displays counts as drawing every one. Inputs: the display, every harness kind's row and
+ * whether this is a Mac. Output: the sentences. */
+export function displayHelper(display: TerminalDisplay, harnesses: HarnessCoordination[], mac: boolean): string {
+  if (display === "classic") return `Classic: every agent draws on the normal screen, so the mouse wheel scrolls the terminal at once and a plain drag selects text. ${DISPLAY_APPLIES}`;
+  const draws = (row: HarnessCoordination) => !row.displays?.length || row.displays.includes("fullscreen");
+  const names = (rows: HarnessCoordination[]) => listed(rows.map((row) => HARNESS_NAMES[row.harness]));
+  const drawn = harnesses.filter(draws);
+  const kept = harnesses.filter((row) => !draws(row));
+  const stays = kept.length === 0 ? "" : ` ${names(kept)} ${kept.length === 1 ? "has" : "have"} no Fullscreen view and ${kept.length === 1 ? "stays" : "stay"} Classic.`;
+  return `Fullscreen: ${names(drawn)} ${drawn.length === 1 ? "draws its own view and takes" : "draw their own view and take"} the mouse; the wheel scrolls inside that view, and ${dragKey(mac)}-drag selects text.${stays} ${DISPLAY_APPLIES}`;
+}
 
 /** The Delivery choices, Auto first as the default. */
 export const DELIVERY_OPTIONS: SelectOption[] = [
@@ -360,23 +379,31 @@ export function CoordinationControls({ projectId, status, reload, children }: { 
   </>;
 }
 
-/** The per-harness rows the approved mockup leaves off Agent settings, kept under each harness:
- * how messages reach its agents and, for Claude Code, the terminal display. Every option is
- * selectable; the plan defaults show for an older engine. Inputs: the project id, the latest
- * team status and a reload. Output: one group per harness kind. */
-export function PerHarnessControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+/** The Terminal display row: one choice for every agent terminal of the project, whatever
+ * harness runs in it (DEC-141), with every option selectable and the words naming a harness
+ * kind that cannot draw the chosen one. The plan default shows for an older engine. Inputs:
+ * the project id, the latest team status and a reload. Output: the row. */
+export function TerminalDisplaySetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const view = coordination(status);
   const { note, change } = useChange(reload);
-  const [display, holdDisplay] = useHeld<ClaudeDisplay>(view.settings.claude_display, Object.is, status);
+  const [display, holdDisplay] = useHeld<TerminalDisplay>(view.settings.terminal_display, Object.is, status);
+  return <SettingRow label="Terminal display">
+    <Select id={`tg-display-${projectId}`} label="Terminal display" value={display} options={DISPLAY_OPTIONS}
+      onValue={(value) => { if (value === "classic" || value === "fullscreen") void change(() => saveCoordSettings(projectId, { terminal_display: value }), "the terminal display", () => holdDisplay(value)); }}
+      helper={displayHelper(display, view.harnesses, isMac())} />
+    <ChangeNote note={note} />
+  </SettingRow>;
+}
+
+/** The per-harness rows the approved mockup leaves off Agent settings, kept under each harness:
+ * how messages reach its agents. Every option is selectable; the plan defaults show for an
+ * older engine. Inputs: the project id, the latest team status and a reload. Output: one group
+ * per harness kind. */
+export function PerHarnessControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const view = coordination(status);
   return <>
     {view.harnesses.map((row) => <div className="set-harness" role="group" aria-label={HARNESS_NAMES[row.harness]} key={row.harness}>
       <DeliverySetting projectId={projectId} row={row} status={status} reload={reload} />
-      {row.harness === "claude-code" && <SettingRow label="Claude Code terminal display">
-        <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={display} options={DISPLAY_OPTIONS}
-          onValue={(value) => { if (value === "classic" || value === "fullscreen") void change(() => saveCoordSettings(projectId, { claude_display: value }), "the Claude Code terminal display", () => holdDisplay(value)); }}
-          helper={DISPLAY_HELPER[display]} />
-      </SettingRow>}
     </div>)}
-    <ChangeNote note={note} />
   </>;
 }

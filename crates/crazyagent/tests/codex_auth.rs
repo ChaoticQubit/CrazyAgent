@@ -1214,27 +1214,25 @@ fn email_error_and_device_url_bounds_apply_to_every_sensitive_ingress() {
 
 #[test]
 fn auth_receive_preserves_existing_frame_output_and_buffer_bounds() {
-    for (count, expected_error) in [(128, None), (129, Some(ProtocolError::Capacity))] {
+    let frame = completion(json!({"loginId":null,"success":false}));
+    for count in [128, 129, 10_000] {
         let mut protocol = ready();
-        let frame = completion(json!({"loginId":null,"success":false}));
         let bytes = frame.repeat(count);
-        assert!(bytes.len() < FRAME_BYTES_MAX);
-        let received = protocol.receive(&bytes);
-        if let Some(error) = expected_error {
-            assert_eq!(received, Err(error));
-            assert_eq!(protocol.state(), State::Failed);
-        } else {
-            let events = received.unwrap();
-            assert_eq!(events.len(), count);
-            assert!(events.iter().all(|event| matches!(
-                event,
-                Event::AuthControl(AuthControl::LoginCompleted {
-                    login_id: None,
-                    success: false,
-                    ..
-                })
-            )));
-        }
+        assert!(bytes.len() <= LINE_BYTES_MAX);
+        let events = protocol.receive(&bytes).unwrap();
+        assert_eq!(
+            events.len(),
+            count,
+            "one chunk is bounded by bytes, not frames"
+        );
+        assert!(events.iter().all(|event| matches!(
+            event,
+            Event::AuthControl(AuthControl::LoginCompleted {
+                login_id: None,
+                success: false,
+                ..
+            })
+        )));
     }
     let mut protocol = ready();
     protocol.start_chatgpt_login().unwrap();

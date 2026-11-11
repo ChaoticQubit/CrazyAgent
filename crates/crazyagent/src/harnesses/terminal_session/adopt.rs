@@ -366,6 +366,7 @@ impl TerminalSession {
             took_none,
             facts: VecDeque::new(),
             background: BTreeSet::new(),
+            ended: VecDeque::new(),
             exited: false,
             stopped: false,
             group_ended: false,

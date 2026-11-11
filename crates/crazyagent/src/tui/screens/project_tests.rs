@@ -4547,7 +4547,8 @@ mod overview_read {
             "the ask is followed by a read"
         );
 
-        let cases: [(fn(&mut Overview), &str); 3] = [
+        type Change = fn(&mut Overview);
+        let cases: [(Change, &str); 3] = [
             (
                 |o| o.running = true,
                 "A run is writing the tabs now. They fill in when it ends.",

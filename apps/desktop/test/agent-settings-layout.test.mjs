@@ -16,7 +16,7 @@ const GROUPS = [
   ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
-  ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]],
+  ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
   ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"]],
 ];
 const MASTER_GROUPS = [
@@ -122,7 +122,7 @@ test("Find a setting keeps the rows whose label matches and the groups that hold
 
 test("Overlapping edits lists the engine's choices in the mockup's order and words and shows an unknown engine value as it is", () => {
   assert.deepEqual(client.OVERLAP_CHOICES, ["warn", "block", "off", "wait"]);
-  const coordination = (overlaps) => ({ settings: { questions_to: "lead", overlaps, nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, claude_display: "classic", task_start: "on" }, harnesses: [] });
+  const coordination = (overlaps) => ({ settings: { questions_to: "lead", overlaps, nudges: "off", counted_tools: [], role_skills: { master: null, lead: null, worker: null }, terminal_display: "classic", task_start: "on" }, harnesses: [] });
   const words = ["Warn both (default)", "Wait until the first lands", "Block the later one", "Off"];
   assert.deepEqual(radios(settingsHtml({ coordination: coordination("block") }), "Overlapping edits"), { labels: words, checked: ["Block the later one"] });
   assert.deepEqual(radios(settingsHtml({ coordination: coordination("hold") }), "Overlapping edits"), { labels: [...words, "hold"], checked: ["hold"] });

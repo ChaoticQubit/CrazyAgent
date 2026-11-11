@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]
 const NULL_DEVICE: &str = "NUL";
+const SESSION_BUS_NAMES: [&str; 2] = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 const CLONE_TIME: Duration = Duration::from_secs(1800);
 const GIT_USER: &str = "x-access-token";
 const NAME_BYTES_MAX: usize = 100;
@@ -69,10 +70,29 @@ fn fixed_git_folder() -> Option<OsString> {
         .then(|| programs.join("Git").join("cmd").into_os_string())
 }
 
+/// The engine variables a git command also gets: on Linux the two that name the session
+/// bus, so the credential helper git starts reaches the Secret Service store the engine
+/// itself uses, and none elsewhere. A variable that is missing or empty is left out.
+/// Inputs: whether this is Linux and how to read a variable. Output: names and values.
+fn session_bus_env(
+    linux: bool,
+    read: impl Fn(&'static str) -> Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    let kept: Vec<(&'static str, OsString)> = SESSION_BUS_NAMES
+        .into_iter()
+        .filter(|_| linux)
+        .filter_map(|name| Some((name, read(name).filter(|value| !value.is_empty())?)))
+        .collect();
+    assert!(kept.len() <= SESSION_BUS_NAMES.len());
+    assert!(linux || kept.is_empty());
+    kept
+}
+
 /// Starts a git command that reads no system, global or owner configuration: an empty
 /// private folder is its home and working folder, so no `.gitconfig`, `.netrc` or XDG git
 /// file of the owner applies. Windows keeps the engine's PATH and SystemRoot, which Git
-/// for Windows needs for its shell and network stack. Inputs: git and the empty home.
+/// for Windows needs for its shell and network stack, and Linux keeps the two variables
+/// that name the session bus. Inputs: git and the empty home.
 /// Output: the command, without arguments.
 fn git_command(git: &Path, empty_home: &Path) -> Command {
     let mut command = Command::new(git);
@@ -90,6 +110,7 @@ fn git_command(git: &Path, empty_home: &Path) -> Command {
             command.env(name, value);
         }
     }
+    command.envs(session_bus_env(cfg!(target_os = "linux"), std::env::var_os));
     command
 }
 
@@ -328,6 +349,62 @@ mod tests {
         assert_eq!(git_program(None), fixed);
         #[cfg(target_os = "macos")]
         assert_eq!(fixed, Some(PathBuf::from("/usr/bin/git")));
+    }
+
+    #[test]
+    fn a_git_command_gets_the_session_bus_variables_only_on_linux() {
+        let bus = OsString::from("unix:path=/run/user/1000/bus");
+        let folder = OsString::from("/run/user/1000");
+        let both = |name: &str| match name {
+            "DBUS_SESSION_BUS_ADDRESS" => Some(bus.clone()),
+            "XDG_RUNTIME_DIR" => Some(folder.clone()),
+            _ => Some(OsString::from("another variable")),
+        };
+        assert_eq!(
+            session_bus_env(true, both),
+            vec![
+                ("DBUS_SESSION_BUS_ADDRESS", bus.clone()),
+                ("XDG_RUNTIME_DIR", folder.clone())
+            ]
+        );
+        assert!(session_bus_env(false, both).is_empty());
+        let one = |name: &str| match name {
+            "DBUS_SESSION_BUS_ADDRESS" => Some(OsString::new()),
+            "XDG_RUNTIME_DIR" => Some(folder.clone()),
+            _ => None,
+        };
+        assert_eq!(
+            session_bus_env(true, one),
+            vec![("XDG_RUNTIME_DIR", folder.clone())],
+            "an empty variable is left out"
+        );
+        assert!(session_bus_env(true, |_| None).is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_git_command_takes_nothing_else_from_the_engine_environment() {
+        let home = tempfile::tempdir().unwrap();
+        let command = git_command(Path::new("/usr/bin/git"), home.path());
+        let mut expected = vec!["GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "HOME", "PATH"];
+        for name in SESSION_BUS_NAMES {
+            let set = std::env::var_os(name).is_some_and(|value| !value.is_empty());
+            if cfg!(target_os = "linux") && set {
+                expected.push(name);
+                let given = command
+                    .get_envs()
+                    .find(|(given, _)| *given == OsStr::new(name))
+                    .and_then(|(_, value)| value.map(OsStr::to_os_string));
+                assert_eq!(given, std::env::var_os(name), "{name}");
+            }
+        }
+        expected.sort_unstable();
+        let mut names: Vec<String> = command
+            .get_envs()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, expected);
     }
 
     #[test]

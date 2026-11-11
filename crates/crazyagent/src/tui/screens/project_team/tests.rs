@@ -1,6 +1,6 @@
 use super::*;
 use crate::client_controller::OwnerController;
-use crate::coord::settings::{ClaudeDisplay, CoordSettings, RoleSkills, TaskStart};
+use crate::coord::settings::{CoordSettings, RoleSkills, TaskStart, TerminalDisplay};
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -3188,10 +3188,10 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         SubagentMode::Native
     );
 
-    for _ in 0..3 {
+    for _ in 0..2 {
         view.key(press(KeyCode::Down));
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 3);
+    assert_eq!(view.coord.as_ref().unwrap().row, 2);
     let reply = view.key(press(KeyCode::Right));
     coord_send(&mut view, &mut controller, reply, 3).await;
     assert_eq!(
@@ -3227,7 +3227,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         );
     }
     let before = harness_row(&view, HarnessKind::Rcli);
-    for (row, label) in [(5, "rcli sub-agents"), (6, "Messages to rcli agents")] {
+    for (row, label) in [(4, "rcli sub-agents"), (5, "Messages to rcli agents")] {
         view.key(press(KeyCode::Down));
         assert_eq!(view.coord.as_ref().unwrap().row, row);
         assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
@@ -3246,7 +3246,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     }
     assert_eq!(harness_row(&view, HarnessKind::Rcli), before);
 
-    for _ in 0..2 {
+    for _ in 0..3 {
         view.key(press(KeyCode::Down));
     }
     assert_eq!(view.coord.as_ref().unwrap().row, 8);
@@ -3530,38 +3530,51 @@ fn the_task_start_reminder_shows_on_by_default_and_space_flips_it() {
     }
 }
 
-/// The Claude Code terminal display shows Classic in the coordination editor of a project
-/// with no saved settings, read from a real engine database, on row 2 under the Claude Code
-/// rows (N-D9), and Space on the row flips it to Fullscreen and back: each press sends the
-/// whole settings with the other display, the engine's answer names it and the row shows
-/// the stored one.
+/// The one Terminal display of every harness shows Classic in the coordination editor of a
+/// project with no saved settings, read from a real engine database, on row 6 under every
+/// harness kind's rows (N-D9, DEC-141), and Space on the row flips it to Fullscreen and back:
+/// each press sends the whole settings with the other display, the engine's answer names it
+/// and the row shows the stored one. Fullscreen says rcli stays Classic, as the engine's view
+/// lists no Fullscreen for it; Classic says nothing more.
 #[test]
-fn the_claude_code_display_shows_classic_by_default_and_space_flips_it() {
+fn the_terminal_display_shows_classic_by_default_and_space_flips_it() {
     let folder = tempfile::tempdir().unwrap();
     let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
     let coordination = crate::team::coordination(&connection, &project()).unwrap();
-    assert_eq!(coordination.settings.claude_display, ClaudeDisplay::Classic);
+    assert_eq!(
+        coordination.settings.terminal_display,
+        TerminalDisplay::Classic
+    );
     let mut view = TeamView::new(project());
     let query = view.next_query(NOW).unwrap();
     let mut stored = team();
     stored.coordination = Some(coordination.clone());
     view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
-    let display =
-        |view: &TeamView| find(&frame(view, 120, 40), "Claude Code terminal display").to_owned();
+    let display = |view: &TeamView| find(&frame(view, 120, 40), "Terminal display").to_owned();
     assert!(display(&view).contains("Classic"), "{}", display(&view));
-    for _ in 0..2 {
+    assert!(!display(&view).contains("stays"), "{}", display(&view));
+    assert!(
+        !frame(&view, 120, 40)
+            .iter()
+            .any(|row| row.contains("Claude Code terminal display")),
+        "the display is no longer a Claude Code row"
+    );
+    for _ in 0..6 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 2);
+    assert_eq!(view.coord.as_ref().unwrap().row, 6);
     let mut at = NOW;
     for (next, words) in [
-        (ClaudeDisplay::Fullscreen, "Fullscreen"),
-        (ClaudeDisplay::Classic, "Classic"),
+        (
+            TerminalDisplay::Fullscreen,
+            "Fullscreen. rcli stays Classic",
+        ),
+        (TerminalDisplay::Classic, "Classic"),
     ] {
         let mut settings = coordination.settings.clone();
-        settings.claude_display = next;
+        settings.terminal_display = next;
         let reply = view.key(press(KeyCode::Char(' ')));
         assert_eq!(
             reply,
@@ -3574,12 +3587,36 @@ fn the_claude_code_display_shows_classic_by_default_and_space_flips_it() {
         at += 60_000;
         assert_eq!(
             settled(&mut view, reply, &stored, at),
-            Some(Notice::plain(format!(
-                "Claude Code terminals now open {words}."
-            )))
+            Some(Notice::plain(format!("Terminals now open {words}.")))
         );
         assert!(display(&view).contains(words), "{}", display(&view));
     }
+}
+
+/// The Terminal display row names only the harness kinds the engine says cannot draw the
+/// chosen display (DEC-141): none under Classic, rcli under Fullscreen, two kinds joined, and
+/// none for rows an engine from before DEC-141 sent without displays.
+#[test]
+fn the_terminal_display_row_names_only_the_kinds_that_stay_classic() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut view = crate::team::coordination(&connection, &project()).unwrap();
+    assert_eq!(display_kept(&view, TerminalDisplay::Classic), "");
+    assert_eq!(
+        display_kept(&view, TerminalDisplay::Fullscreen),
+        " rcli stays Classic."
+    );
+    view.harnesses[1].displays = vec![TerminalDisplay::Classic];
+    assert_eq!(
+        display_kept(&view, TerminalDisplay::Fullscreen),
+        " Codex and rcli stay Classic."
+    );
+    for row in &mut view.harnesses {
+        row.displays.clear();
+    }
+    assert_eq!(display_kept(&view, TerminalDisplay::Fullscreen), "");
+    assert_eq!(display_kept(&view, TerminalDisplay::Classic), "");
 }
 
 /// Sends one settings key's change as the engine answers it: applied, then a fresh team read

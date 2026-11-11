@@ -6,7 +6,7 @@ use super::launch::{
     TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_launch_settings, failure,
     harness_id, key_file_text, validate,
 };
-use crate::coord::settings::ClaudeDisplay;
+use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
@@ -104,6 +104,66 @@ pub enum Transcript {
     CodexRollouts { sessions: PathBuf },
     ClaudeSession { file: PathBuf },
     Unavailable,
+}
+
+/// What one harness kind's terminal starts with for one terminal display (DEC-141): the
+/// variables and the arguments its own program takes, and whether the kind can draw that
+/// display at all. A kind that cannot starts as it always does, and the settings say so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplaySwitches {
+    pub variables: &'static [(&'static str, &'static str)],
+    pub arguments: &'static [&'static str],
+    pub honoured: bool,
+}
+
+/// Maps a terminal display to one harness kind's own switches, the only place a display is
+/// harness-specific (DEC-141). Claude Code takes variables: Classic turns its alternate
+/// screen off, which makes Claude Code 2.1.309 use its classic renderer; Fullscreen sets 3
+/// rows a wheel notch, the step Claude Code picks itself for xterm.js, and asks for the
+/// fullscreen renderer, which Claude Code otherwise picks per account (R8-FS). Codex takes
+/// its `tui.alternate_screen` setting, `never` for Classic and `always` for Fullscreen, its
+/// own view with mouse reporting on (OB-8); a `-c` setting, because the app server a tools-on
+/// launch starts first takes `-c` and exits on `--no-alt-screen`. RCLI runs one turn at a
+/// time with no view of its own, so it has no switches and only Classic holds for it.
+/// Inputs: the kind and the display. Output: the switches.
+pub fn display_switches(harness: HarnessKind, display: TerminalDisplay) -> DisplaySwitches {
+    let (variables, arguments, honoured): (&'static [(&str, &str)], &'static [&str], bool) =
+        match (harness, display) {
+            (HarnessKind::ClaudeCode, TerminalDisplay::Classic) => {
+                (&[("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1")], &[], true)
+            }
+            (HarnessKind::ClaudeCode, TerminalDisplay::Fullscreen) => (
+                &[
+                    ("CLAUDE_CODE_SCROLL_SPEED", "3"),
+                    ("CLAUDE_CODE_NO_FLICKER", "1"),
+                ],
+                &[],
+                true,
+            ),
+            (HarnessKind::Codex, TerminalDisplay::Classic) => {
+                (&[], &["-c", "tui.alternate_screen=\"never\""], true)
+            }
+            (HarnessKind::Codex, TerminalDisplay::Fullscreen) => {
+                (&[], &["-c", "tui.alternate_screen=\"always\""], true)
+            }
+            (HarnessKind::Rcli, TerminalDisplay::Classic) => (&[], &[], true),
+            (HarnessKind::Rcli, TerminalDisplay::Fullscreen) => (&[], &[], false),
+        };
+    DisplaySwitches {
+        variables,
+        arguments,
+        honoured,
+    }
+}
+
+/// The terminal displays one harness kind can draw, in the order settings list them, for the
+/// settings screens to say which kind stays as it is under the chosen display (DEC-141).
+/// Input: the kind. Output: the displays.
+pub fn displays(harness: HarnessKind) -> Vec<TerminalDisplay> {
+    TerminalDisplay::ALL
+        .into_iter()
+        .filter(|display| display_switches(harness, *display).honoured)
+        .collect()
 }
 
 /// Whether a harness has an interactive app the engine can run in a terminal pane.
@@ -310,6 +370,9 @@ pub fn command(
     let executable = text(&request.executable)?;
     let native_lead =
         harness_id(request) == "claude-code" && installed.and_then(Installed::native).is_some();
+    let display = installed
+        .map(Installed::terminal_display)
+        .unwrap_or_default();
     let transcript = match harness_id(request) {
         "codex" => {
             let resume = if run.resume {
@@ -317,7 +380,7 @@ pub fn command(
             } else {
                 None
             };
-            let settings = codex(request, installed, &cwd, key_file.as_deref())?;
+            let settings = codex(request, installed, &cwd, key_file.as_deref(), display)?;
             if request.tools {
                 argv.extend([
                     "/bin/sh".to_owned(),
@@ -357,7 +420,6 @@ pub fn command(
                     ))
                 })
                 .transpose()?;
-            let display = installed.map(Installed::claude_display).unwrap_or_default();
             env.extend(claude_environment(
                 request,
                 &home,
@@ -460,13 +522,15 @@ fn text(path: &Path) -> Result<String, LaunchError> {
 /// The settings a Codex terminal launch runs under. A repository that brings a `.codex`
 /// folder runs untrusted so Codex loads nothing from it, any other stays trusted so it
 /// never meets Codex's folder access screen; approval and sandbox come from these settings
-/// either way. Inputs: the request, the installed context, if any, the working folder and
-/// the key file. Output: the arguments.
+/// either way. The project's terminal display adds Codex's own switches for it last. Inputs:
+/// the request, the installed context, if any, the working folder, the key file and the
+/// display. Output: the arguments.
 fn codex(
     request: &LaunchRequest,
     installed: Option<&Installed>,
     cwd: &Path,
     key_file: Option<&str>,
+    display: TerminalDisplay,
 ) -> Result<Vec<String>, LaunchError> {
     let trust = super::codex_folder::terminal_entry(cwd)?;
     let mut arguments = Vec::new();
@@ -478,6 +542,12 @@ fn codex(
         arguments.push("-c".to_owned());
         arguments.push(setting);
     }
+    arguments.extend(
+        display_switches(HarnessKind::Codex, display)
+            .arguments
+            .iter()
+            .map(|argument| (*argument).to_owned()),
+    );
     Ok(arguments)
 }
 
@@ -556,15 +626,15 @@ fn claude(
     Ok(arguments)
 }
 
-/// Builds Claude Code's own variables for one launch. A native-team lead also gets agent
-/// teams and the task list tools turned on and the command its teammates run. Inputs: the
-/// request, the agent home and, for a native-team lead, the teammate command path. Output:
-/// the variables.
+/// Builds Claude Code's own variables for one launch, with its switches for the project's
+/// terminal display. A native-team lead also gets agent teams and the task list tools turned
+/// on and the command its teammates run. Inputs: the request, the agent home, for a
+/// native-team lead the teammate command path, and the display. Output: the variables.
 fn claude_environment(
     request: &LaunchRequest,
     home: &str,
     teammates: Option<&str>,
-    display: ClaudeDisplay,
+    display: TerminalDisplay,
 ) -> Vec<(String, String)> {
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR".to_owned(), home.to_owned()),
@@ -580,8 +650,8 @@ fn claude_environment(
         ),
     ];
     environment.extend(
-        display
-            .variables()
+        display_switches(HarnessKind::ClaudeCode, display)
+            .variables
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
     );

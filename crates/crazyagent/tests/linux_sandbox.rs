@@ -254,7 +254,10 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
 
 const SESSION: &str = "read -r stat < /proc/$$/stat; set -- ${stat##*\") \"}; echo \"$$ $3 $4 $5\"";
 
-fn assert_own_session(command: &mut Command) {
+/// Runs a wrapped [`SESSION`] command to its end. Takes the command. Returns the four
+/// numbers it printed, as Linux shows them to the agent: its process id, its process group,
+/// its session and its controlling terminal.
+fn session_fields(command: &mut Command) -> Vec<String> {
     let output = crazyagent::spawn_gate::output(
         command
             .stdin(Stdio::null())
@@ -268,19 +271,45 @@ fn assert_own_session(command: &mut Command) {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    let fields: Vec<&str> = text.split_whitespace().collect();
+    let fields: Vec<String> = text.split_whitespace().map(str::to_owned).collect();
     assert_eq!(fields.len(), 4, "{text}");
+    fields
+}
+
+fn assert_own_session(command: &mut Command) {
+    let fields = session_fields(command);
     assert_eq!(
         fields[1], fields[0],
-        "the agent leads its process group: {text}"
+        "the agent leads its process group: {fields:?}"
     );
     assert_eq!(
         fields[2], fields[0],
-        "the agent leads its own session: {text}"
+        "the agent leads its own session: {fields:?}"
     );
     assert_eq!(
         fields[3], "0",
-        "the agent has no controlling terminal: {text}"
+        "the agent has no controlling terminal: {fields:?}"
+    );
+}
+
+/// Checks an agent under bubblewrap, which runs it in a process namespace of its own: the
+/// group and the session are led by that namespace's first process, bubblewrap's own, in a
+/// session made for this agent, with no controlling terminal. A session that began outside
+/// the namespace, such as the engine's, would read 0 there, never 1. Takes the wrapped
+/// [`SESSION`] command.
+fn assert_boundary_session(command: &mut Command) {
+    let fields = session_fields(command);
+    assert_eq!(
+        fields[1], "1",
+        "the boundary's first process leads the agent's group: {fields:?}"
+    );
+    assert_eq!(
+        fields[2], "1",
+        "the boundary's first process leads a session of its own: {fields:?}"
+    );
+    assert_eq!(
+        fields[3], "0",
+        "the agent has no controlling terminal: {fields:?}"
     );
 }
 
@@ -445,6 +474,9 @@ fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
     holder.wait().unwrap();
 }
 
+/// No agent shares the engine's session or terminal. Under Landlock the agent itself leads
+/// its group and session, however it is started. Under bubblewrap the first process of the
+/// agent's own process namespace leads them, see [`assert_boundary_session`].
 #[test]
 fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
     let case = case();
@@ -501,7 +533,7 @@ fn every_agent_leads_a_session_of_its_own_without_the_engine_terminal() {
         },
     )
     .unwrap();
-    assert_own_session(&mut bubblewrap.wrap(&harness).unwrap());
+    assert_boundary_session(&mut bubblewrap.wrap(&harness).unwrap());
 }
 
 #[test]
@@ -1428,6 +1460,9 @@ fn under_refuse_no_limited_network_agent_starts_on_either_backend() {
     assert!(LinuxSandbox::detect(open, Path::new(HELPER)).is_ok());
 }
 
+/// TCP only takes a glibc program and a script whose interpreter is one (`/bin/sh` on a
+/// glibc machine), and refuses a program with a musl loader and a script whose interpreter
+/// is that program, each before it starts. A script is judged by its interpreter, one level.
 #[test]
 fn tcp_only_refuses_a_harness_whose_loader_is_not_glibc_before_it_starts() {
     let case = case();
@@ -1443,7 +1478,12 @@ fn tcp_only_refuses_a_harness_whose_loader_is_not_glibc_before_it_starts() {
     for (name, bytes) in [("glibc", &original[..]), ("musl", &musl[..])] {
         fs::write(programs.join(name), bytes).unwrap();
     }
-    fs::write(programs.join("script"), "#!/bin/sh\ntrue\n").unwrap();
+    fs::write(
+        programs.join("script"),
+        format!("#!{}\ntrue\n", programs.join("musl").display()),
+    )
+    .unwrap();
+    fs::write(programs.join("shell"), "#!/bin/sh\ntrue\n").unwrap();
     let named = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]);
     let wrap = |sockets: LinuxSockets, network: SandboxNetwork, name: &str| {
         let sandbox = LinuxSandbox::new(
@@ -1457,7 +1497,12 @@ fn tcp_only_refuses_a_harness_whose_loader_is_not_glibc_before_it_starts() {
         harness.current_dir(&case.project);
         sandbox.wrap(&harness)
     };
-    assert!(wrap(LinuxSockets::TcpOnly, named.clone(), "glibc").is_ok());
+    for name in ["glibc", "shell"] {
+        assert!(
+            wrap(LinuxSockets::TcpOnly, named.clone(), name).is_ok(),
+            "{name} looks names up over TCP, so TCP only takes it"
+        );
+    }
     for name in ["musl", "script"] {
         match wrap(LinuxSockets::TcpOnly, named.clone(), name) {
             Err(SandboxError::Unavailable(reason)) => {

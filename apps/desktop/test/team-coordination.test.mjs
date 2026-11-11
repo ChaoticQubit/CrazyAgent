@@ -128,23 +128,60 @@ test("Coordination leads with the mockup's rows, each harness's sub-agents toget
   const lead = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
   assert.deepEqual(rows(lead), ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent questions go to", "Overlapping edits", "Terminals per window"]);
   const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status, reload: forbidden }));
-  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Claude Code terminal display", "Messages to Codex agents", "Messages to rcli agents"]);
+  assert.deepEqual(rows(per), ["Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]);
+  assert.doesNotMatch(per, /terminal display/i, "the display is one setting for every harness, not a row of one harness");
   assert.deepEqual([...per.matchAll(/role="group" aria-label="([^"]*)"/g)].map((match) => match[1]), ["Claude Code", "Codex", "rcli"]);
 });
 
-test("Claude Code's row offers both terminal displays with Classic as the default (N-D9)", () => {
-  assert.equal(coord.COORD_DEFAULTS.claude_display, "classic");
+const BOTH_DISPLAYS = ["classic", "fullscreen"];
+
+/** One harness kind's coordination row as the engine sends it. Inputs: the kind and the
+ * terminal displays it can draw, or undefined for an engine from before DEC-141. Output: the
+ * row. */
+function harnessRow(harness, displays) {
+  return { harness, mode: "app_spawned", delivery: "auto", native: harness === "claude-code", ...(displays ? { displays } : {}) };
+}
+
+const ENGINE_ROWS = [harnessRow("claude-code", BOTH_DISPLAYS), harnessRow("codex", BOTH_DISPLAYS), harnessRow("rcli", ["classic"])];
+
+test("one Terminal display row serves every harness with Classic as the default, and each option shows as chosen with its own words (N-D9, DEC-141)", () => {
+  assert.equal(coord.COORD_DEFAULTS.terminal_display, "classic");
   assert.deepEqual(coord.DISPLAY_OPTIONS, [{ value: "classic", label: "Classic" }, { value: "fullscreen", label: "Fullscreen" }]);
-  const status = (claude_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, claude_display }, harnesses: [] } });
-  for (const [display, helper] of [["classic", /the mouse wheel scrolls the terminal at once and a plain drag selects text/], ["fullscreen", /takes the mouse; the wheel scrolls 3 rows a notch and Option-drag selects text/]]) {
-    assert.equal(typeof coord.PerHarnessControls, "function", "the display row sits in the per-harness part");
-    const markup = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status: status(display), reload: forbidden }));
-    const claude = markup.slice(markup.indexOf('aria-label="Claude Code"'), markup.indexOf('aria-label="Codex"'));
-    assert.match(claude, /<label for="tg-display-claude-code-p">Claude Code terminal display<\/label>/, display);
-    assert.match(claude, new RegExp(`<option value="${display}" selected="">`), display);
-    assert.match(claude, helper, display);
-    assert.match(claude, /applies when a Claude Code terminal next starts/, display);
-    assert.doesNotMatch(markup.slice(markup.indexOf('aria-label="Codex"')), /terminal display/, "only Claude Code has the display");
+  assert.equal(typeof coord.TerminalDisplaySetting, "function", "the display has its own row, outside the per-harness groups");
+  const status = (terminal_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, terminal_display }, harnesses: ENGINE_ROWS } });
+  const words = {
+    classic: /Classic: every agent draws on the normal screen, so the mouse wheel scrolls the terminal at once and a plain drag selects text\. A change applies when a terminal next starts\./,
+    fullscreen: /Fullscreen: Claude Code and Codex draw their own view and take the mouse; the wheel scrolls inside that view, and (Option|Shift)-drag selects text\. rcli has no Fullscreen view and stays Classic\. A change applies when a terminal next starts\./,
+  };
+  assert.deepEqual(Object.keys(words), coord.DISPLAY_OPTIONS.map((option) => option.value), "every option has its own words");
+  for (const display of Object.keys(words)) {
+    const markup = renderToStaticMarkup(createElement(coord.TerminalDisplaySetting, { projectId: "p", status: status(display), reload: forbidden }));
+    assert.deepEqual([...markup.matchAll(/data-setting="([^"]*)"/g)].map((match) => match[1]), ["Terminal display"], display);
+    assert.match(markup, /<label for="tg-display-p">Terminal display<\/label>/, display);
+    assert.match(markup, new RegExp(`<option value="${display}" selected="">`), display);
+    assert.match(markup, words[display], display);
+    assert.doesNotMatch(markup, /Claude Code terminal/, "the row is not Claude Code's");
+    const per = renderToStaticMarkup(createElement(coord.PerHarnessControls, { projectId: "p", status: status(display), reload: forbidden }));
+    assert.doesNotMatch(per, /terminal display/i, "no harness group holds a display row");
+  }
+});
+
+test("the Terminal display words name the key that selects on this platform and every harness kind that cannot draw Fullscreen (DEC-141)", () => {
+  assert.equal(typeof coord.displayHelper, "function");
+  const classic = coord.displayHelper("classic", ENGINE_ROWS, true);
+  assert.doesNotMatch(classic, /stay|Option|Shift/, "Classic holds for every harness and needs no key");
+  assert.equal(classic, coord.displayHelper("classic", ENGINE_ROWS, false));
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, true), /and Option-drag selects text\. rcli has no Fullscreen view and stays Classic\./);
+  assert.match(coord.displayHelper("fullscreen", ENGINE_ROWS, false), /and Shift-drag selects text\. rcli has no Fullscreen view and stays Classic\./);
+  const one = [harnessRow("claude-code", BOTH_DISPLAYS), harnessRow("codex", ["classic"]), harnessRow("rcli", ["classic"])];
+  assert.match(coord.displayHelper("fullscreen", one, true), /^Fullscreen: Claude Code draws its own view and takes the mouse; .* Codex and rcli have no Fullscreen view and stay Classic\. A change applies/);
+  for (const older of [coord.COORD_HARNESSES.map((harness) => harnessRow(harness, undefined)), coord.COORD_HARNESSES.map((harness) => harnessRow(harness, []))]) {
+    const unknown = coord.displayHelper("fullscreen", older, true);
+    assert.match(unknown, /^Fullscreen: Claude Code, Codex and rcli draw their own view and take the mouse; /, "an engine that lists no displays is taken to draw every one");
+    assert.doesNotMatch(unknown, /stay/);
+  }
+  for (const row of coord.coordination({ coordination: { settings: coord.COORD_DEFAULTS, harnesses: ENGINE_ROWS } }).harnesses) {
+    assert.ok(row.displays.includes("classic"), `${row.harness} draws Classic, the display where a plain drag selects`);
   }
 });
 
@@ -182,14 +219,14 @@ function coordEngine(stored) {
     seen.sent.push(args.settings);
     await new Promise((done) => setTimeout(done, 20));
     running -= 1;
-    const refused = args.settings.claude_display === "fullscreen";
+    const refused = args.settings.terminal_display === "fullscreen";
     if (!refused) stored[args.id] = { ...args.settings };
     return { outcome: "applied", pending: false, rejection: refused ? "team_settings_invalid" : null };
   } } };
   return seen;
 }
 
-const pick = (settings) => [settings.overlaps, settings.nudges, settings.task_start, settings.claude_display];
+const pick = (settings) => [settings.overlaps, settings.nudges, settings.task_start, settings.terminal_display];
 
 test("quick coordination saves from any row keep every change: one save at a time, each laid on the engine's newest settings", async () => {
   assert.equal(typeof coord.saveCoordSettings, "function", "coordination.tsx has one save path for coordination settings");
@@ -198,7 +235,7 @@ test("quick coordination saves from any row keep every change: one save at a tim
   assert.deepEqual(both.map((result) => result.kind), ["ok", "ok"]);
   assert.equal(engine.most, 1, "one coordination save runs at a time");
   assert.deepEqual(engine.sent.map(pick), [["block", "off", "on", "classic"], ["block", "ten_minutes", "on", "classic"]], "the second save keeps Block");
-  await coord.saveCoordSettings("p1", { claude_display: "fullscreen" });
+  await coord.saveCoordSettings("p1", { terminal_display: "fullscreen" });
   await coord.saveCoordSettings("p1", { nudges: "first_edit" });
   assert.deepEqual(pick(engine.sent[3]), ["block", "first_edit", "on", "classic"], "a refused save is not built on");
   await coord.saveCoordSettings("p2", { task_start: "off" });

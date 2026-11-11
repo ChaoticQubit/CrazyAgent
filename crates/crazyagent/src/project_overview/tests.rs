@@ -1292,7 +1292,7 @@ fn a_run_past_its_time_is_closed_and_its_late_reply_writes_nothing() {
     let mut runs = FakeTabRuns::default();
     read(&db, &project, folder.path(), 0).unwrap();
     assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
-    let late: Vec<_> = runs.claims.drain(..).collect();
+    let late = std::mem::take(&mut runs.claims);
     refresh(&db, &project).unwrap();
     let run_ms = RUN_TIME.as_millis() as i64;
     assert_eq!(tick(&db, &mut runs, run_ms - 1).unwrap(), 0);

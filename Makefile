@@ -3,8 +3,10 @@
 NODE_TESTS := $(filter-out $(NODE_TESTS_EXCLUDE),$(shell find apps crates scripts \( -name node_modules -o -name target -o -name dist \) -prune -o \( -name '*.test.mjs' -o -name '*.test.cjs' \) -type f -print | LC_ALL=C sort))
 BUN_TESTS := $(filter-out $(BUN_TESTS_EXCLUDE),$(shell find scripts -name '*.test.ts' -type f -print | LC_ALL=C sort))
 ENGINE_TESTS := $(filter-out $(ENGINE_TESTS_EXCLUDE),$(basename $(notdir $(wildcard crates/crazyagent/tests/*.rs))))
-ENGINE_ROWS_EXCLUDE := $(foreach test,$(ENGINE_TESTS_EXCLUDE),$(if $(findstring ::,$(test)),$(test)))
+ROWS = $(foreach test,$(1),$(if $(findstring ::,$(test)),$(test),$(if $(findstring /,$(test)),$(notdir $(test)))))
+ENGINE_ROWS_EXCLUDE := $(call ROWS,$(ENGINE_TESTS_EXCLUDE))
 DESKTOP_TESTS := $(filter-out $(DESKTOP_TESTS_EXCLUDE),$(basename $(notdir $(wildcard apps/desktop/src-tauri/tests/*.rs))))
+DESKTOP_ROWS_EXCLUDE := $(call ROWS,$(DESKTOP_TESTS_EXCLUDE))
 BUN ?= $(shell command -v bun)
 RCLI_SDK ?= $(CURDIR)/.local-state/tools/rcli-source
 
@@ -13,7 +15,7 @@ DEBUG_DIR := $(or $(CARGO_TARGET_DIR),$(CURDIR)/target)/debug
 test test-rust-selected: export CRAZYAGENT_TEST_NATIVE_AUTH_HOST = $(DEBUG_DIR)/crazyagent
 
 help:
-	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust, Node and Bun test suites' 'make test-rust-selected  Run the engine and desktop unit tests and test targets minus ENGINE_TESTS_EXCLUDE and DESKTOP_TESTS_EXCLUDE' 'make test-node  Run every first-party node:test file' 'make test-bun   Run the rcli host bun:test files' 'make build      Build the Rust workspace offline' 'make desktop-dist  Build the desktop frontend the desktop crate embeds' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
+	@printf '%s\n' 'make check      Format check, lint, test, build, test again' 'make test       Run the real Rust, Node and Bun test suites' 'make test-rust-selected  Run the engine and desktop unit tests and test targets minus ENGINE_TESTS_EXCLUDE and DESKTOP_TESTS_EXCLUDE (targets, module::rows and target/rows)' 'make test-node  Run every first-party node:test file' 'make test-bun   Run the rcli host bun:test files' 'make build      Build the Rust workspace offline' 'make desktop-dist  Build the desktop frontend the desktop crate embeds' 'make fmt        Format Rust source' 'make lint       Check Rust warnings'
 
 fmt:
 	cargo fmt --all
@@ -35,9 +37,10 @@ engine-bins:
 	install -m 0755 $(DEBUG_DIR)/crazyagent-landlock $(DEBUG_DIR)/deps/crazyagent-landlock
 
 test-rust-selected: desktop-dist engine-bins
+	cargo build -p crazyagent-desktop --bin crazyagent-desktop --locked --offline
 	status=0; \
 	cargo test -p crazyagent --locked --offline --no-fail-fast --lib --bins $(foreach test,$(ENGINE_TESTS),--test $(test))$(if $(ENGINE_ROWS_EXCLUDE), -- --exact $(foreach row,$(ENGINE_ROWS_EXCLUDE),--skip $(row))) || status=$$?; \
-	cargo test -p crazyagent-desktop --locked --offline --no-fail-fast --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test)) || status=$$?; \
+	cargo test -p crazyagent-desktop --locked --offline --no-fail-fast --lib --bins $(foreach test,$(DESKTOP_TESTS),--test $(test))$(if $(DESKTOP_ROWS_EXCLUDE), -- --exact $(foreach row,$(DESKTOP_ROWS_EXCLUDE),--skip $(row))) || status=$$?; \
 	exit $$status
 
 test-price-script:

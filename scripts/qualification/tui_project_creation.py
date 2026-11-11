@@ -244,7 +244,7 @@ def reopen(binary, root, project, paths):
 
 
 def run(binary):
-    with tempfile.TemporaryDirectory(prefix="ca-tui369-", dir="/private/tmp") as temporary:
+    with tempfile.TemporaryDirectory(prefix="ca-tui369-", dir=os.path.realpath("/tmp")) as temporary:
         root = Path(temporary)
         root.chmod(0o700)
         paths = [str(root / "declared frontend"), str(root / "declared backend, literal")]

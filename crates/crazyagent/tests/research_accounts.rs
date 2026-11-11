@@ -95,6 +95,7 @@ fn a_signed_out_managed_account_falls_through_to_a_keyless_endpoint() {
             account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
+                key: None,
             }),
         }
     );
@@ -105,6 +106,7 @@ fn a_signed_out_managed_account_falls_through_to_a_keyless_endpoint() {
             account: Box::new(ResearchAccount::Endpoint {
                 base_url: "https://models.example.test/v1".into(),
                 model: "big-model".into(),
+                key: None,
             }),
         }
     );
@@ -162,6 +164,7 @@ fn the_settings_resolver_reads_live_pool_assignment_and_the_project_folder() {
             account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
+                key: None,
             }),
         }
     );
@@ -190,6 +193,7 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
         account: Box::new(ResearchAccount::AnthropicEndpoint {
             base_url: "http://127.0.0.1:11434".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         }),
     };
     assert_eq!(
@@ -211,6 +215,7 @@ fn claude_code_gets_a_managed_claude_account_or_an_anthropic_endpoint_only() {
             account: Box::new(ResearchAccount::Endpoint {
                 base_url: "http://127.0.0.1:11434/v1".into(),
                 model: "qwen2.5:0.5b".into(),
+                key: None,
             }),
         }
     );
@@ -228,6 +233,7 @@ fn a_paused_pool_account_hands_research_to_the_next_member_or_waits_until_the_fi
         account: Box::new(ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         }),
     };
     let codex_paused = |id: &CredentialRef| (id.as_str() == "codex-connection").then_some(2_000);
@@ -583,6 +589,7 @@ fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_p
         account: Box::new(ResearchAccount::Endpoint {
             base_url: url.into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         }),
     };
     let anthropic = AccountPick::Account {
@@ -590,6 +597,7 @@ fn the_onboarding_pool_pick_skips_paused_accounts_and_waits_while_every_one_is_p
         account: Box::new(ResearchAccount::AnthropicEndpoint {
             base_url: "http://127.0.0.1:11434".into(),
             model: "qwen2.5:0.5b".into(),
+            key: None,
         }),
     };
     let both = [ResearchHarness::Codex, ResearchHarness::ClaudeCode];

@@ -335,7 +335,7 @@ async fn a_codex_host_whose_harness_it_can_never_reap_still_ends_and_releases_th
         let mut fixture = MasterFixture::new("codex");
         let mut process = stand_in_host(
             &mut fixture,
-            "#!/bin/sh\necho $$ > leader.pid\nexec /bin/sleep 30\n",
+            "#!/bin/sh\necho $$ > run/leader.pid\nexec /bin/sleep 30\n",
         )
         .await;
         if !reap_before_the_host(&fixture.project) {

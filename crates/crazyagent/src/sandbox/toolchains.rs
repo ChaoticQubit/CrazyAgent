@@ -57,9 +57,17 @@ if [ "$#" -eq 1 ] && [ "$1" = DARWIN_USER_TEMP_DIR ]; then
 fi
 exec /usr/bin/getconf "$@"
 "#;
-/// The xcrun shim at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
+/// The xcrun shim a Mac has at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
 #[cfg(unix)]
 const GIT_SHIM: &str = "/usr/bin/git";
+
+/// Tells whether a git path is the xcrun shim, which only a Mac has: on any other system
+/// `/usr/bin/git` is the real git and the agent's own `git` runs it. Inputs: the git path
+/// and whether this system is a Mac. Output: the answer.
+#[cfg(unix)]
+fn xcrun_shim(git: &Path, macos: bool) -> bool {
+    macos && git == Path::new(GIT_SHIM)
+}
 /// The most bytes of an agent's `git` script read to tell whether it is current.
 #[cfg(unix)]
 const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
@@ -582,10 +590,10 @@ enum GitCopy {
 /// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
 /// a link to it would lose; it refuses merges as [`GIT_SCRIPT`] says. Inputs: the real
 /// git, the copy and whether it merges `crazyagent/main`. Output: the script, or none when
-/// git is the shim or its path is not plain.
+/// git is a Mac's shim ([`xcrun_shim`]) or its path is not plain.
 #[cfg(unix)]
 fn git_script(git: &Path, copy: GitCopy, main: bool) -> Option<String> {
-    let text = plain_path(git).filter(|_| git != Path::new(GIT_SHIM))?;
+    let text = plain_path(git).filter(|_| !xcrun_shim(git, cfg!(target_os = "macos")))?;
     let script = GIT_SCRIPT
         .replace("@GIT@", text)
         .replace("@LEAD@", if copy == GitCopy::Lead { "1" } else { "0" })

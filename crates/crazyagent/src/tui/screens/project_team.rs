@@ -6,9 +6,9 @@ use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
-    COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
-    HarnessKind, NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole,
-    SubagentMode, TaskStart, native_scope, native_sub_agents,
+    COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
+    NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
+    TaskStart, TerminalDisplay, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -165,14 +165,15 @@ pub(in crate::tui) struct CoordEdit {
 }
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
-/// the Claude Code terminal display (N-D9), where sub-agent questions go, overlapping edits,
-/// whether agents may catch up with main (OS-8), workflow nudges, the Task-start reminder
-/// (T3-15), the counted tools or the skills one team role gets (DEC-111 R3).
+/// the one terminal display of every harness (N-D9, DEC-141), where sub-agent questions go,
+/// overlapping edits, whether agents may catch up with main (OS-8), workflow nudges, the
+/// Task-start reminder (T3-15), the counted tools or the skills one team role gets (DEC-111
+/// R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
     Delivery(HarnessKind),
-    ClaudeDisplay,
+    TerminalDisplay,
     Questions,
     Overlaps,
     CatchUpMain,
@@ -186,11 +187,11 @@ pub(in crate::tui) enum CoordRow {
 const COORD_ROWS: [CoordRow; 17] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
-    CoordRow::ClaudeDisplay,
     CoordRow::Mode(HarnessKind::Codex),
     CoordRow::Delivery(HarnessKind::Codex),
     CoordRow::Mode(HarnessKind::Rcli),
     CoordRow::Delivery(HarnessKind::Rcli),
+    CoordRow::TerminalDisplay,
     CoordRow::Questions,
     CoordRow::Overlaps,
     CoordRow::CatchUpMain,
@@ -2446,14 +2447,15 @@ impl TeamView {
                     ),
                 )
             }
-            CoordRow::ClaudeDisplay => {
-                settings.claude_display = match settings.claude_display {
-                    ClaudeDisplay::Classic => ClaudeDisplay::Fullscreen,
-                    ClaudeDisplay::Fullscreen => ClaudeDisplay::Classic,
+            CoordRow::TerminalDisplay => {
+                settings.terminal_display = match settings.terminal_display {
+                    TerminalDisplay::Classic => TerminalDisplay::Fullscreen,
+                    TerminalDisplay::Fullscreen => TerminalDisplay::Classic,
                 };
                 let done = format!(
-                    "Claude Code terminals now open {}.",
-                    display_words(settings.claude_display)
+                    "Terminals now open {}.{}",
+                    display_words(settings.terminal_display),
+                    display_kept(view, settings.terminal_display)
                 );
                 (
                     TeamAction::CoordSettings {
@@ -2742,9 +2744,13 @@ impl TeamView {
                         .to_owned(),
                     "",
                 ),
-                CoordRow::ClaudeDisplay => (
-                    "Claude Code terminal display".to_owned(),
-                    display_words(view.settings.claude_display).to_owned(),
+                CoordRow::TerminalDisplay => (
+                    "Terminal display".to_owned(),
+                    format!(
+                        "{}{}",
+                        display_words(view.settings.terminal_display),
+                        display_kept(view, view.settings.terminal_display)
+                    ),
                     "",
                 ),
                 CoordRow::Questions => (
@@ -3785,10 +3791,31 @@ fn delivery_scope(kind: HarnessKind) -> &'static str {
     }
 }
 
-fn display_words(display: ClaudeDisplay) -> &'static str {
+fn display_words(display: TerminalDisplay) -> &'static str {
     match display {
-        ClaudeDisplay::Classic => "Classic",
-        ClaudeDisplay::Fullscreen => "Fullscreen",
+        TerminalDisplay::Classic => "Classic",
+        TerminalDisplay::Fullscreen => "Fullscreen",
+    }
+}
+
+/// Says which harness kinds cannot draw the chosen Fullscreen display and so stay Classic
+/// (DEC-141), as the engine's coordination view names them. Classic holds for every kind, and
+/// a kind whose row lists no displays, sent by an engine from before DEC-141, is not named.
+/// Takes the view and the display. Returns a sentence with a leading space, or nothing.
+fn display_kept(view: &CoordinationView, display: TerminalDisplay) -> String {
+    if display == TerminalDisplay::Classic {
+        return String::new();
+    }
+    let kept: Vec<String> = view
+        .harnesses
+        .iter()
+        .filter(|row| !row.displays.is_empty() && !row.displays.contains(&display))
+        .map(|row| harness_name(row.harness.as_str(), None))
+        .collect();
+    match kept.len() {
+        0 => String::new(),
+        1 => format!(" {} stays Classic.", kept[0]),
+        _ => format!(" {} stay Classic.", kept.join(" and ")),
     }
 }
 
