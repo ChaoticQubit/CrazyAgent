@@ -127,6 +127,54 @@ fn with_the_folder_hidden_the_agent_cannot_run_a_macho_in_it() {
 }
 
 #[test]
+fn a_link_beside_a_read_root_is_followed_only_once_it_is_allowed() {
+    let case = case();
+    let pythons = case.project.parent().unwrap().join("python");
+    let real = pythons.join("cpython-3.12.16");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("note.txt"), "through the link\n").unwrap();
+    let link = pythons.join("cpython-3.12");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let closed = sandbox_with_hidden(&case, &[]).allow_read(&real).unwrap();
+    let direct = run(
+        &closed,
+        &case.profile,
+        &format!("cat '{}/note.txt'", real.display()),
+    );
+    assert_eq!(direct.stdout, b"through the link\n", "{direct:?}");
+    let through = format!("cat '{}/note.txt'", link.display());
+    let refused = run(&closed, &case.profile, &through);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert_eq!(refused.stdout, b"");
+    let open = closed.allow_read_link(&link).unwrap();
+    let followed = run(&open, &case.profile, &through);
+    assert_eq!(followed.stdout, b"through the link\n", "{followed:?}");
+}
+
+#[test]
+fn a_link_is_allowed_only_when_it_leads_to_a_read_root_already_granted() {
+    let case = case();
+    let pythons = case.project.parent().unwrap().join("python");
+    let (real, other) = (pythons.join("real"), pythons.join("other"));
+    for folder in [&real, &other] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let (to_real, to_other) = (pythons.join("to-real"), pythons.join("to-other"));
+    std::os::unix::fs::symlink(&real, &to_real).unwrap();
+    std::os::unix::fs::symlink(&other, &to_other).unwrap();
+    let sandbox = || sandbox_with_hidden(&case, &[]).allow_read(&real).unwrap();
+    assert!(sandbox().allow_read_link(&to_real).is_ok());
+    assert!(sandbox().allow_read_link(&to_other).is_err());
+    assert!(sandbox().allow_read_link(&real).is_err());
+    assert!(sandbox().allow_read_link(&pythons.join("missing")).is_err());
+    assert!(
+        sandbox_with_hidden(&case, &[])
+            .allow_read_link(&to_real)
+            .is_err()
+    );
+}
+
+#[test]
 fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
     let case = case();
     let git = |args: &[&str]| {

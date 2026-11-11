@@ -80,12 +80,15 @@ pub(crate) enum GraphEnding {
     Stopped,
 }
 
-/// The folders graphify needs to read to start: its own tool folder and, for
-/// a uv tool install, the Python installation its `pyvenv.cfg` names.
+/// The folders graphify needs to read to start: its own tool folder and, for a uv tool
+/// install, the Python installation its `pyvenv.cfg` names. uv 0.13 names that installation
+/// through a version link beside it (`cpython-3.12-...` leading to `cpython-3.12.16-...`)
+/// and starts the environment's Python through it, so that link is returned too. Takes the
+/// graphify executable. Returns the folders and the link, if the installation has one.
 #[cfg(unix)]
-fn read_roots(graphify: &Path) -> Vec<PathBuf> {
+fn read_roots(graphify: &Path) -> (Vec<PathBuf>, Option<PathBuf>) {
     let Some(bin) = graphify.parent() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let tool = bin.parent().unwrap_or(bin);
     let mut roots = vec![tool.to_path_buf()];
@@ -99,18 +102,26 @@ fn read_roots(graphify: &Path) -> Vec<PathBuf> {
             file.take(VENV_BYTES_MAX).read_to_string(&mut text).ok()?;
             Some(text)
         });
+    let mut link = None;
     if let Some(home) = venv.as_deref().and_then(|text| {
         text.lines()
             .filter_map(|line| line.split_once('='))
             .find(|(key, _)| key.trim() == "home")
             .map(|(_, value)| PathBuf::from(value.trim()))
-    }) && let Some(python) = home.parent()
-        && let Ok(python) = python.canonicalize()
-        && !roots.contains(&python)
+    }) && let Some(named) = home.parent()
+        && let Ok(python) = named.canonicalize()
     {
-        roots.push(python);
+        if std::fs::symlink_metadata(named).is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            link = Some(named.to_path_buf());
+        }
+        if !roots.contains(&python) {
+            roots.push(python);
+        }
     }
-    roots
+    assert!(roots.len() <= 2);
+    assert!(roots.first().is_some_and(|root| root == tool));
+    (roots, link)
 }
 
 /// Runs the free, AST-only `graphify update .` in `repo` under a sandbox with
@@ -194,8 +205,12 @@ pub(crate) fn update(
     private_directory(&tmp)?;
     let mut sandbox = ProjectSandbox::new(&out, &home, &tmp, SandboxNetwork::Only(Vec::new()))?
         .allow_read(repo)?;
-    for root in read_roots(&graphify) {
-        sandbox = sandbox.allow_read(&root)?;
+    let (roots, link) = read_roots(&graphify);
+    for root in &roots {
+        sandbox = sandbox.allow_read(root)?;
+    }
+    if let Some(link) = &link {
+        sandbox = sandbox.allow_read_link(link)?;
     }
     sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
     for folder in hidden {
