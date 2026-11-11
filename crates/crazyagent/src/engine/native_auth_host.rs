@@ -147,20 +147,29 @@ impl RegisteredNativeAuthHost {
         Ok(host)
     }
 
-    /// The host itself while its pinned file still verifies; else, for a host captured
-    /// through a PATH entry, a fresh capture of what the entry leads to now, as after a
-    /// harness update. Input: the shared host. Output: a verified host, the verify error
-    /// for a host with no entry, or `native_auth_host_unavailable` when the entry is gone.
+    /// The host while its entry still leads to the pinned file and that file verifies;
+    /// a fresh capture when the entry leads to another path or a new inode, as after a
+    /// harness update. A rewrite in place of the pinned inode stays refused. Input: the
+    /// shared host. Output: the host to use, `native_auth_host_executable_changed`, the
+    /// verify error for a host with no entry, or `native_auth_host_unavailable`.
     pub(crate) fn current(self: &Arc<Self>) -> Result<Arc<Self>, EngineError> {
-        let stale = match self.verified_path() {
-            Ok(_) => return Ok(self.clone()),
-            Err(stale) => stale,
-        };
         let Some(entry) = self.entry.as_deref() else {
-            return Err(stale);
+            self.verified_path()?;
+            return Ok(self.clone());
         };
+        let real = crate::paths::launch_executable(entry, std::env::var_os("PATH").as_deref())
+            .map_err(|_| EngineError("native_auth_host_unavailable".into()))?;
+        if real == self.path && self.verified_path().is_ok() {
+            return Ok(self.clone());
+        }
         let fresh = Self::capture_entry(entry)?;
         assert_eq!(fresh.entry.as_deref(), Some(entry));
+        if fresh.path == self.path
+            && (fresh.identity.device, fresh.identity.inode)
+                == (self.identity.device, self.identity.inode)
+        {
+            return Err(EngineError("native_auth_host_executable_changed".into()));
+        }
         Ok(Arc::new(fresh))
     }
 
