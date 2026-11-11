@@ -40,3 +40,29 @@ fn a_move_deletes_only_the_source_entries_still_as_its_check_saw_them() {
     assert!(fs::symlink_metadata(&landed).is_err());
     assert_eq!(fs::read_to_string(again.join("sub/b.txt")).unwrap(), "b\n");
 }
+
+#[test]
+fn a_move_removes_every_hard_link_of_a_file_it_checked() {
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let source = base.join("app");
+    fs::create_dir_all(source.join("target/debug/deps")).unwrap();
+    fs::write(source.join("target/debug/deps/app-0f3e"), "binary\n").unwrap();
+    fs::hard_link(
+        source.join("target/debug/deps/app-0f3e"),
+        source.join("target/debug/app"),
+    )
+    .unwrap();
+    fs::write(source.join("Cargo.toml"), "[package]\n").unwrap();
+    let landed = base.join("landed");
+
+    move_by_copy(&source, &landed).unwrap();
+    assert!(fs::symlink_metadata(&source).is_err(), "no source is left");
+    for copied in ["target/debug/app", "target/debug/deps/app-0f3e"] {
+        assert_eq!(
+            fs::read_to_string(landed.join(copied)).unwrap(),
+            "binary\n",
+            "{copied}"
+        );
+    }
+}

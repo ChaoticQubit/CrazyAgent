@@ -41,25 +41,26 @@ pub(super) fn permission_bits(metadata: &fs::Metadata) -> u32 {
 }
 
 /// What tells an entry left as it was from one changed or replaced between a move's check
-/// of its copy and the delete of its source: any write, rename over, chmod or eviction gives
-/// it a new stamp.
+/// of its copy and the delete of its source: a write gives it a new size or modify time, and
+/// a rename over gives the path a new inode. The change time is left out, since deleting one
+/// hard link of a file changes it for every other link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Stamp {
+    device: u64,
     inode: u64,
     bytes: u64,
-    changed: (i64, i64),
     modified: (i64, i64),
 }
 
-/// The stamp of an entry. Unix: its inode, size, and change and modify times to the
-/// nanosecond. Input: the entry's own metadata, links not followed. Output: the stamp.
+/// The stamp of an entry. Unix: its device, inode, size and modify time to the nanosecond.
+/// Input: the entry's own metadata, links not followed. Output: the stamp.
 #[cfg(unix)]
 pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
     use std::os::unix::fs::MetadataExt;
     Some(Stamp {
+        device: metadata.dev(),
         inode: metadata.ino(),
         bytes: metadata.size(),
-        changed: (metadata.ctime(), metadata.ctime_nsec()),
         modified: (metadata.mtime(), metadata.mtime_nsec()),
     })
 }
@@ -74,9 +75,9 @@ pub(super) fn stamp(metadata: &fs::Metadata) -> Option<Stamp> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?;
     Some(Stamp {
+        device: 0,
         inode: 0,
         bytes: metadata.len(),
-        changed: (0, 0),
         modified: (
             i64::try_from(since.as_secs()).ok()?,
             i64::from(since.subsec_nanos()),

@@ -946,6 +946,34 @@ fn a_home_move_across_disks_puts_back_a_folder_whose_source_could_not_be_deleted
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_move_across_disks_moves_a_project_holding_hard_links() {
+    let volume = Volume::attach();
+    let case = case();
+    let app = case.home.join("app");
+    sample(&app);
+    fs::create_dir_all(app.join("target/debug/deps")).unwrap();
+    fs::write(app.join("target/debug/deps/app-0f3e"), "binary\n").unwrap();
+    fs::hard_link(
+        app.join("target/debug/deps/app-0f3e"),
+        app.join("target/debug/app"),
+    )
+    .unwrap();
+    let next = volume.mount.join("next");
+    fs::create_dir(&next).unwrap();
+
+    let plan = plan_move(&case.home, &next, &case.engine).unwrap();
+    assert_eq!(plan.folders(), ["app"]);
+    plan.run().unwrap();
+    assert!(names(&case.home).is_empty());
+    assert_eq!(names(&next), ["app"]);
+    assert_eq!(
+        fs::read_to_string(next.join("app/target/debug/app")).unwrap(),
+        "binary\n"
+    );
+}
+
 fn repo_with_worktree(repo: &Path, worktree: &Path) {
     fs::create_dir_all(repo).unwrap();
     fs::write(repo.join("README.md"), "hello\n").unwrap();
