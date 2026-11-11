@@ -318,7 +318,18 @@ fn the_uv_marker_cannot_be_changed_and_a_moved_bucket_stages_as_plain_files() {
         .allow_tool_cache(&cache.root, cache.uv)
         .unwrap();
     let profile = case.profiles.join("marker.sb");
-    let bucket = cache.root.join("uv").join("sdists-v10");
+    let mut marked: Vec<PathBuf> = fs::read_dir(cache.root.join("uv"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|bucket| {
+            fs::read_link(bucket.join(".git")).is_ok_and(|target| target == Path::new("/dev/null"))
+        })
+        .collect();
+    marked.sort();
+    let bucket = marked
+        .first()
+        .expect("this uv's cache has a bucket with the engine-made marker")
+        .clone();
     let marker = bucket.join(".git");
     for script in [
         format!("rm -f {}", quoted(&marker)),
