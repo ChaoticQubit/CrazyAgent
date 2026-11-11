@@ -3292,7 +3292,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
 
 #[cfg(test)]
 mod turn_line_tests {
-    use super::{turn_holds, turn_lines};
+    use super::{AccountRow, turn_holds, turn_lines};
     use crate::master_session::{
         MasterAccountState, MasterReason, MasterReply, MasterReplyProvenance, MasterTurnPhase,
         MasterTurnView,
