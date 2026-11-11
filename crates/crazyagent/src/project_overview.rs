@@ -9,8 +9,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+mod pack;
 #[cfg(test)]
 mod tests;
+
+pub use pack::{
+    EVIDENCE_BYTES_MAX, RESEARCH_BYTES_MAX, Research, TREE_PATHS_MAX, evidence, parse_reply, prompt,
+};
 
 /// The folder inside a project's `.crazyagent` that holds the tab files.
 pub const TABS_FOLDER: &str = "overview";
