@@ -351,9 +351,10 @@ fn refresh_of(db: &Connection, project: &ProjectId) -> Result<Refresh, EngineErr
     }
 }
 
-/// Saves a project's refresh setting. Turning it off also drops a check that was due, so
-/// nothing runs after the owner said never. Inputs: the connection, the project and the
-/// choice. Output: unit, or `roadmap_status_unavailable`.
+/// Saves a project's refresh setting. Turning it off also drops a check that was due and
+/// takes the claim of one that runs, so that run stops and stores nothing after the owner
+/// said never. Inputs: the connection, the project and the choice. Output: unit, or
+/// `roadmap_status_unavailable`.
 pub fn set_refresh(
     db: &Connection,
     project: &ProjectId,
@@ -369,7 +370,7 @@ pub fn set_refresh(
     assert_eq!(stored, 1);
     if refresh == Refresh::Off {
         db.execute(
-            "UPDATE roadmap_status SET stale=0 WHERE project=?1",
+            "UPDATE roadmap_status SET stale=0, running_ms=NULL WHERE project=?1",
             [project.as_str()],
         )
         .map_err(unavailable)?;
@@ -981,6 +982,67 @@ pub fn requeue(
         .map_err(unavailable)?;
     assert!(changed <= 1);
     Ok(changed == 1)
+}
+
+/// Whether a run still holds its claim: no longer once `tick` closed it, the owner switched
+/// the status off or the project was removed, and then the run stops and stores nothing. A
+/// store that cannot be read counts as held, so a busy database stops no run. Inputs: the
+/// connection, the project and the claim. Output: whether the claim is still the running one.
+pub fn held(db: &Connection, project: &ProjectId, claim: Claim) -> bool {
+    let found = db.query_row(
+        "SELECT COUNT(*) FROM roadmap_status WHERE project=?1 AND running_ms=?2",
+        params![project.as_str(), claim.0],
+        |row| row.get::<_, i64>(0),
+    );
+    match found {
+        Ok(count) => {
+            assert!(count == 0 || count == 1, "a project has one status row");
+            count == 1
+        }
+        Err(_) => true,
+    }
+}
+
+/// The start of the state name of every status run.
+pub(crate) const RUN_NAME_HEAD: &str = "roadmap-status-";
+const RUN_NAME_BYTES_MAX: usize = 96;
+const RUN_TIME_DIGITS_MAX: usize = 19;
+
+/// The part of a status run's state name that names its project: the head and the project
+/// id with every byte outside ASCII letters, digits, `-` and `_` written as `_`, cut so the
+/// name with its time fits `RUN_NAME_BYTES_MAX`. Input: the project. Output: the stem.
+pub(crate) fn run_stem(project: &ProjectId) -> String {
+    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - 1 - RUN_TIME_DIGITS_MAX;
+    let named: String = project
+        .as_str()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(room)
+        .collect();
+    let stem = format!("{RUN_NAME_HEAD}{named}");
+    assert!(stem.is_ascii());
+    assert!(stem.len() + 1 + RUN_TIME_DIGITS_MAX <= RUN_NAME_BYTES_MAX);
+    stem
+}
+
+/// Whether a state name is a status run of this project, the exact shape only: the
+/// project's stem, `-` and the start time in plain digits, so the runs of a project whose id
+/// merely starts the same are not taken for it. Inputs: the project and the name. Output:
+/// whether the name is one of its runs.
+pub(crate) fn names_run(project: &ProjectId, name: &str) -> bool {
+    assert!(name.len() <= 4096, "a file name is bounded by the system");
+    name.strip_prefix(run_stem(project).as_str())
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|time| {
+            (1..=RUN_TIME_DIGITS_MAX).contains(&time.len())
+                && time.bytes().all(|byte| byte.is_ascii_digit())
+        })
 }
 
 /// Closes every run an engine that stopped left open: a run lives on a thread of its

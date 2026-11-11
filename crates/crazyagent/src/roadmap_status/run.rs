@@ -2,15 +2,20 @@ use super::*;
 use crate::research::runner::{
     ReadOnlyEnding, ReadOnlyRun, ResearchAccount, ResearchRunner, RunError,
 };
+use std::cell::Cell;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// What a check says when its agent ran out of time.
 pub const TIMED_OUT: &str = "The check ran out of time";
 /// What a check says when the project's hidden folders hold tracked files or cannot be read.
 pub const HIDDEN_UNREADABLE: &str = "The project's hidden folders could not be checked";
 
-const RUN_NAME_BYTES_MAX: usize = 96;
-const RUN_NAME_HEAD: &str = "roadmap-status-";
+/// The engine log code of a finished run whose folder or profile could not be removed.
+const RUN_LEFT: &str = "roadmap_status_run_left";
+/// How often a running check asks the store whether it still holds its claim; the runner
+/// polls its stop ten times as often.
+const CLAIM_POLL: Duration = Duration::from_secs(1);
 
 /// How a check ended without a status: with words for the owner, or too early to say, so it
 /// runs again later.
@@ -39,7 +44,7 @@ pub(crate) fn check(
     else {
         return;
     };
-    let outcome = answer(runner, &db, project, root, account);
+    let outcome = answer(runner, &db, project, claim, root, account);
     let now = crate::team::now_ms();
     let _ = match &outcome {
         Ok((states, source)) => finish(&db, project, claim, Ok((states.as_slice(), source)), now),
@@ -49,13 +54,15 @@ pub(crate) fn check(
 }
 
 /// Asks the status agent about one project: prepares the items and the evidence, runs the
-/// agent with tools off on the project's account and reads its reply. Inputs: the runner,
-/// the engine connection, the project, its folder and the account. Output: the item states
-/// and the roadmap file they came from, or how the check ended without them.
+/// agent with tools off on the project's account and reads its reply. The agent is stopped
+/// once the run no longer holds its claim. Inputs: the runner, the engine connection, the
+/// project, the claim, its folder and the account. Output: the item states and the roadmap
+/// file they came from, or how the check ended without them.
 fn answer(
     runner: &ResearchRunner,
     db: &Connection,
     project: &ProjectId,
+    claim: Claim,
     root: &Path,
     account: &ResearchAccount,
 ) -> Result<(Vec<ItemState>, String), Unchecked> {
@@ -76,7 +83,16 @@ fn answer(
         wall_time: AGENT_TIME,
         output_tokens: Some(OUTPUT_TOKENS),
     };
-    match runner.run_read_only(&run, &|| runner.is_stopping()) {
+    let asked_at = Cell::new(Instant::now());
+    let lost = Cell::new(false);
+    let stop = || {
+        if !lost.get() && asked_at.get().elapsed() >= CLAIM_POLL {
+            asked_at.set(Instant::now());
+            lost.set(!held(db, project, claim));
+        }
+        lost.get() || runner.is_stopping()
+    };
+    match asked(runner, &run, &stop) {
         Ok(ReadOnlyEnding::Answered(text)) => parse_reply(&text, &check.items)
             .map(|states| (states, check.source))
             .map_err(failed),
@@ -87,26 +103,48 @@ fn answer(
     }
 }
 
+/// Runs the status agent and then removes what the run left in the research state: its
+/// folder, which holds the prompt with the evidence pack and the agent's home, and its
+/// Seatbelt profile, so a check after every landing leaves nothing behind. A run whose end
+/// is uncertain keeps them, since its agent may still use them, and a name that was already
+/// taken is not this run's to remove. Inputs: the runner, the run and `stop`. Output: how
+/// the run ended.
+pub(super) fn asked(
+    runner: &ResearchRunner,
+    run: &ReadOnlyRun<'_>,
+    stop: &dyn Fn() -> bool,
+) -> Result<ReadOnlyEnding, RunError> {
+    assert!(run.name.starts_with(RUN_NAME_HEAD));
+    assert!(run.name.len() <= RUN_NAME_BYTES_MAX);
+    let folder = runner.state().join("agents").join(run.name);
+    let profile = runner
+        .state()
+        .join("profiles")
+        .join(format!("{}.sb", run.name));
+    let fresh = std::fs::symlink_metadata(&folder).is_err();
+    let ending = runner.run_read_only(run, stop);
+    if fresh && !matches!(ending, Err(RunError::Uncertain(_))) {
+        let left = [
+            std::fs::remove_dir_all(&folder),
+            std::fs::remove_file(&profile),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .filter(|error| error.kind() != std::io::ErrorKind::NotFound)
+        .count();
+        if left > 0 {
+            eprintln!("{RUN_LEFT} parts={left}");
+        }
+    }
+    ending
+}
+
 /// The agent state name of one status run: its project and when it started, so no run
-/// reuses the folder of an earlier one; the project part is cut to fit the bound. Inputs:
-/// the project and now. Output: the name, ASCII letters, digits, `-` and `_` only.
-fn run_name(project: &ProjectId, now_ms: i64) -> String {
-    let tail = format!("-{now_ms}");
-    let room = RUN_NAME_BYTES_MAX - RUN_NAME_HEAD.len() - tail.len();
-    let named: String = project
-        .as_str()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .take(room)
-        .collect();
-    let name = format!("{RUN_NAME_HEAD}{named}{tail}");
+/// reuses the folder of an earlier one. Inputs: the project and now. Output: the name,
+/// ASCII letters, digits, `-` and `_` only, which `names_run` reads back as this project's.
+pub(super) fn run_name(project: &ProjectId, now_ms: i64) -> String {
+    let name = format!("{}-{}", run_stem(project), now_ms.max(0));
     assert!(!name.is_empty() && name.len() <= RUN_NAME_BYTES_MAX);
-    assert!(name.is_ascii());
+    assert!(names_run(project, &name));
     name
 }

@@ -931,3 +931,214 @@ fn lines_inside_a_fenced_code_block_are_not_headings_or_items() {
     assert_eq!(texts, ["Sign in", "Search", "Export"]);
     assert!(found.iter().all(|item| item.section == "V1"));
 }
+
+#[test]
+fn switching_the_status_off_takes_the_claim_of_a_running_check_and_its_result_is_not_stored() {
+    let mut runs = FakeRuns::default();
+    let case = status_case(Refresh::AfterLanding);
+    let states = parse_reply("{\"items\":[]}", &items("## V1\n\n- Sign in\n")).unwrap();
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+    let claim = runs.last();
+    assert!(
+        held(&case.db, &case.project, claim),
+        "a run holds its claim"
+    );
+    assert!(case.read(case.now + 1000).running);
+
+    set_refresh(&case.db, &case.project, Refresh::Off).unwrap();
+    assert!(
+        !held(&case.db, &case.project, claim),
+        "Off takes the claim, so the running check stops"
+    );
+    assert!(!case.read(case.now + 2000).running);
+    let ended = finish(
+        &case.db,
+        &case.project,
+        claim,
+        Ok((states.as_slice(), "roadmap.md")),
+        case.now + 3000,
+    );
+    assert!(
+        !ended.unwrap(),
+        "a check that ends after Off stores nothing"
+    );
+    let after = case.read(case.now + 4000);
+    assert!(after.checked_ms.is_none() && after.source.is_none() && after.problem.is_none());
+    assert!(!requeue(&case.db, &case.project, claim, case.now + 5000).unwrap());
+    set_refresh(&case.db, &case.project, Refresh::AfterLanding).unwrap();
+    assert_eq!(
+        tick(&case.db, &mut runs, case.now + 6000).unwrap(),
+        0,
+        "nothing waits after Off"
+    );
+}
+
+#[test]
+fn a_run_closed_after_its_time_or_whose_project_was_removed_no_longer_holds_its_claim() {
+    let mut runs = FakeRuns::default();
+    let case = status_case(Refresh::AfterLanding);
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, case.now).unwrap(), 1);
+    let first = runs.last();
+    assert!(held(&case.db, &case.project, first));
+    let over = case.now + RUN_TIME.as_millis() as i64;
+    tick(&case.db, &mut runs, over).unwrap();
+    assert!(!held(&case.db, &case.project, first), "a closed run stops");
+
+    refresh(&case.db, &case.project).unwrap();
+    assert_eq!(tick(&case.db, &mut runs, over + 1000).unwrap(), 1);
+    let second = runs.last();
+    assert!(held(&case.db, &case.project, second));
+    assert!(!held(&case.db, &case.project, first));
+    let removed = case
+        .db
+        .execute("DELETE FROM roadmap_status WHERE project='alpha'", [])
+        .unwrap();
+    assert_eq!(removed, 1);
+    assert!(
+        !held(&case.db, &case.project, second),
+        "the run of a removed project stops"
+    );
+}
+
+#[test]
+fn the_name_of_a_status_run_is_read_back_as_its_own_projects_only() {
+    let demo = ProjectId::new("demo").unwrap();
+    let name = run::run_name(&demo, NOW);
+    assert_eq!(name, format!("roadmap-status-demo-{NOW}"));
+    assert!(names_run(&demo, &name));
+    for other in ["demo-2", "dem", "demonstration"] {
+        let other = ProjectId::new(other).unwrap();
+        assert!(!names_run(&other, &name), "{other:?}");
+        assert!(!names_run(&demo, &run::run_name(&other, NOW)), "{other:?}");
+    }
+    for odd in [
+        "roadmap-status-demo",
+        "roadmap-status-demo-",
+        "roadmap-status-demo-later",
+        "roadmap-status-demo-1-",
+        "roadmap-status-demo--1",
+        "roadmap-status-demo-12345678901234567890",
+        "job-1-1",
+    ] {
+        assert!(!names_run(&demo, odd), "{odd}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_status_run_leaves_no_folder_and_no_profile_in_the_research_state() {
+    use crate::research::runner::{
+        ReadOnlyRun, ResearchAccount, ResearchLimits, ResearchRunner, RunError,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let private = |path: &Path| {
+        std::fs::create_dir(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let temp = tempfile::Builder::new()
+        .prefix("ca-status-run-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = temp.path().canonicalize().unwrap();
+    let engine = base.join("engine");
+    private(&engine);
+    let database = engine.join("engine.db");
+    let sqlite = Connection::open(&database).unwrap();
+    sqlite.execute_batch("PRAGMA user_version=1").unwrap();
+    drop(sqlite);
+    std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let state = engine.join("research");
+    private(&state);
+    let folder = base.join("repo");
+    std::fs::create_dir(&folder).unwrap();
+    let runner =
+        ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: "http://127.0.0.1:9/v1".into(),
+        model: "local-model".into(),
+    };
+    let project = alpha();
+    let ask = |name: &str| {
+        let run = ReadOnlyRun {
+            name,
+            agent: "roadmap-status",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Check the roadmap.",
+            account: &account,
+            wall_time: std::time::Duration::from_secs(5),
+            output_tokens: Some(OUTPUT_TOKENS),
+        };
+        run::asked(&runner, &run, &|| false)
+    };
+
+    let name = run::run_name(&project, NOW);
+    let ending = ask(&name);
+    assert!(
+        matches!(ending, Err(RunError::Invalid(_))),
+        "this state has no harness to run: {ending:?}"
+    );
+    let agents = state.join("agents");
+    assert!(
+        std::fs::symlink_metadata(agents.join(&name)).is_err(),
+        "the run's folder is gone"
+    );
+    let profile = state.join("profiles").join(format!("{name}.sb"));
+    assert!(std::fs::symlink_metadata(profile).is_err());
+
+    let taken = run::run_name(&project, NOW + 1);
+    std::fs::create_dir_all(agents.join(&taken)).unwrap();
+    std::fs::write(agents.join(&taken).join("kept"), "another run's").unwrap();
+    assert!(matches!(ask(&taken), Err(RunError::Invalid(_))));
+    assert!(
+        agents.join(&taken).join("kept").is_file(),
+        "a folder this run did not make stays"
+    );
+}
+
+/// S4-2 r1 M1: Delete everything records the project's roadmap status runs as engine files
+/// and removes each run's folder and Seatbelt profile; the runs of a project whose id only
+/// starts the same, a name in no run's shape and a research job's run all stay.
+#[test]
+fn delete_everything_removes_the_projects_roadmap_status_runs_and_no_other_projects() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let agents = base.join("research").join("agents");
+    let profiles = base.join("research").join("profiles");
+    std::fs::create_dir_all(&profiles).unwrap();
+    let own = "roadmap-status-demo-1794000000000";
+    let others = [
+        "roadmap-status-demo-2-1794000000000",
+        "roadmap-status-demonstration-1794000000000",
+        "roadmap-status-demo-later",
+        "job-7-1",
+    ];
+    for name in others.iter().chain([&own]) {
+        std::fs::create_dir_all(agents.join(name).join("home")).unwrap();
+        std::fs::write(agents.join(name).join("prompt.md"), "evidence").unwrap();
+        std::fs::write(profiles.join(format!("{name}.sb")), "(version 1)").unwrap();
+    }
+    let plan = crate::projects_home::DeletePlan {
+        database: base.join("engine.db"),
+        project: ProjectId::new("demo").unwrap(),
+        home: base.join("home"),
+        folders: vec![],
+        agents: vec![],
+    };
+    let files = plan.engine_files(&[]);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, [own]);
+    assert_eq!(
+        crate::projects_home::remove_engine_files(&plan.database, &files),
+        [own.to_owned()]
+    );
+    assert!(std::fs::symlink_metadata(agents.join(own)).is_err());
+    assert!(std::fs::symlink_metadata(profiles.join(format!("{own}.sb"))).is_err());
+    for name in others {
+        assert!(agents.join(name).join("prompt.md").is_file(), "{name}");
+        assert!(profiles.join(format!("{name}.sb")).is_file(), "{name}");
+    }
+}
