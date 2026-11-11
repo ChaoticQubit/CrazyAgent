@@ -1055,7 +1055,12 @@ mod tests {
 
     #[test]
     fn a_turn_that_ended_without_reply_text_is_not_called_cut_off() {
-        let turns = [turn(1, 3, MasterTurnPhase::Failed, Some(MasterReason::NoReply))];
+        let turns = [turn(
+            1,
+            3,
+            MasterTurnPhase::Failed,
+            Some(MasterReason::NoReply),
+        )];
         let transcript = build(
             Some(MasterSessionPhase::Configured),
             &turns,

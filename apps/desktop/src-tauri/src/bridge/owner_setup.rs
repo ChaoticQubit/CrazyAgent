@@ -209,7 +209,10 @@ impl NativeBridge {
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
-            .begin_mutation(OwnerMutation::SetMasterStepSettings { settings }, generation)
+            .begin_mutation(
+                OwnerMutation::SetMasterStepSettings { settings },
+                generation,
+            )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
@@ -247,7 +250,10 @@ impl NativeBridge {
             .await
             .map_err(|error| caused("owner_read_failed", &error.0))?;
         self.controller()?
-            .begin_mutation(OwnerMutation::SetMasterTimeSettings { settings }, generation)
+            .begin_mutation(
+                OwnerMutation::SetMasterTimeSettings { settings },
+                generation,
+            )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await

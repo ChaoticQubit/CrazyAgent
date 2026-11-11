@@ -400,8 +400,7 @@ fn a_launched_host_ends_at_its_run_clock_and_has_no_clock_without_one() {
     assert!(after < Duration::from_secs(5), "{after:?}");
     let (code, after) = waiting_host_end(None);
     assert_eq!(
-        code,
-        "rcli_master_startup_deadline",
+        code, "rcli_master_startup_deadline",
         "no run clock ended it"
     );
     assert!(after >= Duration::from_secs(5), "{after:?}");
@@ -580,8 +579,7 @@ fn kept_reply_bytes_past_the_bound_end_the_turn_with_the_output_code() {
     };
     assert_eq!(failure.0, "rcli_master_output_limit");
     assert_eq!(
-        kept,
-        139,
+        kept, 139,
         "8 MiB less the message's entry, in 60,000 byte deltas"
     );
 }

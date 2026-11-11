@@ -1640,8 +1640,7 @@ async fn an_rcli_master_turn_is_prepared_with_the_saved_time_limit() {
         let prepared = case.prepared(&case.turn.id).await;
         assert_eq!(prepared.session.selection.backend, MasterBackend::Rcli);
         assert_eq!(
-            prepared.time,
-            limit,
+            prepared.time, limit,
             "the turn carries the saved time limit"
         );
         assert_eq!(prepared.time.run_time(), limit.run_time());
@@ -2879,8 +2878,7 @@ async fn limited_turn_on(
     let prepared = case.prepared(&case.turn.id).await;
     assert!(prepared.tools, "the project's master tools switch is on");
     assert_eq!(
-        prepared.steps,
-        limit,
+        prepared.steps, limit,
         "the turn carries the saved step limit"
     );
     assert_eq!(prepared.time, time, "the turn carries the saved time limit");
@@ -3002,8 +3000,13 @@ fn slow_reply_harness(seconds: u16) -> String {
 async fn a_master_turn_with_no_time_limit_runs_under_no_clock_to_its_reply() {
     let limit = TimeLimit::NoLimit;
     assert_eq!(limit.run_time(), None, "no limit gives the host no clock");
-    let (ended, stored) =
-        limited_turn_on(SLOW_REPLY_HARNESS, StepLimit::NoLimit, limit, limit.run_time()).await;
+    let (ended, stored) = limited_turn_on(
+        SLOW_REPLY_HARNESS,
+        StepLimit::NoLimit,
+        limit,
+        limit.run_time(),
+    )
+    .await;
     assert_eq!(ended, "reply DONE", "no clock stopped the turn");
     assert!(stored.is_none(), "a replied turn is not stored as failed");
 }
@@ -3035,8 +3038,7 @@ async fn a_master_turn_its_clock_ends_under_each_time_limit_stops_with_that_limi
         let (ended, stored) =
             limited_turn_on(SLOW_REPLY_HARNESS, StepLimit::NoLimit, limit, TEST_CLOCK).await;
         assert_eq!(
-            ended,
-            "reply DONE",
+            ended, "reply DONE",
             "a three second turn fits in {minutes} minutes"
         );
         assert!(stored.is_none(), "a replied turn is not stored as failed");

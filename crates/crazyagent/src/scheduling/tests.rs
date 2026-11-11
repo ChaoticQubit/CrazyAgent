@@ -246,18 +246,15 @@ fn the_live_master_account_choice_is_keep_until_stored_and_each_option_reads_bac
         assert_eq!(stored.version, version);
         assert_eq!(live_master(&connection).unwrap(), choice);
         assert_eq!(
-            stored,
-            held,
+            stored, held,
             "a view's own update matches the stored schedule"
         );
         assert_eq!(load_page(&connection, None).unwrap().0.live_master, choice);
     }
     let rows: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM account_live_master",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM account_live_master", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(rows, 1, "three changes keep one row");
     let tx = connection.transaction().unwrap();
@@ -1018,9 +1015,8 @@ fn under_balanced_only_weekly_use_lower_by_the_margin_is_clearly_before_a_held_a
     assert!(!balanced((0.0, 30.2), (0.0, 30.2)));
     assert!(!balanced((0.0, 30.0), (90.0, 30.0)), "5-hour use alone");
     assert!(balanced((0.0, 96.0), (0.0, 100.0)), "a reached limit");
-    let lone = |id: &'static str| {
-        a_before_held_b(Strategy::Balanced, &[], &[(id, 0.0, None, 20.0, soon)])
-    };
+    let lone =
+        |id: &'static str| a_before_held_b(Strategy::Balanced, &[], &[(id, 0.0, None, 20.0, soon)]);
     assert!(!lone("a"), "the held account has no reading");
     assert!(!lone("b"), "the other account has no reading");
 }
@@ -1043,15 +1039,35 @@ fn a_sooner_reset_a_better_rank_or_a_use_last_pin_is_clearly_before_with_no_marg
     assert!(a_before_held_b(use_it, &[], &resets(24, 72)));
     assert!(!a_before_held_b(use_it, &[], &resets(72, 24)));
     assert!(!a_before_held_b(use_it, &[], &resets(24, 24)));
-    assert!(a_before_held_b(use_it, &[("a", at_rank(1))], &resets(24, 24)));
-    assert!(!a_before_held_b(use_it, &[("b", at_rank(1))], &resets(24, 24)));
-    assert!(!a_before_held_b(use_it, &[("a", at_rank(1))], &resets(72, 24)));
+    assert!(a_before_held_b(
+        use_it,
+        &[("a", at_rank(1))],
+        &resets(24, 24)
+    ));
+    assert!(!a_before_held_b(
+        use_it,
+        &[("b", at_rank(1))],
+        &resets(24, 24)
+    ));
+    assert!(!a_before_held_b(
+        use_it,
+        &[("a", at_rank(1))],
+        &resets(72, 24)
+    ));
     assert!(a_before_held_b(use_it, &[("b", last)], &resets(72, 24)));
     assert!(!a_before_held_b(use_it, &[("a", last)], &resets(24, 72)));
     let manual = Strategy::ManualRank;
     assert!(!a_before_held_b(manual, &[], &[]));
-    assert!(a_before_held_b(manual, &[("a", at_rank(1)), ("b", at_rank(2))], &[]));
-    assert!(!a_before_held_b(manual, &[("a", at_rank(2)), ("b", at_rank(1))], &[]));
+    assert!(a_before_held_b(
+        manual,
+        &[("a", at_rank(1)), ("b", at_rank(2))],
+        &[]
+    ));
+    assert!(!a_before_held_b(
+        manual,
+        &[("a", at_rank(2)), ("b", at_rank(1))],
+        &[]
+    ));
 }
 
 #[test]

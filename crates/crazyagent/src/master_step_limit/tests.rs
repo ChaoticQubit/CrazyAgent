@@ -63,7 +63,9 @@ fn each_option_is_saved_and_read_back_with_its_steps_and_its_cause() {
 
 #[test]
 fn a_step_count_the_owner_cannot_pick_names_no_limit_and_no_cause() {
-    for text in ["", "0", "1", "24", "050", "50 ", "51", "99", "201", "-50", "no_limit"] {
+    for text in [
+        "", "0", "1", "24", "050", "50 ", "51", "99", "201", "-50", "no_limit",
+    ] {
         assert_eq!(StepLimit::of_steps(text), None, "{text:?}");
         assert_eq!(
             steps_of_cause(&format!("master_step_limit_{text}")),

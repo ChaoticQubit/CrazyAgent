@@ -4238,7 +4238,10 @@ fn a_move_between_endpoint_accounts_starts_a_conversation_seeded_with_the_earlie
         at(crate::master_sessions::FRESH_NOTE) < at(super::LIVE_MASTER_MOVED),
         "the summary note comes before the move note: {notes:?}"
     );
-    assert!(at(crate::master_sessions::FRESH_NOTE).is_some(), "{notes:?}");
+    assert!(
+        at(crate::master_sessions::FRESH_NOTE).is_some(),
+        "{notes:?}"
+    );
     assert_eq!(live_turns(&fixture.connection), (1, false));
     team.shutdown().unwrap();
     host.close(&[]).unwrap();

@@ -1262,7 +1262,9 @@ impl OwnerRuntimeHandle {
                 }
                 EventKind::TurnFinished { subtype, .. } if subtype == STEPS_USED => {
                     let cause = prepared.steps.cause();
-                    return Err(failure(cause.as_deref().unwrap_or("master_capture_incomplete")));
+                    return Err(failure(
+                        cause.as_deref().unwrap_or("master_capture_incomplete"),
+                    ));
                 }
                 EventKind::TurnFinished { .. }
                 | EventKind::Disconnected

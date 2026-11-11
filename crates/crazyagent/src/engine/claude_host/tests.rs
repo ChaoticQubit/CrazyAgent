@@ -331,8 +331,7 @@ fn claude_process_bounds_reject_zero_and_excessive_resource_limits() {
     ] {
         let limits = ClaudeHostLimits::from_budget(&budget, clock).unwrap();
         assert_eq!(
-            limits.run_time,
-            clock,
+            limits.run_time, clock,
             "the clock is the setting, not the budget"
         );
     }
@@ -1151,7 +1150,9 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
     let refused = |command: &std::process::Command| {
         matches!(
             validate_command(command, &profile, &home),
-            Err(Fault::Host("claude_host_unapproved_command" | "claude_host_invalid_command"))
+            Err(Fault::Host(
+                "claude_host_unapproved_command" | "claude_host_invalid_command"
+            ))
         )
     };
     let plain = arguments(&built());

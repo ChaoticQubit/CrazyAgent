@@ -1267,7 +1267,10 @@ fn flat(rows: &[String]) -> String {
 fn steps_chosen(shell: &mut Shell) -> StepLimit {
     let sent = jobs(shell);
     let [AppSetupJob::SetMasterSteps { settings, .. }] = sent.as_slice() else {
-        panic!("one master step limit change required, got {} jobs", sent.len())
+        panic!(
+            "one master step limit change required, got {} jobs",
+            sent.len()
+        )
     };
     settings.limit
 }
@@ -1372,7 +1375,10 @@ fn a_stored_master_step_limit_this_version_does_not_know_is_not_offered() {
 fn time_chosen(shell: &mut Shell) -> TimeLimit {
     let sent = jobs(shell);
     let [AppSetupJob::SetMasterTime { settings, .. }] = sent.as_slice() else {
-        panic!("one master time limit change required, got {} jobs", sent.len())
+        panic!(
+            "one master time limit change required, got {} jobs",
+            sent.len()
+        )
     };
     settings.limit
 }
