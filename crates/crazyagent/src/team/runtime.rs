@@ -175,7 +175,9 @@ struct Grant {
 }
 
 /// Everything about an agent's harness launch except the account, so a managed agent
-/// can start a fresh process for each turn. `pane` is the terminal host and the agent's
+/// can start a fresh process for each turn. `executable` is the harness file this agent
+/// runs; `entry` is the harness entry the engine keeps, which credential renewals resolve
+/// again each time, so an update during the agent's run never strands them. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
 /// conversation a live master continues instead of starting one; `toolchains` the families
 /// its sandbox profile, built once for every turn, lets it use; `native` marks a
@@ -192,6 +194,7 @@ struct Grant {
 struct Plan {
     harness: String,
     executable: PathBuf,
+    entry: PathBuf,
     working_dir: PathBuf,
     model: Option<String>,
     tools: bool,
@@ -7699,6 +7702,7 @@ impl TeamRuntime {
             .claude_display;
         let plan = Plan {
             harness: launch.into(),
+            entry: executable.clone(),
             executable: program,
             working_dir,
             model,
@@ -9267,16 +9271,15 @@ fn live(
                     Ok(request) => request,
                     Err(problem) => return Some(problem),
                 };
-            let credential =
-                match profile.hand_to_agent(&home, plan.limits.run_time, &plan.executable) {
-                    Ok(credential) => credential,
-                    Err(problem) => {
-                        return Some(with_code(
-                            "The signed-in account could not reach the agent",
-                            Some(&problem.0),
-                        ));
-                    }
-                };
+            let credential = match profile.hand_to_agent(&home, plan.limits.run_time, &plan.entry) {
+                Ok(credential) => credential,
+                Err(problem) => {
+                    return Some(with_code(
+                        "The signed-in account could not reach the agent",
+                        Some(&problem.0),
+                    ));
+                }
+            };
             (
                 AgentSession::start_resuming(
                     request,
@@ -9663,7 +9666,7 @@ fn native_session(
             return Some(problem);
         }
     };
-    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.executable) {
+    let credential = match profile.hand_to_agent(home, plan.limits.run_time, &plan.entry) {
         Ok(credential) => credential,
         Err(problem) => {
             turn_closed(reports, taken, Some(problem.0.clone()));
@@ -10101,7 +10104,7 @@ fn per_turn(
         let process = rules.limit.map_or(plan.limits.run_time, |limit| {
             limit.min(plan.limits.run_time)
         });
-        let credential = match profile.hand_to_agent(home, process, &plan.executable) {
+        let credential = match profile.hand_to_agent(home, process, &plan.entry) {
             Ok(credential) => credential,
             Err(problem) => {
                 let _ = reports.send(Report::Finished {
