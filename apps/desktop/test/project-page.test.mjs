@@ -276,14 +276,14 @@ test("research agents offer Stop while running, Cancel while waiting and Try aga
 
 test("a failed research row shows its plain reason and Try again", async () => {
   const overview = await import("../src/screens/project/overview.tsx");
-  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData([job("failed", { error: "This harness cannot run research yet", started_ms: 1_000, finished_ms: 2_000 }), job("done")]) }));
+  const markup = renderToStaticMarkup(createElement(overview.ActivityPanel, { data: tabData([job("failed", { error: "This harness cannot run research yet", started_ms: 1_000, finished_ms: 2_000 }), job("done")]) }));
   assert.match(markup, /This harness cannot run research yet/);
   assert.equal(markup.match(/>Try again</g)?.length, 1);
 });
 
-test("the Overview shows Recent activity first, then Research and the Roadmap line under it, as the mockup does", async () => {
+test("the Activity panel shows Recent activity first, then Research and the Roadmap line under it, as the mockup does", async () => {
   const overview = await import("../src/screens/project/overview.tsx");
-  const markup = renderToStaticMarkup(createElement(overview.OverviewTab, { data: tabData([job("done")]) }));
+  const markup = renderToStaticMarkup(createElement(overview.ActivityPanel, { data: tabData([job("done")]) }));
   const at = (pattern) => markup.search(pattern);
   assert.ok(at(/>Recent activity</) > 0, "Recent activity shows");
   assert.ok(at(/<h2 id="pj-research">Research<\/h2>/) > at(/>Recent activity</), "Research comes after Recent activity");
