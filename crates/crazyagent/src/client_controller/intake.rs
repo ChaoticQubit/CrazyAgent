@@ -2,8 +2,14 @@ use super::*;
 use crate::engine::owner::AccountSecret;
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
+use crate::projects_home::icloud::{DOWNLOAD_TIME_MAX, Progress};
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+const ICLOUD_PROGRESS_EVERY: Duration = Duration::from_secs(1);
+const ICLOUD_TICKS_MAX: u64 = DOWNLOAD_TIME_MAX.as_secs() / ICLOUD_PROGRESS_EVERY.as_secs() + 120;
+const _: () = assert!(ICLOUD_TICKS_MAX > DOWNLOAD_TIME_MAX.as_secs() + 60);
 
 impl OwnerController {
     /// Reads the projects home folder and whether the engine watches it.
@@ -41,10 +47,19 @@ impl OwnerController {
 
     /// Measures a folder before the owner copies it into the home.
     /// Takes the absolute folder path.
-    /// Returns its size in bytes.
-    pub async fn folder_size(&mut self, path: String) -> Result<u64, EngineError> {
+    /// Returns its size in bytes and how many of its entries are only in iCloud.
+    pub async fn folder_size(
+        &mut self,
+        path: String,
+    ) -> Result<crate::projects_home::Measured, EngineError> {
         match self.read(OwnerRead::FolderSize { path }).await?.data {
-            OwnerData::FolderSize { bytes } => Ok(bytes),
+            OwnerData::FolderSize {
+                bytes,
+                placeholders,
+            } => Ok(crate::projects_home::Measured {
+                bytes,
+                placeholders,
+            }),
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
@@ -103,14 +118,14 @@ impl OwnerController {
     /// Takes nothing.
     /// Returns the status; no token ever leaves the engine.
     pub async fn github_status(&mut self) -> Result<GitHubStatus, EngineError> {
-        self.github()?.github_status().await
+        self.owner_client()?.github_status().await
     }
 
     /// Starts the GitHub device sign-in; the engine finishes it once the owner enters the code.
     /// Takes nothing.
     /// Returns the code and page the owner uses on github.com; `github_status` shows waiting until then.
     pub async fn github_sign_in(&mut self) -> Result<GitHubDeviceCode, EngineError> {
-        self.github()?.github_sign_in().await
+        self.owner_client()?.github_sign_in().await
     }
 
     /// Hands a pasted GitHub token to the engine in its own secret frame, never a plain field.
@@ -120,14 +135,14 @@ impl OwnerController {
         &mut self,
         token: AccountSecret,
     ) -> Result<GitHubStatus, EngineError> {
-        self.github()?.github_token(token).await
+        self.owner_client()?.github_token(token).await
     }
 
     /// Reuses the GitHub sign-in of an installed and signed-in `gh` CLI.
     /// Takes nothing.
     /// Returns the new status.
     pub async fn github_use_cli(&mut self) -> Result<GitHubStatus, EngineError> {
-        self.github()?.github_use_cli().await
+        self.owner_client()?.github_use_cli().await
     }
 
     /// Lists one page of the signed-in owner's GitHub repositories, most recently pushed first.
@@ -137,19 +152,46 @@ impl OwnerController {
         if page == 0 || page > crate::github::REPO_PAGE_MAX {
             return Err(EngineError("github_page_invalid".into()));
         }
-        self.github()?.github_repos(page).await
+        self.owner_client()?.github_repos(page).await
     }
 
     /// Clones a GitHub repository into the projects home, where it then shows as Found.
     /// Takes the repository as owner/name.
     /// Returns the receipt with the new folder.
     pub async fn clone_repo(&mut self, full_name: String) -> Result<CloneReceipt, EngineError> {
-        self.github()?.clone_repo(full_name).await
+        self.owner_client()?.clone_repo(full_name).await
     }
 
-    fn github(&self) -> Result<&OwnerClient, EngineError> {
-        self.client
-            .as_deref()
-            .ok_or_else(|| EngineError("controller_disconnected".into()))
+    /// Downloads every file of a folder that is only in iCloud, reading the progress about
+    /// once a second while it runs and asking the engine to stop once `cancel` is set.
+    /// Takes the absolute folder, the cancel flag and the progress callback.
+    /// Returns how many placeholders were downloaded, or `home_icloud_not_downloaded` after
+    /// a cancel, a stall or the time limit.
+    pub async fn icloud_download(
+        &mut self,
+        path: String,
+        cancel: &AtomicBool,
+        mut report: impl FnMut(Progress),
+    ) -> Result<u64, EngineError> {
+        let client = self.owner_client()?;
+        let download = client.icloud_download(path);
+        tokio::pin!(download);
+        let mut tick = tokio::time::interval(ICLOUD_PROGRESS_EVERY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut asked = false;
+        for _ in 0..ICLOUD_TICKS_MAX {
+            tokio::select! {
+                outcome = &mut download => return outcome,
+                _ = tick.tick() => {}
+            }
+            if cancel.load(Ordering::Relaxed) && !asked {
+                asked = matches!(client.icloud_cancel().await, Ok(true));
+            }
+            if let Ok(Some(progress)) = client.icloud_progress().await {
+                assert!(progress.done <= progress.total);
+                report(progress);
+            }
+        }
+        Err(EngineError("icloud_outcome_unknown".into()))
     }
 }
