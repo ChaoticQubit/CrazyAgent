@@ -30268,6 +30268,53 @@ fn fan_out_row(max: u8) {
     );
 }
 
+/// A tools-off live master's reply lines are one round of the owner's goal per turn (S1 r2
+/// L1): under 1 round its first turn's two lines are handed over under that turn's key, its
+/// next turn's line is refused with one note that names keep going, and after the owner's
+/// keep going a later turn's line is handed over under its own key.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going() {
+    let fixture = Fixture::new(1);
+    choose_rounds(&fixture, Some(1));
+    let project = fixture.setup.project_id.clone();
+    let mut team = fixture.runtime();
+    owner_says(&fixture, "Build the page");
+    team.admit_reply_lines(
+        &project,
+        "On it.\nDELEGATE codex: Frontend\nDELEGATE codex: Backend",
+        1,
+    )
+    .unwrap();
+    assert_eq!(handed_over(&fixture), 2);
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master' AND turn=-1"
+        ),
+        2,
+        "both lines of turn 1 carry its key"
+    );
+    let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
+    assert_eq!(rounds.used, 1);
+    assert!(!rounds.open());
+    team.admit_reply_lines(&project, "DELEGATE codex: Tests", 2)
+        .unwrap();
+    assert_eq!(handed_over(&fixture), 2, "the limit held turn 2");
+    assert_eq!(noted(&fixture, &rounds.limit_note()), 1);
+    owner_says(&fixture, "keep going");
+    team.admit_reply_lines(&project, "DELEGATE codex: Tests", 3)
+        .unwrap();
+    assert_eq!(handed_over(&fixture), 3, "keep going lets turn 3 hand over");
+    assert_eq!(
+        count(
+            &fixture.connection,
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master' AND turn=-3"
+        ),
+        1
+    );
+}
+
 /// Under 1 sub-agent round, a live master's three Spawns of one turn are that one round
 /// and come back together (S1R1-M1).
 #[cfg(target_os = "macos")]
