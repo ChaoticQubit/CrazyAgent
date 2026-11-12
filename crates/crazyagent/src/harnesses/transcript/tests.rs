@@ -1644,3 +1644,80 @@ fn every_harness_kind_maps_background_commands_at_task_end() {
         }
     }
 }
+
+/// F33: the DiscordManager session store held Codex's AGENTS.md block as the owner's first
+/// message, and HackerBlog's held Claude Code's compaction summary as an owner message. Both
+/// are context a harness injected: no reader takes them as typed words, and the session
+/// search names them `instructions` and `summary`.
+#[test]
+fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles() {
+    let codex_user = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    let instructions = codex_user(
+        "# AGENTS.md instructions for /work/app\n\n<INSTRUCTIONS>\n# Instructions from CrazyAgent\n</INSTRUCTIONS>",
+    );
+    let summary = codex_user(&format!(
+        "{CODEX_SUMMARY} You also have access...\nBuilt the parser."
+    ));
+    let typed = codex_user("Ship the parser today");
+    let claude_summary = serde_json::json!({"type": "user", "isCompactSummary": true,
+        "message": {"role": "user", "content":
+            "This session is being continued from a previous conversation that ran out of context."}})
+    .to_string();
+    let claude_typed = serde_json::json!({"type": "user",
+        "message": {"role": "user", "content": "Fix the login page"}})
+    .to_string();
+
+    assert_eq!(
+        record_message("codex", instructions.as_bytes()).unwrap().0,
+        "instructions"
+    );
+    assert_eq!(
+        record_message("codex", summary.as_bytes()).unwrap().0,
+        "summary"
+    );
+    assert_eq!(
+        record_message("codex", typed.as_bytes()),
+        Some(("typed", "Ship the parser today".to_owned()))
+    );
+    assert_eq!(
+        record_message("claude-code", claude_summary.as_bytes())
+            .unwrap()
+            .0,
+        "summary"
+    );
+    assert_eq!(
+        record_message("claude-code", claude_typed.as_bytes())
+            .unwrap()
+            .0,
+        "typed"
+    );
+
+    let case = Case::new();
+    let codex = case.path().join("rollout.jsonl");
+    std::fs::write(&codex, format!("{instructions}\n{summary}\n{typed}\n")).unwrap();
+    assert_eq!(
+        conversation_messages("codex", &codex),
+        vec![(Speaker::Input, "Ship the parser today".to_owned())]
+    );
+    assert_eq!(
+        typed_after("codex", &codex, 0),
+        Some(vec!["Ship the parser today".to_owned()])
+    );
+    let (past, _) = typed_past("codex", &codex, 0).unwrap();
+    assert_eq!(
+        past.iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["Ship the parser today"]
+    );
+    let claude = case.path().join("session.jsonl");
+    std::fs::write(&claude, format!("{claude_summary}\n{claude_typed}\n")).unwrap();
+    assert_eq!(
+        conversation_messages("claude-code", &claude),
+        vec![(Speaker::Input, "Fix the login page".to_owned())]
+    );
+}

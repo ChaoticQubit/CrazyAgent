@@ -706,10 +706,23 @@ fn record_messages(
         let Some((speaker, text)) = record_message(harness, raw.as_bytes()) else {
             continue;
         };
+        let speaker = record_role(speaker, &text);
         if !each(index, speaker, &text) {
             return;
         }
         index += 1;
+    }
+}
+
+/// The role the session search shows for one record message: `engine` for a message the
+/// record calls typed that the engine typed, such as a handoff or a team message, else the
+/// role the record reader gave, `instructions` and `summary` included (F33). Takes the
+/// reader's role and the text. Returns the role.
+fn record_role(speaker: &'static str, text: &str) -> &'static str {
+    if speaker == "typed" && crate::master_sessions::engine_typed(text) {
+        "engine"
+    } else {
+        speaker
     }
 }
 
