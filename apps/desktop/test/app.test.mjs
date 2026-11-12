@@ -8,7 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const { App, AppView, EngineOutdatedView, ideFocusRoute, pageUnder } = await import("../src/app.tsx");
 const { formatRoute, parseRoute } = await import("../src/ui/router.ts");
 const state = await import("../src/state.ts");
-const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
+const { HomeView, setupSteps, cardActivity } = await import("../src/screens/dashboard/index.tsx");
 
 const profile = { name: "Mira Okafor", role: "", bio: "", preferred_stack: [], working_style: { detail: "terse", initiative: "ask_first" } };
 
@@ -294,16 +294,13 @@ test("Home keeps the Get set up panel with Set up tools after a skipped tools st
   assert.doesNotMatch(renderToStaticMarkup(createElement(HomeView, { ...props, tools: toolsReady })), /Get set up/);
 });
 
-test("Home shows the empty state, setup panel and Needs you from real reads only", () => {
+test("Home shows the empty state and setup panel from real reads only, and no Needs you strip: the bell holds it", () => {
   const accounts = ok(Array.from({ length: 5 }, (_, index) => account({ id: `a${index}`, name: `Claude ${index}`, status: "not_signed_in", status_label: "Not signed in" })));
   const markup = renderToStaticMarkup(createElement(HomeView, { projects: ok([]), accounts, pools: ok([]), harnesses: { kind: "not_ready" }, tools: { kind: "not_ready" }, onRetryProjects: () => {} }));
   assert.match(markup, /<h2>No projects yet<\/h2>/);
   assert.match(markup, /Create a project and agents start the research you pick\./);
   assert.match(markup, /<h2>Get set up<\/h2>/);
-  assert.match(markup, /Claude 0 isn&#x27;t signed in\./);
-  assert.doesNotMatch(markup, /Claude 3 isn/);
-  assert.match(markup, /Show all \(5\)/);
-  assert.equal(needsYou(accounts).rows.length, 3);
+  assert.doesNotMatch(markup, /Needs you|isn&#x27;t signed in|Show all/);
   const cards = renderToStaticMarkup(createElement(HomeView, {
     projects: ok([{ id: "p 1", name: "<Harbor> & Notes", repository_count: 1 }]), accounts: ok([account({})]),
     pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]), harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {},
@@ -368,64 +365,6 @@ test("a project card sums up live agents and research from the team and research
   assert.doesNotMatch(view(new Map()), /class="activity/);
 });
 
-test("Needs you shows one row per account to sign in, and folds accounts that share a name and provider into one", () => {
-  const claude = (id, name, status = "not_signed_in") => account({ id, name, provider: "claude", provider_name: "Claude", status });
-  const accounts = ok([claude("c1", "ChaoticQubit"), claude("c2", "ChaoticQubit"), claude("c3", "ChaoticQubit"), claude("c5", "ChaoticQubit", "signed_in"),
-    account({ id: "g1", name: "ChaoticQubit", status: "not_signed_in" }), claude("c6", "Arman03"), claude("c7", "Arman2000", "signed_in")]);
-  assert.deepEqual(needsYou(accounts).all.map((row) => [row.key, row.text, row.action, row.href]), [
-    ["account-c1", "3 Claude accounts named ChaoticQubit aren't signed in.", "Open accounts", "#/settings/accounts"],
-    ["account-g1", "ChaoticQubit isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=g1"],
-    ["account-c6", "Arman03 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=c6"],
-  ]);
-});
-
-test("Needs you lists accounts to sign in, research waiting for a pool and memories to review", () => {
-  const accounts = ok([account({ id: "a1", name: "Claude 1", status: "not_signed_in", status_label: "Not signed in" }), account({ id: "a2", name: "Codex", status: "signed_in" })]);
-  const projects = [{ id: "p1", name: "Harbor Notes", repository_count: 0 }, { id: "p 2", name: "Quayside", repository_count: 0 }];
-  const jobs = (status) => ({ kind: "ok", value: { jobs: [{ id: 1, status, error: null }] } });
-  const activity = new Map([["p1", cardActivity({ kind: "not_ready" }, jobs("running"))], ["p 2", cardActivity({ kind: "not_ready" }, jobs("needs_pool"))]]);
-  const suggestion = (project_id, project_name, id) => ({ project_id, project_name, id, version: 1, text: "A fact" });
-  const suggestions = ok([suggestion("p1", "Harbor Notes", "m1"), suggestion("p1", "Harbor Notes", "m2"), suggestion("p 2", "Quayside", "m3")]);
-  const needs = needsYou(accounts, projects, activity, suggestions);
-  assert.deepEqual(needs.all.map((row) => [row.project, row.text, row.action, row.href]), [
-    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=a1"],
-    ["Quayside", "Research is waiting for a pool.", "Choose pool", "#/projects/p%202/settings?section=pool"],
-    ["Harbor Notes", "2 suggested memories to review.", "Review", "#/settings/memory"],
-    ["Quayside", "1 suggested memory to review.", "Review", "#/settings/memory"],
-  ]);
-  assert.equal(needs.total, 4);
-  assert.deepEqual(needs.rows, needs.all.slice(0, 3));
-  assert.equal(new Set(needs.all.map((row) => row.key)).size, 4);
-  assert.deepEqual(needsYou(accounts, projects, new Map(), { kind: "not_ready" }).all.map((row) => row.text), ["Claude 1 isn't signed in."]);
-  assert.equal(needsYou({ kind: "loading" }).total, 0);
-  const alerts = new Map([["p 2", 2], ["p1", 1], ["gone", 4], ["quiet", 0]]);
-  const told = needsYou(accounts, projects, new Map(), ok([]), alerts);
-  assert.deepEqual(told.all.map((row) => [row.project, row.text, row.action, row.href]), [
-    ["Harbor Notes", "1 new team notification.", "Open conversation", "#/projects/p1/conversation"],
-    ["Quayside", "2 new team notifications.", "Open conversation", "#/projects/p%202/conversation"],
-    [null, "Claude 1 isn't signed in.", "Sign in again", "#/settings/accounts?action=sign_in&account=a1"],
-  ]);
-  assert.equal(told.total, 3);
-  assert.equal(new Set(told.all.map((row) => row.key)).size, 3);
-
-  const markup = renderToStaticMarkup(createElement(HomeView, {
-    projects: ok(projects), accounts, pools: ok([{ id: "pool-1", name: "Main", summary: "", members: [], project_count: 1 }]),
-    harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {}, activity, suggestions,
-  }));
-  assert.match(markup, /<section class="needs" aria-label="Needs you">/);
-  assert.match(markup, /<strong>Quayside<\/strong> Research is waiting for a pool\./);
-  assert.match(markup, /<a class="btn small" href="#\/projects\/p%202\/settings\?section=pool">Choose pool<\/a>/);
-  assert.match(markup, /<strong>Harbor Notes<\/strong> 2 suggested memories to review\./);
-  assert.doesNotMatch(markup, /1 suggested memory to review/);
-  assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">Show all \(4\)<\/button>/);
-  const alerted = renderToStaticMarkup(createElement(HomeView, {
-    projects: ok(projects), accounts, pools: ok([]), harnesses: ok([]), tools: toolsReady, onRetryProjects: () => {}, activity, suggestions, alerts,
-  }));
-  assert.match(alerted, /<strong>Harbor Notes<\/strong> 1 new team notification\./);
-  assert.match(alerted, /<a class="btn small" href="#\/projects\/p%202\/conversation">Open conversation<\/a>/);
-  assert.match(alerted, /Show all \(6\)/);
-});
-
 test("each project gets its own page, so a switch never keeps the last project's ticket or name", async () => {
   const { Screen } = await import("../src/app.tsx");
   const { ProjectPage } = await import("../src/screens/project/index.tsx");
@@ -470,18 +409,12 @@ test("Home, the sidebar and Go to keep every project up to the bound and say whe
   assert.match(bounded, /role="status">Showing the first 200 projects\. The rest are not listed here, in the sidebar or in Go to\.<\/p>/);
 });
 
-test("project names show direction and hidden characters as escapes in the sidebar, Home cards and Needs you", () => {
+test("project names show direction and hidden characters as escapes in the sidebar and Home cards", () => {
   const name = "invoice‮fdp.exe";
   const markup = render({ projects: ok([{ id: "p-1", name, repository_count: 0 }]) });
   assert.match(markup, /<span class="name">invoice\\u202efdp\.exe<\/span>/);
   assert.match(markup, /<h3 class="ellipsis">invoice\\u202efdp\.exe<\/h3>/);
   assert.ok(!markup.includes("‮"), markup);
-  const needs = renderToStaticMarkup(createElement(HomeView, {
-    projects: ok([{ id: "p-1", name, repository_count: 0 }]), alerts: new Map([["p-1", 1]]), onRetryProjects: () => {},
-    accounts: ok([]), pools: ok([]), harnesses: ok([]), tools: ok({ dependencies: [], pack: [], running: false }),
-  }));
-  assert.match(needs, /<strong>invoice\\u202efdp\.exe<\/strong> 1 new team notification\./);
-  assert.ok(!needs.includes("‮"), needs);
   const plain = render({ projects: ok([{ id: "p-2", name: "Harbor Notes 👩‍💻", repository_count: 0 }]) });
   assert.match(plain, /<span class="name">Harbor Notes 👩‍💻<\/span>/);
 });
