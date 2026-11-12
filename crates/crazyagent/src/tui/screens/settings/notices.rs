@@ -113,8 +113,8 @@ fn turn<T: Copy + PartialEq>(options: &[(T, &str)], now: T, forward: bool) -> T 
 
 /// Settings, Notifications (DEC-136a slice 3): each kind's delivery, the macOS
 /// notifications choice and the days Done items stay, in the desktop's words. Picks stay
-/// unsaved until Enter sends the whole settings as one change; Esc drops them first.
-/// Reached from Go to and from s on the notifications list.
+/// unsaved until Enter sends the whole settings as one change; Esc drops them first, and
+/// waits while a save is under way so its result shows. Opened by Go to and s on the list.
 pub(in crate::tui) struct NotificationSettingsPage {
     stored: Load<NoticeSettings>,
     picks: NoticeSettings,
@@ -449,6 +449,9 @@ impl Screen for NotificationSettingsPage {
             Load::Ready(_) => {}
             Load::Idle | Load::Loading | Load::NotReady => return vec![hint("Esc", "Back")],
         }
+        if self.saving.is_some() {
+            return Vec::new();
+        }
         let vertical = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         let sideways = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         let mut hints = vec![hint(&vertical, "Move"), hint(&sideways, "Change")];
@@ -473,11 +476,7 @@ impl Screen for NotificationSettingsPage {
             return Flow::Ignored;
         }
         if self.saving.is_some() {
-            return if *key == Key::Esc {
-                Flow::Ignored
-            } else {
-                Flow::Handled
-            };
+            return Flow::Handled;
         }
         let on_days = rows()[self.selected] == Row::Days;
         match key {
