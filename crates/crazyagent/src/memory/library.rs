@@ -807,6 +807,9 @@ pub(crate) fn recall(
     if let Err(problem) = validate_page(search, PAGE_ITEMS_MAX) {
         return Ok(Err(problem.0));
     }
+    if let Some(found) = search.and_then(|query| indexed_recall(connection, project, query)) {
+        return Ok(Ok(found));
+    }
     let tx = connection.transaction().map_err(error)?;
     let mut found = Vec::new();
     for scope in [
@@ -825,6 +828,60 @@ pub(crate) fn recall(
     found.truncate(RECALL_ITEMS_MAX);
     assert!(found.iter().all(|memory| !memory.origin.waiting()));
     Ok(Ok(found))
+}
+
+/// Answers recall from the search index while it holds every memory change (DEC-105): the
+/// best BM25 matches first, each reloaded from the library and kept only when it is this
+/// project's or app-wide, not waiting for the owner and free of hidden characters, at most
+/// `RECALL_ITEMS_MAX`. Inputs: the connection, the project and the query. Output: the
+/// memories, or None so the scan answers, also when the index finds none.
+fn indexed_recall(
+    connection: &mut rusqlite::Connection,
+    project: &ProjectId,
+    query: &str,
+) -> Option<Vec<SavedMemory>> {
+    if !crate::search_index::memories_ready(connection) {
+        return None;
+    }
+    let (ids, _) = crate::search_index::ranked(
+        connection,
+        project,
+        crate::search_index::Source::Memory,
+        query,
+    )
+    .ok()?;
+    let tx = connection.transaction().ok()?;
+    let mut found: Vec<SavedMemory> = Vec::new();
+    for id in ids {
+        if found.len() >= RECALL_ITEMS_MAX {
+            break;
+        }
+        let Ok(Some(chunk)) =
+            crate::search_index::chunk(&tx, id, project, crate::search_index::Source::Memory)
+        else {
+            continue;
+        };
+        let Ok(memory_id) = RequestId::new(chunk.key) else {
+            continue;
+        };
+        let Ok(Some(memory)) = get(&tx, &memory_id) else {
+            continue;
+        };
+        let in_scope = match &memory.scope {
+            MemoryScope::Global => true,
+            MemoryScope::Project { project_id } => project_id == project,
+        };
+        if in_scope
+            && !memory.origin.waiting()
+            && !super::hidden_text(&memory.text)
+            && found.iter().all(|kept| kept.id != memory.id)
+        {
+            found.push(memory);
+        }
+    }
+    assert!(found.len() <= RECALL_ITEMS_MAX);
+    assert!(found.iter().all(|memory| !memory.origin.waiting()));
+    (!found.is_empty()).then_some(found)
 }
 
 fn save_selection(
