@@ -184,10 +184,26 @@ export type Toolchain = "rust" | "node" | "python";
  * one per access level and kind of folder, per_agent one per agent. */
 export type ToolCacheScope = "shared" | "per_agent";
 
+/** Which of the project folder's local folders agents see (DEC-147.9): all of them, gitignored
+ * ones included, only the top-level folders the owner picked, or none. */
+export type SharedScope = "all" | "chosen" | "none";
+
+/** Whether agents may change the shared top-level folders git does not track. */
+export type SharedAccess = "read_only" | "read_write";
+
+/** A project's shared local folders choice: which folders, how, the top-level folders picked
+ * for Chosen folders and the secret paths the owner shared back for reading. */
+export interface SharedFolders {
+  scope: SharedScope;
+  access: SharedAccess;
+  chosen: string[];
+  secrets: string[];
+}
+
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
  * that differ from the project's own use, whether git in the IDE runs the project's own
- * hooks, what the IDE may change in agent folders, and who shares the agents' tool cache,
- * shared when it is left out. */
+ * hooks, what the IDE may change in agent folders, who shares the agents' tool cache,
+ * shared when it is left out, and the shared local folders, All and Read-only when left out. */
 export interface AgentPolicy {
   access: AgentAccess;
   network: AgentNetwork;
@@ -195,11 +211,13 @@ export interface AgentPolicy {
   ide_git_hooks: boolean;
   tool_cache?: ToolCacheScope;
   ide_agent_files: IdeAgentFiles;
+  shared_folders?: SharedFolders;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
  * with the reason one can't run, the network choices, every detected toolchain, the IDE
- * hooks switch, the IDE agent folders choice and the tool cache choice with every choice. */
+ * hooks switch, the IDE agent folders choice, the tool cache choice with every choice, the
+ * shared local folders choice and the project folder's top-level folders to pick from. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
@@ -210,6 +228,8 @@ export interface PolicyView {
   tool_cache: ToolCacheScope;
   tool_caches: { scope: ToolCacheScope; label: string }[];
   ide_agent_files: IdeAgentFiles;
+  shared_folders: SharedFolders;
+  local_folders: string[];
   version: number;
 }
 
