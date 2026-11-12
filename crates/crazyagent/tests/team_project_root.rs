@@ -155,6 +155,7 @@ async fn wire(chosen: Option<AgentAccess>) -> Wired {
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
+            ..Default::default()
         };
         let version = owner
             .project_agent_policy(project.clone())

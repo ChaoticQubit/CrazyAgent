@@ -61,7 +61,31 @@ fn view() -> PolicyView {
         shared_folders: Default::default(),
         local_folders: Vec::new(),
         version: 0,
+        apply_changes: Default::default(),
+        apply_choices: Vec::new(),
+        grants: Vec::new(),
+        temp_folder: Default::default(),
+        grant_log: Vec::new(),
     }
+}
+
+/// F08: a TUI save keeps the grants and the Apply access changes choice the project saved,
+/// so saving the level from the TUI never revokes a grant.
+#[test]
+fn a_tui_save_keeps_the_saved_grants_and_apply_choice() {
+    use crate::sandbox::policy::{AccessApply, AccessGrant, GrantView};
+    let grant = AccessGrant::Port { port: 47_821 };
+    let edit = AccessEdit::of(&PolicyView {
+        apply_changes: AccessApply::NextStart,
+        grants: vec![GrantView {
+            grant: grant.clone(),
+            label: grant.label(),
+        }],
+        ..view()
+    });
+    let policy = edit.policy();
+    assert_eq!(policy.grants, [grant]);
+    assert_eq!(policy.apply_changes, AccessApply::NextStart);
 }
 
 #[cfg(target_os = "macos")]

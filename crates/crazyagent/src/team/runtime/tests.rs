@@ -396,6 +396,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
+                ..Default::default()
             },
         )
         .unwrap();
@@ -502,6 +503,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -630,6 +632,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
+        ..Default::default()
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
     fixture
@@ -11182,6 +11185,7 @@ fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -13551,6 +13555,7 @@ fn agent_at_level_running(
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -13776,6 +13781,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -13836,6 +13842,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -13888,6 +13895,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -14038,6 +14046,7 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
+            ..Default::default()
         },
     )
     .unwrap();
@@ -16105,6 +16114,7 @@ fn between_turns(
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
         toolchains: None,
+        access_grants: Vec::new(),
         checked: None,
         narrowed: None,
         ran_before: Duration::ZERO,
@@ -24708,6 +24718,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                     tool_cache: Default::default(),
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -30403,4 +30414,165 @@ fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
         ["claude-c", "claude-d"],
         "another project still picks the held account"
     );
+}
+
+/// The policy F08 rows save: Sandboxed with the given allowed extras and Apply access
+/// changes choice. Input: the grants and the choice. Output: the policy.
+fn granted_policy(
+    grants: Vec<AccessGrant>,
+    apply_changes: AccessApply,
+) -> crate::sandbox::policy::AgentPolicy {
+    crate::sandbox::policy::AgentPolicy {
+        grants,
+        apply_changes,
+        ..Default::default()
+    }
+}
+
+/// A worker between turns that holds no toolchain and the saved network, so only what an
+/// F08 row changes widens or narrows it, with the receiver of its orders. Input: the
+/// project and the role. Output: the worker and its orders.
+fn held_worker(project: &ProjectId, role: AgentRole) -> (Worker, Receiver<Order>) {
+    let mut worker = between_turns(project, role, true, false);
+    let (order, orders) = channel();
+    worker.orders = order;
+    worker.toolchains = Some(Vec::new());
+    (worker, orders)
+}
+
+/// F08 (L2): a grant the owner adds while the live master runs is a widening; under When
+/// idle the master keeps working through an open turn and stops at its next idle point as
+/// a planned restart that resumes its own conversation, with one note before and one after.
+#[test]
+fn a_grant_added_under_when_idle_restarts_the_live_master_at_its_next_idle_point() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let (mut master, orders) = held_worker(&project, AgentRole::Master);
+    master.live = true;
+    master.turn_started = Some(now_ms());
+    team.workers.insert(7, master);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_live_masters SET agent=7 WHERE project=?1",
+            [PROJECT],
+        )
+        .unwrap();
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(
+            vec![AccessGrant::Port { port: 8080 }],
+            AccessApply::WhenIdle,
+        ),
+    )
+    .unwrap();
+    let notes = |text: &str| {
+        fixture
+            .status()
+            .messages
+            .iter()
+            .filter(|message| message.text == text)
+            .count()
+    };
+
+    team.retire_narrowed(&fixture.setup);
+    team.restart_widened(&fixture.setup).unwrap();
+    assert!(!team.workers[&7].stopping, "an open turn is not cut");
+    assert!(team.access_restarts.contains_key(&7));
+    assert!(orders.try_recv().is_err());
+    assert_eq!(notes(ACCESS_WIDER_WHEN_IDLE), 1);
+
+    team.workers.get_mut(&7).unwrap().turn_started = None;
+    team.retire_narrowed(&fixture.setup);
+    team.restart_widened(&fixture.setup).unwrap();
+    assert!(team.workers[&7].stopping, "the idle master stops");
+    assert!(matches!(orders.try_recv(), Ok(Order::Stop)));
+    assert!(team.master_restarts.contains(&project), "a planned restart");
+    assert!(!team.access_restarts.contains_key(&7));
+    assert_eq!(team.workers[&7].narrowed, None, "a widening is no refusal");
+    assert_eq!(
+        notes(ACCESS_WIDER_WHEN_IDLE),
+        1,
+        "the saved widening is noted once"
+    );
+    assert_eq!(notes(ACCESS_MASTER_RESTARTED), 1);
+}
+
+/// F08 (L2): under At its next start a widening stops no running agent; the team gets one
+/// note and the agent keeps the profile it started with.
+#[test]
+fn a_grant_added_under_at_next_start_leaves_running_agents_with_one_note() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let (sub, orders) = held_worker(&project, AgentRole::Sub);
+    team.workers.insert(8, sub);
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(vec![AccessGrant::TempFolder], AccessApply::NextStart),
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        team.retire_narrowed(&fixture.setup);
+        team.restart_widened(&fixture.setup).unwrap();
+    }
+    assert!(!team.workers[&8].stopping);
+    assert!(orders.try_recv().is_err());
+    assert!(team.access_restarts.is_empty());
+    assert!(team.master_restarts.is_empty());
+    let noted = fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.text == ACCESS_WIDER_NEXT_START)
+        .count();
+    assert_eq!(noted, 1);
+}
+
+/// F08 (L2): removing a grant is a narrowing whatever Apply access changes says: every
+/// agent whose profile holds it stops at once, mid turn too, held with its own reason, and
+/// an agent that never held it keeps running.
+#[test]
+fn a_removed_grant_stops_each_agent_holding_it_at_once() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let port = AccessGrant::Port { port: 8080 };
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(vec![port.clone()], AccessApply::NextStart),
+    )
+    .unwrap();
+    let (mut holder, orders) = held_worker(&project, AgentRole::Sub);
+    holder.access_grants = vec![port];
+    holder.own_turn = Some(now_ms());
+    team.workers.insert(9, holder);
+    let (other, other_orders) = held_worker(&project, AgentRole::Sub);
+    team.workers.insert(10, other);
+    team.retire_narrowed(&fixture.setup);
+    assert!(
+        !team.workers[&9].stopping,
+        "a held grant still saved keeps it running"
+    );
+
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &granted_policy(Vec::new(), AccessApply::NextStart),
+    )
+    .unwrap();
+    team.retire_narrowed(&fixture.setup);
+    let holder = &team.workers[&9];
+    assert!(holder.stopping && holder.held);
+    assert_eq!(holder.narrowed, Some(Narrowed::Revoked));
+    assert!(Narrowed::Revoked.problem().contains("agent_grant_revoked"));
+    assert!(matches!(orders.try_recv(), Ok(Order::Stop)));
+    assert!(!team.workers[&10].stopping);
+    assert!(other_orders.try_recv().is_err());
 }

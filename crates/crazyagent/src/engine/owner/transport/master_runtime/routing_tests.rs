@@ -1506,6 +1506,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
         network: crate::sandbox::policy::AgentNetwork::default(),
+        ..Default::default()
     };
     let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
     writer.busy_timeout(Duration::from_secs(5)).unwrap();

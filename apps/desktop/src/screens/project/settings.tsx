@@ -3,9 +3,9 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
+import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
-import { AccessLevels, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf, sameShared, sharedSecretsOf } from "./access";
+import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -529,6 +529,8 @@ function AccessSection({ data }: { data: ProjectData }) {
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [ideGitHooks, setIdeGitHooks] = useState(false);
   const [ideAgentFiles, setIdeAgentFiles] = useState<IdeAgentFiles>("allow_all");
+  const [applyChanges, setApplyChanges] = useState<AccessApply>("when_idle");
+  const [grants, setGrants] = useState<AccessGrant[]>([]);
   const [shared, setShared] = useState<SharedFolders>(DEFAULT_SHARED_FOLDERS);
   const [secretsText, setSecretsText] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -543,6 +545,8 @@ function AccessSection({ data }: { data: ProjectData }) {
     setAllowed(next.toolchains.map((row) => row.allowed));
     setIdeGitHooks(next.ide_git_hooks);
     setIdeAgentFiles(next.ide_agent_files);
+    setApplyChanges(next.apply_changes ?? "when_idle");
+    setGrants(savedGrants(next));
     setShared(next.shared_folders);
     setSecretsText(next.shared_folders.secrets.join("\n"));
   }
@@ -560,7 +564,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders));
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants));
     setBusy(false);
     if (saved.fresh) seed(saved.fresh);
     setNote(saved.note);
@@ -569,7 +573,8 @@ function AccessSection({ data }: { data: ProjectData }) {
 
   const sharedFolders: SharedFolders = { ...shared, secrets: sharedSecretsOf(secretsText) };
   const sharedValid = sharedFolders.secrets.length <= SHARED_SECRETS_MAX;
-  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const grantsChanged = view !== null && grants.map(grantLabel).join("\n") !== savedGrants(view).map(grantLabel).join("\n");
+  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || applyChanges !== (view.apply_changes ?? "when_idle") || grantsChanged || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
@@ -584,6 +589,9 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
     {view && <IdeAgentFilesChoices name="ps-agent-files" value={ideAgentFiles} access={access} onChange={setIdeAgentFiles} />}
     {view && <SharedFoldersChoices prefix="ps" value={shared} secretsText={secretsText} local={view.local_folders} access={access} onChange={setShared} onSecretsText={setSecretsText} />}
+    {view && <GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} />}
+    {view && <ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} />}
+    {view && <GrantLog rows={view.grant_log ?? []} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || !sharedValid || busy}
       onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>

@@ -2364,6 +2364,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
+                ..Default::default()
             },
             bench.generation,
         )

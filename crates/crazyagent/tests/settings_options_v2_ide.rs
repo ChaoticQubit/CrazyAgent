@@ -145,6 +145,7 @@ impl Hooked {
                     ide_agent_files: Default::default(),
                     shared_folders: Default::default(),
                     network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                    ..Default::default()
                 },
                 generation,
             )

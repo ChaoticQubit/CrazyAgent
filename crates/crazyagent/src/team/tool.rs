@@ -106,11 +106,13 @@ pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
 pub const ASK_TOOL: &str = "ask";
 pub const RECORD_TOOL: &str = "record_answer";
 pub const WITHDRAW_TOOL: &str = "withdraw_question";
-/// The owner's questions tools (DEC-099 A, F12) a server lists after `TEAM_TOOLS`: `ask`
-/// logs a question for the owner, `record_answer` records the owner's answer from chat or
-/// from the master's own terminal, and `withdraw_question` takes a question the master no
-/// longer needs off the owner's list. A sub-agent's server leaves the last two out.
-pub const QUESTION_TOOLS: [&str; 3] = [ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL];
+pub const REQUEST_ACCESS_TOOL: &str = "request_access";
+/// The owner's questions tools (DEC-099 A, F12, F08) a server lists after `TEAM_TOOLS`:
+/// `ask` logs a question for the owner, `record_answer` records the owner's answer from chat
+/// or the master's own terminal, `withdraw_question` takes a question the master no longer
+/// needs off the owner's list and `request_access` asks the owner for one narrow extra the
+/// sandbox blocks. A sub-agent's server leaves `MASTER_QUESTION_TOOLS` out.
+pub const QUESTION_TOOLS: [&str; 4] = [ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL, REQUEST_ACCESS_TOOL];
 /// The questions tools only a master is given, left out of every sub-agent's server.
 pub const MASTER_QUESTION_TOOLS: [&str; 2] = [RECORD_TOOL, WITHDRAW_TOOL];
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
@@ -172,6 +174,9 @@ const ASK_KEYS: [&str; 6] = [
 ];
 const RECORD_KEYS: [&str; 4] = ["question", "version", "owner_turn", "answer"];
 const WITHDRAW_KEYS: [&str; 2] = ["question", "version"];
+const REQUEST_INVALID: &str = "Not requested: give kind socket with the socket's full path, kind port with one port from 1 to 49151, or kind temp_folder, and a reason in plain words of up to 2048 bytes.";
+const REQUEST_KEYS: [&str; 4] = ["kind", "path", "port", "reason"];
+const REQUEST_REASON_BYTES_MAX: usize = 2048;
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
@@ -315,6 +320,10 @@ pub enum Call {
         question: u64,
         version: u64,
     },
+    RequestAccess {
+        grant: crate::sandbox::policy::AccessGrant,
+        reason: String,
+    },
 }
 
 impl Call {
@@ -339,6 +348,7 @@ impl Call {
             Self::Ask { .. } => ASK_TOOL,
             Self::RecordAnswer { .. } | Self::RelayAnswer { .. } => RECORD_TOOL,
             Self::Withdraw { .. } => WITHDRAW_TOOL,
+            Self::RequestAccess { .. } => REQUEST_ACCESS_TOOL,
         };
         assert!(TEAM_TOOLS.contains(&name) || QUESTION_TOOLS.contains(&name));
         name
@@ -574,6 +584,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                 questions::ask_listing(),
                 questions::record_listing(),
                 questions::withdraw_listing(),
+                questions::request_listing(),
             ]);
             if waking {
                 tools.push(wake_listing());
@@ -586,7 +597,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 5 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 6 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -645,6 +656,9 @@ fn team_tools(off: &[String]) -> Value {
     }
     if on(WITHDRAW_TOOL) {
         tools.push(withdraw_tool());
+    }
+    if on(REQUEST_ACCESS_TOOL) {
+        tools.push(request_access_tool());
     }
     assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
     json!({ "tools": tools })
@@ -786,6 +800,27 @@ pub fn withdraw_tool() -> Value {
                 "version": {"type": "integer", "description": "The version you read: 0 while the question waits."},
             },
             "required": ["question", "version"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// The MCP entry of the `request_access` tool (F08), the same for every master and agent
+/// that is given it: one socket, one port on this computer or the owner's temp folder, with
+/// the reason the owner reads. Output: the tool's name, description and input schema.
+pub fn request_access_tool() -> Value {
+    json!({
+        "name": REQUEST_ACCESS_TOOL,
+        "description": "Ask the owner to allow one narrow extra your sandbox blocks: connecting to one unix socket, connecting to one TCP port on this computer, or using the owner's own temp folder as yours. The engine checks it and raises a question the owner answers in the Questions view; if allowed it joins the project's Agent access and agents restart at their next pause to get it. Use it instead of working around the sandbox. Container, VM, terminal, editor, SSH, key and password agent sockets are never allowed, nor Docker or debugger ports, nor ports from 49152 up.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["socket", "port", "temp_folder"], "description": "socket: one unix socket by its full path. port: one TCP port on this computer. temp_folder: the owner's own temp folder."},
+                "path": {"type": "string", "description": "For kind socket only: the socket's full path."},
+                "port": {"type": "integer", "minimum": 1, "maximum": 49_151, "description": "For kind port only: the port."},
+                "reason": {"type": "string", "description": "Why you need it, in one or two plain sentences the owner reads."},
+            },
+            "required": ["kind", "reason"],
             "additionalProperties": false,
         },
     })
@@ -1120,6 +1155,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
         WITHDRAW_TOOL => withdraw_call(arguments).ok_or(WITHDRAW_INVALID),
+        REQUEST_ACCESS_TOOL => request_call(arguments).ok_or(REQUEST_INVALID),
         _ => return None,
     })
 }
@@ -1174,6 +1210,43 @@ fn ask_call(arguments: Option<&Value>) -> Option<Call> {
         recommended: ask.recommended,
         context: ask.context,
         replaces,
+    })
+}
+
+/// Reads one `request_access` call: a kind with only the field it needs, a plain grant and
+/// a reason of up to `REQUEST_REASON_BYTES_MAX` bytes; the engine checks the grant itself
+/// and plains the reason when it raises the question. Takes the arguments. Returns the
+/// call, or none when a part is missing, extra or outside its bounds.
+fn request_call(arguments: Option<&Value>) -> Option<Call> {
+    use crate::sandbox::policy::AccessGrant;
+    let arguments = arguments?.as_object()?;
+    if arguments
+        .keys()
+        .any(|key| !REQUEST_KEYS.contains(&key.as_str()))
+    {
+        return None;
+    }
+    let reason = arguments.get("reason")?.as_str()?;
+    if reason.trim().is_empty() || reason.len() > REQUEST_REASON_BYTES_MAX {
+        return None;
+    }
+    let has = |key: &str| arguments.contains_key(key);
+    let grant = match arguments.get("kind")?.as_str()? {
+        "socket" if !has("port") => AccessGrant::Socket {
+            path: std::path::PathBuf::from(arguments.get("path")?.as_str()?),
+        },
+        "port" if !has("path") => AccessGrant::Port {
+            port: u16::try_from(arguments.get("port")?.as_u64()?).ok()?,
+        },
+        "temp_folder" if !has("path") && !has("port") => AccessGrant::TempFolder,
+        _ => return None,
+    };
+    if !grant.plain() {
+        return None;
+    }
+    Some(Call::RequestAccess {
+        grant,
+        reason: reason.to_owned(),
     })
 }
 
@@ -1302,6 +1375,11 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
         } => json!({"question": question, "version": version, "answer": answer}),
         Call::Withdraw { question, version } => {
             json!({"question": question, "version": version})
+        }
+        Call::RequestAccess { grant, reason } => {
+            let mut arguments = serde_json::to_value(grant).map_err(|_| CALL_INVALID)?;
+            arguments["reason"] = json!(reason);
+            arguments
         }
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;

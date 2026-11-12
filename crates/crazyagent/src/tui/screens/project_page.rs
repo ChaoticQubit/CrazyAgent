@@ -362,6 +362,8 @@ impl ProjectPage {
                         ide_agent_files: Default::default(),
                         shared_folders: Default::default(),
                         network: crate::sandbox::policy::AgentNetwork::default(),
+                        apply_changes: Default::default(),
+                        grants: Vec::new(),
                     },
                 },
                 generation,

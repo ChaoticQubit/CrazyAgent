@@ -2623,6 +2623,11 @@ fn access_view(access: AgentAccess, version: u64) -> PolicyView {
         shared_folders: Default::default(),
         local_folders: Vec::new(),
         version,
+        apply_changes: Default::default(),
+        apply_choices: Vec::new(),
+        grants: Vec::new(),
+        temp_folder: Default::default(),
+        grant_log: Vec::new(),
     }
 }
 
@@ -2666,6 +2671,7 @@ fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
             network: crate::sandbox::policy::AgentNetwork::default(),
+            ..Default::default()
         },
     };
     assert_eq!(

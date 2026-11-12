@@ -36,7 +36,9 @@ use crate::research::runner::{
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, Narrowing};
+use crate::sandbox::policy::{
+    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
+};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -86,6 +88,9 @@ const MOVE_DWELL: Duration = Duration::from_secs(crate::scheduling::MOVE_DWELL_S
 /// The one team note a live master's move to its pool's top account leaves (DEC-139). It is
 /// written after any note of the start itself, so it is the newest engine note, which the
 /// desktop master area shows.
+const ACCESS_WIDER_WHEN_IDLE: &str = "The owner widened the project's agent access. Each running agent stops when it is next idle so its next start has it; the live master starts again in its own conversation. Teammates keep their old access until their next start.";
+const ACCESS_WIDER_NEXT_START: &str = "The owner widened the project's agent access. Running agents keep their old access until their next start (Apply access changes: At its next start).";
+const ACCESS_MASTER_RESTARTED: &str = "The live master stopped while idle and starts again in its own conversation with the owner's wider access.";
 const LIVE_MASTER_MOVED: &str = "The live master moved to the account that is now first in this pool's order and started again there (Live master account: Move when idle).";
 const SWEEP_EVERY: Duration = Duration::from_secs(2);
 const SESSION_EVENTS_MAX: usize = 200_000;
@@ -210,7 +215,8 @@ struct Grant {
 /// through, the only network its profile allows (S4b); `relay` is the key relay a keyed
 /// endpoint agent reaches its model through, so the key stays in the engine (DEC-141 PA-4);
 /// `network` is the project network its profile was made for, which a narrower saved choice
-/// stops it for (CS-2); `terminal_display` is the project's terminal display, read when the
+/// stops it for (CS-2); `grants` the owner's narrow grants its profile and variables hold
+/// (F08); `terminal_display` is the project's terminal display, read when the
 /// agent is prepared (N-D9, DEC-141);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
 /// (T3-15, DEC-116).
@@ -225,6 +231,7 @@ struct Plan {
     access: AgentAccess,
     toolchains: Vec<Toolchain>,
     network: AgentNetwork,
+    grants: Vec<AccessGrant>,
     layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
@@ -418,8 +425,9 @@ impl Launch {
 /// A pane an earlier engine left running, taken over from its record: the host and pane
 /// name, the record, the bounds, whether it is a live master, what a signed-in account needs
 /// again, the access level it started at, the project network its profile was made for, its
-/// model proxy, bound again on the port its profile names (S4b), and a sub-agent's Task-start
-/// reminder from its launch context as it reads now (T3-15).
+/// model proxy, bound again on the port its profile names (S4b), a sub-agent's Task-start
+/// reminder from its launch context as it reads now (T3-15), and the owner's grants its
+/// profile holds, none for a record that kept none (F08).
 struct Adoption {
     host: Arc<dyn Host>,
     agent: AgentId,
@@ -432,6 +440,7 @@ struct Adoption {
     network: AgentNetwork,
     proxy: Option<Arc<ModelProxy>>,
     task_start: Option<String>,
+    grants: Vec<AccessGrant>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -534,12 +543,13 @@ enum Busy {
 }
 
 /// Why the engine stopped an agent whose running process holds more than the owner saved:
-/// what the saved policy no longer allows, or toolchains a pane from before the engine kept
-/// them may hold.
+/// what the saved policy no longer allows, toolchains a pane from before the engine kept
+/// them may hold, or an allowed extra the owner removed (F08).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Narrowed {
     Saved(Narrowing),
     Unrecorded,
+    Revoked,
 }
 
 impl Narrowed {
@@ -574,6 +584,10 @@ impl Narrowed {
             Self::Unrecorded => (
                 "the agent started before the engine kept the toolchains it was given, so it was stopped; its next start uses the project's toolchain settings",
                 "agent_toolchains_unrecorded",
+            ),
+            Self::Revoked => (
+                "the owner removed an allowed extra (socket, port or temp folder) the agent held, so the agent was stopped; its next start goes without it",
+                "agent_grant_revoked",
             ),
         };
         with_code(text, Some(code))
@@ -628,6 +642,7 @@ struct Worker {
     parent: Option<i64>,
     ready: bool,
     toolchains: Option<Vec<Toolchain>>,
+    access_grants: Vec<AccessGrant>,
     checked: Option<AgentPolicy>,
     narrowed: Option<Narrowed>,
     reask: Option<i64>,
@@ -689,6 +704,8 @@ pub struct TeamRuntime {
     reproving: Option<Arc<AtomicBool>>,
     instructions_next: BTreeMap<ProjectId, Instant>,
     instruction_restarts: BTreeMap<i64, ProjectId>,
+    access_restarts: BTreeMap<i64, ProjectId>,
+    access_widened: BTreeSet<ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
     master_moves: BTreeMap<ProjectId, CredentialRef>,
     moves_next: BTreeMap<ProjectId, Instant>,
@@ -1001,6 +1018,8 @@ impl TeamRuntime {
             reproving: None,
             instructions_next: BTreeMap::new(),
             instruction_restarts: BTreeMap::new(),
+            access_restarts: BTreeMap::new(),
+            access_widened: BTreeSet::new(),
             master_restarts: BTreeSet::new(),
             master_moves: BTreeMap::new(),
             moves_next: BTreeMap::new(),
@@ -1298,6 +1317,7 @@ impl TeamRuntime {
             network: record.network.unwrap_or(AgentNetwork::Open),
             proxy,
             task_start,
+            grants: record.grants.clone().unwrap_or_default(),
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -2765,6 +2785,7 @@ impl TeamRuntime {
         let paused = self.paused(project)?;
         self.retire_rejected(project, access);
         self.retire_narrowed(&stored);
+        self.restart_widened(&stored)?;
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.resume_interrupted(&stored, access, &paused)?;
@@ -3360,16 +3381,100 @@ impl TeamRuntime {
                 }
                 cause => Narrowed::Saved(cause),
             });
+            let revoked = saved
+                .as_ref()
+                .is_some_and(|saved| saved.revokes(&worker.access_grants));
+            let narrowed = narrowed.or(revoked.then_some(Narrowed::Revoked));
             let Some(narrowed) = narrowed else {
+                let widened = saved.as_ref().is_some_and(|saved| {
+                    saved.widens(
+                        root.as_deref(),
+                        running.then_some(worker.access),
+                        worker.tools.then_some(worker.network),
+                        worker.toolchains.as_deref(),
+                        &worker.access_grants,
+                    )
+                });
+                if widened && worker.role != AgentRole::Teammate {
+                    self.access_restarts.insert(id, project.clone());
+                }
+                if widened {
+                    self.access_widened.insert(project.clone());
+                }
                 worker.checked = saved.clone();
                 continue;
             };
+            self.access_restarts.remove(&id);
             worker.stopping = true;
             worker.held = true;
             worker.narrowed = Some(narrowed);
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
+    }
+
+    /// Applies a wider saved access to running agents under the owner's Apply access changes
+    /// choice (F08): one team note per saved widening; under When idle each agent stops at its
+    /// next idle point, the live master as a planned restart that resumes its own session,
+    /// and under At its next start none stops. Takes the project's stored setup. Returns any
+    /// SQLite failure.
+    fn restart_widened(&mut self, stored: &StoredSetup) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let announce = self.access_widened.remove(project);
+        let ids: Vec<i64> = self
+            .access_restarts
+            .iter()
+            .filter(|(_, owner)| *owner == project)
+            .map(|(id, _)| *id)
+            .collect();
+        if !announce && ids.is_empty() {
+            return Ok(());
+        }
+        assert!(ids.len() <= self.access_restarts.len());
+        let apply = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map(|policy| policy.apply_changes)
+            .unwrap_or_default();
+        if announce {
+            let text = match apply {
+                AccessApply::WhenIdle => ACCESS_WIDER_WHEN_IDLE,
+                AccessApply::NextStart => ACCESS_WIDER_NEXT_START,
+            };
+            self.note(project, text)?;
+        }
+        for id in ids {
+            let gone = self.workers.get(&id).is_none_or(|worker| worker.stopping);
+            if gone || apply == AccessApply::NextStart {
+                self.access_restarts.remove(&id);
+                continue;
+            }
+            let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
+            let quiet = self.workers[&id].live
+                && super::master::quiet(
+                    &self.connection,
+                    self.agents.as_deref().map(Agents::typing),
+                    project,
+                    now_ms(),
+                );
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            let idle = worker.busy.is_none() && worker.own_turn.is_none() && !waits;
+            let stops = match (worker.role, worker.live) {
+                (AgentRole::Master, true) => idle && quiet && worker.turn_started.is_none(),
+                (AgentRole::Teammate, _) => false,
+                _ => idle,
+            };
+            if !stops {
+                continue;
+            }
+            let live = worker.live;
+            worker.stopping = true;
+            let _ = worker.orders.send(Order::Stop);
+            self.access_restarts.remove(&id);
+            if live {
+                self.master_restarts.insert(project.clone());
+                self.note(project, ACCESS_MASTER_RESTARTED)?;
+            }
+        }
+        Ok(())
     }
 
     /// Proves a managed pool account is signed in for this engine run, and that the
@@ -6715,12 +6820,18 @@ impl TeamRuntime {
         };
         assert!(!(kept_session && live));
         let fresh = matches!(&launch, Launch::Fresh(plan, _) if plan.resume.is_none()).then(now_ms);
-        let (access, toolchains, network) = match &launch {
-            Launch::Fresh(plan, _) => (plan.access, Some(plan.toolchains.clone()), plan.network),
+        let (access, toolchains, network, access_grants) = match &launch {
+            Launch::Fresh(plan, _) => (
+                plan.access,
+                Some(plan.toolchains.clone()),
+                plan.network,
+                plan.grants.clone(),
+            ),
             Launch::Adopt(adoption) => (
                 adoption.access,
                 adoption.toolchains.clone(),
                 adoption.network,
+                adoption.grants.clone(),
             ),
         };
         let starts = crate::coord::relay::TaskStarts {
@@ -6794,6 +6905,7 @@ impl TeamRuntime {
                 parent,
                 ready: false,
                 toolchains,
+                access_grants,
                 checked: None,
                 narrowed: None,
                 reask: None,
@@ -8155,6 +8267,17 @@ impl TeamRuntime {
                 }
             }
         }
+        let owner_tmp = policy
+            .grants
+            .contains(&AccessGrant::TempFolder)
+            .then(crate::sandbox::grants::owner_temp_folder)
+            .transpose()
+            .map_err(|code| with_code(crate::sandbox::grants::refusal_text(code), Some(code)))?;
+        let data = crate::sandbox::grants::data_root(&self.connection).unwrap_or_default();
+        let held = crate::sandbox::grants::held_now(&policy.grants, &kept, &data);
+        sandbox = sandbox
+            .grant_access(&held, owner_tmp.as_deref())
+            .map_err(sandboxed)?;
         let profile = agent_profile(&self.state, id);
         sandbox.install(&profile).map_err(sandboxed)?;
         ensure_repository(&root, &tmp).map_err(|e| {
@@ -8349,6 +8472,7 @@ impl TeamRuntime {
             access: policy.access,
             toolchains,
             network: policy.network,
+            grants: policy.grants.clone(),
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
@@ -8715,11 +8839,13 @@ impl TeamRuntime {
                 let worker = &self.workers[&id];
                 let (access, toolchains) = (Some(worker.access), worker.toolchains.clone());
                 let network = Some(worker.network);
+                let grants = Some(worker.access_grants.clone());
                 let per_turn = worker.managed && !worker.live && !worker.kept_session;
                 let pane = pane.map(|record| PaneRecord {
                     access,
                     toolchains,
                     network,
+                    grants,
                     ..*record
                 });
                 if let Some(record) = pane
@@ -9063,6 +9189,7 @@ impl TeamRuntime {
                 spawn_ledger::spawned(&self.root, id, crate::ledger::Outcome::Failed);
                 let mut worker = self.workers.remove(&id).expect("worker exists");
                 self.waited_for.remove(&id);
+                self.access_restarts.remove(&id);
                 crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;

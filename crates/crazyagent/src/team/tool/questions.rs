@@ -1,7 +1,9 @@
-use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL, WITHDRAW_TOOL};
+use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL, REQUEST_ACCESS_TOOL, WITHDRAW_TOOL};
 use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
+use crate::sandbox::grants::{self, Requested};
+use crate::sandbox::policy::AccessGrant;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::io::{Read, Write};
@@ -12,10 +14,11 @@ pub const ASKS_PER_REPLY_MAX: usize = 8;
 pub const ASK_DROP_BYTES_MAX: u64 = ASKS_PER_REPLY_MAX as u64 * super::CALL_BYTES_MAX;
 const ASK_LOGGED: &str = "Recorded. When your reply ends, the engine logs this question in the project's questions and notifies the owner, unless 8 of your questions are still open. Their answer or dismissal comes back to you once on a later turn, so do not ask it again.";
 const RECORD_TAKEN: &str = "Noted. When your reply ends, the engine records the owner's message as the answer, taking the words from that message and never from yours, if the question is still open and the message is the owner's.";
+const REQUEST_TAKEN: &str = "Recorded. When your reply ends, the engine checks the request and raises it as a question in the owner's Questions view. If the owner allows it, it joins the project's Agent access and you get it at your next start; do not ask again.";
+const REQUEST_HELD: &str = "The project already allows that, so nothing was asked. If your sandbox still blocks it, you get it at your next start.";
 const WITHDRAW_TAKEN: &str = "Noted. When your reply ends, the engine takes the question off the owner's list if it is still open and was asked by you or by a sub-agent of this project.";
 const RELAY_LIVE_ONLY: &str = "Not sent: only a master in the owner's terminal records an answer as its own words. Name the owner's message with owner_turn instead.";
-const ASK_ONLY: &str =
-    "Not sent: this tool only takes a question, a recorded answer or a withdrawal.";
+const ASK_ONLY: &str = "Not sent: this tool only takes a question, a recorded answer, a withdrawal or an access request.";
 const ASKS_FULL: &str = "Not sent: the engine takes at most 8 question calls from one reply. Make the next one in a later reply.";
 const ASK_UNWRITABLE: &str = "Not sent: the engine's question record could not be written.";
 const AGENT_ASKS_ONLY: &str = "Not recorded: the owner answers a sub-agent's questions in the Questions view, so only the master records an answer from chat.";
@@ -67,6 +70,14 @@ pub fn note_lines(notes: &[crate::questions::Note]) -> (String, Vec<u64>) {
     (lines, carried)
 }
 
+/// The `request_access` tool's listing, as the live master's list shows it. Output: the
+/// tool's JSON entry, named `REQUEST_ACCESS_TOOL`.
+pub(super) fn request_listing() -> Value {
+    let listed = super::request_access_tool();
+    assert_eq!(listed["name"], REQUEST_ACCESS_TOOL);
+    listed
+}
+
 /// The `record_answer` tool's listing, as the live master's list shows it. Output: the
 /// tool's JSON entry, named `RECORD_TOOL`.
 pub(super) fn record_listing() -> Value {
@@ -82,8 +93,8 @@ pub fn ask_file(drop: &Path) -> PathBuf {
     drop.with_file_name(ASK_DROP_FILE)
 }
 
-/// Answers one `tools/call` of the `ask`, `record_answer` or `withdraw_question` tool on
-/// the drop-file server: the call is checked as the live server checks it and recorded for
+/// Answers one `tools/call` of the `ask`, `record_answer`, `withdraw_question` or
+/// `request_access` tool on the drop-file server: the call is checked as the live server checks it and recorded for
 /// the engine, which takes it when the reply ends. An answer given as the master's own
 /// words is refused, since a drop-file master has no terminal the owner types into. Inputs:
 /// the call's params and the absolute drop file. Output: none for another tool, else the
@@ -91,7 +102,7 @@ pub fn ask_file(drop: &Path) -> PathBuf {
 pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, bool)> {
     let params = params?;
     let name = params.get("name")?.as_str()?;
-    if name != ASK_TOOL && name != RECORD_TOOL && name != WITHDRAW_TOOL {
+    if ![ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL, REQUEST_ACCESS_TOOL].contains(&name) {
         return None;
     }
     Some(match super::live_call(name, params.get("arguments"))? {
@@ -102,6 +113,7 @@ pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, 
                 match call {
                     Call::Ask { .. } => ASK_LOGGED,
                     Call::Withdraw { .. } => WITHDRAW_TAKEN,
+                    Call::RequestAccess { .. } => REQUEST_TAKEN,
                     _ => RECORD_TAKEN,
                 }
                 .to_owned(),
@@ -115,12 +127,15 @@ pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, 
 }
 
 /// Says whether a question call is one the engine takes from a drop-file or conversation
-/// master's record: an ask, an answer recorded from the owner's message or a withdrawal.
-/// Input: the call. Output: the answer.
+/// master's record: an ask, an answer recorded from the owner's message, a withdrawal or an
+/// access request. Input: the call. Output: the answer.
 fn taken(call: &Call) -> bool {
     matches!(
         call,
-        Call::Ask { .. } | Call::RecordAnswer { .. } | Call::Withdraw { .. }
+        Call::Ask { .. }
+            | Call::RecordAnswer { .. }
+            | Call::Withdraw { .. }
+            | Call::RequestAccess { .. }
     )
 }
 
@@ -228,6 +243,7 @@ pub fn apply_master_calls(
     let asker = Asker::Master(master);
     applied(take_asks(drop), |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
+        Call::RequestAccess { grant, reason } => not_raised(db, project, &asker, &grant, &reason),
         Call::RecordAnswer {
             question,
             version,
@@ -267,6 +283,7 @@ pub fn apply_session_calls(
     let mut used = false;
     applied(calls, |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
+        Call::RequestAccess { grant, reason } => not_raised(db, project, &asker, &grant, &reason),
         Call::RecordAnswer {
             question,
             version,
@@ -295,6 +312,58 @@ pub fn apply_session_calls(
         ),
         _ => unreachable!("take_asks returns only question calls"),
     })
+}
+
+/// Raises a drop-file or conversation master's access request when its reply ends, as
+/// [`request_reply`] does. Inputs: the engine connection, the project, the master as
+/// asker, the grant and its reason. Output: none once asked, else the sentence for its
+/// next turn.
+fn not_raised(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    grant: &AccessGrant,
+    reason: &str,
+) -> Option<String> {
+    match grants::request(db, project, asker, grant, reason) {
+        Ok(Requested::Asked(_)) => None,
+        Ok(Requested::AlreadyAllowed) => Some(format!(
+            "Your access request for {}: {REQUEST_HELD}",
+            grant.label()
+        )),
+        Err(code) => Some(format!(
+            "Your access request for {} was not raised: {}",
+            grant.label(),
+            grants::refusal_text(&code)
+        )),
+    }
+}
+
+/// Raises one access request (F08) for the owner and says how it went: the grant is
+/// checked as a save checks it, a grant the project already allows asks nothing, and the
+/// reason is plained and quoted in the owner's question. Inputs: the engine connection, the
+/// project, who asked, the grant and the reason. Output: the sentence the caller reads and
+/// whether it is an error.
+pub(in crate::team) fn request_reply(
+    db: &Connection,
+    project: &ProjectId,
+    asker: &Asker,
+    grant: &AccessGrant,
+    reason: &str,
+) -> (String, bool) {
+    match grants::request(db, project, asker, grant, reason) {
+        Ok(Requested::Asked(question)) => (
+            format!(
+                "Access request raised as question {question} in the owner's Questions view. If the owner allows it, it joins this project's Agent access and you restart at your next pause with it; you are not told otherwise, so do not ask again."
+            ),
+            false,
+        ),
+        Ok(Requested::AlreadyAllowed) => (REQUEST_HELD.to_owned(), false),
+        Err(code) => (
+            format!("Not requested: {}", grants::refusal_text(&code)),
+            true,
+        ),
+    }
 }
 
 fn applied(calls: Vec<Call>, apply: impl FnMut(Call) -> Option<String>) -> Vec<String> {
@@ -419,10 +488,11 @@ pub fn clear_asks(drop: &Path) {
 }
 
 /// Logs the question a sub-agent asked through the `ask` tool of its team server, with the
-/// sub-agent as the asker, in place of an old free-text question of its own when it names
-/// one; a sub-agent's `record_answer` and `withdraw_question` are refused. Inputs: the
-/// engine connection, the project, the sub-agent's team id and its checked question call.
-/// Output: the sentence the sub-agent reads and whether it is an error.
+/// Logs a sub-agent's `ask` with it as the asker, in place of an old free-text question of
+/// its own when it names one, raises its `request_access` as [`request_reply`] does and
+/// refuses its `record_answer` and `withdraw_question`. Inputs: the engine connection, the
+/// project, the sub-agent's team id and its checked question call. Output: the sentence
+/// the sub-agent reads and whether it is an error.
 pub(in crate::team) fn agent_ask(
     db: &Connection,
     project: &ProjectId,
@@ -440,6 +510,9 @@ pub(in crate::team) fn agent_ask(
         }
         Call::RecordAnswer { .. } | Call::RelayAnswer { .. } => (AGENT_ASKS_ONLY.to_owned(), true),
         Call::Withdraw { .. } => (AGENT_WITHDRAW_REFUSED.to_owned(), true),
+        Call::RequestAccess { grant, reason } => {
+            request_reply(db, project, &Asker::Agent(agent), &grant, &reason)
+        }
         _ => unreachable!("only question calls reach agent_ask"),
     }
 }

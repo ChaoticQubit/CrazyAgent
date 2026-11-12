@@ -139,6 +139,7 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
             ASK_TOOL,
             RECORD_TOOL,
             WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
             super::super::WAKE_TOOL
         ]
     );
@@ -244,7 +245,8 @@ fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
     let sub_agent = super::super::MASTER_QUESTION_TOOLS.map(str::to_owned);
     let listed = super::super::team_tools(&sub_agent);
     let tools = listed["tools"].as_array().unwrap();
-    assert_eq!(tools.last(), Some(&super::super::ask_tool()));
+    assert!(tools.contains(&super::super::ask_tool()));
+    assert_eq!(tools.last(), Some(&super::super::request_access_tool()));
     assert!(tools.iter().all(|tool| tool["name"] != RECORD_TOOL));
     assert!(tools.iter().all(|tool| tool["name"] != WITHDRAW_TOOL));
     assert!(super::super::known_tools(&sub_agent));
@@ -566,6 +568,83 @@ fn the_open_line_names_only_the_askers_open_questions_and_the_message_to_record_
     let line = open_line(&pending, &crowded, Some(u64::MAX));
     assert!(line.len() <= OPEN_LINE_BYTES_MAX, "{}", line.len());
     assert_eq!(line.matches("; ").count(), 7);
+}
+
+/// F08 (L2): a drop-file master's access request is recorded during its reply and raised
+/// as an engine question when the reply ends; a refused grant comes back as one line for
+/// its next turn and raises nothing.
+#[test]
+fn a_drop_file_master_s_access_request_is_raised_when_its_reply_ends() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let params = json!({"name": REQUEST_ACCESS_TOOL, "arguments": {"kind": "port", "port": 5432, "reason": "the local database"}});
+    let (said, refused) = drop_call(Some(&params), &drop).unwrap();
+    assert!(!refused, "{said}");
+    assert_eq!(said, REQUEST_TAKEN);
+    called(
+        &drop,
+        REQUEST_ACCESS_TOOL,
+        json!({"kind": "port", "port": 11434, "reason": "the model"}),
+    );
+    let refused = apply_master_calls(&case.db, &case.project, 41, &drop);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0]
+            .starts_with("Your access request for Port 11434 on this computer was not raised"),
+        "{}",
+        refused[0]
+    );
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    assert_eq!(open.len(), 1);
+    assert!(
+        open[0]
+            .asker
+            .starts_with(crate::sandbox::grants::ASKER_PREFIX)
+    );
+    assert!(
+        open[0].question.contains("Port 5432 on this computer"),
+        "{}",
+        open[0].question
+    );
+    assert!(take_asks(&drop).is_empty());
+}
+
+/// F08 (L2): a sub-agent's access request is raised at once and it hears the question
+/// number; one the project already allows asks nothing, and a refused one says why.
+#[test]
+fn a_sub_agent_s_access_request_is_raised_at_once_or_refused_plainly() {
+    let case = Case::new();
+    let request = |port: u16| Call::RequestAccess {
+        grant: AccessGrant::Port { port },
+        reason: "the local database".into(),
+    };
+    let (raised, error) = agent_ask(&case.db, &case.project, AGENT, request(5432));
+    assert!(!error, "{raised}");
+    assert!(
+        raised.starts_with("Access request raised as question "),
+        "{raised}"
+    );
+    let (refused, error) = agent_ask(&case.db, &case.project, AGENT, request(60_000));
+    assert!(error);
+    assert!(
+        refused.starts_with("Not requested: Ports from 49152 up"),
+        "{refused}"
+    );
+    let held = crate::sandbox::policy::AgentPolicy {
+        grants: vec![AccessGrant::Port { port: 6379 }],
+        ..Default::default()
+    };
+    crate::sandbox::policy::save(&case.db, PROJECT, &held).unwrap();
+    assert_eq!(
+        agent_ask(&case.db, &case.project, AGENT, request(6379)),
+        (REQUEST_HELD.to_owned(), false)
+    );
+    assert_eq!(
+        crate::questions::pending(&case.db, &case.project)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// Calls one question tool on the drop-file server and returns what the master reads.

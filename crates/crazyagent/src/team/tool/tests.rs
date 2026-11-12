@@ -254,13 +254,14 @@ fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     assert_eq!(answers["1"]["result"]["serverInfo"]["name"], SERVER_NAME);
     assert!(answers["1"]["result"]["capabilities"]["tools"].is_object());
     let tools = answers["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 6);
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["required"], json!(["task"]));
     assert_eq!(tools[1], ask_tool());
     assert_eq!(tools[2], record_tool());
     assert_eq!(tools[3], withdraw_tool());
-    assert_eq!(tools[4]["name"], WAKE_TOOL);
+    assert_eq!(tools[4], request_access_tool());
+    assert_eq!(tools[5]["name"], WAKE_TOOL);
     for id in ["3", "4"] {
         assert_eq!(answers[id]["result"]["isError"], false, "{id}");
         assert_eq!(answers[id]["result"]["content"][0]["text"], RECORDED);
@@ -1422,8 +1423,8 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(known_tools(&names(&QUESTION_TOOLS)));
     assert!(known_tools(&names(&[WAKE_TOOL])));
     assert!(!known_tools(&names(&["Wake"])));
-    assert!(known_tools(&names(&[STOP_TOOL; 18])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 19])));
+    assert!(known_tools(&names(&[STOP_TOOL; 19])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 20])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.
@@ -1676,6 +1677,59 @@ fn an_ask_call_names_single_or_text_and_a_kind_that_does_not_fit_is_refused() {
         schema["inputSchema"]["properties"]["kind"]["enum"],
         json!(["single", "multi", "text"])
     );
+}
+
+/// F08 (L2): a `request_access` call reads one narrow grant with only the field its kind
+/// needs and a reason, the engine's mailbox check reads it back the same, and anything
+/// broader, extra or out of bounds is refused with the tool's own sentence.
+#[test]
+fn a_request_access_call_reads_one_narrow_grant_and_refuses_the_rest() {
+    use crate::sandbox::policy::AccessGrant;
+    let read = |arguments: Value| live_call(REQUEST_ACCESS_TOOL, Some(&arguments)).unwrap();
+    let kept = [
+        (
+            json!({"kind": "socket", "path": "/private/tmp/app/app.sock", "reason": "the dev server"}),
+            AccessGrant::Socket {
+                path: "/private/tmp/app/app.sock".into(),
+            },
+        ),
+        (
+            json!({"kind": "port", "port": 5432, "reason": "the local database"}),
+            AccessGrant::Port { port: 5432 },
+        ),
+        (
+            json!({"kind": "temp_folder", "reason": "the build writes there"}),
+            AccessGrant::TempFolder,
+        ),
+    ];
+    for (arguments, grant) in kept {
+        let call = read(arguments).unwrap();
+        let Call::RequestAccess {
+            grant: read_grant, ..
+        } = &call
+        else {
+            panic!("not an access request: {call:?}");
+        };
+        assert_eq!(read_grant, &grant);
+        assert_eq!(call.name(), REQUEST_ACCESS_TOOL);
+        assert_eq!(checked(call.clone()), Ok(call));
+    }
+    for arguments in [
+        json!({"kind": "port", "port": 0, "reason": "x"}),
+        json!({"kind": "port", "port": 70_000, "reason": "x"}),
+        json!({"kind": "port", "port": 5432, "path": "/tmp/x", "reason": "x"}),
+        json!({"kind": "socket", "path": "relative.sock", "reason": "x"}),
+        json!({"kind": "socket", "path": "/tmp/a b", "reason": "x"}),
+        json!({"kind": "socket", "path": "/tmp/x.sock", "port": 1, "reason": "x"}),
+        json!({"kind": "temp_folder", "port": 1, "reason": "x"}),
+        json!({"kind": "folder", "path": "/Users", "reason": "x"}),
+        json!({"kind": "port", "port": 5432, "reason": " "}),
+        json!({"kind": "port", "port": 5432, "reason": "x".repeat(2049)}),
+        json!({"kind": "port", "port": 5432}),
+        json!({"kind": "port", "port": 5432, "reason": "x", "scope": "all"}),
+    ] {
+        assert_eq!(read(arguments.clone()), Err(REQUEST_INVALID), "{arguments}");
+    }
 }
 
 /// DEC-147 S3.6: `discard` names a harness and gives a reason on one plain line; anything

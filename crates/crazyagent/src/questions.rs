@@ -151,13 +151,15 @@ pub enum Asker {
 }
 
 /// The engine steps that raise their own questions, stored as `engine:mapping`,
-/// `engine:research:<kind>`, `engine:landing:<change set>` and `engine:planning`.
+/// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning` and
+/// `engine:access:<request>` for an agent's access request (F08).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineSource {
     Mapping,
     Research(String),
     Landing(String),
     Planning,
+    Access(String),
 }
 
 /// Where a question stands. It waits for the owner until answered or dismissed; a box the
@@ -344,7 +346,8 @@ impl EngineSource {
             Self::Planning => Some("engine:planning".into()),
             Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
             Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
-            Self::Research(_) | Self::Landing(_) => None,
+            Self::Access(request) if named(request) => Some(format!("engine:access:{request}")),
+            Self::Research(_) | Self::Landing(_) | Self::Access(_) => None,
         }
     }
 }
@@ -492,6 +495,7 @@ pub fn asker_label(asker: &str) -> String {
         ("engine", rest) => match rest.split_once(':') {
             Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
             Some(("landing", set)) => format!("landing change set {set}"),
+            Some(("access", request)) => format!("access request {request}"),
             _ => asker.into(),
         },
         _ => asker.into(),
@@ -593,8 +597,13 @@ pub fn answer(
     }
     let text = answer_words(&question, answer)?;
     let project = question.project.clone();
+    let asker = question.asker.clone();
     let how = How::Answer(&text, AnsweredBy::Owner);
     let settled = settle(&tx, question, how, &owner(), version)?;
+    if settled == Settlement::Settled {
+        let allowed = crate::sandbox::grants::allows(&answer.picks);
+        crate::sandbox::grants::decide(&tx, &project, &asker, allowed, now_ms())?;
+    }
     finish(db, tx, &project, settled)
 }
 
@@ -606,7 +615,11 @@ pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, Eng
     let tx = immediate(db)?;
     let question = found(&tx, id)?;
     let project = question.project.clone();
+    let asker = question.asker.clone();
     let settled = settle(&tx, question, How::Dismiss, &owner(), version)?;
+    if settled == Settlement::Settled {
+        crate::sandbox::grants::decide(&tx, &project, &asker, false, now_ms())?;
+    }
     finish(db, tx, &project, settled)
 }
 

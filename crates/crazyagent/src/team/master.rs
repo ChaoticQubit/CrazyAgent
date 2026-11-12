@@ -1342,6 +1342,13 @@ fn answer(
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        Call::RequestAccess { grant, reason } => tool::questions::request_reply(
+            connection,
+            project,
+            &crate::questions::Asker::Master(master),
+            &grant,
+            &reason,
+        ),
         Call::RelayAnswer {
             question,
             version,
@@ -1387,7 +1394,8 @@ pub(super) fn answer_sub(
         call @ (Call::Ask { .. }
         | Call::RecordAnswer { .. }
         | Call::RelayAnswer { .. }
-        | Call::Withdraw { .. }) => {
+        | Call::Withdraw { .. }
+        | Call::RequestAccess { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
         Call::Sessions { .. }

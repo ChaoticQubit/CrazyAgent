@@ -38,7 +38,7 @@ const view = {
 const SHARED = { scope: "all", access: "read_only", chosen: [], secrets: [] };
 
 test("Save sends the level, the network choice and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "shared", ide_agent_files: "allow_all", shared_folders: SHARED });
+  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false, "allow_all"), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "shared", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true], false, "allow_all"), {
     access: "sandboxed",
     network: "https",
@@ -46,6 +46,8 @@ test("Save sends the level, the network choice and only the toolchain switches t
     ide_git_hooks: false,
     tool_cache: "shared",
     ide_agent_files: "allow_all",
+    apply_changes: "when_idle",
+    grants: [],
     shared_folders: SHARED,
   });
   assert.throws(() => access.policyOf(view, "full", "none", [true], false, "allow_all"), /one switch per toolchain/);
@@ -144,7 +146,7 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(shared, /fresh\.kind === "ok" \? \{ note: ACCESS_STALE, fresh: fresh\.value \}/);
   assert.ok(shared.indexOf("savedStale(result)") >= 0 && shared.indexOf("savedStale(result)") < shared.indexOf("failureCopy(result)"), "before the plain refusal copy");
   const save = page.slice(page.indexOf("  async function save() {\n    if (!view) return;"));
-  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders\)\)/);
+  assert.match(save, /saveAccess\(data\.id, view, policyOf\(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants\)\)/);
   assert.match(save, /if \(saved\.fresh\) seed\(saved\.fresh\);\n    setNote\(saved\.note\);/);
   const rows = readFileSync(new URL("../src/screens/team/setup-rows.tsx", import.meta.url), "utf8");
   assert.match(rows, /saveAccess\(projectId, view, policyOf\(view, access, view\.network, view\.toolchains\.map\(\(row\) => row\.allowed\), view\.ide_git_hooks, view\.ide_agent_files\)\)/,
@@ -160,7 +162,7 @@ test("agent access saves at the version the page read, and a stale save reads th
 });
 
 test("the IDE hooks switch is saved with the policy and reads the same in both UIs, Off for a new project", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, tool_cache: "shared", ide_agent_files: "allow_all", shared_folders: SHARED });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true, "allow_all"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true, tool_cache: "shared", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
   assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
   assert.doesNotMatch(access.IDE_GIT_HOOKS_LINE, /Sandboxed terminal/);
@@ -169,7 +171,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS_LINE}"`));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders)"));
+  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants)"));
   assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
@@ -180,7 +182,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
 });
 
 test("the tool cache choice is saved with the policy, the saved one unless the owner picks another, with the engine's labels and what each means", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "per_agent"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "per_agent", ide_agent_files: "allow_all", shared_folders: SHARED });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "per_agent"), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: false, tool_cache: "per_agent", ide_agent_files: "allow_all", apply_changes: "when_idle", grants: [], shared_folders: SHARED });
   assert.equal(access.policyOf({ ...view, tool_cache: "per_agent" }, "sandboxed", "open", [true, false], false, "allow_all").tool_cache, "per_agent", "a save that shows no choice keeps the saved one");
   assert.deepEqual(access.TOOL_CACHE_CHOICES.map((choice) => [choice.scope, choice.label]), view.tool_caches.map((row) => [row.scope, row.label]));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
@@ -273,6 +275,61 @@ test("Full access says what it means for the IDE wherever it asks, and the hooks
   assert.ok(read("../../../crates/crazyagent/src/tui/screens/project_access.rs").includes(`"${access.FULL_ACCESS_IDE}"`));
   assert.ok(access.IDE_GIT_HOOKS_LINE.includes("No effect at Full access: git runs as yours."), access.IDE_GIT_HOOKS_LINE);
   assert.match(access.IDE_GIT_HOOKS_LINE, /Applies when the IDE next starts\.$/);
+});
+
+test("F08: the Apply access changes choice and the allowed extras save with the policy, the saved ones kept by a save that shows neither", () => {
+  const port = { kind: "port", port: 5432 };
+  const socket = { kind: "socket", path: "/Users/you/.local/run/app.sock" };
+  const saved = { ...view, apply_changes: "next_start", grants: [{ grant: port, label: "Port 5432 on this computer" }] };
+  const kept = access.policyOf(saved, "sandboxed", "open", [true, false], false, "allow_all");
+  assert.equal(kept.apply_changes, "next_start", "a save that shows no choice keeps the saved one");
+  assert.deepEqual(kept.grants, [port], "a save from Agent settings never drops an extra");
+  const edited = access.policyOf(saved, "sandboxed", "open", [true, false], false, "allow_all", "shared", undefined, "when_idle", [port, socket, { kind: "temp_folder" }]);
+  assert.equal(edited.apply_changes, "when_idle");
+  assert.deepEqual(edited.grants, [port, socket, { kind: "temp_folder" }]);
+  assert.throws(() => access.policyOf(saved, "sandboxed", "open", [true, false], false, "allow_all", "shared", undefined, "when_idle", [socket, { ...socket, path: "/a.sock" }, { ...socket, path: "/b.sock" }]), /at most 2 sockets/);
+  assert.deepEqual(access.APPLY_CHOICES.map((choice) => choice.apply), ["when_idle", "next_start"], "When idle first, the proposed default");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  for (const choice of access.APPLY_CHOICES) assert.ok(engine.includes(`"${choice.label}"`), `${choice.label} is the engine's label`);
+});
+
+test("F08: an extra the owner types is a full plain socket path or a port below 49152, named as the engine names it", () => {
+  assert.deepEqual(access.typedGrant("port", " 5432 "), { kind: "port", port: 5432 });
+  for (const text of ["0", "49152", "65535", "54x", "-1", ""]) assert.equal(typeof access.typedGrant("port", text), "string", text);
+  assert.deepEqual(access.typedGrant("socket", "/tmp/app.sock"), { kind: "socket", path: "/tmp/app.sock" });
+  for (const text of ["app.sock", "/tmp/a b", "/tmp/dir/", `/${"a".repeat(103)}`]) assert.equal(typeof access.typedGrant("socket", text), "string", text);
+  assert.equal(access.grantLabel({ kind: "port", port: 5432 }), "Port 5432 on this computer");
+  assert.equal(access.grantLabel({ kind: "socket", path: "/tmp/app.sock" }), "Socket /tmp/app.sock");
+  assert.equal(access.grantLabel({ kind: "temp_folder" }), "Your temp folder");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  assert.ok(engine.includes('"Port {port} on this computer"') || engine.includes("Port {} on this computer"), "the engine names a port the same way");
+  assert.ok(engine.includes('"Your temp folder"'));
+});
+
+test("F08: Agent access shows the extras with what each means, the apply choice and the extras log, and every grant refusal has the engine's sentence", () => {
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} \/>/);
+  assert.match(page, /<ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} \/>/);
+  assert.match(page, /<GrantLog rows={view\.grant_log \?\? \[\]} \/>/);
+  assert.ok(page.includes("setGrants(savedGrants(next))"));
+  assert.ok(page.includes("|| grantsChanged ||"));
+  assert.match(access.REMOVING_EXTRA_STOPS_AGENTS, /stops every agent holding it at once/);
+  assert.match(access.GRANT_MEANINGS.socket, /never replace or remove it/);
+  assert.match(access.GRANT_MEANINGS.temp_folder, /other apps' temp files/);
+  const grants = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/grants.rs", import.meta.url), "utf8");
+  const body = grants.slice(grants.indexOf("pub fn refusal_text"), grants.indexOf("\n}\n", grants.indexOf("pub fn refusal_text")));
+  const pairs = [...body.matchAll(/"([a-z_]+)" => \{?\s*"((?:[^"\\]|\\.)*)"/g)];
+  assert.ok(pairs.length >= 17, `${pairs.length} refusals`);
+  const RUN_AS_YOU = "If that program can run commands or change files (a database, a debugger, an editor, a terminal or a remote shell), agents can then do anything you can, outside their sandbox.";
+  const meanings = grants.slice(grants.indexOf("pub fn meaning"), grants.indexOf("\n}\n", grants.indexOf("pub fn meaning")));
+  assert.equal(meanings.split(RUN_AS_YOU).length - 1, 2, "the engine's question warns for a socket and a port");
+  for (const kind of ["socket", "port"]) {
+    assert.ok(access.GRANT_MEANINGS[kind].includes(RUN_AS_YOU), kind);
+    assert.match(access.GRANT_MEANINGS[kind], /other programs can be just as powerful/, kind);
+  }
+  assert.ok(!access.GRANT_MEANINGS.temp_folder.includes(RUN_AS_YOU));
+  for (const [, code, text] of pairs) assert.equal(api.plainError(code), text.replace(/\\'/g, "'"), code);
+  assert.match(api.plainError("agent_grant_revoked"), /was removed, so the agent was stopped/);
 });
 
 test("the shared folders choice is saved with the policy, the saved one unless the owner picks another, with the engine's labels in both UIs", () => {
