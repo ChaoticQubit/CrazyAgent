@@ -583,6 +583,36 @@ fn a_removed_agent_keeps_its_history_and_is_never_offered_to_wake() {
     assert!(case.kept(2));
 }
 
+/// F10: once cleanup removed an agent, the master's status lists it among the retired
+/// sub-agents by its label, so it hands their work to a new agent instead of waking them,
+/// and the status text says so; an agent cleanup kept is not listed.
+#[test]
+fn a_removed_agent_is_listed_to_the_master_as_retired() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    assert!(
+        crate::team::events::retired_agents(&case.db, &case.project)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    let label = crate::team::events::label(&case.db, 1).unwrap();
+    assert_eq!(
+        crate::team::events::retired_agents(&case.db, &case.project).unwrap(),
+        [label.clone()]
+    );
+    let text = crate::team::events::status(&case.db, &case.project)
+        .unwrap()
+        .text();
+    assert!(
+        text.contains(&format!(
+            "Retired sub-agents, whose worktrees are gone, so they cannot be woken; hand their work out with spawn() instead: {label}."
+        )),
+        "{text}"
+    );
+}
+
 /// DEC-123, After N days: the sweep removes the worktree of each finished agent past its wait,
 /// an agent with no finish time counting as past it, and keeps the rest, a check keeping one
 /// never stopping the others; once the wait is over the next pass takes the one that waited.

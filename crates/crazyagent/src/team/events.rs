@@ -324,6 +324,8 @@ pub struct EventsStatus {
     pub agents: Vec<AgentLine>,
     #[serde(default)]
     pub finished: Vec<String>,
+    #[serde(default)]
+    pub retired: Vec<String>,
     pub events: Vec<TeamEvent>,
     pub paused: bool,
 }
@@ -360,6 +362,13 @@ impl EventsStatus {
                 text.push_str(line);
                 text.push('\n');
             }
+        }
+        if !self.retired.is_empty() {
+            text.push_str(&format!(
+                "Retired sub-agents, whose worktrees are gone, so they cannot be woken; hand their work out with {}() instead: {}.\n",
+                super::tool::SPAWN_TOOL,
+                self.retired.join(", ")
+            ));
         }
         if self.paused {
             text.push_str("Auto-wake is paused at its hourly cap.\n");
@@ -1708,6 +1717,39 @@ pub(crate) fn finished_agents(
         .collect()
 }
 
+/// The most retired sub-agents a master is told about.
+pub(crate) const RETIRED_LISTED_MAX: usize = 20;
+
+/// Lists a project's retired sub-agents by label, newest first and at most
+/// `RETIRED_LISTED_MAX`: each stopped or failed sub-agent with no worktree on record, as
+/// cleanup leaves one it retired, so the master hands their work to a new agent instead
+/// of waking them (F10). Takes the database and the project. Returns the labels.
+pub(crate) fn retired_agents(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<String>, EngineError> {
+    let ids: Vec<i64> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT a.id FROM team_agents a
+                 WHERE a.project=?1 AND a.role='sub' AND a.status IN ('stopped','failed')
+                   AND NOT EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+                 ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2",
+            )
+            .map_err(error)?;
+        statement
+            .query_map(
+                params![project.as_str(), RETIRED_LISTED_MAX as i64],
+                |row| row.get(0),
+            )
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    assert!(ids.len() <= RETIRED_LISTED_MAX);
+    ids.into_iter().map(|id| label(connection, id)).collect()
+}
+
 /// Says whether a sub-agent's persona or handle, ignoring case, is also the persona or handle
 /// of another running sub-agent of the project, so a message sent by that name reaches the
 /// running agent and the finished one is listed by its number only (DEC-111 Q19).
@@ -1826,6 +1868,7 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
             .into_iter()
             .map(|(_, line)| line)
             .collect(),
+        retired: retired_agents(connection, project)?,
         events: events(connection, project, STATUS_EVENTS_MAX)?,
         paused,
     })
