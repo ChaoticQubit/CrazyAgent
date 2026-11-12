@@ -240,10 +240,14 @@ pub(crate) fn progress(tx: &Transaction<'_>) -> Result<LearningProgress, EngineE
             count: count(tx, signal)?,
         });
     }
-    Ok(LearningProgress {
-        steps,
-        skipped: false,
-    })
+    let skipped = count(
+        tx,
+        Signal {
+            table: "learning_marks",
+            filter: "step='skipped'",
+        },
+    )? > 0;
+    Ok(LearningProgress { steps, skipped })
 }
 
 /// Sets or clears one mark. A repeat mark keeps its first time; clearing a mark never set
@@ -254,7 +258,15 @@ pub(crate) fn mark(
     step: MarkStep,
     on: bool,
 ) -> Result<Outcome, EngineError> {
-    let _ = (connection, step.name(), on);
+    let written = if on {
+        connection.execute(
+            "INSERT INTO learning_marks(step, marked_ms) VALUES(?1, ?2) ON CONFLICT(step) DO NOTHING",
+            rusqlite::params![step.name(), crate::team::now_ms()],
+        )
+    } else {
+        connection.execute("DELETE FROM learning_marks WHERE step=?1", [step.name()])
+    };
+    written.map_err(|_| EngineError("learning_mark_unavailable".into()))?;
     Ok(Outcome::Applied)
 }
 

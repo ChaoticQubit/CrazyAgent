@@ -1465,6 +1465,7 @@ fn apply(
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
+            | Command::OwnerLearningMark { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
