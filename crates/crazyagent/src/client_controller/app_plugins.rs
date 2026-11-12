@@ -125,9 +125,16 @@ impl OwnerController {
             .await
     }
 
-    /// Starts the local model download the owner confirmed. Output: the Search page.
-    pub async fn search_model_download(&self) -> Result<SearchView, EngineError> {
-        self.app_plugins_client()?.search_model_download().await
+    /// Starts the local model download the owner confirmed. Input: the size the confirm
+    /// showed. Output: the Search page, or `search_model_confirm` when it is not the pinned
+    /// size.
+    pub async fn search_model_download(
+        &self,
+        confirm_bytes: u64,
+    ) -> Result<SearchView, EngineError> {
+        self.app_plugins_client()?
+            .search_model_download(confirm_bytes)
+            .await
     }
 
     /// Cancels the local model download. Output: the Search page.

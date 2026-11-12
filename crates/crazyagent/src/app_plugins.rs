@@ -456,6 +456,7 @@ const PLAIN: &[(&str, &str)] = &[
         "search_model_missing",
         "the local model is not downloaded yet.",
     ),
+    ("search_model_confirm", "confirm the download size first."),
     (
         "search_model_downloading",
         "the local model is already downloading.",

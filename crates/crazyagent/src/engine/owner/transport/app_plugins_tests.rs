@@ -181,8 +181,26 @@ fn requests_are_bounded_and_strict() {
         "app_plugin_request_invalid"
     );
     assert_eq!(
-        invalid(request(json!({"kind": "list", "extra": 1}))),
+        invalid(request(
+            json!({"kind": "remove", "name": "near", "extra": 1})
+        )),
         "app_plugin_request_invalid"
+    );
+    assert_eq!(
+        invalid(json!({"app_plugins": {"kind": "list"}, "secret_present": false, "extra": 1})),
+        "app_plugin_request_invalid"
+    );
+    assert!(
+        parse(
+            &serde_json::to_vec(&request(json!({
+                "kind": "bind_account",
+                "name": "openai",
+                "secret": "api_key",
+                "account": "a".repeat(ACCOUNT_BYTES_MAX),
+            })))
+            .unwrap()
+        )
+        .is_ok()
     );
     assert_eq!(
         invalid(request(json!({"kind": "run_plugin"}))),
@@ -203,7 +221,7 @@ fn requests_are_bounded_and_strict() {
             "kind": "bind_account",
             "name": "openai",
             "secret": "api_key",
-            "account": "a".repeat(NAME_BYTES_MAX + 1),
+            "account": "a".repeat(ACCOUNT_BYTES_MAX + 1),
         }))),
         "app_plugin_request_invalid"
     );
@@ -286,4 +304,33 @@ fn every_app_plugins_code_is_listed_for_the_clients_with_a_plain_sentence() {
             assert!(crate::app_plugins::plain_problem(code).is_some(), "{code}");
         }
     }
+}
+
+#[test]
+fn the_model_download_starts_only_with_the_pinned_size_confirmed() {
+    let (_tmp, root) = engine();
+    for confirm_bytes in [
+        0,
+        crate::semantic::local::DOWNLOAD_BYTES - 1,
+        crate::semantic::local::DOWNLOAD_BYTES + 1,
+    ] {
+        assert_eq!(
+            send(
+                &root,
+                request(json!({"kind": "download_model", "confirm_bytes": confirm_bytes})),
+                None,
+            )
+            .unwrap_err()
+            .0,
+            "search_model_confirm"
+        );
+    }
+    assert!(!root.join("models").exists());
+    assert_eq!(
+        parse(&serde_json::to_vec(&request(json!({"kind": "download_model"}))).unwrap())
+            .unwrap_err()
+            .0,
+        "app_plugin_request_invalid"
+    );
+    assert!(APP_PLUGINS_CODES.contains(&"search_model_confirm"));
 }
