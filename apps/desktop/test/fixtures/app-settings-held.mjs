@@ -9,7 +9,7 @@ import { UpdatesView } from "../../src/screens/settings/updates.tsx";
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const SCHEDULE = { strategy: "manual_rank", pools: [{ id: "pool-main", strategy: "balanced" }], projects: [{ id: "project-a", strategy: "use_it_or_lose_it" }], accounts: [], version: 3 };
 const nothing = () => undefined;
-const MEMORY_PAGE = { kind: "ok", value: { items: [], next: null, agent_writes: "save" } };
+const MEMORY_PAGE = { kind: "ok", value: { items: [], next: null, agent_writes: "save", agent_scope: "project" } };
 const MEMORY = { saved: MEMORY_PAGE, writesRead: MEMORY_PAGE, suggested: { kind: "ok", value: [] }, scope: "", projects: [], search: "", failure: "", busy: null,
   onSearch: nothing, onScope: nothing, onAdd: nothing, onSave: nothing, onSaveEdited: nothing, onDismiss: nothing, onDelete: nothing, onMore: nothing, onRetry: nothing, onImport: nothing };
 const DELIVERY = { kind: "ok", value: { settings: { mode: "both", transcripts: true, edits: "next_message" }, version: 1 } };

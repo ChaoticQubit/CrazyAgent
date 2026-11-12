@@ -10,10 +10,11 @@ use crate::engine::owner::{
     NativeAuthMethod, NativeAuthPhase, NativeAuthStart, OwnerResult,
 };
 use crate::harnesses::HarnessEntry;
+use crate::harnesses::finding::Found;
 use crate::harnesses::update::{HarnessVersions, UpdateSettings};
 use crate::memory::library::{
-    AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX,
-    SavedMemory,
+    AgentScope, AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX,
+    SCOPE_ITEMS_MAX, SavedMemory,
 };
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
@@ -48,6 +49,13 @@ pub(in crate::tui) enum SettingsJob {
     HarnessInstall {
         id: String,
     },
+    HarnessFind {
+        id: String,
+    },
+    HarnessChoosePath {
+        id: String,
+        path: Option<String>,
+    },
     HarnessUpdateSettings,
     Usage {
         since_ms: Option<i64>,
@@ -74,6 +82,14 @@ pub(in crate::tui) enum SettingsJob {
     },
     AgentWrites {
         set: Option<(AgentWrites, u64)>,
+    },
+    AgentScope {
+        set: Option<(AgentScope, u64)>,
+    },
+    MoveMemory {
+        memory: RequestId,
+        project: ProjectId,
+        generation: u64,
     },
     AddMemory {
         scope: MemoryScope,
@@ -211,6 +227,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::HarnessVersions { .. } => "HarnessVersions",
             Self::HarnessUpdate { .. } => "HarnessUpdate",
             Self::HarnessInstall { .. } => "HarnessInstall",
+            Self::HarnessFind { .. } => "HarnessFind",
+            Self::HarnessChoosePath { .. } => "HarnessChoosePath",
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
@@ -222,6 +240,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::DeleteMemory { .. } => "DeleteMemory",
             Self::ApproveMemory { .. } => "ApproveMemory",
             Self::AgentWrites { .. } => "AgentWrites",
+            Self::AgentScope { .. } => "AgentScope",
+            Self::MoveMemory { .. } => "MoveMemory",
             Self::AddMemory { .. } => "AddMemory",
             Self::ImportMemory { .. } => "ImportMemory",
             Self::Suggestions { .. } => "Suggestions",
@@ -333,6 +353,8 @@ pub(in crate::tui) enum SettingsEvent {
     HarnessVersions(String, Result<HarnessVersions, String>),
     HarnessUpdated(String, Result<(), String>),
     HarnessInstalled(String, Result<(), String>),
+    HarnessFound(String, Result<Found, String>),
+    HarnessChosen(String, Option<String>, Result<Found, String>),
     HarnessUpdateSettings(Result<UpdateSettings, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
@@ -340,10 +362,12 @@ pub(in crate::tui) enum SettingsEvent {
     RecountDecided(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
-    Memories(Result<Vec<SavedMemory>, String>),
+    Memories(Vec<MemoryScope>, Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
     MemoryApproved(Result<(), String>),
     AgentWrites(Result<AgentWrites, String>),
+    AgentScope(Result<AgentScope, String>),
+    MemoryMoved(Result<(), String>),
     MemoryAdded(Result<(), String>),
     MemoryImported(Result<crate::memory::import::ImportReport, String>),
     Suggestions(Result<Vec<Suggestion>, String>),
@@ -390,6 +414,10 @@ impl SettingsEvent {
             }
             SettingsJob::HarnessUpdate { id } => Self::HarnessUpdated(id.clone(), Err(problem)),
             SettingsJob::HarnessInstall { id } => Self::HarnessInstalled(id.clone(), Err(problem)),
+            SettingsJob::HarnessFind { id } => Self::HarnessFound(id.clone(), Err(problem)),
+            SettingsJob::HarnessChoosePath { id, path } => {
+                Self::HarnessChosen(id.clone(), path.clone(), Err(problem))
+            }
             SettingsJob::HarnessUpdateSettings => Self::HarnessUpdateSettings(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
@@ -397,10 +425,12 @@ impl SettingsEvent {
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
-            SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
+            SettingsJob::Memories { scopes } => Self::Memories(scopes.clone(), Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
             SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
             SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
+            SettingsJob::AgentScope { .. } => Self::AgentScope(Err(problem)),
+            SettingsJob::MoveMemory { .. } => Self::MemoryMoved(Err(problem)),
             SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
             SettingsJob::ImportMemory { .. } => Self::MemoryImported(Err(problem)),
             SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
@@ -577,6 +607,26 @@ impl NativeOwner {
                 };
                 SettingsEvent::HarnessInstalled(id, result)
             }
+            SettingsJob::HarnessFind { id } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_find(&id)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessFound(id, result)
+            }
+            SettingsJob::HarnessChoosePath { id, path } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .harness_choose_path(&id, path.as_deref().map(std::path::Path::new))
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::HarnessChosen(id, path, result)
+            }
             SettingsJob::HarnessUpdateSettings => {
                 SettingsEvent::HarnessUpdateSettings(match self.settings_controller() {
                     Ok(controller) => controller
@@ -629,7 +679,7 @@ impl NativeOwner {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
             }
             SettingsJob::Memories { scopes } => {
-                SettingsEvent::Memories(self.all_memories(scopes, lost).await)
+                SettingsEvent::Memories(scopes.clone(), self.all_memories(scopes, lost).await)
             }
             SettingsJob::Plugins => SettingsEvent::Plugins(self.plugins(None, lost).await),
             SettingsJob::ProjectPlugins { project } => SettingsEvent::ProjectPlugins(
@@ -826,6 +876,27 @@ impl NativeOwner {
             }
             SettingsJob::AgentWrites { set } => {
                 SettingsEvent::AgentWrites(self.agent_writes(set, lost).await)
+            }
+            SettingsJob::AgentScope { set } => {
+                SettingsEvent::AgentScope(self.agent_scope(set, lost).await)
+            }
+            SettingsJob::MoveMemory {
+                memory,
+                project,
+                generation,
+            } => {
+                let action = LibraryAction::MoveToProject {
+                    memory_id: memory,
+                    project_id: project,
+                };
+                SettingsEvent::MemoryMoved(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.change_memory(action, generation).await,
+                        "memory_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
             }
         }
     }
@@ -1081,6 +1152,32 @@ impl NativeOwner {
             .memories(MemoryScope::Global, None, None)
             .await
             .map(|page| page.agent_writes)
+            .map_err(|error| problem(&error, lost))
+    }
+
+    /// Saves the owner's Where agents save memories setting when asked, then reads it back.
+    /// Inputs: the choice with its client generation, if any, and the lost-connection
+    /// flag. Output: the setting the engine now holds, or the plain problem code.
+    pub(super) async fn agent_scope(
+        &mut self,
+        set: Option<(AgentScope, u64)>,
+        lost: &mut bool,
+    ) -> Result<AgentScope, String> {
+        let controller = self.settings_controller()?;
+        if let Some((scope, generation)) = set {
+            applied(
+                controller
+                    .change_memory(LibraryAction::AgentScope { scope }, generation)
+                    .await,
+                "memory_outcome_unknown",
+                lost,
+            )?;
+        }
+        let controller = self.settings_controller()?;
+        controller
+            .memories(MemoryScope::Global, None, None)
+            .await
+            .map(|page| page.agent_scope)
             .map_err(|error| problem(&error, lost))
     }
 
@@ -1465,7 +1562,7 @@ mod tests {
             nowhere,
             SettingsEvent::MemoryAdded(Err(code)) if code == "memory_project_missing"
         ));
-        let SettingsEvent::Memories(Ok(memories)) = native
+        let SettingsEvent::Memories(_, Ok(memories)) = native
             .settings(SettingsJob::Memories {
                 scopes: vec![MemoryScope::Global],
             })
@@ -1483,7 +1580,7 @@ mod tests {
             })
             .await;
         assert!(matches!(deleted, SettingsEvent::MemoryDeleted(Ok(()))));
-        let SettingsEvent::Memories(Ok(memories)) = native
+        let SettingsEvent::Memories(_, Ok(memories)) = native
             .settings(SettingsJob::Memories {
                 scopes: vec![MemoryScope::Global],
             })
@@ -2069,6 +2166,20 @@ mod tests {
             SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))
         ));
 
+        let scope = |set| SettingsJob::AgentScope { set };
+        assert!(matches!(
+            native.settings(scope(None)).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Project))
+        ));
+        assert!(matches!(
+            native.settings(scope(Some((AgentScope::Agent, 1)))).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Agent))
+        ));
+        assert!(matches!(
+            native.settings(scope(None)).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Agent))
+        ));
+
         let mut db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
         db.execute("INSERT INTO projects(id,body) VALUES ('alpha','{}')", [])
@@ -2082,12 +2193,15 @@ mod tests {
                 "Ship on Fridays.",
             )
             .unwrap(),
-            Ok(true)
+            Ok(crate::memory::library::AgentSaved {
+                waiting: true,
+                narrowed: false
+            })
         );
         drop(db);
         let agent = "Ada (@lead-a)".to_owned();
         let listed = |event: SettingsEvent| {
-            let SettingsEvent::Memories(Ok(list)) = event else {
+            let SettingsEvent::Memories(_, Ok(list)) = event else {
                 panic!("the memories were not listed");
             };
             list
@@ -2128,6 +2242,10 @@ mod tests {
             native.settings(writes(Some((AgentWrites::Save, 4)))).await,
             SettingsEvent::AgentWrites(Ok(AgentWrites::Save))
         ));
+        assert!(matches!(
+            native.settings(scope(Some((AgentScope::Project, 5)))).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Project))
+        ));
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await
@@ -2157,7 +2275,7 @@ mod tests {
             SettingsEvent::Accounts(Err(code))
             | SettingsEvent::AllAccounts(Err(code))
             | SettingsEvent::Harnesses(Err(code))
-            | SettingsEvent::Memories(Err(code))
+            | SettingsEvent::Memories(_, Err(code))
             | SettingsEvent::MemoryAdded(Err(code))
             | SettingsEvent::Plugins(Err(code)) => Some(code),
             _ => None,

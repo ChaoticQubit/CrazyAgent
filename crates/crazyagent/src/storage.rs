@@ -28,6 +28,8 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
     validate_configured_initial_conversation_receipt,
 };
+#[cfg(unix)]
+pub use migrations::backup_failure;
 pub(crate) mod agent_text;
 mod native_auth;
 #[cfg(all(test, unix))]
@@ -248,6 +250,10 @@ pub(crate) enum Job {
     /// so every job queued after it is answered only then, however fast the machine is.
     #[cfg(all(test, unix))]
     Hold(oneshot::Receiver<()>),
+    /// Puts the handler in place of the storage connection's busy wait and answers once it
+    /// is set, so a test sees the moment a job waits on another connection's lock.
+    #[cfg(all(test, unix))]
+    BusyHandler(fn(i32) -> bool, oneshot::Sender<Result<(), EngineError>>),
 }
 
 pub(crate) struct Storage {
@@ -961,6 +967,10 @@ impl Storage {
                         #[cfg(all(test, unix))]
                         Job::Hold(release) => {
                             let _ = release.blocking_recv();
+                        }
+                        #[cfg(all(test, unix))]
+                        Job::BusyHandler(handler, reply) => {
+                            let _ = reply.send(connection.busy_handler(Some(handler)).map_err(error));
                         }
                     }
                 }

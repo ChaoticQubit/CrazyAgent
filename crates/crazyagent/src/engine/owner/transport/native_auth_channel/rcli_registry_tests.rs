@@ -1,6 +1,12 @@
 use super::{OwnerRuntimeHandle, RegisteredNativeAuthHost};
 use crate::engine::bootstrap::EngineService;
+#[cfg(target_os = "macos")]
+use crate::harnesses::Search;
+#[cfg(target_os = "macos")]
+use crate::harnesses::finding::Found;
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "macos")]
+use std::ffi::OsStr;
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,6 +15,7 @@ use tokio::sync::watch;
 
 struct RegistryCase {
     root: tempfile::TempDir,
+    tools: tempfile::TempDir,
     service: EngineService,
     _stop: watch::Sender<bool>,
 }
@@ -35,6 +42,7 @@ impl RegistryCase {
         .unwrap();
         Self {
             root,
+            tools: tempfile::tempdir().unwrap(),
             service,
             _stop: stop,
         }
@@ -49,6 +57,9 @@ impl RegistryCase {
     }
 }
 
+/// Runs one row against a real engine. The row's harness files go in their own folder,
+/// outside the engine folder and the agents' temp folders, as an owner's install would be.
+/// Input: the row, given the owner handle and that folder. Output: none.
 async fn registry_case<F, T>(case: F)
 where
     F: FnOnce(OwnerRuntimeHandle, PathBuf) -> T,
@@ -56,10 +67,23 @@ where
 {
     let mut fixture = RegistryCase::start().await;
     let host = fixture.host();
-    let root = fixture.root.path().to_path_buf();
-    let outcome = tokio::spawn(case(host, root)).await;
+    let tools = std::fs::canonicalize(fixture.tools.path()).unwrap();
+    let outcome = tokio::spawn(case(host, tools)).await;
     fixture.service.shutdown().await.unwrap();
     outcome.unwrap();
+}
+
+/// A search over the given PATH folders alone, so a row never sees this machine's harnesses.
+/// Input: the PATH value. Output: the search.
+#[cfg(target_os = "macos")]
+fn on(path: &OsStr) -> Search {
+    Search::new(std::env::split_paths(path).collect(), None, Vec::new())
+}
+
+/// A search that looks nowhere. Output: the search.
+#[cfg(target_os = "macos")]
+fn nowhere() -> Search {
+    Search::new(Vec::new(), None, Vec::new())
 }
 
 fn physical_file(root: &Path, name: &str, contents: &[u8]) -> PathBuf {
@@ -365,7 +389,7 @@ async fn rcli_registry_real_runtime_directory_drift_rejects_both_methods() {
         let path = physical_file(&root, "rcli", b"runtime-directory-file");
         let captured = RegisteredNativeAuthHost::capture(&path).unwrap();
         let generation = host.authority.root.path.clone();
-        let moved = root.join("moved-owner-generation");
+        let moved = generation.with_file_name("moved-owner-generation");
         std::fs::rename(&generation, &moved).unwrap();
         let registration = host.register_rcli_master_executable(captured);
         std::fs::rename(&moved, &generation).unwrap();
@@ -387,6 +411,7 @@ async fn rcli_registry_real_runtime_directory_drift_rejects_both_methods() {
     .await;
 }
 
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
     registry_case(|host, root| async move {
@@ -407,19 +432,23 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
             .unwrap_err();
         assert_eq!(frozen.0, "native_auth_host_registration_frozen");
         assert!(host.registered_codex_executable().is_err());
-        assert!(!host.register_installed_harness("codex", None).unwrap());
         assert!(
             !host
-                .register_installed_harness("aider", Some(&path))
+                .register_installed_harness("codex", &nowhere(), None)
                 .unwrap()
         );
         assert!(
             !host
-                .register_installed_harness("claude-code", Some(&path))
+                .register_installed_harness("aider", &on(&path), Some(&path))
                 .unwrap()
         );
         assert!(
-            host.register_installed_harness("codex", Some(&path))
+            !host
+                .register_installed_harness("claude-code", &on(&path), Some(&path))
+                .unwrap()
+        );
+        assert!(
+            host.register_installed_harness("codex", &on(&path), Some(&path))
                 .unwrap()
         );
         assert_eq!(
@@ -434,7 +463,7 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
         assert_eq!(lookup("aider"), None);
         assert!(
             !host
-                .register_installed_harness("codex", Some(&later))
+                .register_installed_harness("codex", &on(&later), Some(&later))
                 .unwrap()
         );
         assert_eq!(
@@ -446,12 +475,12 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
         );
         host.authority.native_auth_host.lock().unwrap().disabled = true;
         let disabled = host
-            .register_installed_harness("claude-code", Some(&later))
+            .register_installed_harness("claude-code", &on(&later), Some(&later))
             .unwrap_err();
         assert_eq!(disabled.0, "native_auth_host_registration_frozen");
         host.authority.native_auth_host.lock().unwrap().disabled = false;
         assert!(
-            host.register_installed_harness("claude-code", Some(&later))
+            host.register_installed_harness("claude-code", &on(&later), Some(&later))
                 .unwrap()
         );
         assert_eq!(
@@ -465,6 +494,419 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
             let pinned = lookup(spec.id).is_some();
             assert_eq!(pinned, spec.launch.is_none(), "{}", spec.id);
         }
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn codex_installed_after_start_is_pinned_by_check_again_and_sign_in_becomes_available() {
+    registry_case(|host, root| async move {
+        let bin = root.join("installed-later");
+        std::fs::create_dir(&bin).unwrap();
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+        assert_eq!(
+            host.registered_codex_executable().err().unwrap().0,
+            "native_auth_host_unavailable"
+        );
+        let missing = host
+            .find_harness("codex", None, &on(&path), Some(&path))
+            .unwrap();
+        assert!(
+            matches!(&missing, Found::Missing { looked } if looked.iter().any(|folder| folder == &bin.display().to_string())),
+            "{missing:?}"
+        );
+        let codex = physical_file(&bin, "codex", b"codex-installed-after-start");
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Registered {
+                path: codex.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
+        assert_eq!(host.harness_lookup()("codex"), Some(codex.clone()));
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Ready { path: codex }
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_chosen_codex_file_is_pinned_and_never_replaces_a_pinned_one() {
+    registry_case(|host, root| async move {
+        let chosen = root.join("chosen");
+        let other = root.join("other");
+        std::fs::create_dir(&chosen).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let picked = physical_file(&chosen, "codex-aarch64-apple-darwin", b"chosen-codex");
+        let on_path = physical_file(&other, "codex", b"path-codex");
+        let path = std::env::join_paths([other]).unwrap();
+        assert_eq!(
+            host.find_harness("codex", Some(&picked), &on(&path), Some(&path))
+                .unwrap(),
+            Found::Registered {
+                path: picked.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            picked
+        );
+        assert_eq!(
+            host.find_harness("codex", Some(&on_path), &nowhere(), None)
+                .unwrap(),
+            Found::Ready {
+                path: picked.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            picked
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_found_codex_that_fails_the_pin_checks_is_refused_with_its_code_not_missing() {
+    registry_case(|host, root| async move {
+        let bin = root.join("group-writable");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = physical_file(&bin, "codex", b"group-writable-codex");
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Refused {
+                path: codex.clone(),
+                code: "native_auth_host_executable_unsafe".into()
+            }
+        );
+        assert!(host.registered_codex_executable().is_err());
+        assert_eq!(
+            host.register_installed_harness("codex", &on(&path), Some(&path))
+                .unwrap_err()
+                .0,
+            "native_auth_host_executable_unsafe"
+        );
+        let unknown = host
+            .find_harness("aider", None, &on(&path), Some(&path))
+            .unwrap_err();
+        assert_eq!(unknown.0, "harness_path_unknown_harness");
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_passes_over_a_group_writable_or_empty_codex_and_pins_a_good_one_later() {
+    registry_case(|host, tools| async move {
+        let group = tools.join("group-writable");
+        let empty = tools.join("empty");
+        let good = tools.join("good");
+        for folder in [&group, &empty, &good] {
+            std::fs::create_dir(folder).unwrap();
+        }
+        let writable = physical_file(&group, "codex", b"group-writable-codex");
+        std::fs::set_permissions(&writable, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let nothing = physical_file(&empty, "codex", b"");
+        let safe = physical_file(&good, "codex", b"good-codex");
+        let path = std::env::join_paths([group, empty, good]).unwrap();
+        let space =
+            crate::harnesses::finding::AgentSpace::open(&tools.join("no-engine-here")).unwrap();
+        let mut passed = Vec::new();
+        let picked = crate::harnesses::finding::pick_noting(
+            "codex",
+            &on(&path),
+            None,
+            &space,
+            |file, error| {
+                passed.push((file.to_path_buf(), error.0.clone()));
+            },
+        );
+        assert_eq!(picked.and_then(Result::ok), Some(safe.clone()));
+        let unsafe_code = "native_auth_host_executable_unsafe".to_owned();
+        assert_eq!(
+            passed,
+            vec![(writable, unsafe_code.clone()), (nothing, unsafe_code)]
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Registered { path: safe.clone() }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            safe
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn an_nvm_codex_is_pinned_by_the_shared_search() {
+    registry_case(|host, root| async move {
+        let home = root.join("home");
+        let bin = home.join(".nvm/versions/node/v22.11.0/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = physical_file(&bin, "codex", b"nvm-codex");
+        let search = Search::new(Vec::new(), Some(home), Vec::new());
+        assert_eq!(
+            host.find_harness("codex", None, &search, None).unwrap(),
+            Found::Registered { path: codex }
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn look_again_searches_only_where_engine_start_said_and_an_engine_without_a_search_reads_nothing()
+ {
+    registry_case(|host, root| async move {
+        let bin = root.join("started-with");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = physical_file(&bin, "codex", b"held-search-codex");
+        assert_eq!(host.held_search().unwrap(), None);
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Missing { looked: Vec::new() }
+        );
+        assert!(host.registered_codex_executable().is_err());
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        host.set_harness_search(on(&path)).unwrap();
+        assert_eq!(
+            host.set_harness_search(nowhere()).unwrap_err().0,
+            "native_auth_host_registration_frozen"
+        );
+        assert_eq!(host.held_search().unwrap(), Some(on(&path)));
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Registered {
+                path: codex.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
+        assert!(matches!(
+            host.look_again("claude-code").unwrap(),
+            Found::Missing { looked } if looked == vec![bin.display().to_string()]
+        ));
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_replaces_a_pin_whose_file_is_gone_but_never_one_that_changed_or_is_unsafe() {
+    registry_case(|host, root| async move {
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let old = physical_file(&first, "codex", b"first-codex");
+        let path = std::env::join_paths([first.clone(), second.clone()]).unwrap();
+        host.set_harness_search(on(&path)).unwrap();
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Registered { path: old.clone() }
+        );
+        let new = physical_file(&second, "codex", b"second-codex");
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let unsafe_file = host.look_again("codex").unwrap();
+        assert!(
+            matches!(&unsafe_file, Found::Refused { path, .. } if path == &old),
+            "{unsafe_file:?}"
+        );
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&old, b"first-codex-rewritten-in-place").unwrap();
+        let changed = host.look_again("codex").unwrap();
+        assert!(
+            matches!(&changed, Found::Refused { path, code } if path == &old && code == "native_auth_host_executable_changed"),
+            "{changed:?}"
+        );
+        assert!(host.registered_codex_executable().is_err());
+
+        std::fs::remove_file(&old).unwrap();
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Registered { path: new.clone() }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            new
+        );
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Ready { path: new }
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_passes_over_a_shim_a_changeable_folder_and_an_agent_folder_for_a_safe_codex() {
+    registry_case(|host, tools| async move {
+        let home = tools.join("home");
+        let volta = home.join(".volta").join("bin");
+        let open = tools.join("open");
+        let linked = home.join(".local").join("bin");
+        let good = tools.join("good");
+        for folder in [&volta, &open, &linked, &good] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let shim = physical_file(&volta, "codex", b"volta-shim-codex");
+        let changeable = physical_file(&open, "codex", b"changeable-codex");
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let engine = host.authority.root.path.parent().unwrap().to_path_buf();
+        let agent = engine.join("agent-codex");
+        std::fs::create_dir(&agent).unwrap();
+        let inside = physical_file(&agent, "codex", b"agent-codex");
+        let link = linked.join("codex");
+        std::os::unix::fs::symlink(&inside, &link).unwrap();
+        let safe = physical_file(&good, "codex", b"safe-codex");
+        let search = |folders: Vec<PathBuf>| Search::new(folders, Some(home.clone()), Vec::new());
+        let refused = |path: &Path, code: &str| Found::Refused {
+            path: path.to_path_buf(),
+            code: code.into(),
+        };
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![volta.clone()]), None)
+                .unwrap(),
+            refused(&shim, "harness_path_shim")
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![open.clone()]), None)
+                .unwrap(),
+            refused(&changeable, "harness_path_changeable")
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &search(Vec::new()), None)
+                .unwrap(),
+            refused(&link, "harness_path_agent_space")
+        );
+        assert_eq!(
+            host.find_harness("codex", Some(&link), &nowhere(), None)
+                .unwrap(),
+            refused(&link, "harness_path_agent_space")
+        );
+        assert_ne!(
+            search(vec![volta.clone()]).find("codex"),
+            Some(shim.clone())
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![volta, open, good]), None)
+                .unwrap(),
+            Found::Registered { path: safe.clone() }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            safe
+        );
+    })
+    .await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_refuses_a_codex_in_an_agent_worktree_or_a_registered_project_folder() {
+    registry_case(|host, tools| async move {
+        let worktree = tools
+            .join("projects")
+            .join("harbor")
+            .join(".crazyagent")
+            .join("worktrees")
+            .join("agent-4")
+            .join("bin");
+        let repository = tools.join("api");
+        let declared = repository.join("bin");
+        let good = tools.join("good");
+        for folder in [&worktree, &declared, &good] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let planted = physical_file(&worktree, "codex", b"worktree-codex");
+        let in_project = physical_file(&declared, "codex", b"project-codex");
+        let safe = physical_file(&good, "codex", b"safe-codex");
+        let search = |folders: Vec<PathBuf>| Search::new(folders, None, Vec::new());
+        let refused = |path: &Path| Found::Refused {
+            path: path.to_path_buf(),
+            code: "harness_path_agent_space".into(),
+        };
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![worktree.clone()]), None)
+                .unwrap(),
+            refused(&planted)
+        );
+        assert_eq!(
+            host.find_harness("codex", Some(&planted), &nowhere(), None)
+                .unwrap(),
+            refused(&planted)
+        );
+        let engine = host.authority.root.path.parent().unwrap().to_path_buf();
+        let project = crate::protocol::StoredProject {
+            project_id: crate::protocol::ProjectId::new("api").unwrap(),
+            spec: crate::protocol::ProjectSpec {
+                name: "Api".into(),
+                repositories: vec![repository.to_str().unwrap().into()],
+            },
+        };
+        let stored = crate::landing::open(&engine)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id, body) VALUES('api', ?1)",
+                [serde_json::to_string(&project).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(stored, 1);
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![declared.clone()]), None)
+                .unwrap(),
+            refused(&in_project)
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![worktree, declared, good]), None)
+                .unwrap(),
+            Found::Registered { path: safe }
+        );
     })
     .await;
 }

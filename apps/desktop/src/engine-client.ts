@@ -417,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_agent_scope" | "memory_move" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -634,10 +634,13 @@ export type SavedMemory = {
 
 export type AgentMemoryWrites = "save" | "ask";
 
+export type AgentMemoryScope = "project" | "agent";
+
 export type SavedMemoryPage = {
   items: SavedMemory[];
   next: number | null;
   agent_writes: AgentMemoryWrites;
+  agent_scope: AgentMemoryScope;
 };
 
 export type ApprovedMemory = {
@@ -802,6 +805,7 @@ export interface TeamTask {
   started_ms: number | null;
   finished_ms: number | null;
   parent?: number | null;
+  wait?: string | null;
 }
 
 export interface TeamMessage {
@@ -825,6 +829,22 @@ export type SwitchApply = "when_idle" | "next_start";
  * still run: wait for them, give them a grace time in seconds and stop them, or stop them
  * with the turn and tell the agent first. */
 export type BackgroundAtEnd = { mode: "wait" } | { mode: "grace"; secs: number } | { mode: "stop" };
+
+/** What the engine does with processes an agent leaves running after its stop: end them after
+ * a short grace, keep them running and let the account go, or hold the account and ask. */
+export type LeftoverMode = "end" | "keep" | "ask";
+
+/** One hold of processes an agent left running, as the team view lists it: its engine key,
+ * who left it, the processes it names, where it stands, when it began in Unix milliseconds
+ * and whether it still keeps an account. */
+export type LeftoverHold = {
+  key: number;
+  who: string;
+  names: string;
+  state: "held" | "ending" | "kept";
+  since_ms: number;
+  holds_account: boolean;
+};
 
 /** Where a lead's worker lands its change set: on the lead's branch when the lead accepts it,
  * or only when the owner accepts it. */
@@ -970,10 +990,13 @@ export interface TeamStatus {
   master_branch?: string | null;
   land_on?: string | null;
   background_at_end?: BackgroundAtEnd;
+  leftovers?: LeftoverMode;
+  leftover_holds?: LeftoverHold[];
   ask_before_merge?: boolean;
   master_lands?: MasterLands | null;
   access_unreadable?: boolean;
   reask_empty_reply?: boolean;
+  done_quiet_secs?: number | null;
   master_idle_stop?: MasterIdleStop;
   master_live_terminal?: boolean;
   catch_up_main?: CatchUpMain;
@@ -987,6 +1010,11 @@ export interface TeamStatus {
   paused: boolean;
   max_harnesses?: number | null;
   max_teammates?: number | null;
+  master_rounds?: number | null;
+  rounds_used?: number;
+  rounds_kept_going?: boolean;
+  master_run_secs?: number | null;
+  master_deadline_ms?: number | null;
   token_budget?: number | null;
   budget_used?: number | null;
   budget_reached?: boolean;
@@ -1061,7 +1089,7 @@ export interface AgentMessages {
 }
 
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
-export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped";
+export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped" | "settled";
 export type WakeRuleLevel = "shipped" | "app" | "project" | "agent";
 
 export interface TeamEvent {

@@ -119,7 +119,8 @@ export type ActivityKind =
   | "work_complete"
   | "work_closed"
   | "phase"
-  | "test";
+  | "test"
+  | "team_action";
 
 export interface ActivityItem {
   id: number;
@@ -329,6 +330,8 @@ const copy: Record<string, string> = {
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
   team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
+  team_rounds_invalid: "Pick a listed number of sub-agent rounds, or Until the goal is done.",
+  team_run_time_invalid: "Pick a listed master run time, or No limit.",
   team_agent_not_found: "That agent is no longer part of this team.",
   team_notification_missing: "There is no such notification to mark as seen.",
   team_engine_not_ready: "The engine is still starting. Try again in a moment.",

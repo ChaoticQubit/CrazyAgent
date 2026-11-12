@@ -822,7 +822,6 @@ impl Agents {
             attempt,
             folder: self.folder(&id),
         };
-        let limit = LaunchLimits::default().output_bytes as u64;
         let thread = {
             let (output, probe, quit) = (output.clone(), probe.clone(), quit.clone());
             std::thread::Builder::new()
@@ -833,17 +832,8 @@ impl Agents {
                             recorder.finish(AgentState::Exited, None, None);
                             return;
                         }
-                        if probe
-                            .metadata()
-                            .is_ok_and(|metadata| metadata.len() > limit)
-                        {
-                            recorder.ended(
-                                AgentState::Failed,
-                                None,
-                                Some("launch_output_limit"),
-                                kill_holders(group, &output, &probe),
-                            );
-                            return;
+                        if launch::trim_unread_output(&output, &probe) {
+                            eprintln!("agent_output_trimmed agent={}", recorder.id);
                         }
                         std::thread::sleep(MONITOR_POLL);
                     }

@@ -9,7 +9,7 @@ import { harnessName } from "../new-project/team-editor";
 import { AgentMessages } from "../team/agent-messages";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
-import { agentKey, finishedLabel, finishedRows, liveAgent, teamPanel } from "./research";
+import { agentKey, finishedLabel, finishedRows, liveAgent, teamLimitsLine, teamPanel } from "./research";
 import type { FinishedRow, TeamAgentRow, TeamFilter, TeamTaskRow, TeammateRow } from "./research";
 import { startRead, stampRead } from "../../state";
 import { NotReady } from "./shared";
@@ -118,6 +118,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       <h3 id="pj-team-title">Team</h3>
       <span className="pj-secondary pj-small">{working} of {status.max_agents} agents working.</span>
     </div>
+    <p className="pj-small pj-muted" aria-label="Agent limits">{displayText(teamLimitsLine(status, (id) => harnessName(harnesses, id)))} Change them in Agent settings.</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
     {panel.agents.length > 0 ? <div className="pj-table-wrap"><table className="pj-table">
       <caption className="pj-sr">Team agents</caption>

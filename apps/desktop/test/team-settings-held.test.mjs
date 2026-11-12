@@ -23,7 +23,7 @@ const ROWS = [
   "Workflow nudges", "Task-start reminder", "Re-ask a sub-agent's empty reply",
   "Claude Code sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display",
   "Messages to Claude Code agents", "Messages to Codex agents",
-  "Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget",
+  "Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget", "Master run time", "Sub-agent rounds per message",
 ];
 
 /** Opens Agent settings or the master's settings over the fake engine with every team save given

@@ -312,35 +312,26 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
     let team = catalog.default_team;
     assert_eq!(team.master, "codex");
     assert!(team.master_tools);
-    assert_eq!(
-        team.sub_harnesses,
-        [HarnessSlot {
-            harness: "codex".into(),
-            agents: 2,
-            tools: true
-        }]
+    assert!(
+        team.sub_harnesses.is_empty(),
+        "research toggles never cap the default team (DEC-147.1)"
     );
-    assert_eq!((team.min_agents, team.max_agents), (1, 3));
+    assert_eq!((team.min_agents, team.max_agents), (1, TEAM_AGENTS_MAX));
     assert!(team.validate().is_ok());
 
-    let only_claude = default_team(&config, Some(&mixed), &[], &signed(&["b-claude"]));
+    let only_claude = default_team(&config, Some(&mixed), &signed(&["b-claude"]));
     assert_eq!(
         only_claude.master, "claude",
         "a signed-in harness beats an unsigned one"
     );
-    let nobody = default_team(
-        &config,
-        Some(&mixed),
-        &[ResearchKind::MarketResearch],
-        &signed(&[]),
-    );
+    let nobody = default_team(&config, Some(&mixed), &signed(&[]));
     assert_eq!(
         nobody.master, "codex",
         "without a signed-in harness the team defaults to Codex, never RCLI"
     );
-    assert_eq!(nobody.sub_harnesses[0].harness, "codex");
+    assert!(nobody.sub_harnesses.is_empty());
     let local_pool = CredentialRef::new("pool-local").unwrap();
-    let local = default_team(&config, Some(&local_pool), &[], &signed(&[]));
+    let local = default_team(&config, Some(&local_pool), &signed(&[]));
     assert_eq!(local.master, "codex");
     assert!(local.sub_harnesses.is_empty());
     assert_eq!(
@@ -349,10 +340,7 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
         "no harness chosen means any harness, up to the team maximum"
     );
     assert!(local.validate().is_ok());
-    assert_eq!(
-        default_team(&config, None, &[], &signed(&[])).master,
-        "codex"
-    );
+    assert_eq!(default_team(&config, None, &signed(&[])).master, "codex");
     assert_eq!(catalog.default_team_status, None);
     assert_eq!(
         default_team_status(&config, Some(&local_pool), &signed(&[])),
@@ -367,7 +355,8 @@ fn catalog_serves_plain_labels_and_default_team_prefers_signed_in_codex() {
 }
 
 #[test]
-fn research_slots_follow_the_best_signed_in_harness_and_say_what_is_missing() {
+fn research_toggles_leave_the_default_team_open_and_the_master_follows_the_best_signed_in_harness()
+{
     let config = resolve_config_bytes(MANAGED_ONLY, "").unwrap();
     let managed = CredentialRef::new("pool-managed").unwrap();
     let absent = CredentialRef::new("pool-absent").unwrap();
@@ -381,33 +370,27 @@ fn research_slots_follow_the_best_signed_in_harness_and_say_what_is_missing() {
         ResearchKind::CompetitorResearch,
         ResearchKind::DesignResearch,
     ];
-    let claude = default_team(&config, Some(&managed), &toggles, &signed(&["m-claude"]));
+    let claude = catalog(&config, Some(&managed), &toggles, &signed(&["m-claude"]))
+        .unwrap()
+        .default_team;
     assert_eq!(claude.master, "claude");
     assert!(claude.master_tools);
-    assert_eq!(
-        claude.sub_harnesses,
-        [HarnessSlot {
-            harness: "claude".into(),
-            agents: 3,
-            tools: true
-        }]
+    assert!(
+        claude.sub_harnesses.is_empty(),
+        "three research toggles no longer make a 3-agent cap (DEC-147.1)"
     );
-    assert_eq!((claude.min_agents, claude.max_agents), (1, 4));
+    assert_eq!((claude.min_agents, claude.max_agents), (1, TEAM_AGENTS_MAX));
     assert_eq!(
         default_team_status(&config, Some(&managed), &signed(&["m-claude"])),
         None
     );
-    let both = default_team(
-        &config,
-        Some(&managed),
-        &toggles,
-        &signed(&["m-claude", "m-codex"]),
-    );
+    let both = default_team(&config, Some(&managed), &signed(&["m-claude", "m-codex"]));
     assert_eq!(both.master, "codex");
-    assert_eq!(both.sub_harnesses[0].harness, "codex");
-    let nobody = default_team(&config, Some(&managed), &toggles, &signed(&[]));
+    assert!(both.sub_harnesses.is_empty());
+    let nobody = default_team(&config, Some(&managed), &signed(&[]));
     assert_eq!(nobody.master, "codex");
-    assert_eq!(nobody.sub_harnesses[0].harness, "codex");
+    assert!(nobody.sub_harnesses.is_empty());
+    assert_eq!(nobody.max_agents, TEAM_AGENTS_MAX);
     assert_eq!(
         default_team_status(&config, Some(&managed), &signed(&[])),
         Some("Needs a signed-in account")

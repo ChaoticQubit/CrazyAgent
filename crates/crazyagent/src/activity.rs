@@ -124,10 +124,11 @@ pub enum ActivityKind {
     WorkClosed,
     Phase,
     Test,
+    TeamAction,
 }
 
 impl ActivityKind {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Created,
         Self::ResearchStarted,
         Self::ResearchSaved,
@@ -151,6 +152,7 @@ impl ActivityKind {
         Self::WorkClosed,
         Self::Phase,
         Self::Test,
+        Self::TeamAction,
     ];
 
     /// Whether agents log the kind themselves with `log_activity`: a phase or a test run.
@@ -189,6 +191,7 @@ impl ActivityKind {
             Self::WorkClosed => "work_closed",
             Self::Phase => "phase",
             Self::Test => "test",
+            Self::TeamAction => "team_action",
         }
     }
 

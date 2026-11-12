@@ -8,6 +8,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
+const SIGN_IN_PATH: &str = "/usr/bin:/bin";
+
+/// The PATH a sign-in or token renewal child runs with: `/usr/bin:/bin`, after the `bin`
+/// folder of the npm prefix a Node script harness sits in ([`crate::harnesses::node_prefix`]),
+/// the same folder an agent launch puts first. Input: the real file. Output: the PATH value.
+pub(crate) fn sign_in_path(executable: &Path) -> std::ffi::OsString {
+    match crate::harnesses::node_prefix(executable) {
+        Some(prefix) => {
+            let mut path = prefix.join("bin").into_os_string();
+            path.push(":");
+            path.push(SIGN_IN_PATH);
+            path
+        }
+        None => SIGN_IN_PATH.into(),
+    }
+}
 
 /// How long after a harness identity was first seen a matching hash must start to prove its
 /// bytes for good off macOS. A write after that stamps a change time more than one clock tick
@@ -81,9 +97,14 @@ struct ExecutableIdentity {
 }
 
 impl ExecutableIdentity {
+    /// The identity of a file the engine may pin and run: a regular file of 1 byte to
+    /// [`EXECUTABLE_BYTES_MAX`] the owner may run, owned by the engine's user or by root
+    /// (only root can change a root file), with no group or world write. Input: the file's
+    /// metadata. Output: the identity, or `native_auth_host_executable_unsafe`.
     fn of(metadata: &Metadata) -> Result<Self, EngineError> {
+        let owner = metadata.uid();
         if !metadata.is_file()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || (owner != rustix::process::geteuid().as_raw() && owner != 0)
             || metadata.mode() & 0o022 != 0
             || metadata.mode() & 0o100 == 0
             || !(1..=EXECUTABLE_BYTES_MAX).contains(&metadata.len())
@@ -100,6 +121,13 @@ impl ExecutableIdentity {
             changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
     }
+}
+
+/// The pin's file rule alone, so a harness search refuses exactly the files a pin would
+/// ([`ExecutableIdentity::of`]). Input: the real file's metadata. Output: Ok, or
+/// `native_auth_host_executable_unsafe`.
+pub(crate) fn pinnable(metadata: &Metadata) -> Result<(), EngineError> {
+    ExecutableIdentity::of(metadata).map(|_| ())
 }
 
 pub(crate) struct RegisteredNativeAuthHost {
@@ -218,6 +246,15 @@ impl RegisteredNativeAuthHost {
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
         Ok(Arc::new(fresh))
+    }
+
+    /// Whether the harness this host pins is gone from disk: the entry a launch resolves (the
+    /// pinned path for a host with no entry) leads to nothing, so it answers NotFound. A file
+    /// that is there but changed or unsafe is not gone and stays refused. Input: none.
+    /// Output: true when the entry leads to nothing.
+    pub(crate) fn vanished(&self) -> bool {
+        let named = self.entry.as_deref().unwrap_or(&self.path);
+        matches!(std::fs::metadata(named), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
     }
 
     /// The PATH entry this host was captured through, which a launch resolves again each

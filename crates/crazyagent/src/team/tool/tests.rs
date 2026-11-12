@@ -643,7 +643,35 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
     );
     assert_eq!(
         live_call(INSPECT_WORK_TOOL, None).unwrap(),
-        Ok(Call::InspectWork)
+        Ok(Call::InspectWork { task: None })
+    );
+    assert_eq!(
+        live_call(INSPECT_WORK_TOOL, Some(&json!({"task": 12}))).unwrap(),
+        Ok(Call::InspectWork { task: Some(12) })
+    );
+    assert_eq!(
+        live_call(INSPECT_WORK_TOOL, Some(&json!({"task": " 12 "}))).unwrap(),
+        Ok(Call::InspectWork { task: Some(12) })
+    );
+    for refused in [
+        json!({"task": 0}),
+        json!({"task": -3}),
+        json!({"task": "twelve"}),
+    ] {
+        assert_eq!(
+            live_call(INSPECT_WORK_TOOL, Some(&refused)).unwrap(),
+            Err(INSPECT_INVALID),
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(Call::InspectWork { task: None }).unwrap(),
+        json!({"tool": "inspect_work"}),
+        "a call without a task is written as before, so older mailbox readers take it"
+    );
+    assert_eq!(
+        serde_json::from_value::<Call>(json!({"tool": "inspect_work", "task": 12})).unwrap(),
+        Call::InspectWork { task: Some(12) }
     );
     assert_eq!(live_call("shell", None), None);
     assert_eq!(live_call(TOOL_NAME, None), None);
@@ -651,7 +679,19 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
 
 #[test]
 fn the_engine_checks_again_every_call_read_from_a_mailbox() {
-    assert_eq!(checked(Call::InspectWork), Ok(Call::InspectWork));
+    assert_eq!(
+        checked(Call::InspectWork { task: None }),
+        Ok(Call::InspectWork { task: None })
+    );
+    assert_eq!(
+        checked(Call::InspectWork { task: Some(7) }),
+        Ok(Call::InspectWork { task: Some(7) })
+    );
+    assert_eq!(
+        checked(Call::InspectWork { task: Some(0) }),
+        Err(INSPECT_INVALID),
+        "a planted task number the tool would refuse is refused again"
+    );
     let planted = Call::Spawn {
         task: "Write page.md".into(),
         harness: Some("Codex".into()),
@@ -717,7 +757,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
         taken[0],
         (
             first.clone(),
-            Some(Call::InspectWork),
+            Some(Call::InspectWork { task: None }),
             Some(call_digest(b"{\"tool\":\"inspect_work\"}\n"))
         )
     );
@@ -821,7 +861,7 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
         take_calls(&mailbox, CALLS_PER_TICK_MAX),
         vec![(
             id.clone(),
-            Some(Call::InspectWork),
+            Some(Call::InspectWork { task: None }),
             Some(call_digest(b"{\"tool\":\"inspect_work\"}\n"))
         )]
     );
@@ -850,7 +890,7 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
             let mailbox = mailbox.clone();
             std::thread::spawn(move || {
                 (0..16)
-                    .map(|_| ask(&mailbox, &Call::InspectWork, REPLY_WAIT))
+                    .map(|_| ask(&mailbox, &Call::InspectWork { task: None }, REPLY_WAIT))
                     .collect::<Vec<_>>()
             })
         })
@@ -932,7 +972,7 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     let server = std::thread::spawn(move || {
         ask(
             &served,
-            &Call::InspectWork,
+            &Call::InspectWork { task: None },
             std::time::Duration::from_millis(800),
         )
     });
@@ -1339,7 +1379,8 @@ fn a_call_carries_no_pane_and_a_planted_pane_is_dropped_unread() {
     let directory = tempfile::tempdir().unwrap();
     let mailbox = directory.path().canonicalize().unwrap();
     let asked = mailbox.clone();
-    let asker = std::thread::spawn(move || ask(&asked, &Call::InspectWork, REPLY_WAIT));
+    let asker =
+        std::thread::spawn(move || ask(&asked, &Call::InspectWork { task: None }, REPLY_WAIT));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let id = loop {
         if let Some((_, id)) = calls(&mailbox, CALL_SUFFIX).pop() {
@@ -1355,7 +1396,7 @@ fn a_call_carries_no_pane_and_a_planted_pane_is_dropped_unread() {
         take_calls(&mailbox, CALLS_PER_TICK_MAX),
         vec![(
             id.clone(),
-            Some(Call::InspectWork),
+            Some(Call::InspectWork { task: None }),
             Some(call_digest(&bytes))
         )]
     );
@@ -1374,7 +1415,11 @@ fn a_call_carries_no_pane_and_a_planted_pane_is_dropped_unread() {
         std::fs::write(mailbox.join(format!("{id}{CALL_SUFFIX}")), bytes).unwrap();
         assert_eq!(
             take_calls(&mailbox, CALLS_PER_TICK_MAX),
-            vec![(id, Some(Call::InspectWork), Some(call_digest(bytes)))],
+            vec![(
+                id,
+                Some(Call::InspectWork { task: None }),
+                Some(call_digest(bytes))
+            )],
             "{}",
             String::from_utf8_lossy(bytes)
         );
@@ -1385,7 +1430,7 @@ fn a_call_carries_no_pane_and_a_planted_pane_is_dropped_unread() {
     );
     assert_eq!(
         read_call(br#"{"tool":"inspect_work","pane":"%7"}"#),
-        Some(Call::InspectWork)
+        Some(Call::InspectWork { task: None })
     );
 }
 

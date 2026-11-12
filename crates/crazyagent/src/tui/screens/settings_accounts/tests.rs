@@ -628,6 +628,7 @@ fn removing_an_account_in_a_pool_names_the_pool_and_takes_it_out() {
     let mut details = AccountDetails::new(accounts[0].clone(), Accounts::with(accounts.clone()));
     details.key(&Key::Right, &mut ctx);
     details.key(&Key::Right, &mut ctx);
+    details.key(&Key::Right, &mut ctx);
     details.key(&Key::Enter, &mut ctx);
     let (modal, _) = details.modal(&ctx).expect("a confirm before removing");
     assert_eq!(modal.title, "Remove account");
@@ -1504,7 +1505,7 @@ fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_
             codex,
             NativeAuthPhase::Unavailable,
             Some("native_auth_host_unavailable"),
-            "Codex isn't installed on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.",
+            "CrazyAgent didn't find a Codex it can run on this Mac, so ChatGPT sign-in isn't available. Install Codex, then choose Check again, or choose its file.",
         ),
         (
             claude,

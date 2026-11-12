@@ -372,6 +372,19 @@ pub(super) async fn serve(
                     ModelAuthentication::NativeManaged { .. }
                 ) {
                     let harness = reply.connection.harness.as_str();
+                    let catalog = if harness == "claude" {
+                        "claude-code"
+                    } else {
+                        harness
+                    };
+                    let pinned = match harness {
+                        "codex" => runtime.registered_codex_executable().is_ok(),
+                        "claude" => runtime.registered_claude_executable().is_ok(),
+                        _ => true,
+                    };
+                    if !pinned && crate::harnesses::finding::CHOOSABLE.contains(&catalog) {
+                        let _ = runtime.look_again(catalog);
+                    }
                     let producer = match harness {
                         "codex" if runtime.registered_codex_executable().is_ok() => {
                             ProducerCapability::Available

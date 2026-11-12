@@ -13,7 +13,7 @@ use crate::engine::claude_host::diagnostic::StreamDiagnostic;
 use crate::master_frame_limit::FrameSize;
 use crate::master_step_limit::StepLimit;
 use crate::master_time_limit::START_TIME_MAX;
-use crate::protocol::{CredentialRef, RequestId};
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
 use process::{CodexHostOutput, CodexHostProcess};
@@ -52,8 +52,9 @@ impl CodexHost {
     /// Starts the Codex harness under custody and brings its thread to idle. `run_time` is
     /// the wall clock of the whole run; with none the run has no clock and only its start
     /// is bounded, by `START_TIME_MAX`. Inputs: the launch, its sandbox, lease, home, action,
-    /// account, clock, budget, instructions and the owner's master frame size limit, which
-    /// bounds every frame the host writes. Output: the idle host or a plain code.
+    /// account, the project whose leftover setting and owner view its leftovers follow,
+    /// clock, budget, instructions and the owner's master frame size limit, which bounds every
+    /// frame the host writes. Output: the idle host or a plain code.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
@@ -62,6 +63,7 @@ impl CodexHost {
         home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
+        project: ProjectId,
         run_time: Option<Duration>,
         budget: ResourceBudget,
         instructions: &str,
@@ -79,7 +81,7 @@ impl CodexHost {
             command,
             &budget,
             run_time,
-            Some(profile),
+            Some((profile, project)),
             sandbox.is_unconfined(),
         )
         .await?;

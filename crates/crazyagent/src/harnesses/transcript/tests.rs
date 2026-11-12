@@ -212,7 +212,7 @@ fn claude_a_record_with_no_typed_line_reads_to_its_last_finished_line() {
     assert_eq!(read, (Vec::new(), finished));
 }
 
-/// OB6R2-M1: a line longer than `LINE_BYTES_MAX`, which the turn reader refuses too, is
+/// OB6R2-M1: a line longer than `LINE_BYTES_MAX`, which the turn reader passes over too, is
 /// passed over without being held in memory, and the typed line after it is read.
 #[test]
 fn claude_a_line_longer_than_the_reader_takes_is_passed_over_not_read() {
@@ -863,25 +863,52 @@ fn claude_transcript_behind_a_symlink_is_not_followed() {
     assert_eq!(reader.read().unwrap(), Vec::new());
 }
 
+/// Owner 11-11, no output cap: a line longer than `LINE_BYTES_MAX` is passed over with one
+/// note, never an error, the line after it is read as usual, every byte counts as read and
+/// the reader never holds more than `LINE_BYTES_MAX + READ_BYTES_MAX` bytes.
 #[test]
-fn line_above_the_limit_is_refused() {
+fn a_line_above_the_limit_is_skipped_and_the_next_line_is_read() {
     let case = Case::new();
     let (file, mut reader) = case.claude();
-    append(&file, &"x".repeat(LINE_BYTES_MAX + 1));
-    let mut outcome = Ok(Vec::new());
-    for _ in 0..(LINE_BYTES_MAX / READ_BYTES_MAX + 2) {
-        outcome = reader.read();
-        if outcome.is_err() {
-            break;
-        }
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    let long = LINE_BYTES_MAX + 2 * READ_BYTES_MAX + 1;
+    append(&file, &"x".repeat(long));
+    append(&file, &format!("\n{prompt}\n"));
+    let total = (long + 1 + prompt.len() + 1) as u64;
+    let mut events = Vec::new();
+    for _ in 0..(total as usize / READ_BYTES_MAX + 3) {
+        events.extend(reader.read().unwrap());
+        assert!(reader.pending.len() <= LINE_BYTES_MAX + READ_BYTES_MAX);
     }
-    assert_eq!(
-        outcome,
-        Err(LaunchError(
-            "launch_transcript_line_too_long".to_owned(),
-            None
-        ))
-    );
+    assert_eq!(events, vec![TranscriptEvent::TurnStarted]);
+    assert_eq!(reader.bytes(), total);
+    assert!(!reader.skipping);
+}
+
+/// Owner 11-11: a reader that starts inside a line, as a resume at a recorded offset can
+/// after a restart, passes over the rest of that line, short or past `LINE_BYTES_MAX`,
+/// and reads the next line, never failing on the fragment.
+#[test]
+fn a_reader_resumed_inside_a_line_passes_over_the_rest_of_it() {
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    for rest in [16, LINE_BYTES_MAX + 1] {
+        let case = Case::new();
+        let (file, mut reader) = case.claude();
+        append(&file, &format!("{prompt}\n"));
+        assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+        append(&file, r#"{"type":"assistant","message":"#);
+        let inside = std::fs::metadata(&file).unwrap().len();
+        append(&file, &"x".repeat(rest));
+        append(&file, &format!("\n{prompt}\n"));
+        let claude = Transcript::ClaudeSession { file: file.clone() };
+        let mut resumed =
+            TranscriptReader::resumed(claude, &case.work(), &file, Some(inside)).unwrap();
+        let mut events = Vec::new();
+        for _ in 0..(rest / READ_BYTES_MAX + 3) {
+            events.extend(resumed.read().unwrap());
+        }
+        assert_eq!(events, vec![TranscriptEvent::TurnStarted], "rest {rest}");
+    }
 }
 
 fn rollout(sessions: &Path, day: &str, name: &str, cwd: &Path, lines: &[&str]) -> PathBuf {
@@ -1643,4 +1670,81 @@ fn every_harness_kind_maps_background_commands_at_task_end() {
             HarnessKind::Rcli => assert_eq!(crate::team::launch_harness("rcli"), None),
         }
     }
+}
+
+/// F33: the DiscordManager session store held Codex's AGENTS.md block as the owner's first
+/// message, and HackerBlog's held Claude Code's compaction summary as an owner message. Both
+/// are context a harness injected: no reader takes them as typed words, and the session
+/// search names them `instructions` and `summary`.
+#[test]
+fn injected_instructions_and_summaries_are_never_typed_and_keep_their_own_roles() {
+    let codex_user = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    let instructions = codex_user(
+        "# AGENTS.md instructions for /work/app\n\n<INSTRUCTIONS>\n# Instructions from CrazyAgent\n</INSTRUCTIONS>",
+    );
+    let summary = codex_user(&format!(
+        "{CODEX_SUMMARY} You also have access...\nBuilt the parser."
+    ));
+    let typed = codex_user("Ship the parser today");
+    let claude_summary = serde_json::json!({"type": "user", "isCompactSummary": true,
+        "message": {"role": "user", "content":
+            "This session is being continued from a previous conversation that ran out of context."}})
+    .to_string();
+    let claude_typed = serde_json::json!({"type": "user",
+        "message": {"role": "user", "content": "Fix the login page"}})
+    .to_string();
+
+    assert_eq!(
+        record_message("codex", instructions.as_bytes()).unwrap().0,
+        "instructions"
+    );
+    assert_eq!(
+        record_message("codex", summary.as_bytes()).unwrap().0,
+        "summary"
+    );
+    assert_eq!(
+        record_message("codex", typed.as_bytes()),
+        Some(("typed", "Ship the parser today".to_owned()))
+    );
+    assert_eq!(
+        record_message("claude-code", claude_summary.as_bytes())
+            .unwrap()
+            .0,
+        "summary"
+    );
+    assert_eq!(
+        record_message("claude-code", claude_typed.as_bytes())
+            .unwrap()
+            .0,
+        "typed"
+    );
+
+    let case = Case::new();
+    let codex = case.path().join("rollout.jsonl");
+    std::fs::write(&codex, format!("{instructions}\n{summary}\n{typed}\n")).unwrap();
+    assert_eq!(
+        conversation_messages("codex", &codex),
+        vec![(Speaker::Input, "Ship the parser today".to_owned())]
+    );
+    assert_eq!(
+        typed_after("codex", &codex, 0),
+        Some(vec!["Ship the parser today".to_owned()])
+    );
+    let (past, _) = typed_past("codex", &codex, 0).unwrap();
+    assert_eq!(
+        past.iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["Ship the parser today"]
+    );
+    let claude = case.path().join("session.jsonl");
+    std::fs::write(&claude, format!("{claude_summary}\n{claude_typed}\n")).unwrap();
+    assert_eq!(
+        conversation_messages("claude-code", &claude),
+        vec![(Speaker::Input, "Fix the login page".to_owned())]
+    );
 }

@@ -202,7 +202,18 @@ async fn start_engine(
     }
     crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
         .await
-        .map_err(|_| engine_failure("engine_start_failed"))
+        .map_err(|_| engine_failure(start_failure(layout)))
+}
+
+/// The code of an engine start that did not answer: `engine_backup_failed` when the engine's
+/// record says its upgrade backup failed (F36), else `engine_start_failed`. Input: the
+/// layout. Output: the code.
+fn start_failure(layout: &crazyagent::paths::Layout) -> &'static str {
+    if crazyagent::service::backup_failure(layout).is_some() {
+        "engine_backup_failed"
+    } else {
+        "engine_start_failed"
+    }
 }
 
 /// Makes sure the default engine runs before the bridge connects: when none answers it
@@ -347,6 +358,44 @@ async fn desktop_harness_install(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     read(&state).await?.harness_install(&id).await
+}
+
+#[tauri::command]
+async fn desktop_harness_find(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::harnesses::finding::Found, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_find(&id).await
+}
+
+#[tauri::command]
+async fn desktop_harness_choose_path(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    path: Option<String>,
+) -> Result<crazyagent::harnesses::finding::Found, BridgeError> {
+    main_window(&webview)?;
+    read(&state)
+        .await?
+        .harness_choose_path(&id, path.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn desktop_pick_harness_file(webview: Webview) -> Result<Option<String>, BridgeError> {
+    main_window(&webview)?;
+    Ok(
+        match bridge::picker::choose(bridge::picker::HARNESS_FILE_SCRIPT).await? {
+            Pick::Canceled => None,
+            Pick::Paths(mut paths) => {
+                assert!(!paths.is_empty());
+                Some(paths.swap_remove(0))
+            }
+        },
+    )
 }
 
 #[tauri::command]
@@ -731,6 +780,35 @@ async fn desktop_set_agent_memory_writes(
     lock(&state)
         .await?
         .set_agent_memory_writes(writes, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_move_memory(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    project: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .move_memory(&id, &project, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_agent_memory_scope(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    scope: crazyagent::memory::library::AgentScope,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_agent_memory_scope(scope, generation)
         .await
 }
 
@@ -1156,6 +1234,37 @@ async fn desktop_team_background(
 }
 
 #[tauri::command]
+async fn desktop_team_leftovers(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: crazyagent::team::LeftoverMode,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_leftovers(&id, mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_leftover_hold(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    key: u64,
+    end: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_leftover_hold(&id, key, end, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_ask_before_merge(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -1197,6 +1306,21 @@ async fn desktop_team_reask_empty_reply(
     lock(&state)
         .await?
         .team_reask_empty_reply(&id, on, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_done_quiet(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    secs: Option<u32>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_done_quiet(&id, secs, generation)
         .await
 }
 
@@ -1530,6 +1654,36 @@ async fn desktop_team_max_teammates(
     lock(&state)
         .await?
         .team_max_teammates(&id, max, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_master_rounds(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    max: Option<u8>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_rounds(&id, max, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_master_run_time(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    secs: Option<u32>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_master_run_time(&id, secs, generation)
         .await
 }
 
@@ -4578,6 +4732,9 @@ native_commands! {
     desktop_harness_versions,
     desktop_harness_update,
     desktop_harness_install,
+    desktop_harness_find,
+    desktop_harness_choose_path,
+    desktop_pick_harness_file,
     desktop_harness_update_settings,
     desktop_harness_set_update_settings,
     desktop_baselines,
@@ -4623,9 +4780,12 @@ native_commands! {
     desktop_team_master_branch,
     desktop_team_land_on,
     desktop_team_background,
+    desktop_team_leftovers,
+    desktop_team_leftover_hold,
     desktop_team_ask_before_merge,
     desktop_team_master_lands,
     desktop_team_reask_empty_reply,
+    desktop_team_done_quiet,
     desktop_team_catch_up_main,
     desktop_team_master_idle_stop,
     desktop_team_master_live_terminal,
@@ -4645,6 +4805,8 @@ native_commands! {
     desktop_team_stop_teammate,
     desktop_team_max_harnesses,
     desktop_team_max_teammates,
+    desktop_team_master_rounds,
+    desktop_team_master_run_time,
     desktop_team_token_budget,
     desktop_team_spread_accounts,
     desktop_team_graph,
@@ -4709,6 +4871,8 @@ native_commands! {
     desktop_delete_memory,
     desktop_approve_memory,
     desktop_set_agent_memory_writes,
+    desktop_set_agent_memory_scope,
+    desktop_move_memory,
     desktop_forget_memory,
     desktop_remember_research,
     desktop_save_selection_to_memory,

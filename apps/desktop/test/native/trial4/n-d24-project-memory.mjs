@@ -7,6 +7,7 @@ import { sendToMaster, terminalLive } from "./n-d8-master-reply.mjs";
 const MASTER_MS = 600000;
 const MEMORY = "//button[contains(@class, \"pj-titem\")][normalize-space(.)=\"Project memory\"]";
 const WRITES = "#memory-agent-writes";
+const SETTINGS_LINK = "//button[normalize-space(.)=\"Memory settings\"]";
 
 /** Opens Context, Project memory afresh, so it reads what the engine saved. Input: the kit.
  * Output: the text the panel shows. */
@@ -27,13 +28,14 @@ async function sourceOf(row) {
 export const checks = [{
   id: "N-D24",
   op: ["OP-22"],
-  title: "The master remembers a fact and Context, Project memory shows it",
+  title: "The master remembers a fact, Context, Project memory shows it and approves it in place",
   why: "owner: \"the memory doesn't work at all\"",
   after: "changes",
   run: async (kit) => {
     const token = `T4-${randomBytes(4).toString("hex")}`;
-    await kit.go("#/settings/memory");
-    await kit.until(() => shown(WRITES), UI_MS, "Settings, Memory never showed Agent memory writes");
+    await projectMemory(kit);
+    await click(SETTINGS_LINK);
+    await kit.until(() => shown(WRITES), UI_MS, "Memory settings in Context, Project memory never opened Agent memory writes");
     const writes = await $(WRITES).getValue();
     await kit.tab("conversation");
     const request = rememberPrompt(token);
@@ -45,18 +47,22 @@ export const checks = [{
     }, MASTER_MS, `OP-22: Context, Project memory never showed the master's fact ${token}`);
 
     const row = `//div[contains(@class, "set-row")][.//p[contains(normalize-space(.), ${lit(token)})]]`;
-    const approve = `${row}//button[normalize-space(.)="Approve"]`;
     await kit.go("#/settings/memory");
     await kit.pick("#memory-scope", kit.project());
     await kit.until(() => shown(row), UI_MS, `Settings, Memory never listed ${token} for the project`);
     const source = await sourceOf(row);
+
+    const note = `//li[contains(@class, "pj-memory")][.//p[contains(normalize-space(.), ${lit(token)})]]`;
+    const approve = `${note}//button[normalize-space(.)="Approve"]`;
+    const waiting = await projectMemory(kit);
     const approved = await shown(approve);
     if (approved) {
       await click(approve);
-      await kit.until(async () => !(await shown(approve)) && !(await sourceOf(row)).startsWith("Waiting"), UI_MS, `${token} still waits after Approve`);
+      await kit.until(async () => !(await shown(approve)) && (await $(note).getText()).includes("Saved"), UI_MS,
+        `${token} still waits after Approve in Context, Project memory`);
     }
     const listed = await projectMemory(kit);
     await kit.screen();
-    return memoryVerdict({ token, writes, source, approved, shown: listed });
+    return memoryVerdict({ token, writes, source, approved, waiting, shown: listed });
   },
 }];

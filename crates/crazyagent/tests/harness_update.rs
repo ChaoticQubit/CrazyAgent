@@ -108,6 +108,7 @@ impl FakeNative {
     fn engine_entry(&self) -> PathBuf {
         crazyagent::paths::resolve_harnesses(
             crazyagent::paths::Harnesses::default(),
+            &self.search(),
             Some(&self.path_value()),
             None,
         )

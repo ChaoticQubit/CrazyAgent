@@ -5,7 +5,7 @@ use super::{
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::leftovers::LineageToken;
-use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
+use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
 use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::sandbox::toolchains::Toolchain;
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const RECORD_BYTES_MAX: usize = 4096;
 const SETTLE_WAIT: Duration = Duration::from_secs(10);
-const REPLAY_READS_MAX: usize = 4096;
+const REPLAY_READS_MAX: u64 = 4096;
 const POLL: Duration = Duration::from_millis(100);
 const ESCAPE: &[u8] = b"\x1b";
 
@@ -205,30 +205,19 @@ impl PaneRecord {
     }
 }
 
-/// Adds the transcript facts an adopted pane already had to its event count, since the
-/// engine that launched it may have reported each of them. Fails with `launch_event_limit`
-/// past the launch's event budget, as the session itself would.
-fn count(events: &mut usize, facts: usize, limits: &LaunchLimits) -> Result<(), LaunchError> {
-    *events = events.saturating_add(facts);
-    if *events > limits.events {
-        return Err(failure("launch_event_limit"));
-    }
-    Ok(())
-}
-
-fn replay(
-    reader: &mut TranscriptReader,
-    limits: &LaunchLimits,
-    events: &mut usize,
-) -> Result<Option<bool>, LaunchError> {
+/// Reads an adopted pane's record on to its end to learn whether a turn is open there.
+/// No byte count ends it (owner 11-11): it reads until a read finds nothing new, at most
+/// `REPLAY_READS_MAX` reads more than the record held when it was opened, and a harness
+/// that writes faster than that leaves the rest to the session's own polls. Takes the
+/// reader. Returns whether a turn is open, none when no fact says, or the reader's problem.
+fn replay(reader: &mut TranscriptReader) -> Result<Option<bool>, LaunchError> {
     let mut open = None;
-    for _ in 0..REPLAY_READS_MAX {
+    let mut reads_max: Option<u64> = None;
+    let mut reads: u64 = 0;
+    loop {
         let before = reader.bytes();
         let facts = reader.read()?;
-        if reader.bytes() > limits.output_bytes as u64 {
-            return Err(failure("launch_output_limit"));
-        }
-        count(events, facts.len(), limits)?;
+        reads += 1;
         if facts.is_empty() && reader.bytes() == before {
             return Ok(open);
         }
@@ -241,8 +230,15 @@ fn replay(
                 _ => {}
             }
         }
+        let max = *reads_max.get_or_insert_with(|| {
+            REPLAY_READS_MAX + reader.unread().unwrap_or(0) / READ_BYTES_MAX as u64
+        });
+        assert!(max >= REPLAY_READS_MAX);
+        if reads >= max {
+            eprintln!("launch_adopt_replay_cut reads={reads}");
+            return Ok(open);
+        }
     }
-    Err(failure("launch_output_limit"))
 }
 
 impl TerminalSession {
@@ -308,8 +304,7 @@ impl TerminalSession {
             }
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
-        let mut events = 0;
-        let open = replay(&mut reader, &limits, &mut events)? == Some(true);
+        let open = replay(&mut reader)? == Some(true);
         let stale = open
             && reader
                 .silent()
@@ -322,7 +317,6 @@ impl TerminalSession {
             while !settled && Instant::now() < deadline {
                 std::thread::sleep(POLL);
                 let facts = reader.read()?;
-                count(&mut events, facts.len(), &limits)?;
                 settled = facts.iter().any(|fact| {
                     matches!(
                         fact,
@@ -339,7 +333,7 @@ impl TerminalSession {
                 ));
             }
             if settled {
-                replay(&mut reader, &limits, &mut events)?;
+                replay(&mut reader)?;
             }
         }
         let took_none = open && !settled;
@@ -362,9 +356,8 @@ impl TerminalSession {
             reader,
             queue: VecDeque::new(),
             limits,
-            deadline: Instant::now() + record.run_time_left(limits.run_time),
+            deadline: Some(Instant::now() + record.run_time_left(limits.run_time)),
             checked: Instant::now(),
-            events,
             ready: !on_menu,
             first: None,
             folder: on_menu.then_some(FolderStep::Waiting),

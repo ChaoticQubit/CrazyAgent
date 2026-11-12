@@ -1,8 +1,8 @@
 use super::{ActionOutcome, BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::library::{
-    AgentWrites, ApprovedMemories, LibraryAction, MemoryOrigin, MemoryScope, SavedMemory,
-    known_code,
+    AgentScope, AgentWrites, ApprovedMemories, LibraryAction, MemoryOrigin, MemoryScope,
+    SavedMemory, known_code,
 };
 use crazyagent::protocol::{ProjectId, RequestId};
 use serde::Serialize;
@@ -57,6 +57,7 @@ pub struct MemoryList {
     pub items: Vec<MemoryNote>,
     pub next: Option<u64>,
     pub agent_writes: AgentWrites,
+    pub agent_scope: AgentScope,
 }
 
 /// How an import of a memory folder ended: memories saved, markdown files not saved, and
@@ -116,6 +117,7 @@ impl NativeBridge {
             items: page.items.into_iter().map(MemoryNote::from).collect(),
             next: page.next,
             agent_writes: page.agent_writes,
+            agent_scope: page.agent_scope,
         })
     }
 
@@ -218,6 +220,33 @@ impl NativeBridge {
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.change_memory(LibraryAction::AgentWrites { writes }, generation)
+            .await
+    }
+
+    /// Moves one app-wide memory an agent saved into one project, so only that project's
+    /// agents read it. Takes the memory id, the project id and a fresh draft generation.
+    /// Returns the intent receipt.
+    pub async fn move_memory(
+        &mut self,
+        id: &str,
+        project: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let action = LibraryAction::MoveToProject {
+            memory_id: memory_id(id)?,
+            project_id: ProjectId::new(project).map_err(|_| failure("invalid_project"))?,
+        };
+        self.change_memory(action, generation).await
+    }
+
+    /// Saves the owner's Where agents save memories setting: this project only or agent
+    /// chooses. Takes the choice and a fresh draft generation. Returns the intent receipt.
+    pub async fn set_agent_memory_scope(
+        &mut self,
+        scope: AgentScope,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.change_memory(LibraryAction::AgentScope { scope }, generation)
             .await
     }
 
