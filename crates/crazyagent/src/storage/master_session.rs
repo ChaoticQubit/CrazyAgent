@@ -6792,6 +6792,51 @@ auth = { method = "none" }"#;
         case.close().await;
     }
 
+    /// KY-M1: a master turn stopped because the engine could not write its keyed account's
+    /// saved key keeps the reason a changed profile gets, so pausing and failover stay as
+    /// they are, and carries the line naming each app's way to set the account up again.
+    #[tokio::test]
+    async fn a_master_turn_stopped_for_its_key_setup_names_each_way_to_set_it_up_again() {
+        let case = Fixture::new(true).await;
+        case.register().await;
+        let MasterRuntimeResult::Prepared(prepared) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered key must prepare the first turn");
+        };
+        case.runtime(MasterRuntimeCommand::Observe {
+            host: case.started.host.clone(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+            attempt_id: prepared.attempt.request.id.clone(),
+            observation: MasterRuntimeObservation::Failed {
+                reason: MasterReason::ConnectionChanged,
+                cause: crate::master_session::RCLI_KEY_SETUP_CAUSE.into(),
+            },
+        })
+        .await
+        .unwrap();
+        let (_, turns) = case.view().await;
+        let stopped = turns.iter().find(|turn| turn.id == case.turn.id).unwrap();
+        assert_eq!(
+            (
+                stopped.phase,
+                stopped.reason,
+                stopped.cause.as_deref(),
+                stopped.detail.as_deref()
+            ),
+            (
+                MasterTurnPhase::Failed,
+                Some(MasterReason::ConnectionChanged),
+                Some("rcli_master_key_setup_required"),
+                Some(
+                    "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup."
+                )
+            )
+        );
+        case.close().await;
+    }
+
     #[tokio::test]
     async fn configured_receipt_cannot_be_replaced_by_a_constructed_proof() {
         let case = Fixture::new(false).await;

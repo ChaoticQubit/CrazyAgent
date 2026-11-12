@@ -1219,6 +1219,7 @@ mod tests {
         let configured = Some(MasterSessionPhase::Configured);
         let inputs = [entry(3, "Go.")];
         let refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";
+        const KEY_SETUP: &str = "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup.";
         let cases = [
             (
                 MasterReason::RuntimeUnavailable,
@@ -1237,6 +1238,12 @@ mod tests {
                 Some(refused),
                 "repository_config_refused:core_hookspath",
                 format!("Codex stopped: {refused} (repository_config_refused:core_hookspath) Press r to try again."),
+            ),
+            (
+                MasterReason::ConnectionChanged,
+                Some(KEY_SETUP),
+                "rcli_master_key_setup_required",
+                format!("{KEY_SETUP} (rcli_master_key_setup_required) Press r to try again."),
             ),
         ];
         for (reason, detail, cause, line) in cases {

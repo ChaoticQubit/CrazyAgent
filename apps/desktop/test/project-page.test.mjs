@@ -124,6 +124,8 @@ test("a stopped master turn shows a plain sentence and the cause the engine stor
     "The master stopped: its account is busy signing in or out. (native_profile_in_use)");
   assert.equal(research.turnLine(turn("failed", "connection_changed", "native_profile_connection_missing")),
     "The master stopped: its settings changed while it was open. (native_profile_connection_missing)");
+  const keySetup = "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup.";
+  assert.equal(research.turnLine(turn("failed", "connection_changed", "rcli_master_key_setup_required", keySetup)), `${keySetup} (rcli_master_key_setup_required)`);
   assert.equal(research.turnLine(turn("failed", "transient_failure", "native_profile_renewal_failed")),
     "The master stopped: the account's sign-in could not be renewed just now, so it is unavailable for a moment. Your next message uses the next account in the pool, or this one after a minute. (native_profile_renewal_failed)");
   assert.equal(research.turnLine(turn("failed", "instructions_too_large", "master_instructions_too_large")),

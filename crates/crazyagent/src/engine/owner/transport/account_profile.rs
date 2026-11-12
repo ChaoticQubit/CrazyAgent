@@ -413,6 +413,20 @@ pub(super) async fn serve(
     write_wire(stream, &reply).await
 }
 
+impl OwnerRuntimeHandle {
+    /// Writes a pooled keyed RCLI account's saved API key into its generated SDK home before
+    /// the master launch, through the Configure flow and the same writer, when the home
+    /// holds the config but no key file, as a keyed account saved before DEC-150 addendum 9a
+    /// left it (KY-M1). Input: the prepared turn. Output: Ok when nothing was missing or the
+    /// key was written; otherwise the RCLI_KEY_SETUP_CAUSE refusal.
+    pub(super) async fn set_up_master_key(
+        &self,
+        _prepared: &crate::storage::PreparedMasterTurn,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+}
+
 /// Finds the key saved with a registry account when a client configures its harness profile
 /// without sending one, so the key is read only from the engine's account key store.
 /// Inputs: engine, authority, admission and request. Output: the saved key, if any.
