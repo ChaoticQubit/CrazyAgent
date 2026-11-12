@@ -383,8 +383,8 @@
     },
     {
       "path": "scripts/rcli/host.runtime.ts",
-      "sha256": "808f5f1591230787920fe10c166e8ee7b22499d67df13994300590776247a2af",
-      "bytes": 13666
+      "sha256": "47cedde5aba9641c7c99d1cb2dbc9a3febd8918e331e9e7bed5360e3d107a39d",
+      "bytes": 14074
     },
     {
       "path": "scripts/rcli/host.codec.ts",
