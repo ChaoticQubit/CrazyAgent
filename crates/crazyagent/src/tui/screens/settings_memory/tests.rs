@@ -883,3 +883,170 @@ fn the_agent_memory_writes_row_shows_the_engine_choice_and_how_to_change_it() {
         assert!(shown.contains("w to change"), "{shown}");
     }
 }
+
+fn fieldnotes_memory(memories: Vec<SavedMemory>) -> Memory {
+    let mut screen = Memory::with(memories);
+    screen.project = Some((
+        ProjectId::new("fieldnotes").unwrap(),
+        "Fieldnotes Mobile".into(),
+    ));
+    screen
+}
+
+fn asked(ordinal: u64, text: &str) -> SavedMemory {
+    saved(
+        ordinal,
+        text,
+        only("fieldnotes"),
+        MemoryOrigin::Requested {
+            agent: "Ada (@lead-a)".into(),
+        },
+    )
+}
+
+#[test]
+fn a_project_memory_reads_only_its_project_and_y_approves_a_requested_memory_in_place() {
+    let mut ctx = memory_ctx(120, 36);
+    let before = ctx.store.memory.clone();
+    let fieldnotes = ProjectId::new("fieldnotes").unwrap();
+    let mut screen = Memory::for_project(fieldnotes.clone(), "Fieldnotes Mobile".into());
+    screen.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+    match job(&mut ctx) {
+        SettingsJob::Memories { scopes } => assert_eq!(scopes, [only("fieldnotes")]),
+        other => panic!("memories expected, got {other:?}"),
+    }
+    match job(&mut ctx) {
+        SettingsJob::Suggestions { projects } => assert_eq!(projects, [fieldnotes.clone()]),
+        other => panic!("suggestions expected, got {other:?}"),
+    }
+    assert!(
+        ctx.next_request().is_none(),
+        "the app-wide Agent memory writes setting is not read here"
+    );
+
+    let list = vec![
+        asked(9, "Ship on Fridays."),
+        saved(
+            8,
+            "Field crews sync at dusk.",
+            only("fieldnotes"),
+            MemoryOrigin::Written,
+        ),
+    ];
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(list))), &mut ctx);
+    assert_eq!(
+        ctx.store.memory, before,
+        "one project's count never stands for every memory"
+    );
+    let shown = texts(&screen.body(110, &ctx).0).join("\n");
+    assert!(shown.starts_with("Project memory"), "{shown}");
+    assert!(
+        shown.contains("1 memory waits for your approval. y approves the focused one."),
+        "{shown}"
+    );
+    assert!(shown.contains(PROJECT_SUBTITLE), "{shown}");
+    assert!(!shown.contains("Agent memory writes"), "{shown}");
+    assert!(!shown.contains("Settings, Memory"), "{shown}");
+    assert_eq!(
+        screen.crumbs(),
+        ["Fieldnotes Mobile".to_owned(), "Project memory".to_owned()]
+    );
+    assert_eq!(
+        screen.place(),
+        Some(Place::ProjectMemory {
+            id: fieldnotes.clone(),
+            name: "Fieldnotes Mobile".into(),
+        })
+    );
+    assert_eq!(screen.project(), Some(fieldnotes));
+    assert!(screen.hints(&ctx).contains(&hint("y", "Approve")));
+
+    screen.key(&Key::Char('y'), &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::ApproveMemory { memory, generation } => {
+            assert_eq!(memory.as_str(), "memory-9");
+            assert!(generation > 0);
+        }
+        other => panic!("approve expected, got {other:?}"),
+    }
+    screen.arrive(&settings(SettingsEvent::MemoryApproved(Ok(()))), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Memory approved. Agents get it from their next launch."
+    );
+    match job(&mut ctx) {
+        SettingsJob::Memories { scopes } => {
+            assert_eq!(
+                scopes,
+                [only("fieldnotes")],
+                "the reload stays in the project"
+            )
+        }
+        other => panic!("reload expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_project_memory_leaves_app_wide_keys_to_settings_and_s_opens_memory_settings() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = fieldnotes_memory(vec![asked(9, "Ship on Fridays.")]);
+    for key in ['w', 'a', 'i'] {
+        assert!(
+            matches!(screen.key(&Key::Char(key), &mut ctx), Flow::Ignored),
+            "{key}"
+        );
+        assert_eq!(ctx.queued(), 0, "{key}");
+        assert!(matches!(screen.mode, Mode::List), "{key}");
+    }
+    assert!(matches!(screen.step(true, &mut ctx), Flow::Ignored));
+    assert!(matches!(
+        screen.key(&Key::Char('s'), &mut ctx),
+        Flow::Open(Place::Settings(SettingsSection::Memory))
+    ));
+    let hints = screen.hints(&ctx);
+    assert!(hints.contains(&hint("s", "Memory settings")), "{hints:?}");
+    assert!(hints.contains(&hint("Esc", "Back")), "{hints:?}");
+    for app_wide in ["a", "w", "i"] {
+        assert!(
+            !hints.iter().any(|shown| shown.key == app_wide),
+            "{app_wide}: {hints:?}"
+        );
+    }
+
+    let mut app = Memory::with(vec![asked(9, "Ship on Fridays.")]);
+    assert!(matches!(app.key(&Key::Char('s'), &mut ctx), Flow::Ignored));
+    assert!(app.hints(&ctx).contains(&hint("w", "Agent memory writes")));
+}
+
+#[test]
+fn a_project_memory_counts_one_or_many_waiting_and_says_when_none_wait() {
+    let ctx = memory_ctx(120, 36);
+    let line = |memories: Vec<SavedMemory>| {
+        texts(&fieldnotes_memory(memories).body(110, &ctx).0)[2].clone()
+    };
+    assert_eq!(
+        line(vec![saved(
+            1,
+            "Kept.",
+            only("fieldnotes"),
+            MemoryOrigin::Written
+        )]),
+        "Nothing waits for your approval."
+    );
+    assert_eq!(
+        line(vec![
+            asked(2, "One."),
+            saved(1, "Kept.", only("fieldnotes"), MemoryOrigin::Written)
+        ]),
+        "1 memory waits for your approval. y approves the focused one."
+    );
+    assert_eq!(
+        line(vec![asked(3, "One."), asked(2, "Two.")]),
+        "2 memories wait for your approval. y approves the focused one."
+    );
+    let empty = texts(&fieldnotes_memory(Vec::new()).body(110, &ctx).0).join(" ");
+    assert!(empty.starts_with("Project memory"), "{empty}");
+    assert!(empty.contains("No memories yet."), "{empty}");
+    assert!(empty.contains("it waits here for your approval"), "{empty}");
+}
