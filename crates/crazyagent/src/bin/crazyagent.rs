@@ -551,7 +551,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         explicit.claude.is_none(),
         explicit.rcli.is_none(),
     ];
-    let search = crazyagent::harnesses::Search::from_environment();
+    let search = crazyagent::harnesses::Search::from_environment().with_engine(layout.root());
     let chosen = crazyagent::harnesses::finding::at_start(layout.root(), search.home());
     let path = std::env::var_os("PATH");
     let space = crazyagent::harnesses::finding::AgentSpace::open(layout.root());
@@ -622,7 +622,8 @@ fn positional_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             std::env::var_os("PATH").as_deref(),
             &[],
             std::env::var_os("HOME").map(PathBuf::from),
-        ),
+        )
+        .with_engine(Path::new(&args[1])),
     })
 }
 

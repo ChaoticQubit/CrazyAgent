@@ -300,9 +300,19 @@ impl Search {
 
     /// Adds the `bin` folder of the engine's own npm prefix
     /// ([`crate::setup::harness_prefix`]), where an npm harness the engine installed lives,
-    /// after the PATH and system folders, so a harness the owner already has still wins.
-    /// Input: the engine root. Output: the search.
-    pub fn with_engine(self, _engine_root: &Path) -> Self {
+    /// after the PATH and system folders and before the HOME folders, once, even before the
+    /// first install makes it; a folder others can change is left out. Input: the engine
+    /// root. Output: the search, still bounded.
+    pub fn with_engine(mut self, engine_root: &Path) -> Self {
+        let folder = crate::setup::harness_prefix(engine_root).join("bin");
+        let kept = usable_path(&folder)
+            && !self.directories.contains(&folder)
+            && self.directories.len() < SEARCH_DIRECTORIES_MAX
+            && crate::service::changeable_by_others(&folder).is_none();
+        if kept {
+            self.directories.push(folder);
+        }
+        assert!(self.directories.len() <= SEARCH_DIRECTORIES_MAX);
         self
     }
 
