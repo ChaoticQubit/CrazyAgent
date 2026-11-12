@@ -316,14 +316,27 @@ pub struct ResearchRunner {
 /// interpreter's absolute file and then the script. Input: the harness's real file. Output:
 /// the words, or the tool resolver's owner line when the interpreter is missing.
 fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
-    let words = vec![
-        program
-            .to_str()
-            .ok_or_else(|| RunError::Invalid("harness path is not text".into()))?
-            .to_owned(),
-    ];
-    assert!(!words.is_empty());
+    let words = crate::harnesses::interactive::launch_words(program)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    assert!(
+        words
+            .first()
+            .is_some_and(|word| Path::new(word).is_absolute())
+    );
     Ok(words)
+}
+
+/// Lets a research harness run in `sandbox`: its real file, the Node folders of an npm
+/// install ([`ProjectSandbox::allow_node_for`]) and the interpreters the tool resolver finds
+/// for it ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets.
+/// Inputs: the sandbox and the harness's real file. Output: the sandbox, or its refusal.
+fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandbox, RunError> {
+    let mut sandbox = sandbox.allow_exec(program)?.allow_node_for(program)?;
+    let places = crate::tools::Places::from_environment(None);
+    if let Ok(resolved) = crate::tools::resolve_entry(program, &places) {
+        sandbox = sandbox.allow_interpreters(&resolved)?;
+    }
+    Ok(sandbox)
 }
 
 /// Ends every research pane an earlier engine left in `host`, with every process its harness
@@ -1042,7 +1055,7 @@ impl ResearchRunner {
         for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
-        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
+        sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
@@ -1696,7 +1709,7 @@ impl ResearchRunner {
         if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
-        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
+        sandbox = allow_harness(sandbox, &program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)

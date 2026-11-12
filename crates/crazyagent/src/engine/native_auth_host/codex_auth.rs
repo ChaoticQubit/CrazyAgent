@@ -43,7 +43,7 @@ fn command(executable: &Path, home: &Path) -> Result<Command, EngineError> {
     if !executable.is_absolute() || !home.is_absolute() {
         return Err(failure("native_auth_codex_launch_invalid"));
     }
-    let mut command = Command::new(executable);
+    let mut command = super::sign_in_command(executable)?;
     command
         .args([
             "-c",
@@ -56,7 +56,7 @@ fn command(executable: &Path, home: &Path) -> Result<Command, EngineError> {
         .env("HOME", home)
         .env("CODEX_HOME", home)
         .env("TMPDIR", home)
-        .env("PATH", super::sign_in_path(executable))
+        .env("PATH", super::SIGN_IN_PATH)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(home)
@@ -65,7 +65,7 @@ fn command(executable: &Path, home: &Path) -> Result<Command, EngineError> {
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home));
-    assert_eq!(command.get_program(), executable.as_os_str());
+    assert!(Path::new(command.get_program()).is_absolute());
     Ok(command)
 }
 
