@@ -642,7 +642,7 @@ fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_s
         "{path}"
     );
     let granted = Toolchains::grant(&homes, &[]);
-    assert_eq!(granted.roots(), [xcode.clone()]);
+    assert_eq!(granted.roots(), std::slice::from_ref(&xcode));
     fs::write(developer.join("usr").join("bin").join("cc"), "cc fixture\n").unwrap();
     let env = agent_env(&home, &homes);
     assert!(
