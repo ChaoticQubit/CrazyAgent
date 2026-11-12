@@ -155,6 +155,7 @@ pub(in crate::tui) enum SettingsJob {
     },
     Ranking,
     HarnessSettings(Box<super::harness_settings::HarnessSettingsQuery>),
+    ModelChoice(Box<super::model_choice::ModelChoiceQuery>),
     Checks(Box<super::checks::ChecksJob>),
     Tracker(Box<super::tracker::TrackerJob>),
 }
@@ -273,6 +274,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::SetSchedule { .. } => "SetSchedule",
             Self::Ranking => "Ranking",
             Self::HarnessSettings(_) => "HarnessSettings",
+            Self::ModelChoice(_) => "ModelChoice",
             Self::Checks(job) => super::checks::job_name(job),
             Self::Tracker(job) => super::tracker::job_name(job),
         })
@@ -410,6 +412,7 @@ pub(in crate::tui) enum SettingsEvent {
     ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
     HarnessSettings(Box<super::harness_settings::HarnessSettingsEvent>),
+    ModelChoice(Box<super::model_choice::ModelChoiceEvent>),
     Checks(Box<super::checks::ChecksEvent>),
     Tracker(Box<super::tracker::TrackerEvent>),
 }
@@ -493,6 +496,9 @@ impl SettingsEvent {
             SettingsJob::Ranking => Self::Ranking(Err(problem)),
             SettingsJob::HarnessSettings(query) => Self::HarnessSettings(Box::new(
                 super::harness_settings::HarnessSettingsEvent::unavailable((**query).clone()),
+            )),
+            SettingsJob::ModelChoice(query) => Self::ModelChoice(Box::new(
+                super::model_choice::ModelChoiceEvent::unavailable((**query).clone()),
             )),
             SettingsJob::Checks(job) => {
                 Self::Checks(Box::new(super::checks::ChecksEvent::unavailable(job)))
@@ -935,6 +941,9 @@ impl NativeOwner {
             }
             SettingsJob::HarnessSettings(query) => {
                 SettingsEvent::HarnessSettings(Box::new(self.harness_settings(*query, lost).await))
+            }
+            SettingsJob::ModelChoice(query) => {
+                SettingsEvent::ModelChoice(Box::new(self.model_choice(*query, lost).await))
             }
             SettingsJob::AgentScope { set } => {
                 SettingsEvent::AgentScope(self.agent_scope(set, lost).await)

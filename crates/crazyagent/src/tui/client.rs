@@ -30,6 +30,7 @@ pub(super) mod cleanup;
 pub(super) mod conflict;
 pub(super) mod editor;
 pub(super) mod harness_settings;
+pub(super) mod model_choice;
 pub(super) mod ide;
 pub(super) mod intake;
 pub(super) mod learning;
