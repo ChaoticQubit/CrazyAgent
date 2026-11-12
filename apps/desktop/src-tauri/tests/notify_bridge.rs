@@ -3,10 +3,10 @@
 mod engine_support;
 
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
-use crazyagent::protocol::{ProjectId, ProjectSpec};
-use crazyagent::questions::{Ask, EngineSource, QuestionStatus, Settlement};
-use crazyagent_desktop::bridge::notify::notice;
+use crazyagent::notifications::{
+    Banners, NoticeAction, NoticeFilter, NoticeKind, NoticeQuery, NoticeReport, NoticeTarget,
+};
+use crazyagent_desktop::bridge::notify::{bannered, notice, one_item};
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
@@ -14,7 +14,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const COMMANDS: [&str; 3] = [
-    "desktop_notify_question",
+    "desktop_notify_notice",
     "desktop_notification_target",
     "desktop_system_notifications",
 ];
@@ -80,111 +80,97 @@ fn parameters(command: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_window_names_only_the_project_and_the_question() {
+fn the_window_names_only_the_store_item() {
     assert_eq!(
-        parameters("desktop_notify_question"),
+        parameters("desktop_notify_notice"),
         [
             "webview: Webview,",
             "state: State<'_, NativeState>,",
             "notices: State<'_, Notices>,",
-            "project_id: String,",
-            "question_id: u64,"
+            "id: i64,"
         ]
     );
+}
+
+/// Sends one change to the store and expects it applied. Inputs: the bridge, the change and
+/// a fresh draft generation. Output: none, or the bridge failure.
+async fn applied(
+    bridge: &mut NativeBridge,
+    action: NoticeAction,
+    generation: u64,
+) -> Result<(), Box<dyn Error>> {
+    let receipt = bridge.notification_action(action, generation).await?;
+    assert!(
+        matches!(receipt.outcome, ActionOutcome::Applied),
+        "{receipt:?}"
+    );
+    Ok(())
 }
 
 async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     assert!(bridge.connect().await?.connected);
-    let _home = engine_support::pick_home(&mut bridge, 1).await;
-    let receipt = bridge
-        .setup_project(
-            ProjectSpec {
-                name: "Recipe box".into(),
-                repositories: vec![],
-            },
-            ProjectSetup {
-                about: "Keeps family recipes.".into(),
-                tech_stack: vec!["rust".into()],
-                platforms: vec![Platform::Website],
-                research: vec![ResearchKind::MarketResearch],
-                pool: None,
-                team: None,
-                documents: vec![],
-            },
-            2,
-        )
-        .await?;
-    assert!(
-        matches!(receipt.outcome, ActionOutcome::Applied),
-        "{receipt:?}"
-    );
-    let id = receipt.intent.project_id.clone().unwrap();
-    let project = ProjectId::new(id.clone())?;
+    let report = NoticeReport::AppUpdateReady {
+        version: "9.1.0".into(),
+    };
+    applied(&mut bridge, NoticeAction::Report { report }, 1).await?;
+    let newest = NoticeQuery {
+        filter: NoticeFilter::All,
+        project_id: None,
+        kind: None,
+        fold: false,
+        before: None,
+        after: None,
+        limit: 1,
+    };
+    let id = bridge.notifications(newest).await?.newest;
+    assert!(id >= 1);
 
-    let db = crazyagent::questions::open(root)?;
-    let asked = crazyagent::questions::raise(
-        &db,
-        &project,
-        &EngineSource::Mapping,
-        &Ask {
-            question: "Which database should the app use?\nIt stores recipes.".into(),
-            kind: crazyagent::questions::QuestionKind::Single,
-            options: vec!["Postgres".into(), "SQLite".into()],
-            recommended: Some("SQLite".into()),
-            context: Some("It runs on one laptop.".into()),
+    let item = bannered(bridge.notifications(one_item(id)?).await?, id)
+        .expect("a new unread App update ready item the engine marks for a banner");
+    assert_eq!(item.kind, NoticeKind::AppUpdateReady);
+    assert_eq!(item.target, NoticeTarget::Updates);
+    let shown = notice(None, &item);
+    assert_eq!(shown.title, "App update ready");
+    assert_eq!(
+        shown.body, "CrazyAgent 9.1.0 is ready to install.",
+        "the text comes from the engine's item"
+    );
+    assert_eq!(
+        bannered(bridge.notifications(one_item(id + 1)?).await?, id + 1),
+        None,
+        "an id the store does not hold is never notified"
+    );
+
+    let mut settings = bridge.notification_settings().await?;
+    settings.banners = Banners::Off;
+    applied(
+        &mut bridge,
+        NoticeAction::SaveSettings {
+            settings: settings.clone(),
         },
-    )?;
-
-    let record = bridge.notified_question(id.clone(), asked)?.await?;
-    assert_eq!(record.id, asked);
-    assert_eq!(record.project, project);
-    assert_eq!(record.status, QuestionStatus::Pending);
+        2,
+    )
+    .await?;
     assert_eq!(
-        record.question,
-        "Which database should the app use?\nIt stores recipes."
+        bannered(bridge.notifications(one_item(id)?).await?, id),
+        None,
+        "macOS notifications Off sends none, whatever the window asks"
     );
-    let shown = notice(Some("Recipe box"), &record);
-    assert_eq!(shown.title, "Recipe box needs your answer");
+    settings.banners = Banners::All;
+    applied(&mut bridge, NoticeAction::SaveSettings { settings }, 3).await?;
+    assert!(bannered(bridge.notifications(one_item(id)?).await?, id).is_some());
+    applied(&mut bridge, NoticeAction::Read { ids: vec![id] }, 4).await?;
     assert_eq!(
-        shown.body, "Project mapping: Which database should the app use?",
-        "the text comes from the engine's record, first line only"
-    );
-    assert_eq!(
-        bridge
-            .notified_question(id.clone(), u64::MAX)?
-            .await
-            .unwrap_err()
-            .code,
-        "questions_not_found"
-    );
-    assert!(
-        bridge
-            .notified_question("another-project".into(), asked)?
-            .await
-            .is_err(),
-        "another project's notification never reads this question"
-    );
-
-    assert_eq!(
-        crazyagent::questions::dismiss(&db, asked, record.version)?,
-        Settlement::Settled
-    );
-    drop(db);
-    assert_eq!(
-        bridge
-            .notified_question(id.clone(), asked)?
-            .await
-            .unwrap_err()
-            .code,
-        "questions_not_found",
-        "a settled question is never notified"
+        bannered(bridge.notifications(one_item(id)?).await?, id),
+        None,
+        "an item already read is never notified"
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn a_notification_reads_its_pending_question_from_the_real_engine() {
+async fn a_notification_reads_its_store_item_from_the_real_engine() {
     let root = tempfile::Builder::new()
         .prefix("ca-desk-n-")
         .tempdir_in("/tmp")
