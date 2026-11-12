@@ -965,7 +965,7 @@ impl ResearchRunner {
         for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
-        sandbox = sandbox.allow_exec(&program)?;
+        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
@@ -1617,7 +1617,7 @@ impl ResearchRunner {
         if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
-        sandbox = sandbox.allow_exec(&program)?;
+        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)

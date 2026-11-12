@@ -7964,6 +7964,7 @@ impl TeamRuntime {
         sandbox = sandbox
             .allow_read(&install)
             .and_then(|sandbox| sandbox.allow_exec(&program))
+            .and_then(|sandbox| sandbox.allow_node_for(&program))
             .map_err(sandboxed)?;
         if let Some(engine) = &self.delegation_tool {
             let engine = engine

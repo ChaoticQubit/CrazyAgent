@@ -1014,6 +1014,93 @@ fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_
 }
 
 #[test]
+fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
+    let case = case();
+    let prefix = case
+        .tools
+        .join("nvm")
+        .join("versions")
+        .join("node")
+        .join("v22.11.0");
+    let node = prefix.join("bin").join("node");
+    write(&node, "#!/bin/sh\necho \"node beside codex ran $1\"\n");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    write(&script, "#!/usr/bin/env node\n");
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let path_of = |command: &std::process::Command| -> String {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let bin = prefix.join("bin");
+    let bin = bin.to_str().unwrap();
+    let plain = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&node)
+    .unwrap();
+    let profile = case.profiles.join("plain.sb");
+    plain.install(&profile).unwrap();
+    assert!(!path_of(&plain.command(&profile, Path::new("/bin/sh"))).contains(bin));
+
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(script.parent().unwrap())
+    .unwrap()
+    .allow_exec(&script)
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let profile = case.profiles.join("node.sb");
+    sandbox.install(&profile).unwrap();
+    let mut harness = std::process::Command::new(&script);
+    harness.current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    let path = path_of(&wrapped);
+    let folders: Vec<&str> = path.split(':').collect();
+    let node_at = folders.iter().position(|folder| *folder == bin).unwrap();
+    assert!(
+        node_at
+            < folders
+                .iter()
+                .position(|folder| *folder == "/usr/bin")
+                .unwrap(),
+        "{path}"
+    );
+    assert_eq!(
+        path_of(&sandbox.command(&profile, Path::new("/bin/sh")))
+            .split(':')
+            .next(),
+        Some(bin)
+    );
+    let output = wrapped.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        format!("node beside codex ran {}", script.display())
+    );
+}
+
+#[test]
 fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() {
     let case = case();
     let tmp = toolchains::make_tmp(&case.home).unwrap();

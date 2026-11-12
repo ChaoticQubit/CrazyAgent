@@ -831,6 +831,7 @@ pub struct ProjectSandbox {
     lead_branch: Option<String>,
     adds_worktrees: bool,
     agent_files: Option<policy::AgentFilesRule>,
+    node_bin: Option<PathBuf>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -910,6 +911,7 @@ impl ProjectSandbox {
             lead_branch: None,
             adds_worktrees: false,
             agent_files: None,
+            node_bin: None,
         })
     }
 
@@ -1274,6 +1276,32 @@ impl ProjectSandbox {
         }
         granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets a Node script harness find the `node` beside it, as its sign-in does: for a program
+    /// under an npm prefix ([`crate::harnesses::node_prefix`]) the prefix becomes readable when
+    /// no read root covers its `bin` and `lib` yet, and its `bin` goes first on PATH after the
+    /// agent's own tools. Any other program leaves the sandbox as it is. Input: the canonical
+    /// program. Output: the sandbox, or a refusal of the prefix as a read root.
+    pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
+        let Some(prefix) = crate::harnesses::node_prefix(program) else {
+            return Ok(self);
+        };
+        let covered = [prefix.join("bin"), prefix.join("lib")]
+            .iter()
+            .all(|folder| {
+                SYSTEM_READ_ROOTS
+                    .iter()
+                    .map(Path::new)
+                    .chain(self.read_roots.iter().map(PathBuf::as_path))
+                    .any(|root| folder.starts_with(root))
+            });
+        if !covered {
+            self = self.allow_read(&canonical(&prefix)?)?;
+        }
+        self.node_bin = Some(prefix.join("bin"));
+        assert!(self.node_bin.as_deref().is_some_and(Path::is_absolute));
         Ok(self)
     }
 
@@ -2501,14 +2529,18 @@ impl ProjectSandbox {
     }
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
-    /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies, the
-    /// C locale and [`toolchains::agent_env`]. A harness's PATH also starts with the agent's
-    /// own `getconf` and `git` ([`toolchains::with_agent_git`]); an engine command's never
-    /// does. Takes whether the command is a harness. Returns the variables.
+    /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies after
+    /// any [`Self::allow_node_for`] folder, the C locale and [`toolchains::agent_env`]. Only a
+    /// harness's PATH starts with the agent's own `getconf` and `git`
+    /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
         let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = match self.node_bin.as_deref().and_then(Path::to_str) {
+            Some(bin) => format!("{bin}:{path}"),
+            None => path,
+        };
         let path = if harness {
             toolchains::with_agent_git(&self.agent_home, path)
         } else {

@@ -226,3 +226,21 @@ fn where_we_looked_names_home_as_tilde_and_stays_bounded() {
     );
     assert!(finding::looked(&search, "claude").is_empty());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_node_folder_of_a_node_script_harness_is_its_npm_prefix_bin_holding_node() {
+    let case = Case::new();
+    let script = case.file(
+        "nvm/versions/node/v22.11.0/lib/node_modules/@openai/codex/bin/codex.js",
+        0o755,
+    );
+    let prefix = case.root.join("nvm/versions/node/v22.11.0");
+    assert_eq!(super::node_prefix(&script), None);
+    case.file("nvm/versions/node/v22.11.0/bin/node", 0o755);
+    assert_eq!(super::node_prefix(&script), Some(prefix.clone()));
+    let native = case.file("tools/codex", 0o755);
+    assert_eq!(super::node_prefix(&native), None);
+    std::fs::set_permissions(prefix.join("bin"), std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(super::node_prefix(&script), None);
+}

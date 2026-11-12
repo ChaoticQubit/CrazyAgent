@@ -58,6 +58,8 @@ const NVM_ENTRIES_MAX: usize = 64;
 const NVM_VERSIONS_MAX: usize = 8;
 const NVM_ALIAS_BYTES_MAX: u64 = 64;
 const HOME_PLACES_MAX: usize = HOME_DIRECTORIES.len() + NVM_VERSIONS_MAX;
+const NODE_PREFIX_DEPTH_MAX: usize = 32;
+const NODE_PREFIX_BYTES_MAX: usize = 1024;
 const LOCATIONS_MAX: usize = 8;
 
 /// Names a kind of account a harness can run on.
@@ -381,6 +383,27 @@ fn below(base: &Path, relative: &str) -> PathBuf {
     relative
         .split('/')
         .fold(base.to_path_buf(), |at, part| at.join(part))
+}
+
+/// The npm prefix a Node script harness sits in, so a sign-in or an agent launch can put the
+/// `node` beside it on PATH: for a real file under `<prefix>/lib/node_modules/`, the prefix
+/// whose `bin` holds `node`, when that `bin` is an absolute folder of at most 1024 bytes with
+/// no `:` that only the owner and the system can change. Input: the harness's real file.
+/// Output: the prefix, or none.
+pub fn node_prefix(program: &Path) -> Option<PathBuf> {
+    let prefix = program
+        .ancestors()
+        .take(NODE_PREFIX_DEPTH_MAX)
+        .find(|folder| folder.ends_with("lib/node_modules"))
+        .and_then(|modules| modules.parent()?.parent())?;
+    let bin = prefix.join("bin");
+    let usable = bin.is_absolute()
+        && bin
+            .to_str()
+            .is_some_and(|text| !text.contains(':') && text.len() <= NODE_PREFIX_BYTES_MAX)
+        && bin.join("node").is_file()
+        && crate::service::changeable_by_others(&bin).is_none();
+    usable.then(|| prefix.to_path_buf())
 }
 
 fn usable_path(path: &Path) -> bool {

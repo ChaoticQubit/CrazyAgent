@@ -9,31 +9,14 @@ use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 const SIGN_IN_PATH: &str = "/usr/bin:/bin";
-const NODE_PREFIX_DEPTH_MAX: usize = 32;
-const NODE_PREFIX_BYTES_MAX: usize = 1024;
 
-/// The PATH a sign-in child runs with: `/usr/bin:/bin`, after the `bin` folder of the npm
-/// prefix a Node script harness sits in (`<prefix>/lib/node_modules/...`, with `node` in
-/// `<prefix>/bin`) when that folder holds `node` and only the owner and the system can
-/// change it. Input: the pinned real file. Output: the PATH value.
-fn sign_in_path(executable: &Path) -> std::ffi::OsString {
-    let bin = executable
-        .ancestors()
-        .take(NODE_PREFIX_DEPTH_MAX)
-        .find(|folder| folder.ends_with("lib/node_modules"))
-        .and_then(|modules| modules.parent()?.parent())
-        .map(|prefix| prefix.join("bin"));
-    let usable = bin.as_ref().is_some_and(|bin| {
-        bin.is_absolute()
-            && bin
-                .to_str()
-                .is_some_and(|text| !text.contains(':') && text.len() <= NODE_PREFIX_BYTES_MAX)
-            && bin.join("node").is_file()
-            && crate::service::changeable_by_others(bin).is_none()
-    });
-    match bin.filter(|_| usable) {
-        Some(bin) => {
-            let mut path = bin.into_os_string();
+/// The PATH a sign-in or token renewal child runs with: `/usr/bin:/bin`, after the `bin`
+/// folder of the npm prefix a Node script harness sits in ([`crate::harnesses::node_prefix`]),
+/// the same folder an agent launch puts first. Input: the real file. Output: the PATH value.
+pub(crate) fn sign_in_path(executable: &Path) -> std::ffi::OsString {
+    match crate::harnesses::node_prefix(executable) {
+        Some(prefix) => {
+            let mut path = prefix.join("bin").into_os_string();
             path.push(":");
             path.push(SIGN_IN_PATH);
             path

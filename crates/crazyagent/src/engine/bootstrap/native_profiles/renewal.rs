@@ -208,12 +208,13 @@ impl Renewal {
 fn managed_command(executable: &Path, managed: &Path) -> Result<Command, EngineError> {
     let program = crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
         .map_err(crate::engine::io_error)?;
+    let path = crate::engine::native_auth_host::sign_in_path(&program);
     let mut command = Command::new(program);
     command
         .env_clear()
         .env("HOME", managed)
         .env("TMPDIR", managed)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", path)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(managed)
