@@ -3480,8 +3480,9 @@ impl TeamRuntime {
     /// restarting, as after the live switch goes off, so the project never runs two masters
     /// at once, nor to a live master finishing its turn under Live terminal Off, which would
     /// drop it. A master that keeps running gets the owner's instruction edit at the start of
-    /// its next message under the Next task choice (DEC-111 QR1), once. Takes the setup, live
-    /// access and paused accounts.
+    /// its next message under the Next task choice (DEC-111 QR1), once. The master's waiting
+    /// team messages, such as overlap notes that start no turn alone, ride with the message
+    /// when they fit the prompt (F31). Takes the setup, live access and paused accounts.
     fn feed_master(
         &mut self,
         stored: &StoredSetup,
@@ -3627,6 +3628,12 @@ impl TeamRuntime {
             ));
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        let (letters, mut riding) = crate::coord::delivery::next_turn(&self.connection, id)?;
+        if prompt.len() + letters.len() <= self.turn_prompt_max(id) {
+            prompt.push_str(&letters);
+        } else {
+            riding.clear();
+        }
         if author == "owner"
             && owner_typed(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
@@ -3682,6 +3689,7 @@ impl TeamRuntime {
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
         }
+        crate::coord::delivery::delivered(&self.connection, &riding, now_ms())?;
         self.mark_agent(id, AgentStatus::Working, None)
     }
 
@@ -4692,7 +4700,8 @@ impl TeamRuntime {
     /// delivered (DEC-111 QR1). A message the owner typed in the team chat, never a relayed
     /// answer, ends with the master's Task-start reminder (F30)
     /// while the setting is On and it still fits the input limit beside the message and the
-    /// edit, which it never cuts (DEC-116, OP4-L1). While the master's app
+    /// edit, which it never cuts (DEC-116, OP4-L1). The master's waiting team messages ride
+    /// with the typed message when the whole still types (F31). While the master's app
     /// does not read keys the message waits, and past `READY_WAIT` one note and the problem
     /// line say so (F2); a typed message takes that line down, also one an earlier engine
     /// stored. Takes the project. Returns any SQLite failure; a message that cannot be typed
@@ -4745,6 +4754,12 @@ impl TeamRuntime {
             Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
         };
+        let (letters, mut riding) = crate::coord::delivery::next_turn(&self.connection, id)?;
+        if !letters.is_empty() && super::master::typable(&format!("{typed}{letters}")) {
+            typed.push_str(&letters);
+        } else {
+            riding.clear();
+        }
         if author == "owner"
             && owner_typed(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
@@ -4786,6 +4801,7 @@ impl TeamRuntime {
                 "A team message could not be typed into the master because it is empty or not plain text.",
             );
         }
+        crate::coord::delivery::delivered(&self.connection, &riding, now_ms())?;
         let fed = if author == "owner" {
             crate::master_sessions::Fed::Owner(text)
         } else {

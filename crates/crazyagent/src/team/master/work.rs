@@ -159,7 +159,11 @@ pub(super) fn start_work(
                 work: Some(overlap.theirs.work),
                 reply_to: None,
                 body: bound_text(&note, coord::BODY_BYTES_MAX),
-                idempotency_key: None,
+                idempotency_key: Some(format!(
+                    "{}{work}-{}",
+                    coord::delivery::OVERLAP_KEY,
+                    overlap.theirs.agent
+                )),
             },
             now,
         ))?;

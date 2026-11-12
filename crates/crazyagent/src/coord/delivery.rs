@@ -34,6 +34,12 @@ pub const EVENTS_KEY: &str = "events-";
 /// The idempotency key prefix of the engine's note of what the owner did to a lead's
 /// workers; [`waking`] never counts it, and alone it starts no turn of the lead's own.
 pub const NOTICES_KEY: &str = "owner-notices-";
+/// The idempotency key prefix of the engine's note that another agent's new work overlaps
+/// a claim (F31); alone such notes never start a master turn, they ride with its next one.
+pub const OVERLAP_KEY: &str = "overlap-";
+/// The most text one engine message to a master carries: its waiting messages and the due
+/// team events, composed into one notice for one turn (F31).
+const MASTER_NOTICE_BYTES_MAX: usize = crate::team::MESSAGE_BYTES_MAX * 2 - 64;
 /// The SQL test of a `coord_messages` row `m` worth a turn of its own, as [`waking`] counts
 /// it, with `?2` bound to `RESULTS_KEY` and `?3` to `EVENTS_KEY`.
 const WAKING_SQL: &str = "(m.kind IN ('prompt','question','reply') OR (m.from_kind='engine'
@@ -46,6 +52,8 @@ const RETRIES_KEPT_MAX: usize = 1024;
 const _: () = assert!(HEAD_BYTES_MAX + CUT.len() + 512 < PROMPT_BYTES_MAX);
 const _: () = assert!(NEXT_TURN_BYTES_MAX >= super::BODY_BYTES_MAX + HEAD_BYTES_MAX);
 const _: () = assert!(SENDER_BYTES_MAX + 100 < HEAD_BYTES_MAX);
+const _: () = assert!(MASTER_NOTICE_BYTES_MAX + 8 <= crate::team::master::INPUT_TEXT_MAX);
+const _: () = assert!(crate::team::MESSAGE_BYTES_MAX < MASTER_NOTICE_BYTES_MAX);
 
 /// What a tick needs besides the database: the terminal host team agents run in, none
 /// when they run headless; the owner typing signal; the team state folder that holds
@@ -226,7 +234,7 @@ fn deliver_to(
         return Ok(true);
     }
     if role == "master" {
-        return to_master(db, project, &messages, now);
+        return to_master(db, project, agent, &messages, now);
     }
     let kind = HarnessKind::from_harness(&harness);
     let delivery = match kind {
@@ -382,15 +390,25 @@ pub fn no_channel(
 
 /// Hands a project master its waiting messages through the engine's own master input
 /// (`feed_live` or the next master turn), which already waits for the owner, as one engine
-/// message once none of the master's other messages wait; the engine message and the
-/// Delivered receipts commit together, so a failure leaves both undone. Takes the database,
-/// the project, the messages and the time. Returns true once they were handed over.
+/// message once none of the master's other messages wait, with the team events due then,
+/// so one notice takes one master turn (F31); the engine message, the Delivered receipts
+/// and the events' wake commit together, so a failure leaves all undone. The engine's
+/// overlap notes alone (`OVERLAP_KEY`) start no turn: they stay Sent and ride with the
+/// master's next turn, unless `PENDING_MAX` messages wait. Takes the database, the project,
+/// the master, its waiting messages, at least one, and the time. Returns true once they
+/// were handed over or wait for that next turn.
 fn to_master(
     db: &Connection,
     project: &ProjectId,
+    master: AgentId,
     messages: &[Message],
     now: i64,
 ) -> Result<bool, EngineError> {
+    assert!(!messages.is_empty());
+    let last = messages[messages.len() - 1].id;
+    if messages.len() < PENDING_MAX && first_other(db, master, last, OVERLAP_KEY)?.is_none() {
+        return Ok(true);
+    }
     let (text, carried) = lines(db, messages, crate::team::MESSAGE_BYTES_MAX)?;
     let tx =
         rusqlite::Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(state)?;
@@ -404,6 +422,13 @@ fn to_master(
     if waiting > 0 {
         return Ok(false);
     }
+    let wake = crate::team::events::due(&tx, project, now)?
+        .filter(|wake| text.len() + 1 + wake.text.len() <= MASTER_NOTICE_BYTES_MAX);
+    let text = match &wake {
+        Some(wake) => format!("{text}\n{}", wake.text),
+        None => text,
+    };
+    assert!(text.len() <= MASTER_NOTICE_BYTES_MAX);
     let appended = crate::team::append_message(
         &tx,
         project,
@@ -416,6 +441,9 @@ fn to_master(
         return Ok(false);
     }
     mark_all(&tx, &carried, Receipt::Delivered, now)?;
+    if let Some(wake) = &wake {
+        crate::team::events::woke(&tx, wake, false, now)?;
+    }
     tx.commit().map_err(state)?;
     Ok(carried.len() == messages.len())
 }
@@ -454,22 +482,26 @@ fn notices_alone(
     if messages.len() >= PENDING_MAX {
         return Ok(false);
     }
-    Ok(first_other(db, agent, last.id)?.is_none())
+    Ok(first_other(db, agent, last.id, NOTICES_KEY)?.is_none())
 }
 
-/// Finds an agent's oldest Sent message up to an id that is not an owner notice
-/// (`NOTICES_KEY` engine note; a note with no key is never one). Takes the database, the
-/// agent and the last id. Returns its id, none when every such message is a notice.
+/// Finds an agent's oldest Sent message up to an id that is not a quiet engine note: one
+/// whose key starts with `quiet`, the owner's notices (`NOTICES_KEY`) for a sub-agent or the
+/// overlap notes (`OVERLAP_KEY`) for a master; a note with no key is never quiet. Takes the
+/// database, the agent, the last id and the key prefix. Returns its id, none when every
+/// such message is quiet.
 fn first_other(
     db: &Connection,
     agent: AgentId,
     last: MessageId,
+    quiet: &str,
 ) -> Result<Option<MessageId>, EngineError> {
+    assert!(quiet == NOTICES_KEY || quiet == OVERLAP_KEY);
     db.query_row(
         "SELECT MIN(id) FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
          AND receipt='sent' AND id<=?2 AND NOT (from_kind='engine' AND kind='note'
          AND ifnull(substr(idem_key,1,length(?3))=?3,0))",
-        params![agent, last, NOTICES_KEY],
+        params![agent, last, quiet],
         |row| row.get(0),
     )
     .map_err(state)
@@ -489,7 +521,7 @@ fn batch(
     if carried.len() == ready.len() {
         return Ok((text, carried));
     }
-    let Some(other) = first_other(db, agent, ready[ready.len() - 1].id)? else {
+    let Some(other) = first_other(db, agent, ready[ready.len() - 1].id, NOTICES_KEY)? else {
         return Ok((text, carried));
     };
     match ready.iter().position(|message| message.id == other) {

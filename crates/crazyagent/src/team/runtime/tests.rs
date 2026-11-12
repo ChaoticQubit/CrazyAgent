@@ -11669,6 +11669,72 @@ fn a_tools_on_master_s_turn_for_an_owner_answer_carries_no_task_start_reminder()
     );
 }
 
+/// F31: an overlap note the engine sends the master starts no turn of its own; it rides with
+/// the master's next turn, here the owner's next message, and is marked delivered with it.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_overlap_note_rides_with_the_master_s_next_owner_message_turn() {
+    const NOTE: &str =
+        "Grace started work #9 claiming docs/a.md, which overlaps your claim docs/ on work #4.";
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    crate::coord::ensure(&fixture.connection).unwrap();
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        master_replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    let note = crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: fixture.setup.project_id.clone(),
+            from: crate::coord::Party::Engine,
+            to: crate::coord::Party::Agent(master),
+            kind: crate::coord::MessageKind::Note,
+            question: None,
+            work: Some(4),
+            reply_to: None,
+            body: NOTE.into(),
+            idempotency_key: Some(format!("{}9-{master}", crate::coord::delivery::OVERLAP_KEY)),
+        },
+        now_ms(),
+    )
+    .unwrap();
+    let receipt = |f: &Fixture| -> String {
+        f.connection
+            .query_row(
+                "SELECT receipt FROM coord_messages WHERE id=?1",
+                [note],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let first = pasted(&fixture, master);
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        master_replies(f) == 2
+    });
+    let text = pasted(&fixture, master);
+    let delivered = receipt(&fixture);
+    let engine_messages = fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.author == MessageAuthor::Engine && message.text.contains(NOTE))
+        .count();
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(second.contains("Plan the title"), "{second}");
+    assert!(
+        second.contains(NOTE),
+        "the note rides with the turn: {second}"
+    );
+    assert_eq!(delivered, "delivered");
+    assert_eq!(engine_messages, 0, "the note took no turn of its own");
+}
+
 /// F30: while the Task-start reminder is On, the owner's answer to a question that the engine
 /// types into a tools-on live master's pane carries no reminder, although the message the
 /// owner typed before it carried one.
