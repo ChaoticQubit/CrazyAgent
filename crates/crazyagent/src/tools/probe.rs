@@ -61,7 +61,7 @@ static VERSIONS: Mutex<BTreeMap<PathBuf, Known>> = Mutex::new(BTreeMap::new());
 /// cached, empty until the first run finishes, and starts a background run when one is due
 /// ([`Probes::start`]). Output: the absolute folders.
 pub fn folders() -> Vec<PathBuf> {
-    refreshed(false)
+    refreshed(|probes, now| probes.start(now, false))
 }
 
 /// A program's version as it reports it, read in the background with a time limit and
@@ -96,15 +96,23 @@ pub fn version(program: &Path) -> Option<String> {
 /// background once the last run waited out its backoff ([`Probes::start`]); a run already
 /// going is enough. Never blocks.
 pub fn missed() {
-    refreshed(true);
+    refreshed(|probes, now| probes.start(now, true));
 }
 
-/// Starts a background folder run when one is due, recording a run that could not start as
-/// failed so it is retried. Input: whether a resolve missed. Output: the cached folders.
-fn refreshed(missed: bool) -> Vec<PathBuf> {
+/// Starts a folder run in the background at once for a user's explicit retry (the live
+/// master's Try again or Start again, setup's Recheck or retry), whatever the backoff; a run
+/// already going is enough. Automatic resolves call [`missed`] instead. Never blocks.
+pub(crate) fn refresh_now() {
+    refreshed(|probes, _| probes.start_now());
+}
+
+/// Starts a background folder run when the given rule marks one as going, recording a run
+/// that could not start as failed so it is retried. Input: the rule, given the cache and
+/// now. Output: the cached folders.
+fn refreshed(due: impl FnOnce(&mut Probes, Instant) -> bool) -> Vec<PathBuf> {
     let now = Instant::now();
     let mut probes = lock(&FOLDERS);
-    if probes.start(now, missed) && !start_folder_probe() {
+    if due(&mut *probes, now) && !start_folder_probe() {
         probes.finish(Vec::new(), false, now);
     }
     probes.found.clone()
@@ -152,6 +160,14 @@ impl Probes {
         if due {
             self.running = true;
         }
+        due
+    }
+
+    /// Marks a run as going at once, whatever the backoff, unless one is going, for a user's
+    /// explicit retry. Output: whether the caller starts the run.
+    pub(crate) fn start_now(&mut self) -> bool {
+        let due = !self.running;
+        self.running = true;
         due
     }
 
