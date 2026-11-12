@@ -4521,7 +4521,8 @@ fn p_then_a_number_stops_that_running_teammate_of_the_selected_harness() {
 }
 
 /// The team view's help (S3, feat/harness-comms b07fcf11) names every key once, each with
-/// its own label, Stop teammate on p beside Stop agent on z.
+/// its own label, Stop teammate on p beside Stop agent on z, and Master run time on N so
+/// that D stays End a turn after done.
 #[test]
 fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
     let help = loaded().help();
@@ -4541,6 +4542,9 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("m", "Master's branch"),
         ("g", "Master accepts change sets"),
         ("T", "Token budget"),
+        ("U", "Sub-agent rounds"),
+        ("N", "Master run time"),
+        ("D", "End a turn after done"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
     }
@@ -4688,7 +4692,7 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
     }
 }
 
-/// Sub-agent rounds per message (U) and Master run time (D) each step through every choice
+/// Sub-agent rounds per message (U) and Master run time (N) each step through every choice
 /// and back (F09, F01): each key sends its change, the engine's answer says the new choice
 /// and the team rows show what the engine stored.
 #[test]
@@ -4733,7 +4737,7 @@ fn master_rounds_and_run_time_step_through_every_choice() {
         (Some(259_200), "3 days"),
         (Some(604_800), "7 days"),
     ] {
-        let reply = view.key(press(KeyCode::Char('D')));
+        let reply = view.key(press(KeyCode::Char('N')));
         assert_eq!(
             reply,
             TeamReply::Change(TeamAction::MasterRunTime {

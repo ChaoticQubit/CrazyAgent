@@ -737,7 +737,7 @@ impl TeamView {
             KeyCode::Char('v') => self.cap(Cap::Harnesses),
             KeyCode::Char('u') => self.cap(Cap::Teammates),
             KeyCode::Char('U') => self.master_rounds(),
-            KeyCode::Char('D') => self.master_run_time(),
+            KeyCode::Char('N') => self.master_run_time(),
             KeyCode::Char('T') => self.token_budget(),
             KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
@@ -3796,7 +3796,7 @@ impl TeamView {
             ("v", "Max harnesses"),
             ("u", "Max teammates"),
             ("U", "Sub-agent rounds"),
-            ("D", "Master run time"),
+            ("N", "Master run time"),
             ("T", "Token budget"),
             ("P", "Spread accounts"),
             ("z", "Stop agent"),
