@@ -273,7 +273,7 @@ fn the_harness_page_renders_locked_lines_at_80_columns() {
 #[test]
 fn the_app_page_keeps_every_codex_setting_in_view_at_80x24() {
     let mut shell = app_page(QUALIFIED);
-    let shown = render(&mut shell, 80, 24);
+    let shown = render(&mut shell, 80, 24).join("\n");
     for label in [
         "Hide agent reasoning",
         "Reasoning effort",
