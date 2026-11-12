@@ -933,6 +933,7 @@ fn listed(folders: &[&Path]) -> String {
         .arg("-ledn")
         .args(folders)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success());
