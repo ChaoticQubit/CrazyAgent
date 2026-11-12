@@ -15364,6 +15364,37 @@ fn merge_commit_landing_refuses_an_agent_message_with_a_control_character() {
     assert_eq!(case.view(&id).state, ChangeState::Pending);
 }
 
+/// Under Merge commit the check covers every commit the merge makes reachable, not only
+/// those above the set's measured base: an agent commit with a control character that an
+/// earlier Squash accept left out of the owner's history, below the next set's base, is
+/// still refused once the owner switches to Merge commit (DEC-147.6 security bound).
+#[test]
+fn merge_commit_landing_refuses_an_unplain_commit_below_a_squash_landed_base() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line \u{1b}[31mred");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.edit("NOTES", "five\n");
+    case.agent_commit("Add the notes");
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&first).unwrap() else {
+        panic!("the squash set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit).len(), 1, "a squash commit");
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(case.accept(&second).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), commit, "nothing more landed");
+    assert_eq!(case.view(&second).state, ChangeState::Pending);
+}
+
 /// Agent-written text with hidden or control characters is never plain; a message with
 /// newlines and tabs is.
 #[test]

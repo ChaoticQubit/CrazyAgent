@@ -39,36 +39,38 @@ struct Place {
 /// The second parent an Accept gives the commit it lands (DEC-147.6): none under the
 /// project's Landing setting Squash, the set's head under Merge commit once every commit
 /// the merge would carry into the owner's history passed [`carried_commits_plain`].
-/// Inputs: the store, the owner repository, the project, where the set's work is measured
-/// from and its head. Output: the parent, None for a squash, or the refusal.
+/// Inputs: the store, the owner repository, the project, the tip the commit lands on and
+/// the set's head. Output: the parent, None for a squash, or the refusal.
 pub(super) fn merge_parent(
     db: &Connection,
     owner: &Repo,
     project: &ProjectId,
-    from: &str,
+    tip: &str,
     head: &str,
 ) -> Result<Option<String>, EngineError> {
-    assert!(super::git::is_object_id(from) && super::git::is_object_id(head));
+    assert!(super::git::is_object_id(tip) && super::git::is_object_id(head));
     match crate::team::landing_mode(db, project)? {
         LandingMode::Squash => Ok(None),
         LandingMode::Merge => {
-            carried_commits_plain(owner, from, head)?;
+            carried_commits_plain(owner, tip, head)?;
             Ok(Some(head.to_owned()))
         }
     }
 }
 
-/// Checks the commits a Merge commit would make part of the owner's branch, the ones
-/// after `from` up to `head`: at most [`MERGED_COMMITS_MAX`], and no author, committer or
-/// message holding hidden text or a control character other than a newline or a tab, so
-/// nothing an agent wrote can hide in or garble the owner's `git log`. Inputs: the owner
-/// repository and both commits. Output: Ok, or `changes_merge_unsafe`.
+/// Checks every commit a Merge commit would make part of the owner's branch, the ones
+/// reachable from `head` but not from `tip`, which includes agent commits below a set's
+/// measured base that an earlier Squash landing left out of the owner's history: at most
+/// [`MERGED_COMMITS_MAX`], and no author, committer or message holding hidden text or a
+/// control character other than a newline or a tab, so nothing an agent wrote can hide in
+/// or garble the owner's `git log`. Inputs: the owner repository, the tip and the head.
+/// Output: Ok, or `changes_merge_unsafe`.
 pub(super) fn carried_commits_plain(
     owner: &Repo,
-    from: &str,
+    tip: &str,
     head: &str,
 ) -> Result<(), EngineError> {
-    let range = format!("{from}..{head}");
+    let range = format!("{tip}..{head}");
     let count = format!("--max-count={}", MERGED_COMMITS_MAX + 1);
     let format = "--format=%x1e%an%x1f%ae%x1f%cn%x1f%ce%x1f%B";
     let output = owner.exec(
@@ -327,7 +329,7 @@ pub(super) fn tell_main_moved(
     Ok(true)
 }
 
-/// The Note an own-clone sub-agent gets when main moved on (DEC-147.6, leader 22:40): the
+/// The Note an own-clone sub-agent gets when main moved on (DEC-147.6, leader approved): the
 /// tip, and the commit its next work opens above, so `git log <base>..HEAD` tells whether it
 /// has commits of its own, under Squash too. Inputs: the tip and the base. Output: the text.
 pub(super) fn main_moved_text(tip: &str, base: &str) -> String {
