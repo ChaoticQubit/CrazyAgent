@@ -1541,7 +1541,7 @@ impl ProcessPage {
         let room = height.saturating_sub(EDITOR_CHROME_ROWS + floor);
         if let Some(conflict) = &self.conflict {
             let body = quoted(&conflict.current, width);
-            let full = body.len().min(LINES_SHOWN_MAX);
+            let most = body.len().min(LINES_SHOWN_MAX);
             let fits = |shown: usize| {
                 let mut trial = lines.clone();
                 trial.extend(conflict_rows(conflict, &body, shown, width, ctx));
@@ -1549,8 +1549,8 @@ impl ProcessPage {
                 trial.len() <= room
             };
             let shown = match self.scope {
-                Scope::App => (1..=full).rev().find(|&shown| fits(shown)).unwrap_or(1),
-                Scope::Project { .. } => full,
+                Scope::App => (1..=most).rev().find(|&shown| fits(shown)).unwrap_or(1),
+                Scope::Project { .. } => most,
             };
             lines.extend(conflict_rows(conflict, &body, shown, width, ctx));
         }
