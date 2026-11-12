@@ -11395,10 +11395,10 @@ fn run_code(error: &RunError) -> &str {
 
 /// The prompt one turn is typed with: the task's own, and under Stop the line telling the
 /// agent its background commands stop when its turn ends, only where the engine stops them:
-/// a session that ends with the turn, or a pane app whose record reports them. A kept
-/// session reporting none, such as a Codex app's, keeps them running, so its agent is not
-/// told so (rv-audit S3 F2). Takes the prompt, the turn's rules and whether the engine stops
-/// them. Returns the prompt.
+/// a session that ends with the turn, or a pane app whose record reports them, as Claude
+/// Code's and Codex's do (DEC-141 PA-10). A kept session reporting none, such as a headless
+/// agent's on pipes, keeps them running, so its agent is not told so (rv-audit S3 F2). Takes
+/// the prompt, the turn's rules and whether the engine stops them. Returns the prompt.
 fn told(prompt: String, rules: TurnRules, stops: bool) -> String {
     if rules.background == super::BackgroundAtEnd::Stop && stops {
         format!("{prompt}\n{BACKGROUND_STOPS_LINE}")
