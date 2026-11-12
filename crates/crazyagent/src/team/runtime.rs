@@ -4283,7 +4283,13 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    let own = super::model_pick::agent_model(&self.connection, pinned)?;
+                    let own = super::model_pick::start_model(
+                        &self.connection,
+                        project,
+                        pinned,
+                        &harness,
+                        false,
+                    )?;
                     let (account, run) = match self.account_with_model(
                         access,
                         project,
@@ -5192,7 +5198,13 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?
             .flatten();
-        let model = super::model_pick::agent_model(&self.connection, id)?;
+        let model = super::model_pick::start_model(
+            &self.connection,
+            &seat.project,
+            id,
+            &seat.harness,
+            seat.role == AgentRole::Master,
+        )?;
         self.workers.insert(
             id,
             Worker {

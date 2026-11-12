@@ -118,10 +118,11 @@ CREATE TABLE IF NOT EXISTS team_model_fallbacks (
     PRIMARY KEY (project, harness, model)
 ) WITHOUT ROWID;";
 
-/// Reads the model a task's agent should start on (DEC-150): the spawn's pinned pick,
-/// else the project's agent default for the harness, else the app's, none for the
-/// account's own model. Takes the database, the task, the project and the harness.
-/// Returns the model, or a store or SQLite failure.
+/// Reads the model a task's agent should start on (DEC-150): the spawn's pinned pick
+/// while the owner's choices still allow it (`still_allowed`), else the project's agent
+/// default for the harness, else the app's, none for the account's own model. Takes the
+/// database, the task, the project and the harness. Returns the model, or a store or
+/// SQLite failure.
 pub(crate) fn wanted(
     db: &Connection,
     task: i64,
@@ -129,7 +130,7 @@ pub(crate) fn wanted(
     harness: &str,
 ) -> Result<Option<String>, EngineError> {
     if let Some(pick) = pinned(db, task)? {
-        return Ok(Some(pick.model));
+        return still_allowed(db, project, harness, &pick.model);
     }
     let catalog = crate::model_choice::catalog(harness);
     store::launch_model(
@@ -141,11 +142,12 @@ pub(crate) fn wanted(
     )
 }
 
-/// Reads the model one agent starts on before its account's own (DEC-150): a master the
-/// owner's master model for its harness in this project, read at every start so a changed
-/// setting reaches the next one, any other agent the model recorded for it. Takes the
-/// database, the project, the agent, its harness and whether it is the master. Returns the
-/// model, none for the account's own, or a store or SQLite failure.
+/// Reads the model one agent starts on before its account's own (DEC-150), at every start
+/// so a changed setting reaches the next one: a master the owner's master model for its
+/// harness in this project, any other agent the model recorded for it while the owner's
+/// choices still allow it (`still_allowed`). Takes the database, the project, the agent,
+/// its harness and whether it is the master. Returns the model, none for the account's
+/// own, or a store or SQLite failure.
 pub(crate) fn start_model(
     db: &Connection,
     project: &ProjectId,
@@ -155,7 +157,10 @@ pub(crate) fn start_model(
 ) -> Result<Option<String>, EngineError> {
     assert!(agent > 0);
     if !master {
-        return agent_model(db, agent);
+        return match agent_model(db, agent)? {
+            Some(model) => still_allowed(db, project, harness, &model),
+            None => Ok(None),
+        };
     }
     let catalog = crate::model_choice::catalog(harness);
     store::launch_model(
@@ -164,6 +169,28 @@ pub(crate) fn start_model(
         &catalog,
         Some(project),
         crate::model_choice::Slot::Master,
+    )
+}
+
+/// Checks a model a task was pinned to or an agent was started on against the owner's
+/// current choices and pick rule, as a new pick would be (MS-1): one the owner since took
+/// off the list, or no longer offers, gives way to the agent default, and one the rule
+/// overrules does too. The pin and the record stay as history. Takes the database, the
+/// project, the harness and the model. Returns the model to start on, none for the
+/// account's own, or a store or SQLite failure.
+fn still_allowed(
+    db: &Connection,
+    project: &ProjectId,
+    harness: &str,
+    model: &str,
+) -> Result<Option<String>, EngineError> {
+    let catalog = crate::model_choice::catalog(harness);
+    Ok(
+        match store::pick(db, harness, &catalog, project, Some(model))? {
+            Pick::Run(run) => run,
+            Pick::Overruled(default) | Pick::Refused { default, .. } => default,
+            Pick::Unsupported => None,
+        },
     )
 }
 
