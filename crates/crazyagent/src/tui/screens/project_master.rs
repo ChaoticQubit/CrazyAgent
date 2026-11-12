@@ -983,6 +983,35 @@ mod tests {
         );
     }
 
+    /// F39: a turn stopped by a harness protocol fault, the master frame size limit or a
+    /// master worktree the engine could not check says what to do next in plain words.
+    #[test]
+    fn a_configured_master_failure_line_names_its_action() {
+        let configured = Some(MasterSessionPhase::Configured);
+        let inputs = [entry(3, "Go.")];
+        for (reason, expected) in [
+            (
+                MasterReason::ProtocolFault,
+                "Codex stopped: it sent a message out of order. Send again to start a fresh turn. (protocol_fault) Press r to try again.",
+            ),
+            (
+                MasterReason::FrameLimit,
+                "Codex stopped: one message was larger than the master frame size limit. Raise it in Settings, then send again. (frame_limit) Press r to try again.",
+            ),
+            (
+                MasterReason::WorktreeUncertain,
+                "Codex stopped: its copy of the project could not be checked. Close the master and open it again, then send again. (worktree_uncertain) Press r to try again.",
+            ),
+        ] {
+            let transcript = build(
+                configured,
+                &[turn(1, 3, MasterTurnPhase::Failed, Some(reason))],
+                &inputs,
+            );
+            assert_eq!(transcript.messages.last().unwrap().text, expected);
+        }
+    }
+
     #[test]
     fn every_stopped_turn_names_its_engine_code_and_never_a_bare_unknown() {
         let configured = Some(MasterSessionPhase::Configured);
@@ -1016,6 +1045,9 @@ mod tests {
             ),
             (MasterReason::RepositoryMissing, "repository_missing"),
             (MasterReason::InstructionsTooLarge, "instructions_too_large"),
+            (MasterReason::ProtocolFault, "protocol_fault"),
+            (MasterReason::FrameLimit, "frame_limit"),
+            (MasterReason::WorktreeUncertain, "worktree_uncertain"),
             (MasterReason::Cancelled, "cancelled"),
         ];
         for (reason, code) in named {

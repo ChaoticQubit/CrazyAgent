@@ -2003,6 +2003,67 @@ mod tests {
         }
     }
 
+    /// F39, DEC-141: every protocol fault of the Claude Code and Codex master hosts, a frame
+    /// past the frame size limit, a session or bootstrap that no longer matches and a master
+    /// worktree the engine could not check each name a plain reason with an action, never
+    /// Unknown; the causes F39 found that already had one keep it.
+    #[test]
+    fn every_configured_master_failure_cause_names_a_plain_reason() {
+        for host in ["codex_host_protocol_", "claude_host_protocol_"] {
+            for (fault, expected) in [
+                ("invalid_state", MasterReason::ProtocolFault),
+                ("invalid_input", MasterReason::ProtocolFault),
+                ("invalid_message", MasterReason::ProtocolFault),
+                ("stale_message", MasterReason::ProtocolFault),
+                ("disconnected", MasterReason::ProtocolFault),
+                ("frame_too_large", MasterReason::FrameLimit),
+                ("capacity", MasterReason::OutputLimit),
+            ] {
+                let code = format!("{host}{fault}");
+                assert_eq!(
+                    reason_for_error(&EngineError(code.clone())),
+                    expected,
+                    "{code}"
+                );
+            }
+        }
+        for (code, expected) in [
+            (
+                "claude_host_protocol_unsupported",
+                MasterReason::ProtocolFault,
+            ),
+            ("codex_host_input_limit", MasterReason::FrameLimit),
+            (
+                "master_session_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_project_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_bootstrap_scope_conflict",
+                MasterReason::ConnectionChanged,
+            ),
+            (
+                "master_bootstrap_uncertain",
+                MasterReason::WorktreeUncertain,
+            ),
+            ("master_repository_missing", MasterReason::RepositoryMissing),
+            ("master_capture_incomplete", MasterReason::CaptureIncomplete),
+            (
+                "gateway_invalid_authentication",
+                MasterReason::InvalidAuthentication,
+            ),
+        ] {
+            assert_eq!(
+                reason_for_error(&EngineError(code.into())),
+                expected,
+                "{code}"
+            );
+        }
+    }
+
     #[test]
     fn a_harness_with_no_sign_in_fails_the_turn_without_a_provider_rejection() {
         let read = |account| AuthControl::AccountRead {
