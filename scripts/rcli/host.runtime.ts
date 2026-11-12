@@ -7,16 +7,18 @@ import type { AgentEvent, TurnStatus } from "../../.local-state/tools/rcli-sourc
 import { BoundedEventWriter, identifier, readControls, type Control, type EventBody } from "./host.codec.ts";
 import { SdkTurnProjection, type HostAction } from "./host.turns.ts";
 
-export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string; instructionsFile?: string };
+export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string; instructionsFile?: string; model?: string };
+
+const MODEL_REFERENCE = /^[a-z0-9][a-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,255}$/;
 
 const INSTRUCTIONS_BYTES_MAX = 131_539;
 
 export function parseLaunch(argv: string[]): Launch {
   try {
-    if (!Array.isArray(argv) || (argv.length !== 8 && argv.length !== 10) || argv.some((value) => typeof value !== "string")) throw new Error();
+    if (!Array.isArray(argv) || argv.length < 8 || argv.length > 12 || argv.length % 2 !== 0 || argv.some((value) => typeof value !== "string")) throw new Error();
     const fields = new Map<string, string>();
     const required = ["--session-id", "--instance-id", "--home-dir", "--cwd"];
-    const names = [...required, "--instructions-file"];
+    const names = [...required, "--instructions-file", "--model"];
     for (let index = 0; index < argv.length; index += 2) {
       const key = argv[index]!;
       if (!names.includes(key) || fields.has(key)) throw new Error();
@@ -32,9 +34,15 @@ export function parseLaunch(argv: string[]): Launch {
       if (!path.isWellFormed() || path.includes("\0") || Buffer.byteLength(path) > 4096 || !isAbsolute(path) || normalize(path) !== path || path === "/") throw new Error();
     }
     if (homeDir === cwd) throw new Error();
-    if (instructionsFile === undefined) return { sessionId, instanceId, homeDir, cwd };
-    if ([homeDir, cwd].some((folder) => instructionsFile === folder || instructionsFile.startsWith(`${folder}/`))) throw new Error();
-    return { sessionId, instanceId, homeDir, cwd, instructionsFile };
+    const model = fields.get("--model");
+    if (model !== undefined && !MODEL_REFERENCE.test(model)) throw new Error();
+    const launch: Launch = { sessionId, instanceId, homeDir, cwd };
+    if (instructionsFile !== undefined) {
+      if ([homeDir, cwd].some((folder) => instructionsFile === folder || instructionsFile.startsWith(`${folder}/`))) throw new Error();
+      launch.instructionsFile = instructionsFile;
+    }
+    if (model !== undefined) launch.model = model;
+    return launch;
   } catch { throw new Error("host_launch_rejected"); }
 }
 
@@ -230,7 +238,7 @@ export async function runExecutable(argv: string[]): Promise<void> {
     import("../../.local-state/tools/rcli-source/src/core/permissions/index.ts"),
     import("./host.ts"),
   ]), 5000);
-  const config = new Config({ argv: ["--cwd", launch.cwd], homeDir: launch.homeDir });
+  const config = new Config({ argv: ["--cwd", launch.cwd, ...(launch.model === undefined ? [] : ["--model", launch.model])], homeDir: launch.homeDir });
   if (!config.hasBackendForCurrentModel) throw new Error("host_startup_failed");
   const client = createAgentClient(config);
   const permissions = buildPermissionContext(config.cwd, "manual", false);
