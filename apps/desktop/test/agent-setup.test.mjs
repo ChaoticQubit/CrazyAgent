@@ -91,8 +91,8 @@ test("an account added to a pool from Add account is set up for agents the way t
 });
 
 /** A bridge stand-in that keeps one selected record, as the desktop bridge does: inspecting
- * picks an account or a pool and gives its ticket, and a set-up or an edit with any other
- * ticket is refused as stale_model_access. Output: the commands seen in order and the invoke
+ * picks an account or a pool and gives its ticket, and a set-up, an edit, a sign-in cancel or a
+ * sign-out with any other ticket is refused as stale_model_access. Output: the commands seen in order and the invoke
  * to install. */
 function singleSelectionBridge() {
   const seen = [];
@@ -110,6 +110,12 @@ function singleSelectionBridge() {
       seen.push(`edit ${args.ticket}`);
       if (args.ticket !== String(selection)) throw Object.assign(new Error("stale"), { code: "stale_model_access" });
       return { pending: false, outcome: "applied", rejection: null };
+    }
+    if (command === "desktop_cancel_native_auth" || command === "desktop_logout_native_auth") {
+      const use = command === "desktop_cancel_native_auth" ? "cancel" : "logout";
+      seen.push(`${use} ${args.ticket}`);
+      if (args.ticket !== String(selection)) throw Object.assign(new Error("stale"), { code: "stale_model_access" });
+      return { phase: use === "cancel" ? "cancelled" : "unauthenticated_observed", code: null };
     }
     if (command === "desktop_configure_account_profile") {
       seen.push(`configure ${args.ticket}`);
@@ -181,6 +187,29 @@ test("READY-GUARD F1: a pool save and a pool delete started beside a set-up each
     for (let at = 0; at < 6; at += 2) {
       assert.match(bridge.seen[at], /^inspect /, JSON.stringify(bridge.seen));
       assert.match(bridge.seen[at + 1], new RegExp(`^(configure|edit) ${at / 2 + 1}$`), `each inspect is followed by the use of its own ticket: ${JSON.stringify(bridge.seen)}`);
+    }
+  } finally {
+    globalThis.window = before;
+  }
+});
+
+test("Backlog 44: a sign-in cancel and a sign-out started beside a pool save each hold the bridge's one selection from inspect to use, so all three end ok", async () => {
+  const { cancelSignIn, signOut } = await import("../src/screens/settings/sign-in.tsx");
+  const bridge = singleSelectionBridge();
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: bridge.invoke } };
+  try {
+    const results = await Promise.all([
+      cancelSignIn("a"),
+      signOut("b"),
+      api.savePool("team", "Team", ["a", "b"], { name: "Team", members: ["a"] }),
+    ]);
+    const ok = { kind: "ok", value: undefined };
+    assert.deepEqual(results, [ok, ok, ok], "no step is refused because another moved the selection");
+    assert.equal(bridge.seen.length, 6, JSON.stringify(bridge.seen));
+    for (let at = 0; at < 6; at += 2) {
+      assert.match(bridge.seen[at], /^inspect /, JSON.stringify(bridge.seen));
+      assert.match(bridge.seen[at + 1], new RegExp(`^(cancel|logout|edit) ${at / 2 + 1}$`), `each inspect is followed by the use of its own ticket: ${JSON.stringify(bridge.seen)}`);
     }
   } finally {
     globalThis.window = before;
