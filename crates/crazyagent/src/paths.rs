@@ -766,7 +766,8 @@ mod tests {
         let homebrew = root.join("opt/homebrew/bin");
         program(&homebrew.join("codex"), 0o755);
         let finder = std::ffi::OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
-        let search = crate::harnesses::Search::engine(Some(&finder), &[homebrew.clone()], None);
+        let search =
+            crate::harnesses::Search::engine(Some(&finder), std::slice::from_ref(&homebrew), None);
         let found = resolve_harnesses(Harnesses::default(), &search, Some(&finder), None);
         assert_eq!(found.codex, Some(homebrew.join("codex")));
         let path_only =
@@ -865,7 +866,7 @@ mod tests {
             program(&entry, 0o755);
             let search = crate::harnesses::Search::engine(
                 Some(&path),
-                &[system.clone()],
+                std::slice::from_ref(&system),
                 Some(home.clone()),
             );
             let started = resolve_harnesses(Harnesses::default(), &search, Some(&path), None);
