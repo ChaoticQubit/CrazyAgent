@@ -1954,17 +1954,32 @@ fn stored() -> crate::project_setup::StoredSetup {
 
 /// Team settings name the saved master harness on the plan line and, after the On harness
 /// switch choice, when a saved change reaches the running master; at 80 columns too, where a
-/// setting of its own would fold the first settings row away. At 80 by 24 the plan line gives
-/// way first, as `draw` orders it, and every setting, Left running included, still shows.
+/// setting of its own would fold the first settings row away. In a short window the focused
+/// agent's Tools and Working copy rows give way first, then the plan line, as `draw` orders
+/// them: at 80 by 25 the plan line shows, at 80 by 24 it gives way, and every setting, Left
+/// running included, shows at both (v2.3.2 gate rows 26 and 27).
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
     let view = loaded();
+    let tall = frame(&view, 160, 36);
+    assert!(find(&tall, "Working copy").contains("agent-1"));
+    assert!(find(&tall, "Tools").contains("On, inside the project folder"));
     for (width, height) in [(160, 36), (80, 25)] {
         let rows = frame(&view, width, height);
         assert!(find(&rows, "leads.").contains("Codex leads."));
         assert!(
             find(&rows, "On harness switch")
                 .contains("On harness switch  Carry over, when the master is idle"),
+            "{}",
+            rows.join("\n")
+        );
+    }
+    for height in [24, 25] {
+        let rows = frame(&view, 80, height);
+        assert!(find(&rows, "Account").contains("ChatGPT Pro - main"));
+        assert!(
+            rows.iter().all(|row| !row.contains("Working copy")
+                && !row.contains("On, inside the project folder")),
             "{}",
             rows.join("\n")
         );
