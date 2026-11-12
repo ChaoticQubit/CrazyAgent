@@ -7,6 +7,7 @@ const DEPTH_MAX: usize = 6;
 const LINES_MAX: usize = 200;
 const KEY_BYTES_MAX: usize = 40;
 const DIGITS_MAX: usize = 2;
+const CLAUDE_PROFILE_PATH: &str = "/api/oauth/profile";
 
 /// The shape of a reply as lines of key paths and value types, never a value: a key that is
 /// not a short word (a letter first, at most two digits) prints as `<key>`, so no id used as
@@ -87,10 +88,11 @@ fn probe_the_codex_usage_reply_shape() {
     );
 }
 
-/// Prints the key names and value types of a real Claude account's usage reply and of its
-/// private detail reply, to confirm `extra_usage` and `cedar_ember` with its grants (DEC-154
-/// E7). A refused detail prints its code only. Needs the owner's GO: it reads a real
-/// app-managed sign-in through the custody lease and calls a private query.
+/// Prints the key names and value types of a real Claude account's usage reply, its private
+/// detail reply and its OAuth profile reply, to confirm `extra_usage`, `cedar_ember` with its
+/// grants and where the spend's organization comes from (DEC-154 E7). A refused read prints
+/// its code only. Needs the owner's GO: it reads a real app-managed sign-in through the
+/// custody lease and calls a private query.
 #[test]
 #[ignore = "live probe: owner GO only; needs Claude signed in, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn probe_the_claude_usage_and_detail_reply_shapes() {
@@ -104,10 +106,15 @@ fn probe_the_claude_usage_and_detail_reply_shapes() {
         "claude usage",
         fetch(Provider::Claude, url.clone(), &credential, false),
     );
-    let mut detail = url;
+    let mut detail = url.clone();
     detail.set_query(Some(CLAUDE_DETAIL_QUERY));
     print_shape(
         "claude detail",
         fetch(Provider::Claude, detail, &credential, false),
+    );
+    let profile = url.join(CLAUDE_PROFILE_PATH).unwrap();
+    print_shape(
+        "claude profile",
+        fetch(Provider::Claude, profile, &credential, false),
     );
 }
