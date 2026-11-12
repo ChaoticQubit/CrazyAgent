@@ -1,0 +1,8 @@
+schema: 1
+kind: embedding
+name: local
+title: On this Mac
+version: 1.0.0
+description: Built-in local model static-retrieval-mrl-en-v1 (Apache-2.0). One-time download of about 126 MB, then it runs offline and nothing leaves this Mac.
+local:
+  runtime: static-retrieval-mrl-en-v1

@@ -6,6 +6,7 @@ pub mod adapters;
 pub mod agent_git;
 pub mod agent_home;
 pub mod agents;
+pub mod app_plugins;
 pub mod assets;
 pub mod checks;
 pub mod cleanup_settings;

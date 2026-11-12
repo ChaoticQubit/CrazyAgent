@@ -61,8 +61,17 @@ pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 /// directory.
 #[cfg(unix)]
 pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
+    remove_key_in(root, ACCOUNT_KEYS, name)
+}
+
+/// Deletes one key file from an owner-only key folder of the engine root: `account-keys`
+/// or `plugin-keys`. Inputs: the engine root, the folder name and the key name. Output: Ok
+/// when the file is gone, including when it or the folder was already missing;
+/// `account_key_store_unsafe` for a folder that is not this user's 0700 directory.
+#[cfg(unix)]
+pub(crate) fn remove_key_in(root: &Path, folder: &str, name: &str) -> Result<(), EngineError> {
     use rustix::fs::AtFlags;
-    let Some(directory) = key_folder(root, name)? else {
+    let Some(directory) = key_folder_in(root, folder, name)? else {
         return Ok(());
     };
     match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
@@ -77,13 +86,23 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
 /// for a folder that is not this user's 0700 directory.
 #[cfg(unix)]
 fn key_folder(root: &Path, name: &str) -> Result<Option<std::fs::File>, EngineError> {
+    key_folder_in(root, ACCOUNT_KEYS, name)
+}
+
+#[cfg(unix)]
+fn key_folder_in(
+    root: &Path,
+    folder: &str,
+    name: &str,
+) -> Result<Option<std::fs::File>, EngineError> {
     use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
+    assert!(KEY_FOLDERS.contains(&folder), "a known key folder");
     if CredentialRef::new(name).is_err() || name.starts_with('.') {
         return Err(error("account_key_reference_invalid"));
     }
     let directory = match rustix::fs::open(
-        root.join(ACCOUNT_KEYS),
+        root.join(folder),
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     ) {
@@ -114,10 +133,23 @@ pub(crate) fn read_key_file(
     root: &Path,
     credential: &CredentialRef,
 ) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    read_key_in(root, ACCOUNT_KEYS, credential)
+}
+
+/// Reads one saved key from an owner-only key folder of the engine root (`account-keys`
+/// or `plugin-keys`) into engine memory only. Inputs: the engine root, the folder name and
+/// the key's reference. Output: the key, none when it was never saved, or the same
+/// refusals as `read_key_file`.
+#[cfg(unix)]
+pub(crate) fn read_key_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
     use rustix::fs::{Mode, OFlags};
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
-    let Some(directory) = key_folder(root, credential.as_str())? else {
+    let Some(directory) = key_folder_in(root, folder, credential.as_str())? else {
         return Ok(None);
     };
     let file = match rustix::fs::openat(
@@ -148,6 +180,132 @@ pub(crate) fn read_key_file(
     crate::credentials::SecretString::new(bytes)
         .map(Some)
         .map_err(|_| error("account_key_store_unsafe"))
+}
+
+/// Whether a key is saved in an owner-only key folder, without reading it. Inputs: the
+/// engine root, the folder name and the key's reference. Output: true for a regular file,
+/// false when it or the folder is missing, or the folder's refusal.
+#[cfg(unix)]
+pub(crate) fn key_saved_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+) -> Result<bool, EngineError> {
+    let Some(directory) = key_folder_in(root, folder, credential.as_str())? else {
+        return Ok(false);
+    };
+    match rustix::fs::statat(
+        &directory,
+        credential.as_str(),
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(stat) => Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode)
+            == rustix::fs::FileType::RegularFile),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
+
+/// Saves or replaces one key in an owner-only key folder of the engine root, creating the
+/// 0700 folder when missing: the key goes to a staged 0600 file that is renamed over the
+/// old one, so a file never holds a partial key. Inputs: the engine root, the folder name,
+/// the key's reference and the key bytes, which are zeroed. Output: Ok with the folder
+/// synced; on failure the old key stays and nothing is staged.
+#[cfg(unix)]
+pub(crate) fn replace_key_in(
+    root: &Path,
+    folder: &str,
+    credential: &CredentialRef,
+    mut key: Vec<u8>,
+) -> Result<(), EngineError> {
+    use rustix::fs::{AtFlags, Mode, OFlags};
+    let saved = (|| {
+        if key.is_empty() || key.len() as u64 > KEY_BYTES_MAX {
+            return Err(error("account_key_store_unavailable"));
+        }
+        assert!(KEY_FOLDERS.contains(&folder), "a known key folder");
+        match rustix::fs::mkdir(root.join(folder), Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(_) => return Err(error("account_key_store_unavailable")),
+        }
+        let directory = key_folder_in(root, folder, credential.as_str())?
+            .ok_or_else(|| error("account_key_store_unavailable"))?;
+        let staged = format!(".replace-{}", crate::engine::owner::random_id()?);
+        let mut file = std::fs::File::from(
+            rustix::fs::openat(
+                &directory,
+                staged.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(|_| error("account_key_store_unavailable"))?,
+        );
+        let written = std::io::Write::write_all(&mut file, &key).and_then(|()| file.sync_all());
+        if written.is_err()
+            || rustix::fs::renameat(&directory, staged.as_str(), &directory, credential.as_str())
+                .is_err()
+        {
+            let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
+            return Err(error("account_key_store_unavailable"));
+        }
+        directory
+            .sync_all()
+            .map_err(|_| error("account_key_store_unavailable"))
+    })();
+    key.fill(0);
+    saved
+}
+
+/// The owner-only key folders beside the engine database: account keys and the keys the
+/// owner entered for app plugins (DEC-156 addendum 1).
+#[cfg(unix)]
+pub(crate) const KEY_FOLDERS: [&str; 2] = [ACCOUNT_KEYS, PLUGIN_KEYS];
+
+/// The folder beside the engine database that holds keys entered for app plugins, one 0600
+/// file per key named by its reference.
+pub(crate) const PLUGIN_KEYS: &str = "plugin-keys";
+
+/// Refuses to read a key where the Unix owner-only key folder does not exist.
+/// Inputs: the engine root, folder and credential, all unused. Output:
+/// `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn read_key_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to check a key where the Unix owner-only key folder does not exist.
+/// Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn key_saved_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+) -> Result<bool, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to save a key where the Unix owner-only key folder does not exist; the key is
+/// zeroed. Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn replace_key_in(
+    _root: &Path,
+    _folder: &str,
+    _credential: &CredentialRef,
+    mut key: Vec<u8>,
+) -> Result<(), EngineError> {
+    key.fill(0);
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to delete a key where the Unix owner-only key folder does not exist.
+/// Output: `account_key_store_unavailable`.
+#[cfg(not(unix))]
+pub(crate) fn remove_key_in(_root: &Path, _folder: &str, _name: &str) -> Result<(), EngineError> {
+    Err(error("account_key_store_unavailable"))
 }
 
 /// Refuses to read an account key where the Unix owner-only key folder does not exist.

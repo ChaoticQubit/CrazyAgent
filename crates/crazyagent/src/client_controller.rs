@@ -13,6 +13,7 @@ use std::time::Duration;
 mod account_profile;
 mod accounts;
 mod agents;
+mod app_plugins;
 mod changes;
 mod checks;
 mod cleanup;
