@@ -58,6 +58,7 @@ fn wide() -> Bounds {
         memory_bytes: 1 << 30,
         round_chunks: 1_000,
         scan_bytes: 1 << 30,
+        sweep_rows: 1_000,
     }
 }
 
@@ -128,6 +129,80 @@ fn a_changed_plugin_key_re_embeds_and_drops_the_old_vectors() {
         2,
         "switching back re-embeds"
     );
+}
+
+#[test]
+fn a_key_switched_back_while_the_old_vectors_are_still_going_requeues_what_was_deleted() {
+    let mut db = db();
+    let (a, b) = (plugin('a'), plugin('b'));
+    let ids: Vec<i64> = (1..=3)
+        .map(|at| {
+            chunk(
+                &db,
+                Some("alpha"),
+                Source::Session,
+                &format!("chunk {at}"),
+                at,
+            )
+        })
+        .collect();
+    assert_eq!(round(&mut db, "alpha", &a, &wide()).0, 3);
+    let step = Bounds {
+        sweep_rows: 1,
+        ..wide()
+    };
+    assert_eq!(
+        round(&mut db, "alpha", &b, &step).0,
+        0,
+        "the old key's vectors go one step per round"
+    );
+    assert_eq!(stored(&db, &a.key).len(), 2);
+    let embedded: usize = (0..10).map(|_| round(&mut db, "alpha", &a, &step).0).sum();
+    assert_eq!(
+        embedded, 1,
+        "the vector deleted before the switch back is queued and embedded again"
+    );
+    assert_eq!(stored(&db, &a.key), ids);
+    assert_eq!(
+        progress(&db, &a.key),
+        Progress {
+            embedded: 3,
+            total: 3
+        }
+    );
+}
+
+#[test]
+fn a_new_key_queues_the_chunks_in_bounded_steps_before_it_embeds() {
+    let mut db = db();
+    let acme = plugin('a');
+    for at in 1..=3 {
+        chunk(
+            &db,
+            Some("alpha"),
+            Source::Session,
+            &format!("chunk {at}"),
+            at,
+        );
+    }
+    let step = Bounds {
+        sweep_rows: 1,
+        ..wide()
+    };
+    let rounds: Vec<usize> = (0..5)
+        .map(|_| round(&mut db, "alpha", &acme, &step).0)
+        .collect();
+    assert_eq!(
+        rounds[0], 0,
+        "one step queues at most sweep_rows chunks, so the first round waits"
+    );
+    assert_eq!(rounds.iter().sum::<usize>(), 3);
+    let queued: i64 = db
+        .query_row("SELECT COUNT(*) FROM search_vector_pending", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(queued, 0);
 }
 
 #[test]

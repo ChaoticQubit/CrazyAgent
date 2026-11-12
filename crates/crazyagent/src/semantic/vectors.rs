@@ -113,6 +113,7 @@ pub(crate) struct Bounds {
     pub(crate) memory_bytes: u64,
     pub(crate) round_chunks: usize,
     pub(crate) scan_bytes: u64,
+    pub(crate) sweep_rows: usize,
 }
 
 /// The engine's limits.
@@ -121,6 +122,7 @@ pub(crate) const BOUNDS: Bounds = Bounds {
     memory_bytes: MEMORY_BYTES_MAX,
     round_chunks: ROUND_CHUNKS_MAX,
     scan_bytes: SCAN_BYTES_MAX,
+    sweep_rows: SWEEP_ROUND_MAX,
 };
 
 /// The chosen embedding plugin as vectors see it: the key its vectors are stored under, the
@@ -180,12 +182,13 @@ fn triggers_found(connection: &Connection) -> Result<usize, EngineError> {
 }
 
 /// Brings the vectors in line with the plugin key before a round: when the stored key is
-/// another, deletes at most [`SWEEP_ROUND_MAX`] of the other keys' vectors, and once none
-/// is left drops their query vectors, queues every chunk with no vector of this key and
-/// stores the key. Inputs: the connection and the plugin key. Output: whether the vectors
-/// are this key's alone, so the round may embed.
-fn settle(connection: &mut Connection, key: &str) -> Result<bool, EngineError> {
+/// another, deletes at most `sweep_rows` of the other keys' vectors, and once none is left
+/// drops their query vectors, queues every chunk with no vector of this key and stores the
+/// key. Inputs: the connection, the plugin key and the most rows one step deletes. Output:
+/// whether the vectors are this key's alone, so the round may embed.
+fn settle(connection: &mut Connection, key: &str, sweep_rows: usize) -> Result<bool, EngineError> {
     assert!(!key.is_empty() && key.len() <= KEY_BYTES_MAX);
+    assert!((1..=SWEEP_ROUND_MAX).contains(&sweep_rows));
     let tx = immediate(connection)?;
     let state: Option<String> = tx
         .query_row(
@@ -200,7 +203,7 @@ fn settle(connection: &mut Connection, key: &str) -> Result<bool, EngineError> {
     }
     let mut deleted = 0;
     for side in ["<", ">"] {
-        let left = SWEEP_ROUND_MAX - deleted;
+        let left = sweep_rows - deleted;
         deleted += tx
             .execute(
                 &format!(
@@ -210,7 +213,7 @@ fn settle(connection: &mut Connection, key: &str) -> Result<bool, EngineError> {
                 params![key, left as i64],
             )
             .map_err(storage)?;
-        assert!(deleted <= SWEEP_ROUND_MAX);
+        assert!(deleted <= sweep_rows);
     }
     let others: bool = tx
         .query_row(
@@ -276,7 +279,7 @@ pub(crate) fn embed_round(
     embed: &mut Embed<'_>,
 ) -> usize {
     assert!((1..=ROUND_CHUNKS_MAX).contains(&bounds.round_chunks));
-    if !matches!(settle(connection, &plugin.key), Ok(true)) {
+    if !matches!(settle(connection, &plugin.key, bounds.sweep_rows), Ok(true)) {
         return 0;
     }
     let Ok(plan) = plan(connection, project, plugin, bounds) else {
