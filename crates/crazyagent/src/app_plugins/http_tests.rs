@@ -76,6 +76,16 @@ fn vector(head: &[f64]) -> Vec<f64> {
     vector
 }
 
+fn built(
+    spec: &manifest::HttpSpec,
+    secrets: &[crate::credentials::SecretString],
+    body: &str,
+) -> String {
+    let mut buffer = Config::with_capacity(CONFIG_BYTES);
+    config(spec, secrets, std::path::Path::new(body), &mut buffer).unwrap();
+    String::from_utf8(buffer.0.clone()).unwrap()
+}
+
 fn arguments(command: &std::process::Command) -> Vec<String> {
     command
         .get_args()
@@ -87,13 +97,7 @@ fn arguments(command: &std::process::Command) -> Vec<String> {
 fn the_key_url_and_headers_go_only_to_curl_stdin_never_to_its_arguments_or_environment() {
     let plugin = loaded(&acme());
     let secrets = [crate::credentials::SecretString::new(KEY.as_bytes().to_vec()).unwrap()];
-    let config = config(
-        spec(&plugin),
-        &secrets,
-        std::path::Path::new("/tmp/crazyagent-plugin-x/request"),
-    )
-    .unwrap();
-    let config = String::from_utf8(config).unwrap();
+    let config = built(spec(&plugin), &secrets, "/tmp/crazyagent-plugin-x/request");
     assert!(config.contains("url = \"https://api.acme.example/v1/embed\"\n"));
     assert!(config.contains("request = \"POST\"\n"));
     assert!(config.contains(&format!("header = \"Authorization: Bearer {KEY}\"\n")));
@@ -133,10 +137,7 @@ fn the_key_url_and_headers_go_only_to_curl_stdin_never_to_its_arguments_or_envir
 #[test]
 fn a_loopback_plugin_uses_plain_http_and_pins_localhost_to_127_0_0_1() {
     let plugin = loaded(&near("http://localhost:9000/embed", "localhost"));
-    let pinned = String::from_utf8(
-        config(spec(&plugin), &[], std::path::Path::new("/tmp/x/request")).unwrap(),
-    )
-    .unwrap();
+    let pinned = built(spec(&plugin), &[], "/tmp/x/request");
     assert!(pinned.contains("resolve = \"localhost:9000:127.0.0.1\"\n"));
     assert!(!pinned.contains("Authorization"));
     let plain_arguments = arguments(&command(spec(&plugin)));
@@ -146,10 +147,7 @@ fn a_loopback_plugin_uses_plain_http_and_pins_localhost_to_127_0_0_1() {
             .any(|window| window == ["--proto", "=http"])
     );
     let plain = loaded(&near("http://127.0.0.1:9000/embed", "127.0.0.1"));
-    let plain_config = String::from_utf8(
-        config(spec(&plain), &[], std::path::Path::new("/tmp/x/request")).unwrap(),
-    )
-    .unwrap();
+    let plain_config = built(spec(&plain), &[], "/tmp/x/request");
     assert!(!plain_config.contains("resolve"));
 }
 
@@ -308,4 +306,58 @@ fn a_plugin_whose_bound_key_is_gone_makes_no_call() {
             .0,
         "app_plugin_needs_key"
     );
+}
+
+#[test]
+fn quotes_and_backslashes_in_the_url_headers_and_keys_are_escaped_in_the_curl_config() {
+    let text = acme().replace("X-Team: research", "X-Team: 'a\"b\\c'");
+    let plugin = loaded(&text);
+    let key = "k\"e\\y-0001";
+    let secrets = [crate::credentials::SecretString::new(key.as_bytes().to_vec()).unwrap()];
+    let escaped = built(spec(&plugin), &secrets, "/tmp/x/re\"q\\uest");
+    assert!(
+        escaped.contains("header = \"X-Team: a\\\"b\\\\c\"\n"),
+        "{escaped}"
+    );
+    assert!(
+        escaped.contains("header = \"Authorization: Bearer k\\\"e\\\\y-0001\"\n"),
+        "{escaped}"
+    );
+    assert!(
+        escaped.contains("data-binary = \"@/tmp/x/re\\\"q\\\\uest\"\n"),
+        "{escaped}"
+    );
+    let mut line = Config::with_capacity(CONFIG_BYTES);
+    push_line(&mut line, "url", "https://api.acme.example/a\"b\\c").unwrap();
+    assert_eq!(
+        line.0.as_slice(),
+        b"url = \"https://api.acme.example/a\\\"b\\\\c\"\n"
+    );
+    let mut short = Config::with_capacity(16);
+    assert_eq!(
+        push_line(&mut short, "url", &"x".repeat(64)).unwrap_err().0,
+        "app_plugin_call_failed"
+    );
+}
+
+#[test]
+fn a_config_that_fails_part_way_leaves_no_key_bytes_in_its_buffer() {
+    let plugin = loaded(&acme());
+    let secrets = [crate::credentials::SecretString::new(KEY.as_bytes().to_vec()).unwrap()];
+    let long = format!("/tmp/{}", "x".repeat(4096));
+    let mut buffer = Config::with_capacity(1024);
+    assert_eq!(
+        config(
+            spec(&plugin),
+            &secrets,
+            std::path::Path::new(&long),
+            &mut buffer
+        )
+        .unwrap_err()
+        .0,
+        "app_plugin_call_failed"
+    );
+    assert_eq!(buffer.0.capacity(), 1024);
+    assert!(buffer.0.len() > KEY.len());
+    assert!(buffer.0.iter().all(|byte| *byte == 0));
 }
