@@ -226,34 +226,43 @@ fn the_app_plugin_request_scratch_folder_is_an_engine_secret_agents_cannot_reach
 }
 
 #[test]
-fn the_mcp_plugin_store_is_an_engine_secret_no_grant_reaches() {
+fn the_mcp_plugin_secret_folder_is_an_engine_secret_no_grant_reaches() {
     let case = case();
     let store = case.runtime.join("plugins");
-    fs::create_dir_all(store.join("secrets")).unwrap();
-    fs::write(store.join("secrets").join("mcp-ref"), "synthetic").unwrap();
+    let secret_folder = store.join("secrets");
+    let skills = store.join("skills");
+    fs::create_dir_all(&secret_folder).unwrap();
+    fs::create_dir_all(&skills).unwrap();
+    fs::write(secret_folder.join("mcp-ref"), "synthetic").unwrap();
     let secrets = guarded(&case).secret_paths();
-    assert!(secrets.contains(&store));
+    assert!(secrets.contains(&secret_folder));
+    assert!(!secrets.contains(&store));
+    walled(guarded(&case).allow_read(&secret_folder));
     walled(guarded(&case).allow_read(&store));
-    walled(guarded(&case).allow_read(&store.join("secrets")));
-    let server_parent = store.clone();
-    walled(
-        sandbox(&case)
-            .keep_ports(&[])
-            .and_then(|sandbox| sandbox.guard_engine(&case.runtime))
-            .and_then(|sandbox| sandbox.allow_read(&server_parent)),
+    assert_eq!(
+        guarded(&case).allow_read(&skills).unwrap().read_roots(),
+        [skills.clone()].as_slice()
     );
-    walled(
-        sandbox(&case)
-            .allow_read(&server_parent)
-            .and_then(|sandbox| sandbox.guard_engine(&case.runtime)),
-    );
+    for server_parent in [&store, &secret_folder] {
+        walled(
+            sandbox(&case)
+                .keep_ports(&[])
+                .and_then(|sandbox| sandbox.guard_engine(&case.runtime))
+                .and_then(|sandbox| sandbox.allow_read(server_parent)),
+        );
+        walled(
+            sandbox(&case)
+                .allow_read(server_parent)
+                .and_then(|sandbox| sandbox.guard_engine(&case.runtime)),
+        );
+    }
     let profile = guarded(&case).profile();
     let deny = profile
         .split("(deny file-read* file-write*")
         .nth(1)
         .expect("a secret deny block");
     assert!(
-        deny.contains(&format!("(subpath \"{}\")", store.display())),
+        deny.contains(&format!("(subpath \"{}\")", secret_folder.display())),
         "{profile}"
     );
 }
