@@ -112,7 +112,7 @@ pub(crate) fn refresh_now() {
 fn refreshed(due: impl FnOnce(&mut Probes, Instant) -> bool) -> Vec<PathBuf> {
     let now = Instant::now();
     let mut probes = lock(&FOLDERS);
-    if due(&mut *probes, now) && !start_folder_probe() {
+    if due(&mut probes, now) && !start_folder_probe() {
         probes.finish(Vec::new(), false, now);
     }
     probes.found.clone()
