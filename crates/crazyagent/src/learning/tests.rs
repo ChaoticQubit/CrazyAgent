@@ -141,15 +141,16 @@ fn a_message_typed_into_the_live_master_terminal_ticks_talk_to_the_master_but_en
         1,
         "the owner's own turn typed into the live master terminal"
     );
-    db.execute(
-        "INSERT INTO conversation_entries VALUES ('p1','message','Hi.')",
-        [],
+    db.execute_batch(
+        "INSERT INTO conversation_entries VALUES ('p1','message','Hi.');
+         INSERT INTO session_messages(session,seq,project,speaker,mode,harness,text,at_ms,source,source_key)
+         VALUES('one-1',1,'p1','owner','one_turn','claude','Hi.',2000,'turn','turn-1');",
     )
     .unwrap();
     assert_eq!(
         count(&read(&mut db), StepId::Master),
         2,
-        "a composer message and a live turn both count"
+        "a composer message counts once, though its turn is kept in both stores, and a live turn counts too"
     );
 }
 
