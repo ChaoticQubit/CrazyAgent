@@ -180,7 +180,7 @@ test("a question the master closed says so: withdrawn, asked again as a choice, 
   assert.match(withdrawn, />Withdrawn by the master</);
   assert.doesNotMatch(withdrawn, />Dismiss</);
   const relayed = card(question({ status: "answered_in_terminal", closed_by: "relay", answer: "Use SQLite.", settled_ms: NOW }));
-  assert.match(relayed, />Answered in the master's terminal</);
+  assert.match(relayed, />Answered in the master&#x27;s terminal</);
   assert.match(relayed, /<span class="pj-secondary">The master reports: <\/span>Use SQLite\./);
   assert.match(card(question({ status: "dismissed", closed_by: "replaced", settled_ms: NOW })), />Asked again as a choice</);
 });
