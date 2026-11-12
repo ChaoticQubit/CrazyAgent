@@ -1,8 +1,9 @@
 import { useState, type ReactNode } from "react";
 import type { AccountView } from "../../api";
-import { pollFailure, type AccountLimits, type WindowKind } from "../../api-usage";
+import { pollFailure, type AccountLimits, type LimitExtras, type WindowKind } from "../../api-usage";
 import { Button, Notice, Panel, TextField } from "../../ui";
 import { atText } from "../settings/account-choice";
+import { extrasLine } from "./extras";
 import { API_KEY_ACCOUNT, manualReset, missingWindow, readLine, untilText, windowNow } from "./usage-model";
 import "../project/projects.css";
 import "./metrics.css";
@@ -89,12 +90,20 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
   </div>;
 }
 
-export function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
+/** An account's free resets and credits line under its limits, when the extras read has the
+ * account. Inputs: its extras and now. Output: the line, or nothing. */
+function ExtrasLine({ extras, nowMs }: { extras: LimitExtras | undefined; nowMs: number }) {
+  if (!extras) return null;
+  return <span className="muted small usage-extras">{extrasLine(extras, nowMs)}</span>;
+}
+
+export function LimitsCard({ limits, name, nowMs, busy, onSetReset, extras }: {
   limits: AccountLimits;
   name: string;
   nowMs: number;
   busy: string | null;
   onSetReset: (account: string, kind: WindowKind, at: number | null) => void;
+  extras?: LimitExtras;
 }) {
   return <section className="usage-limits" aria-label={`${name} limits`}>
     <div className="row usage-window-head">
@@ -105,6 +114,7 @@ export function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
     {limits.failure && <Notice tone={limits.failure === API_KEY_ACCOUNT ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
     <WindowLine limits={limits} kind="five_hour" nowMs={nowMs} pending={busy === `${limits.account}/five_hour`} onSetReset={onSetReset} />
     <WindowLine limits={limits} kind="weekly" nowMs={nowMs} pending={busy === `${limits.account}/weekly`} onSetReset={onSetReset} />
+    <ExtrasLine extras={extras} nowMs={nowMs} />
   </section>;
 }
 
@@ -134,22 +144,26 @@ export function noWindow(account: Pick<AccountView, "method" | "provider">): str
   return account.method === "api_key" ? NO_WINDOW_KEY : NO_WINDOW_URL;
 }
 
-function NoWindowCard({ name, note }: { name: string; note: string }) {
+function NoWindowCard({ name, note, extras, nowMs }: { name: string; note: string; extras: LimitExtras | undefined; nowMs: number }) {
   return <section className="usage-limits" aria-label={`${name} limits`}>
     <div className="row usage-window-head"><h3>{name}</h3></div>
     <span className="muted small">{note}</span>
+    <ExtrasLine extras={extras} nowMs={nowMs} />
   </section>;
 }
 
 /** Account limits: each account's windows and resets under the Check limits now button, then
- * each key, URL or local account without a read of its own, saying what it has instead.
- * Inputs: the limits read, the account namer, now, the page's controls and those accounts. */
-export function AccountLimitsPanel({ limits, name, nowMs, controls, noWindow: plain = [] }: {
+ * each key, URL or local account without a read of its own, saying what it has instead; each
+ * card ends with its free resets and credits line when the extras read has the account.
+ * Inputs: the limits read, the account namer, now, the page's controls, those accounts and the
+ * extras by account. */
+export function AccountLimitsPanel({ limits, name, nowMs, controls, noWindow: plain = [], extras }: {
   limits: AccountLimits[];
   name: (key: string) => string;
   nowMs: number;
   controls: LimitsControls;
   noWindow?: readonly NoWindow[];
+  extras?: ReadonlyMap<string, LimitExtras>;
 }) {
   const read = new Set(limits.map((row) => row.account));
   const others = plain.filter((row) => !read.has(row.account));
@@ -157,7 +171,7 @@ export function AccountLimitsPanel({ limits, name, nowMs, controls, noWindow: pl
     {limits.length === 0 && others.length === 0
       ? <p className="muted">No limits read yet. Signed-in Claude and ChatGPT accounts show here after their first check.</p>
       : <div className="usage-limit-grid">{limits.map((row) => <LimitsCard key={row.account} limits={row} name={name(row.account)}
-        nowMs={nowMs} busy={controls.busy} onSetReset={controls.onSetReset} />)}
-        {others.map((row) => <NoWindowCard key={row.account} name={name(row.account)} note={row.note} />)}</div>}
+        nowMs={nowMs} busy={controls.busy} onSetReset={controls.onSetReset} extras={extras?.get(row.account)} />)}
+        {others.map((row) => <NoWindowCard key={row.account} name={name(row.account)} note={row.note} extras={extras?.get(row.account)} nowMs={nowMs} />)}</div>}
   </Panel>;
 }

@@ -734,6 +734,13 @@ fn the_daily_question_on_asks_once_a_day_and_a_yes_counts_the_day() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].id, id);
     assert_eq!(pending[0].asker, EngineSource::Scorecard.name().unwrap());
+    assert_eq!(
+        pending[0].context.as_deref(),
+        Some(
+            "The go/no-go scorecard counts the days you answer Yes. Turn this question off on the go/no-go scorecard."
+        ),
+        "the way off names the scorecard, not a Settings tab that is gone"
+    );
     questions::answer(
         &score.case.db,
         id,

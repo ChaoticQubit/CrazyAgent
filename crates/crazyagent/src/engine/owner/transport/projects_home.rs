@@ -27,6 +27,7 @@ enum Work {
     Move(MovePlan),
     MoveProject(ProjectMove),
     New(NewProjectPlan),
+    Demo(NewProjectPlan),
     Delete(DeletePlan, Vec<i64>),
 }
 
@@ -36,7 +37,7 @@ impl Work {
             Self::Add(_) => "home_add_interrupted",
             Self::Move(_) => "home_move_interrupted",
             Self::MoveProject(_) => "move_project_interrupted",
-            Self::New(_) => "home_new_project_interrupted",
+            Self::New(_) | Self::Demo(_) => "home_new_project_interrupted",
             Self::Delete(..) => "project_delete_interrupted",
         }
     }
@@ -67,12 +68,26 @@ impl Work {
                 };
             }
             Self::New(plan) => Step::Staged(plan.run()),
+            Self::Demo(plan) => Step::Staged(plan.run().and_then(seeded)),
             Self::Delete(plan, research) => Step::Deleted(plan.run().map(|()| {
                 let files = plan.engine_files(&research);
                 (plan.database, files)
             })),
         };
         (step, After::default())
+    }
+}
+
+/// Writes the demo web page into a staged New Project folder and commits it.
+/// Input: the staged folder. Output: the same staged folder, or the seed's code
+/// with the staging folder removed, as a failed New Project leaves it.
+fn seeded(staged: Staged) -> Result<Staged, String> {
+    match crate::demo::seed(staged.staging()) {
+        Ok(()) => Ok(staged),
+        Err(code) => {
+            let _ = std::fs::remove_dir_all(staged.staging());
+            Err(code.into())
+        }
     }
 }
 
@@ -92,8 +107,8 @@ enum Planned {
 
 /// True for the owner requests that touch folders outside the engine data:
 /// AddExistingFolder, MoveProjectsHome that moves the projects, MoveProjectHome,
-/// SetupProject (New Project), DeleteProject (Delete everything), FolderSize and
-/// ProjectFiles.
+/// SetupProject (New Project), CreateDemo (the demo's New Project with its web page),
+/// DeleteProject (Delete everything), FolderSize and ProjectFiles.
 /// These run their slow disk work here, off the storage actor, and only then
 /// reach the engine database.
 pub(super) fn handles(request: &OwnerRequest) -> bool {
@@ -107,6 +122,7 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
                 }
                 | OwnerMutation::MoveProjectHome { .. }
                 | OwnerMutation::SetupProject { .. }
+                | OwnerMutation::CreateDemo { .. }
                 | OwnerMutation::DeleteProject { .. }
         } | OwnerOperation::Read {
             query: OwnerRead::FolderSize { .. } | OwnerRead::ProjectFiles { .. }
@@ -114,8 +130,8 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
     )
 }
 
-/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject and
-/// FolderSize for one owner. Input: the stream, engine, authority, owner packet and
+/// Serves AddExistingFolder, MoveProjectsHome, MoveProjectHome, SetupProject, CreateDemo
+/// and FolderSize for one owner. Input: the stream, engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
 /// the replay check, the plan, a grant check under the owner barrier and, for a
@@ -434,13 +450,15 @@ async fn plan(
                 },
             );
         }
-        OwnerMutation::SetupProject { .. } => {
+        OwnerMutation::SetupProject { .. } | OwnerMutation::CreateDemo { .. } => {
+            let demo = matches!(mutation, OwnerMutation::CreateDemo { .. });
             let request = Box::new(request.clone());
             return Ok(
                 match engine
                     .owner_job(|reply| Job::SetupPlan(a.clone(), request, reply))
                     .await?
                 {
+                    Ok(plan) if demo => Planned::Work(Work::Demo(plan)),
                     Ok(plan) => Planned::Work(Work::New(plan)),
                     Err(code) => Planned::Step(Step::Staged(Err(code))),
                 },

@@ -75,6 +75,39 @@ test("the rows stand exactly as the ranking gives them, each with its place, nam
   assert.deepEqual([seen[2].limits, seen[2].none], [[], "No usage read yet"]);
 });
 
+test("each row says its free resets and credits under its usage, and an account with no usage read still gets its line", async () => {
+  const seen = await onPools({}, rows);
+  assert.deepEqual(seen.map((row) => [row.name, row.extras]), [
+    ["Account 2", "2 free resets (weekly) \u00b7 Credits: $4.20 left"],
+    ["Account 0", "No free resets \u00b7 Credits: not reported by Codex"],
+    ["Account 1", "Free resets and credits: not reported by Codex"],
+  ]);
+  assert.equal(seen[2].none, "No usage read yet");
+  for (const row of seen) assert.doesNotMatch(row.extras, /(^|\D)0 free|: 0\b/, "nothing missing reads as 0");
+});
+
+test("a row says where to spend when the provider spends elsewhere", async () => {
+  const seen = await onPools({ extras: "spend" }, rows);
+  assert.equal(seen[0].extras, "2 free resets \u00b7 Credits: not reported by Codex \u00b7 Spend at chatgpt.com");
+});
+
+test("Pools asks for the detail rows on every read while it is open", async () => {
+  const asked = await onPools({}, async (page) => {
+    const first = await page.evaluate("Fixture.extrasDetail()");
+    await page.evaluate("Fixture.fireTimer(60000)");
+    return { first, later: await page.evaluate("Fixture.extrasDetail()") };
+  });
+  assert.ok(asked.first.length >= 1, JSON.stringify(asked));
+  assert.ok(asked.later.length > asked.first.length, JSON.stringify(asked));
+  assert.ok(asked.later.every((detail) => detail === true), JSON.stringify(asked));
+});
+
+test("a failed extras read keeps each row's usage and shows no made-up line", async () => {
+  const seen = await onPools({ extras: "error" }, rows);
+  assert.deepEqual(seen.map((row) => row.extras), ["", "", ""]);
+  assert.deepEqual(seen[0].limits, [["Weekly62% used", "ok"], ["5-hour18% used", "ok"]]);
+});
+
 test("held accounts come after the held line with no number, in the ranking's order", async () => {
   const seen = await onPools({ ranking: "held" }, async (page) => ({ rows: await rows(page), head: await page.evaluate("Fixture.heldHead()") }));
   assert.deepEqual(seen.rows.map((row) => [row.number, row.spoken, row.name, row.held]), [["1", "Position 1", "Account 2", false], ["-", "Held", "Account 1", true], ["-", "Held", "Account 0", true]]);
@@ -363,7 +396,7 @@ for (const theme of ["light", "dark"]) {
   test(`the pool list and every row part read at 4.5 to 1 in ${theme}`, async () => {
     const seen = await onPools({ ranking: "held", limits: "mixed" }, async (page) => {
       const read = {};
-      for (const selector of [".pool-item-count", ".pool-item.on .pool-item-label", ".pool-item-about", ".pool-pos", ".pool-row.held .pool-pos", ".pool-plan", ".pool-why", ".pool-row.held .pool-why", ".pool-why a", ".pool-limit.near", ".pool-limit.full", ".pool-limit-none", ".pool-held-head", ".pool-order p"]) {
+      for (const selector of [".pool-item-count", ".pool-item.on .pool-item-label", ".pool-item-about", ".pool-pos", ".pool-row.held .pool-pos", ".pool-plan", ".pool-why", ".pool-row.held .pool-why", ".pool-why a", ".pool-limit.near", ".pool-limit.full", ".pool-limit-none", ".pool-extras", ".pool-held-head", ".pool-order p"]) {
         read[selector] = await page.evaluate(`Fixture.contrast(${JSON.stringify(selector)})`);
       }
       return read;

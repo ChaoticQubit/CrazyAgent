@@ -18,6 +18,7 @@ pub mod conversation;
 pub mod coord;
 pub mod coordination;
 pub mod credentials;
+pub mod demo;
 pub mod engine;
 pub mod file_identity;
 #[cfg(unix)]
@@ -46,6 +47,7 @@ pub mod master_step_limit;
 pub mod master_time_limit;
 pub mod memory;
 pub mod model_gateway;
+pub mod notifications;
 pub mod onboarding;
 pub mod owner_profile;
 pub mod paths;
