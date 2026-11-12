@@ -304,12 +304,41 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
         })
     );
     let engine = crate::tools::Places::engine(Some(root.path()), None, None, None);
-    let at = |wanted: &Path| engine.folders().iter().position(|found| found == wanted);
-    assert_eq!(at(&setup_bin), Some(0));
+    let folders = engine.folders();
     assert_eq!(
-        at(&crate::setup::harness_prefix(root.path()).join("bin")),
-        Some(1)
+        folders[folders.len() - 2..],
+        [
+            setup_bin,
+            crate::setup::harness_prefix(root.path()).join("bin")
+        ]
     );
+}
+
+#[test]
+fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let home = work.path().join("home");
+    let owner = home.join(".local/bin");
+    script(&owner.join("node"), "v22.11.0");
+    npm_launcher(&owner);
+    let engine = crate::tools::Places::engine(Some(root.path()), None, Some(home), None);
+    let setup_bin = root.path().join("setup/bin");
+    let prefix_bin = crate::setup::harness_prefix(root.path()).join("bin");
+    let both: Vec<PathBuf> = engine
+        .folders()
+        .iter()
+        .filter(|folder| [&owner, &setup_bin, &prefix_bin].contains(folder))
+        .cloned()
+        .collect();
+    assert_eq!(both, [owner.clone(), setup_bin, prefix_bin]);
+    let found = usable(&places(both)).unwrap();
+    assert_eq!(found.node, owner.join("node"));
+    assert_eq!(found.npm, owner.join("npm"));
 }
 
 #[test]
