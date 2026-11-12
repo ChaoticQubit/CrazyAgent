@@ -4,18 +4,21 @@ use super::project::{
     Transcript, memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
+use super::project_needs::NeedsYou;
 use super::project_view::{activity, job_status, project_screen, tab_items};
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::engine::{Client, EngineError};
 use crate::memory::ReviewDecision;
+use crate::notifications::{Notice, NoticeCounts, NoticeKind, NoticePage, NoticeTarget};
 use crate::project_setup::{
     ContextKind, Platform, ProjectSetup, ResearchJob, ResearchKind, ResearchStatus, SetupAction,
     SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
+use crate::tui::client::notifications::{NoticesEvent, NoticesReply};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Style};
 use std::os::unix::fs::PermissionsExt;
@@ -187,6 +190,51 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
     })
 }
 
+/// One pending store item of a test project, unread and not folded. Inputs: the id, kind,
+/// text and target. Output: the item.
+fn pending(id: i64, kind: NoticeKind, text: &str, target: NoticeTarget) -> Notice {
+    Notice {
+        id,
+        kind,
+        class: kind.class(),
+        project_id: target.project().cloned(),
+        text: text.into(),
+        target,
+        created_ms: 1_793_000_000_000,
+        read_ms: None,
+        resolved_ms: None,
+        folded: 1,
+        unread: 1,
+        pending: 1,
+        ids: vec![id],
+        banner: true,
+    }
+}
+
+/// Lands one read of the Overview's Needs you with these items of the project and no
+/// sign-ins. Inputs: the screen, now and the items. Output: none.
+fn needs_you(screen: &mut ProjectScreen, now_ms: i64, items: &[Notice]) {
+    screen.needs.refresh();
+    let due = screen.needs.due(now_ms);
+    assert_eq!(due.len(), 2, "{due:?}");
+    for query in due {
+        let own = query == NeedsYou::own_query(&screen.project);
+        let page = NoticePage {
+            newest: items.iter().map(|item| item.id).max().unwrap_or(0),
+            counts: NoticeCounts {
+                unread: 0,
+                pending: 0,
+            },
+            more: false,
+            items: if own { items.to_vec() } else { Vec::new() },
+        };
+        screen.needs.arrive(&NoticesEvent {
+            query,
+            result: Ok(NoticesReply::Page(page)),
+        });
+    }
+}
+
 async fn settle(
     screen: &mut ProjectScreen,
     controller: &mut OwnerController,
@@ -333,6 +381,39 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
         assert!(shown.contains("! Needs a pool"));
         assert_eq!(drawn.help.first(), Some(&("Enter", "Pick a pool")));
     }
+    let waits = pending(
+        41,
+        NoticeKind::ResearchPool,
+        "2 research jobs wait for a pool.",
+        NoticeTarget::ProjectPool {
+            project_id: screen.project.clone(),
+        },
+    );
+    let asks = pending(
+        42,
+        NoticeKind::Question,
+        "Which page ships first?",
+        NoticeTarget::Questions {
+            project_id: screen.project.clone(),
+            question: Some(42),
+            agent: None,
+        },
+    );
+    needs_you(&mut screen, start + 4_000, &[asks, waits.clone()]);
+    let shown = text(&project_screen(&mut screen, 120, 36, &look).rows);
+    assert!(shown.contains("Which page ships first?"), "{shown}");
+    assert!(
+        !shown.contains("Pick a pool to start. Work starts as soon as you do."),
+        "an item beyond the pool shows the Overview's Needs you: {shown}"
+    );
+    needs_you(&mut screen, start + 5_000, &[waits]);
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    let shown = text(&drawn.rows);
+    assert!(
+        shown.contains("Pick a pool to start. Work starts as soon as you do."),
+        "only the pool's wait needs the owner, which the picker answers (DEC-136a decision 4): {shown}"
+    );
+    assert_eq!(drawn.help.first(), Some(&("Enter", "Pick a pool")));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::PickPool);
     let picked = CredentialRef::new("pool-main").unwrap();
     screen.setup.as_mut().unwrap().pool = Some(picked.clone());
