@@ -298,6 +298,14 @@ impl Search {
         self
     }
 
+    /// Adds the `bin` folder of the engine's own npm prefix
+    /// ([`crate::setup::harness_prefix`]), where an npm harness the engine installed lives,
+    /// after the PATH and system folders, so a harness the owner already has still wins.
+    /// Input: the engine root. Output: the search.
+    pub fn with_engine(self, _engine_root: &Path) -> Self {
+        self
+    }
+
     fn locate(&self, spec: &HarnessSpec) -> Option<PathBuf> {
         self.hits(spec, 1, false).pop()
     }

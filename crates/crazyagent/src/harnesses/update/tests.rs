@@ -16,12 +16,13 @@ impl Machine {
     }
     fn roots(&self) -> Roots {
         let npm = self.root.path().join("brew/bin/npm");
-        let engine = self.root.path().join("harnesses");
+        let engine = crate::setup::harness_prefix(self.root.path());
         Roots {
             home: self.root.path().join("home"),
             brew_prefixes: vec![self.root.path().join("brew")],
             casks: true,
             npm: npm.exists().then(|| NpmInstall {
+                node: self.root.path().join("brew/bin/node"),
                 program: npm,
                 search: vec![self.root.path().join("brew/bin"), engine.join("bin")],
                 prefix: engine,
@@ -1148,7 +1149,11 @@ fn npm_installs_into_the_prefix_the_harness_was_found_in_whatever_the_owners_npm
     let install = install_command("codex", &machine.roots()).unwrap();
     assert_eq!(install.program, machine.root.path().join("brew/bin/npm"));
     assert!(run(&install, &home, CHECK_TIME).unwrap().success);
-    assert!(machine.root.path().join("harnesses/installed").exists());
+    assert!(
+        crate::setup::harness_prefix(machine.root.path())
+            .join("installed")
+            .exists()
+    );
     assert!(!machine.root.path().join("brew/installed").exists());
     assert!(!elsewhere.join("installed").exists());
 }
@@ -1159,7 +1164,7 @@ fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_ho
     machine.program("brew/bin/brew", 0o755);
     let npm = machine.npm("brew");
     executable(&npm, NPM_LIKE);
-    let engine = machine.root.path().join("harnesses");
+    let engine = crate::setup::harness_prefix(machine.root.path());
     let fixed = install_command("gemini-cli", &machine.roots()).unwrap();
     assert_eq!(fixed.program, npm);
     assert_eq!(fixed.args, ["install", "-g", "@google/gemini-cli"]);
@@ -1187,10 +1192,15 @@ fn an_npm_install_goes_to_the_engine_prefix_with_the_found_npm_and_never_to_a_ho
 fn a_harness_npm_put_in_the_engine_prefix_updates_and_checks_with_the_found_npm() {
     let machine = Machine::new();
     let npm = machine.npm("brew");
-    let engine = machine.root.path().join("harnesses");
+    let engine = crate::setup::harness_prefix(machine.root.path());
     std::fs::create_dir_all(engine.join("lib/node_modules")).unwrap();
+    let relative = engine
+        .strip_prefix(machine.root.path())
+        .unwrap()
+        .to_str()
+        .unwrap();
     let real = machine.program(
-        "harnesses/lib/node_modules/@google/gemini-cli/dist/index.js",
+        &format!("{relative}/lib/node_modules/@google/gemini-cli/dist/index.js"),
         0o755,
     );
     let update = update_command("gemini-cli", &real, &real, &machine.roots()).unwrap();
@@ -1769,6 +1779,20 @@ fn an_install_runs_the_fixed_line_and_the_harness_is_found_right_after() {
 }
 
 #[test]
+fn an_npm_install_from_the_app_links_the_node_it_installs_with_into_the_engine_prefix() {
+    let machine = Machine::new();
+    executable(&machine.npm("brew"), NPM_LIKE);
+    let node = machine.program("brew/bin/node", 0o755);
+    std::fs::create_dir_all(machine.roots().home).unwrap();
+    let case = Case::new(machine, entry("gemini-cli", None), None);
+    case.install().unwrap();
+    case.finish();
+    let engine = crate::setup::harness_prefix(case.machine.root.path());
+    assert!(engine.join("installed").exists());
+    assert_eq!(std::fs::read_link(engine.join("bin/node")).unwrap(), node);
+}
+
+#[test]
 fn an_install_is_refused_when_installed_when_the_setting_is_off_and_while_another_job_runs() {
     assert_eq!(
         update_case("claude-code").install().unwrap_err(),
@@ -1876,7 +1900,7 @@ fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
         assert_eq!(fixed.program, npm, "{why}");
         assert_eq!(
             fixed.prefix.as_deref(),
-            Some(machine.root.path().join("harnesses").as_path()),
+            Some(crate::setup::harness_prefix(machine.root.path()).as_path()),
             "{why} installs into the engine prefix"
         );
     }

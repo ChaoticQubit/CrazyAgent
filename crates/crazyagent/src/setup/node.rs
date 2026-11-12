@@ -97,12 +97,6 @@ pub fn folder(engine_root: &Path) -> PathBuf {
     engine_root.join("setup").join("node")
 }
 
-/// The engine-owned npm prefix npm harnesses install into, `<engine root>/harnesses`.
-/// Input: the engine root. Output: the folder.
-pub fn prefix(engine_root: &Path) -> PathBuf {
-    engine_root.join("harnesses")
-}
-
 /// The pinned Node archive for one target triple, from nodejs.org's own dist folder.
 /// Input: the target, such as `aarch64-apple-darwin`. Output: its pin, or none for a
 /// target with no Node pin.
@@ -126,7 +120,7 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
     let home = folder(engine_root);
     let node = home.join("bin").join("node");
     let npm = home.join("bin").join("npm");
-    let prefix = prefix(engine_root);
+    let prefix = super::harness_prefix(engine_root);
     let uid = rustix::process::getuid().as_raw();
     let own_file = std::fs::symlink_metadata(&node).is_ok_and(|metadata| {
         metadata.is_file()
@@ -169,7 +163,7 @@ pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
 /// Makes the engine npm prefix private and ready for `npm install -g`: the prefix with its
 /// `bin` and `lib/node_modules` folders, each this user's alone, kept as they are when
 /// already so. Input: the prefix folder. Output: Ok, or `setup_store_unavailable`.
-pub fn make_prefix(prefix: &Path) -> Result<(), InstallError> {
+pub fn make_prefix(prefix: &Path, _node: &Path) -> Result<(), InstallError> {
     for made in [prefix.join("bin"), prefix.join("lib").join("node_modules")] {
         private_folder(&made)?;
     }
@@ -243,7 +237,7 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
         for name in LINKED {
             link(&folder(engine_root).join("bin").join(name), &bin.join(name))?;
         }
-        make_prefix(&prefix(engine_root))?;
+        make_prefix(&super::harness_prefix(engine_root), &bin.join("node"))?;
         runtime(engine_root).ok_or(InstallError("setup_install_failed"))
     })();
     let _ = std::fs::remove_dir_all(&staging);

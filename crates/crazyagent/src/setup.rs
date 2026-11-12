@@ -520,6 +520,13 @@ pub fn known_reason(code: &str) -> Option<&'static str> {
         .map(|(_, sentence)| *sentence)
 }
 
+/// The engine-owned npm prefix npm harnesses install into, the one folder below the engine
+/// root the tool resolver, the harness search and harness finding accept as the engine's
+/// own. Input: the engine root. Output: the folder.
+pub fn harness_prefix(engine_root: &std::path::Path) -> std::path::PathBuf {
+    engine_root.join("harnesses")
+}
+
 /// The installer for this Mac, installing into `<engine root>/setup`.
 /// Input: the engine root. Output: the installer.
 #[cfg(target_os = "macos")]

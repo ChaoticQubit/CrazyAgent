@@ -67,7 +67,7 @@ fn nothing_left(root: &Path) {
     for name in ["node", "npm", "npx"] {
         assert!(std::fs::symlink_metadata(setup.join("bin").join(name)).is_err());
     }
-    assert!(std::fs::symlink_metadata(root.join("harnesses")).is_err());
+    assert!(std::fs::symlink_metadata(crate::setup::harness_prefix(root)).is_err());
     let hidden: Vec<String> = std::fs::read_dir(&setup)
         .map(|entries| {
             entries
@@ -114,7 +114,7 @@ fn the_pinned_node_unpacks_under_setup_with_its_links_and_an_engine_npm_prefix()
     let (archive, sha256) = pack(work.path(), &source);
     let installed = install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
     let setup = root.path().join("setup");
-    let prefix = root.path().join("harnesses");
+    let prefix = crate::setup::harness_prefix(root.path());
     assert_eq!(installed.node, setup.join("node/bin/node"));
     assert_eq!(installed.npm, setup.join("node/bin/npm"));
     assert_eq!(installed.prefix, prefix);
@@ -304,14 +304,54 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
     let engine = crate::tools::Places::engine(Some(root.path()), None, None, None);
     let at = |wanted: &Path| engine.folders().iter().position(|found| found == wanted);
     assert_eq!(at(&setup_bin), Some(0));
-    assert_eq!(at(&prefix(root.path()).join("bin")), Some(1));
+    assert_eq!(
+        at(&crate::setup::harness_prefix(root.path()).join("bin")),
+        Some(1)
+    );
+}
+
+#[test]
+fn the_engine_npm_prefix_sits_in_the_setup_folder_the_resolver_and_harness_finding_accept() {
+    let root = Path::new("/engine");
+    assert_eq!(
+        crate::setup::harness_prefix(root),
+        root.join("setup").join("harnesses")
+    );
+    assert!(crate::setup::harness_prefix(root).starts_with(root.join("setup")));
+}
+
+#[test]
+fn the_engine_npm_prefix_links_the_node_its_install_used_so_a_node_script_harness_finds_it() {
+    let root = root();
+    let prefix = crate::setup::harness_prefix(root.path());
+    let first = root.path().join("tools/one/bin/node");
+    script(&first, "one");
+    make_prefix(&prefix, &first).unwrap();
+    assert_eq!(std::fs::read_link(prefix.join("bin/node")).unwrap(), first);
+    let harness = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
+    script(&harness, "codex");
+    assert_eq!(
+        crate::harnesses::node_prefix(&harness),
+        Some(prefix.clone())
+    );
+    let second = root.path().join("tools/two/bin/node");
+    script(&second, "two");
+    make_prefix(&prefix, &second).unwrap();
+    assert_eq!(
+        std::fs::read_link(prefix.join("bin/node")).unwrap(),
+        second,
+        "a later install's node replaces the link"
+    );
+    private(&prefix.join("bin"));
 }
 
 #[test]
 fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
     let root = root();
-    let made = prefix(root.path());
-    make_prefix(&made).unwrap();
+    let made = crate::setup::harness_prefix(root.path());
+    let node = root.path().join("tools/bin/node");
+    script(&node, "node");
+    make_prefix(&made, &node).unwrap();
     for folder in [
         made.clone(),
         made.join("bin"),
@@ -321,7 +361,11 @@ fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
         private(&folder);
     }
     assert_eq!(runtime(root.path()), None);
-    assert_eq!(make_prefix(&made), Ok(()), "making it again keeps it");
+    assert_eq!(
+        make_prefix(&made, &node),
+        Ok(()),
+        "making it again keeps it"
+    );
 }
 
 #[test]

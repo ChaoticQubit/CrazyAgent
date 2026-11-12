@@ -92,7 +92,7 @@ impl Places {
         let mut folders: Vec<PathBuf> = Vec::new();
         folders.extend(app_folder.map(Path::to_path_buf));
         folders.extend(engine_root.map(|root| root.join("setup").join("bin")));
-        folders.extend(engine_root.map(|root| root.join("harnesses").join("bin")));
+        folders.extend(engine_root.map(|root| crate::setup::harness_prefix(root).join("bin")));
         if let Some(path) = path {
             folders.extend(
                 std::env::split_paths(path)

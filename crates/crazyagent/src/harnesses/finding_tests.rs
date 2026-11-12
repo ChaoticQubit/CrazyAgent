@@ -491,3 +491,63 @@ fn a_pipe_at_the_nvm_default_alias_never_holds_up_the_search() {
         .expect("the search waited on the pipe");
     assert!(looked.contains(&version), "{looked:?}");
 }
+
+#[test]
+fn the_engine_search_finds_a_harness_in_the_engine_npm_prefix_after_the_owners_folders() {
+    let case = Case::new();
+    let bin = crate::setup::harness_prefix(&case.engine).join("bin");
+    let bare = Search::engine(None, &[], None);
+    let engine = bare.clone().with_engine(&case.engine);
+    assert_eq!(
+        engine.clone().with_engine(&case.engine),
+        engine,
+        "the folder is added once"
+    );
+    let relative = bin.strip_prefix(&case.root).unwrap().to_str().unwrap();
+    let installed = case.file(&format!("{relative}/codex"), 0o755);
+    assert_eq!(bare.find("codex"), None);
+    assert_eq!(
+        engine.find("codex"),
+        Some(installed.clone()),
+        "a prefix made after engine start is still looked in"
+    );
+    let owned = case.file("tools/codex", 0o755);
+    let path = std::env::join_paths([owned.parent().unwrap()]).unwrap();
+    let both = Search::engine(Some(&path), &[], None).with_engine(&case.engine);
+    assert_eq!(both.find("codex"), Some(owned));
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        Search::engine(None, &[], None)
+            .with_engine(&case.engine)
+            .find("codex"),
+        None,
+        "a prefix others can change is left out"
+    );
+}
+
+#[test]
+fn an_npm_harness_the_engine_installed_in_its_setup_folder_passes_and_other_engine_data_stays_refused()
+ {
+    let case = Case::new();
+    let prefix = crate::setup::harness_prefix(&case.engine);
+    let relative = prefix.strip_prefix(&case.root).unwrap().to_str().unwrap();
+    let real = case.file(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let entry = prefix.join("bin/codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&real, &entry).unwrap();
+    assert_eq!(case.check("codex", &entry), Ok(entry.clone()));
+    assert_eq!(case.check("codex", &real), Ok(real));
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    assert_eq!(case.check("codex", &agent), Err(PATH_AGENT_SPACE.into()));
+    let into = prefix.join("bin/claude");
+    std::os::unix::fs::symlink(&agent, &into).unwrap();
+    assert_eq!(
+        case.check("claude-code", &into),
+        Err(PATH_AGENT_SPACE.into())
+    );
+    let beside = case.file("engine/setup-other/codex", 0o755);
+    assert_eq!(case.check("codex", &beside), Err(PATH_AGENT_SPACE.into()));
+}

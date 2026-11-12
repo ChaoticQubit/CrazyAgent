@@ -166,7 +166,8 @@ fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
     };
     assert_eq!(at("/app"), 0);
     assert_eq!(at("/engine/setup/bin"), 1);
-    assert_eq!(at("/engine/harnesses/bin"), 2);
+    let prefix_bin = crate::setup::harness_prefix(Path::new("/engine")).join("bin");
+    assert_eq!(at(prefix_bin.to_str().unwrap()), 2);
     assert_eq!(at("/opt/homebrew/bin"), 3);
     assert_eq!(at("/usr/local/bin"), 4);
     assert_eq!(at("/custom/bin"), 5);
