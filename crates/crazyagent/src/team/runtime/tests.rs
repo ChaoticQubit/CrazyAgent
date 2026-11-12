@@ -29666,6 +29666,54 @@ fn a_stop_fallback_waits_while_the_accounts_that_can_run_the_model_rest() {
     assert_eq!(agents, 0, "no agent on the other account's own model");
 }
 
+/// An agent whose harness refused its model (DEC-150 F8) records the refusal for its
+/// project, account and model, so the pool no longer counts that account as one that can
+/// run the model, and stops, so its next start picks again; the master starts again too.
+/// An agent on its account's own model records nothing.
+#[test]
+fn a_model_refusal_is_recorded_for_the_account_and_stops_the_agent_that_got_it() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = fixture.setup.project_id.clone();
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+    worker.model = Some("gpt-a".to_owned());
+    team.workers.insert(sub, worker);
+    let own = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    team.workers
+        .insert(own, between_turns(&project, AgentRole::Sub, false, false));
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Working);
+    let mut worker = between_turns(&project, AgentRole::Master, false, false);
+    worker.model = Some("gpt-m".to_owned());
+    team.workers.insert(master, worker);
+
+    team.apply(sub, Report::ModelRefused).unwrap();
+    team.apply(own, Report::ModelRefused).unwrap();
+    team.apply(master, Report::ModelRefused).unwrap();
+
+    let now = now_ms();
+    let refused = |model: &str| {
+        super::super::model_pick::refused(
+            &fixture.connection,
+            &project,
+            &reference(ENDPOINT),
+            model,
+            now,
+        )
+        .unwrap()
+    };
+    assert!(refused("gpt-a"));
+    assert!(refused("gpt-m"));
+    assert!(team.workers[&sub].stopping);
+    assert_eq!(team.workers[&sub].stop_why, "engine_stop:model_refused");
+    assert!(
+        !team.workers[&own].stopping,
+        "an account's own model is not refused"
+    );
+    assert!(team.workers[&master].stopping);
+    assert!(team.master_restarts.contains(&project));
+}
+
 /// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
 /// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
 /// stops one idle agent on another model, so the task can start on its own model.

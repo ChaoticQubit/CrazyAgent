@@ -1246,3 +1246,64 @@ fn an_unread_durable_output_log_past_its_bound_is_emptied_only_when_it_is_the_pr
     assert!(super::trim_unread_output(&path, &probe));
     assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
 }
+
+/// A launched agent's model refusal is told apart from any other turn error by its
+/// harness code alone (DEC-150 F8): Claude Code's `model_not_found` assistant error, and a
+/// Codex app-server turn error whose `codexErrorInfo` is `modelNotFound`, each ahead of the
+/// plain turn error; other codes and wording that only names the model are not refusals.
+#[test]
+fn a_model_refusal_is_reported_from_the_harness_code_ahead_of_its_turn_error() {
+    let refusals = |events: &[LaunchEvent]| {
+        events
+            .iter()
+            .filter(|event| matches!(event, LaunchEvent::ModelRefused))
+            .count()
+    };
+    let mut driver = claude_driver();
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"assistant", "uuid":"assistant-1", "session_id":"native-session",
+            "parent_tool_use_id":null, "error":"model_not_found",
+            "message":{"id":"message-1","type":"message","role":"assistant",
+                "model":"observed-model","content":[],"stop_reason":"end_turn",
+                "usage":{"input_tokens":1,"output_tokens":0}}
+        })))
+        .unwrap();
+    assert_eq!(refusals(&events), 1);
+    assert_eq!(turn_errors(&events), [false]);
+    let refused = events
+        .iter()
+        .position(|event| matches!(event, LaunchEvent::ModelRefused));
+    let failed = events
+        .iter()
+        .position(|event| matches!(event, LaunchEvent::TurnError { .. }));
+    assert!(refused < failed, "{events:?}");
+    let (events, _) = driver
+        .receive(&line(json!({
+            "type":"assistant", "uuid":"assistant-2", "session_id":"native-session",
+            "parent_tool_use_id":null, "error":"invalid_request",
+            "message":{"id":"message-2","type":"message","role":"assistant",
+                "model":"observed-model","content":[],"stop_reason":"end_turn",
+                "usage":{"input_tokens":1,"output_tokens":0}}
+        })))
+        .unwrap();
+    assert_eq!(refusals(&events), 0);
+
+    let mut driver = codex_driver_in_a_turn();
+    let (events, _) = driver
+        .receive(&line(json!({"method":"error","params":{
+            "threadId":"own-thread", "turnId":"own-turn", "willRetry":false,
+            "error":{"message":"The model gpt-x does not exist","codexErrorInfo":"modelNotFound"}
+        }})))
+        .unwrap();
+    assert_eq!(refusals(&events), 1, "{events:?}");
+    assert_eq!(turn_errors(&events), [false]);
+    let mut driver = codex_driver_in_a_turn();
+    let (events, _) = driver
+        .receive(&line(json!({"method":"error","params":{
+            "threadId":"own-thread", "turnId":"own-turn", "willRetry":false,
+            "error":{"message":"model not found","codexErrorInfo":"badRequest"}
+        }})))
+        .unwrap();
+    assert_eq!(refusals(&events), 0, "{events:?}");
+}

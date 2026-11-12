@@ -382,3 +382,33 @@ fn a_pin_or_record_the_owner_since_took_off_the_list_starts_on_the_default() {
     assert_eq!(pinned(&db, id).unwrap(), Some(pick("gpt-a")));
     assert_eq!(agent_model(&db, 4).unwrap(), on("gpt-a"));
 }
+
+#[test]
+fn a_model_refusal_holds_for_its_project_connection_and_model_until_it_expires() {
+    let (_tmp, db) = engine();
+    let a = CredentialRef::new("account-a").unwrap();
+    let b = CredentialRef::new("account-b").unwrap();
+    let other = ProjectId::new("other").unwrap();
+    assert!(!refused(&db, &project(), &a, "gpt-a", 1_000).unwrap());
+    refuse(&db, &project(), &a, "gpt-a", 1_000).unwrap();
+    assert!(refused(&db, &project(), &a, "gpt-a", 1_001).unwrap());
+    assert!(!refused(&db, &project(), &a, "gpt-b", 1_001).unwrap());
+    assert!(!refused(&db, &project(), &b, "gpt-a", 1_001).unwrap());
+    assert!(!refused(&db, &other, &a, "gpt-a", 1_001).unwrap());
+    assert!(!refused(&db, &project(), &a, "gpt-a", 1_000 + MODEL_REFUSAL_MS).unwrap());
+    let extra = 4;
+    for n in 0..(REFUSALS_MAX + extra) {
+        refuse(&db, &project(), &a, &format!("m-{n}"), 2_000 + n as i64).unwrap();
+    }
+    let kept: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM team_model_refusals WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, REFUSALS_MAX as i64);
+    let last = format!("m-{}", REFUSALS_MAX + extra - 1);
+    assert!(refused(&db, &project(), &a, &last, 3_000).unwrap());
+    assert!(!refused(&db, &project(), &a, "m-0", 3_000).unwrap());
+}
