@@ -447,8 +447,9 @@ impl AccessEdit {
     /// The shared folders lines: the choice with its help, one switch per top-level folder
     /// while Chosen folders is picked, Read-only or Read-write with its help, what stays closed
     /// with the secrets shared back and the ones the choice cannot reach, when a change
-    /// applies, the Linux and Windows gap, and the Full access note. Inputs: the look, the lines so far, and the cursor's line and the
-    /// last line of its help, moved here when the cursor is on one of these rows.
+    /// applies, the Linux and Windows gap, and the Full access note. Inputs: the look, the
+    /// lines so far, and the cursor's line and the last line of its help, moved here when the
+    /// cursor is on one of these rows.
     fn shared_form(&self, look: &Look, body: &mut Vec<Row>, at: &mut usize, end: &mut usize) {
         let mark = |row: usize| if self.cursor == row { "> " } else { "  " };
         let style = |row: usize| {

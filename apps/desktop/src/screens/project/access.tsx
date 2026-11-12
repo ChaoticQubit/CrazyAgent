@@ -286,9 +286,9 @@ export function IdeAgentFilesChoices({ name, value, access, onChange }: {
 /** The shared folders choice: which local folders agents see as radio cards, the top-level
  * folders to pick for Chosen folders, Read-only or Read-write, and the secret paths shared
  * back, with what stays closed and the shared-back ones the choice cannot reach, the Linux
- * and Windows gap, when a change applies and a note when Full access makes it moot. Inputs: the id prefix, the choice, the secret paths text,
- * the engine's top-level folders, the chosen access level and the change handlers. Output:
- * the fieldset. */
+ * and Windows gap, when a change applies and a note when Full access makes it moot.
+ * Inputs: the id prefix, the choice, the secret paths text, the engine's top-level folders,
+ * the chosen access level and the change handlers. Output: the fieldset. */
 export function SharedFoldersChoices({ prefix, value, secretsText, local, access, onChange, onSecretsText }: {
   prefix: string; value: SharedFolders; secretsText: string; local: string[]; access: AgentAccess;
   onChange: (value: SharedFolders) => void; onSecretsText: (text: string) => void;
