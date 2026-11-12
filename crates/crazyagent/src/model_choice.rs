@@ -19,8 +19,10 @@ pub const MODEL_BYTES_MAX: usize = 256;
 pub const CATALOG_MODELS_MAX: usize = 64;
 /// The most model ids the owner may add to one harness.
 pub const CUSTOM_MAX: usize = 32;
-/// The most model ids one allowed list holds.
-pub const ALLOWED_MAX: usize = 32;
+/// The most model ids one allowed list holds, so a full Models section, every slot
+/// holding the longest list here and as its effective value beside every candidate, fits
+/// one owner frame.
+pub const ALLOWED_MAX: usize = 16;
 /// The reason a slot shows when CrazyAgent cannot choose that harness's model there.
 pub const NOT_SUPPORTED: &str = "Not supported by this harness";
 /// Every refusal code the model choice store returns.
