@@ -87,6 +87,20 @@ export function mergeNotes(first: SavedMemory[], older: SavedMemory[]): SavedMem
   return [...first, ...older.filter((memory) => !seen.has(memory.id))];
 }
 
+/** Older notes shown under the newest page: the cursor of the newest page they were read
+ * after, the notes, and the cursor of the next older page. */
+export type OlderNotes = { from: number; items: SavedMemory[]; next: number | null };
+
+/** The older notes that still join the newest page after it reloads. While the newest page
+ * still reaches the cursor they were read after, they continue it, overlaps dropped by
+ * mergeNotes. Once a newer note pushes that page's end above the cursor, the notes between
+ * would show nowhere, so Show older starts again. Inputs: the newest page's next cursor and
+ * the older notes. Output: the older notes to show, or undefined. */
+export function olderShown(first: number | null, older: OlderNotes | undefined): OlderNotes | undefined {
+  if (older === undefined || first === null || first > older.from) return undefined;
+  return older;
+}
+
 /** Your notes in Project memory: each note with Approve while it waits and Delete, then Show
  * older while the engine has older notes for this project. Inputs: the notes, whether older
  * ones remain, the busy note, whether an older page is loading, and the actions.
@@ -133,7 +147,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [notes, reloadNotes] = useLoad(() => savedMemories(data.id, ""), [data.id], "project-memories");
   const [forgetting, setForgetting] = useState<SavedMemory | null>(null);
-  const [older, setOlder] = useState<{ items: SavedMemory[]; next: number | null }>();
+  const [older, setOlder] = useState<OlderNotes>();
   const [paging, setPaging] = useState(false);
   const project = useRef(data.id);
   useEffect(() => {
@@ -201,20 +215,24 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     reloadNotes();
   }
 
-  async function showOlder(next: number) {
+  async function showOlder(next: number, shown: OlderNotes | undefined) {
     const asked = data.id;
     setPaging(true);
     setNote("");
     const page = await savedMemories(asked, "", next);
     setPaging(false);
     if (project.current !== asked) return;
-    if (page.kind === "ok") setOlder((shown) => ({ items: [...(shown?.items ?? []), ...page.value.items], next: page.value.next }));
+    if (page.kind === "ok") setOlder({ from: shown?.from ?? next, items: [...(shown?.items ?? []), ...page.value.items], next: page.value.next });
     else setNote(page.kind === "not_ready" ? "Not ready yet: older notes aren't in this build." : page.message);
   }
 
   const value = memories?.kind === "ok" ? memories.value : null;
-  const ownNotes = notes.kind === "ok" ? mergeNotes(notes.value.items, older?.items ?? []) : [];
-  const next = notes.kind === "ok" ? (older ? older.next : notes.value.next) : null;
+  const joined = notes.kind === "ok" ? olderShown(notes.value.next, older) : undefined;
+  useEffect(() => {
+    if (older !== undefined && joined === undefined && notes.kind === "ok") setOlder(undefined);
+  }, [older, joined, notes.kind]);
+  const ownNotes = notes.kind === "ok" ? mergeNotes(notes.value.items, joined?.items ?? []) : [];
+  const next = notes.kind === "ok" ? (joined ? joined.next : notes.value.next) : null;
   const waiting = waitingLine(ownNotes, next !== null);
   const groups = memoryGroups(value?.items ?? []);
   return <div className="pj-stack">
@@ -240,7 +258,7 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     </section>}
     {ownNotes.length > 0 && <OwnNotes items={ownNotes} more={next !== null} busy={busy} paging={paging}
       onApprove={(memory) => void approve(memory)} onDelete={setForgetting}
-      onMore={() => { if (next !== null) void showOlder(next); }} />}
+      onMore={() => { if (next !== null) void showOlder(next, joined); }} />}
     {value && value.more && <p className="pj-small pj-muted">Showing the first {value.items.length} memories.</p>}
     {value && groups.suggested.length === 0 && groups.saved.length === 0 && ownNotes.length === 0 && <ProjectEmpty title="No memories yet">
       Open a research report and use Save to memory, or select text in any file and use Save selection.

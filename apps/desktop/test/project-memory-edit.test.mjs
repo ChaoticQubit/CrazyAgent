@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { MemorySuggestion, OwnNoteRow, OwnNotes, ProjectMemoryHead, SavedMemoryRow, mergeNotes, waitingLine } = await import("../src/screens/project/memory.tsx");
+const { MemorySuggestion, OwnNoteRow, OwnNotes, ProjectMemoryHead, SavedMemoryRow, mergeNotes, olderShown, waitingLine } = await import("../src/screens/project/memory.tsx");
 const { readFileSync, readdirSync } = await import("node:fs");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
@@ -165,4 +165,20 @@ test("a note an agent wrote names that agent in Your notes, and the owner's own 
   assert.match(noteRow(note({ agent: null })), /From an agent/);
   assert.match(noteRow(note({ agent: "Ma\u202ester" })), /From Ma\\u202ester/);
   assert.doesNotMatch(noteRow(note({ origin: "written", agent: null })), /From /);
+});
+
+test("older notes keep joining the newest page while it still reaches the cursor they were read after (PROJMEM-L1)", () => {
+  const older = { from: 40, items: [note({ id: "o-39" }), note({ id: "o-38" })], next: 20 };
+  assert.equal(olderShown(40, older), older, "an unchanged newest page keeps the older notes");
+  assert.equal(olderShown(35, older), older, "a newest page that grew over them keeps them, overlaps merged once");
+  assert.equal(olderShown(40, undefined), undefined);
+});
+
+test("a newer note pushing the newest page's end above the older cursor starts Show older again, so no note between hides (PROJMEM-L1)", () => {
+  const older = { from: 40, items: [note({ id: "o-39" })], next: 20 };
+  assert.equal(olderShown(41, older), undefined, "the note at ordinal 40 would show in neither list");
+  assert.equal(olderShown(null, older), undefined, "a newest page that holds every note needs no older pages");
+  const first = [note({ id: "n-50", origin: "requested" }), note({ id: "n-41" })];
+  assert.deepEqual(mergeNotes(first, olderShown(41, older)?.items ?? []).map((memory) => memory.id), ["n-50", "n-41"]);
+  assert.equal(waitingLine(first, true), "1 memory waits for your approval. Older notes may hold more.");
 });
