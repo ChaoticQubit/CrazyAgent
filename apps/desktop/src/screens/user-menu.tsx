@@ -47,7 +47,7 @@ export function useUserDialog(): UserMenuTab | null {
 export function UserMenuDialog({ tab, onClose }: { tab: UserMenuTab; onClose: () => void }) {
   return <Dialog open title={USER_MENU_ITEMS[tab].label} onClose={onClose} wide>
     <div className="user-dialog">
-      {tab === "profile" ? <ProfileSettings />
+      {tab === "profile" ? <ProfileSettings onClose={onClose} />
         : tab === "updates" ? <UpdatesSettings />
         : tab === "github" ? <GitHubSettings />
         : <ProjectsHomeSettings />}

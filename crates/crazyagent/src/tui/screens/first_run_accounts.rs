@@ -1,4 +1,4 @@
-use super::{Flow, Place, Screen, open};
+use super::{Flow, Place, Screen};
 use crate::learning::MarkStep;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::learning::LearningQuery;
@@ -75,16 +75,16 @@ impl FirstRunAccounts {
         Self::default()
     }
 
-    fn leave(choice: Choice, ctx: &mut Ctx) -> Flow {
+    fn leave(choice: Choice) -> Flow {
         match choice {
             Choice::Add => Flow::Go(Place::AddAccount),
-            Choice::Skip => Flow::Replace(open(&Place::Home, ctx)),
+            Choice::Skip => Flow::Go(Place::Home),
         }
     }
 
     fn pick(&mut self, ctx: &mut Ctx) -> Flow {
         if self.guide {
-            return Self::leave(self.choice, ctx);
+            return Self::leave(self.choice);
         }
         let query = LearningQuery::Mark {
             step: MarkStep::Skipped,
@@ -173,7 +173,7 @@ impl Screen for FirstRunAccounts {
                 if event.result.is_err() {
                     ctx.say(Message::warning(SKIP_FAILED, ""));
                 }
-                Self::leave(choice, ctx)
+                Self::leave(choice)
             }
             other => {
                 self.sent = other;

@@ -1440,6 +1440,17 @@ mod tests {
     }
 
     #[test]
+    fn skip_for_now_in_a_first_run_started_again_from_profile_leaves_one_home() {
+        let mut shell = at(Place::Home, ctx());
+        shell.apply(Flow::Open(Place::FirstRunAccounts));
+        assert_eq!(shell.depth(), 2);
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        assert_eq!(shell.place(), Some(Place::Home));
+        assert_eq!(shell.depth(), 1, "Skip for now goes back to the root Home");
+    }
+
+    #[test]
     fn quit_asks_before_unsaved_profile_changes_are_lost() {
         let loaded = || {
             let mut ctx = ctx();

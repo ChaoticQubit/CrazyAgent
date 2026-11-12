@@ -2,6 +2,7 @@ pub mod account_choice;
 pub mod pool_editor;
 pub mod pools;
 pub mod profile;
+pub mod replay;
 pub mod spend;
 
 use super::{Flow, Screen, SettingsSection};
