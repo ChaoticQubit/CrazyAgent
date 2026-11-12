@@ -10,6 +10,8 @@
     "allow-desktop-harness-versions",
     "allow-desktop-harness-update",
     "allow-desktop-harness-install",
+    "allow-desktop-harness-install-many",
+    "allow-desktop-harness-queued",
     "allow-desktop-harness-find",
     "allow-desktop-harness-choose-path",
     "allow-desktop-pick-harness-file",

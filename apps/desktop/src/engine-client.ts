@@ -1540,6 +1540,7 @@ export type DependencyState =
   | { state: "found"; version: string }
   | { state: "installing" }
   | { state: "installed"; version: string }
+  | { state: "bundled"; version: string }
   | { state: "failed"; reason: string };
 
 export interface Dependency {

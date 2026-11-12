@@ -80,6 +80,19 @@ impl OwnerController {
         self.harness_client()?.harness_install(id).await
     }
 
+    /// Starts installing the onboarding picks one after another. Input: the catalog ids.
+    /// Output: Ok once they are queued, the engine's refusal code, or
+    /// `controller_disconnected` without a connection.
+    pub async fn harness_install_many(&self, ids: &[String]) -> Result<(), EngineError> {
+        self.harness_client()?.harness_install_many(ids).await
+    }
+
+    /// Reads the harnesses still waiting to install, in install order. Output: their catalog
+    /// ids, the engine's refusal code, or `controller_disconnected` without a connection.
+    pub async fn harness_queued(&self) -> Result<Vec<String>, EngineError> {
+        self.harness_client()?.harness_queued().await
+    }
+
     /// Has the engine look for Codex or Claude Code again and pin it when it can. Input: the
     /// catalog id. Output: what was found, the engine's refusal code, or
     /// `controller_disconnected` without a connection.

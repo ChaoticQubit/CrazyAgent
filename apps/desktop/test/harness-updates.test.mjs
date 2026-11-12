@@ -214,7 +214,7 @@ test("the page lists the install setting with both options, and changing it keep
 });
 
 test("every install refusal has its own plain sentence, none shared with an update code", () => {
-  const codes = ["harness_install_no_tool", "harness_install_off", "harness_install_already", "harness_install_not_found", "harness_install_failed"];
+  const codes = ["harness_install_no_tool", "harness_install_off", "harness_install_already", "harness_install_not_found", "harness_install_failed", "harness_install_needs_node", "harness_install_list_invalid"];
   const update = ["harness_update_unknown_install", "harness_update_with_app", "harness_update_not_installed", "harness_update_failed", "harness_update_outcome_unknown"];
   assert.equal(new Set([...codes, ...update].map(api.updateCopy)).size, codes.length + update.length);
   for (const code of codes) assert.doesNotMatch(api.updateCopy(code), /harness_|\u2014/, code);

@@ -397,7 +397,7 @@ fn continuing_installs_the_ticked_entries_then_opens_home() {
     done.pack[1].state = PackState::Available;
     done.pack[2].state = PackState::On;
     shell.arrive(event(AppSetupEvent::Status(Ok(done))));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -409,7 +409,7 @@ fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
         assert!(help.contains("Enter Install and continue"), "{help}");
         assert!(help.contains("c Continue without installing"), "{help}");
         shell.key(Key::Char('c'));
-        assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+        assert_eq!(shell.place(), Some(Place::HarnessSetup));
         let runs = jobs(&mut shell)
             .iter()
             .filter(|job| matches!(job, AppSetupJob::Run { .. }))
@@ -445,7 +445,7 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
         "caveman: The source could not be downloaded.",
     );
     shell.key(Key::Char('c'));
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]
@@ -564,7 +564,7 @@ fn without_engine_support_first_run_says_not_ready_and_continues() {
     find(&rows, "Not ready yet.");
     assert!(bar(&rows).contains("Enter Continue"));
     shell.key(Key::Enter);
-    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    assert_eq!(shell.place(), Some(Place::HarnessSetup));
 }
 
 #[test]

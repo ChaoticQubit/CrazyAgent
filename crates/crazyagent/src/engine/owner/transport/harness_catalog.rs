@@ -30,6 +30,10 @@ enum Action {
     Install {
         id: String,
     },
+    InstallMany {
+        ids: Vec<String>,
+    },
+    Queued,
     Settings,
     SetSettings {
         mode: UpdateMode,
@@ -59,6 +63,9 @@ enum WireReply {
         versions: Box<HarnessVersions>,
     },
     Started,
+    Queued {
+        ids: Vec<String>,
+    },
     Settings {
         mode: UpdateMode,
         when: CheckWhen,

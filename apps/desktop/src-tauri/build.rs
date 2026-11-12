@@ -6,6 +6,8 @@ fn main() {
         "desktop_harness_versions",
         "desktop_harness_update",
         "desktop_harness_install",
+        "desktop_harness_install_many",
+        "desktop_harness_queued",
         "desktop_harness_find",
         "desktop_harness_choose_path",
         "desktop_pick_harness_file",

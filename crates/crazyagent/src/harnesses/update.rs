@@ -8,9 +8,9 @@ pub use run::{
     UPDATE_TIME, VERSION_TIME, lookup, masked, refused_user, run,
 };
 pub use state::{
-    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_NOT_FOUND,
-    INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS, UPDATE_FAILED, UPDATE_OFF,
-    Updates, initialize, set_settings, settings,
+    BUSY, CHECK_FAILED, CHECK_ONLY, INSTALL_ALREADY, INSTALL_FAILED, INSTALL_LIST_INVALID,
+    INSTALL_NOT_FOUND, INSTALL_OFF, NOT_INSTALLED, SETTINGS_UNREADABLE, UNKNOWN_HARNESS,
+    UPDATE_FAILED, UPDATE_OFF, Updates, initialize, set_settings, settings,
 };
 
 use crate::harnesses;
@@ -35,6 +35,7 @@ pub const NEEDS_ADMIN: &str = "harness_update_needs_admin";
 pub const UNSUPPORTED_HERE: &str = "harness_update_unsupported_here";
 pub const CHECK_UNREADABLE: &str = "harness_update_check_unreadable";
 pub const NO_INSTALLER: &str = "harness_install_no_tool";
+pub const NEEDS_NODE: &str = "harness_install_needs_node";
 
 const VERSION_WORDS_MAX: usize = 8;
 const VERSION_PARTS_MAX: usize = 6;
@@ -813,8 +814,9 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
 
 /// Builds the one install command of a harness that is not installed: Homebrew first with
 /// the table's installable name (casks only where `roots.casks`), else npm with the table's
-/// package and the vendor's flags. A missing or untrusted tool is skipped, never an error of
-/// its own. Inputs: the harness id and the roots. Output: the command, or the refusal code.
+/// package and the vendor's flags. A missing or untrusted tool is skipped; an npm harness on a
+/// Mac with no npm at all is refused as needing Node. Inputs: the harness id and the roots.
+/// Output: the command, or the refusal code.
 pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
     let id = harnesses::canonical(id);
     if id == BUNDLED {
@@ -839,7 +841,18 @@ pub fn install_command(id: &str, roots: &Roots) -> Result<Fixed, &'static str> {
             owned(&prefix.join("lib").join(MODULES)).then_some(fixed)
         })
     };
-    let fixed = with_brew.or_else(with_npm).ok_or(NO_INSTALLER)?;
+    let no_npm = || {
+        roots
+            .brew_prefixes
+            .iter()
+            .all(|prefix| std::fs::symlink_metadata(prefix.join("bin").join("npm")).is_err())
+    };
+    let refusal = if recipe.npm.is_some() && no_npm() {
+        NEEDS_NODE
+    } else {
+        NO_INSTALLER
+    };
+    let fixed = with_brew.or_else(with_npm).ok_or(refusal)?;
     assert!(fixed.args.first() == Some(&"install"));
     assert!(fixed.args.len() <= ARGS_MAX);
     assert!(fixed.program.is_absolute());

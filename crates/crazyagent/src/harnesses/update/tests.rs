@@ -1774,3 +1774,132 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
     assert_eq!(system.versions(false).installed.as_deref(), Some("1.0.0"));
     assert!(system.machine.root.path().join("ran").exists());
 }
+
+#[test]
+fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_has_no_installer() {
+    let machine = Machine::new();
+    for id in ["codex", "claude-code", "gemini-cli"] {
+        assert_eq!(
+            install_command(id, &machine.roots()).unwrap_err(),
+            "harness_install_needs_node",
+            "{id}"
+        );
+    }
+    for id in ["aider", "goose", "cursor-agent"] {
+        assert_eq!(
+            install_command(id, &machine.roots()).unwrap_err(),
+            NO_INSTALLER,
+            "{id}"
+        );
+    }
+    let missing = Case::new(Machine::new(), entry("codex", None), None);
+    assert_eq!(
+        missing.versions(false).refusal.as_deref(),
+        Some("harness_install_needs_node")
+    );
+}
+
+fn listed(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+#[test]
+fn a_list_is_queued_only_when_each_id_is_a_catalog_harness_once_and_never_rcli() {
+    let updates = Updates::new();
+    let db = db();
+    for refused in [
+        listed(&[]),
+        listed(&["no-such-harness"]),
+        listed(&["rcli"]),
+        listed(&["codex", "codex"]),
+        listed(&["claude", "claude-code"]),
+        vec!["codex".to_owned(); crate::harnesses::specs().len() + 1],
+    ] {
+        assert_eq!(
+            updates.queue(&db, &refused).unwrap_err(),
+            "harness_install_list_invalid",
+            "{refused:?}"
+        );
+        assert!(updates.queued().is_empty());
+    }
+    assert_eq!(
+        updates.queue(&db, &listed(&["claude", "codex"])).unwrap(),
+        vec!["claude-code", "codex"]
+    );
+    assert_eq!(updates.queued(), listed(&["claude-code", "codex"]));
+    assert_eq!(
+        updates.queue(&db, &listed(&["aider"])).unwrap_err(),
+        "harness_update_busy"
+    );
+    let off = self::db();
+    set_settings(
+        &off,
+        UpdateSettings {
+            install: InstallFromApp::Off,
+            ..UpdateSettings::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        Updates::new().queue(&off, &listed(&["codex"])).unwrap_err(),
+        "harness_install_off"
+    );
+}
+
+#[test]
+fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the_rest() {
+    let case = slow_install_case("aider");
+    let ids = listed(&["aider", "goose", "codex"]);
+    assert_eq!(
+        case.updates.queue(&case.db, &ids).unwrap(),
+        vec!["aider", "goose", "codex"]
+    );
+    let seen: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::default();
+    let drain = {
+        let (updates, seen) = (case.updates.clone(), seen.clone());
+        let (roots, bin) = (case.machine.roots(), case.bin());
+        std::thread::spawn(move || {
+            let db = db();
+            let worker = updates.clone();
+            updates.drain(
+                move |id| {
+                    seen.lock().unwrap().push((id, worker.idle()));
+                    assert_eq!(worker.queued().first().map(String::as_str), Some(id));
+                    match id {
+                        "aider" => {
+                            let bin = bin.clone();
+                            worker.install(&db, &entry(id, None), &roots, move || {
+                                found_in(&bin, "aider")
+                            })
+                        }
+                        "goose" => Err(NO_INSTALLER),
+                        _ => Ok(()),
+                    }
+                },
+                WAIT_STEP,
+                WAIT_STEP * u32::try_from(WAIT_STEPS).unwrap(),
+            );
+        })
+    };
+    let running = (0..WAIT_STEPS).any(|_| {
+        std::thread::sleep(WAIT_STEP);
+        !case.updates.idle()
+    });
+    assert!(running);
+    assert_eq!(case.updates.queued(), listed(&["goose", "codex"]));
+    case.finish();
+    drain.join().unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![("aider", true), ("goose", true), ("codex", true)]
+    );
+    assert!(case.updates.queued().is_empty());
+    assert!(case.versions(false).last.unwrap().ok);
+    let goose = case.updates.versions(
+        &case.db,
+        &entry("goose", None),
+        &case.machine.roots(),
+        false,
+    );
+    assert_eq!(goose.last.unwrap().code.as_deref(), Some(NO_INSTALLER));
+}

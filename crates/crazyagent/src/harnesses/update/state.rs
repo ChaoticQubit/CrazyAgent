@@ -1,8 +1,8 @@
 use super::run::run_raw;
 use super::{
-    BREW_PREFIXES, CHECK_TIME, CheckWhen, Fixed, HarnessVersions, InstallFromApp, LOOKUP_FAILED,
-    LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots, START_FAILED, UPDATE_TIME,
-    UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide, install_command,
+    BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessVersions, InstallFromApp,
+    LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots, START_FAILED,
+    UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide, install_command,
     installed_version, latest, latest_from_pointer, lookup, method, pointer, run, shown,
     update_command,
 };
@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 pub const UPDATE_OFF: &str = "harness_update_off";
 pub const CHECK_ONLY: &str = "harness_update_check_only";
@@ -27,6 +28,7 @@ pub const INSTALL_OFF: &str = "harness_install_off";
 pub const INSTALL_ALREADY: &str = "harness_install_already";
 pub const INSTALL_NOT_FOUND: &str = "harness_install_not_found";
 pub const INSTALL_FAILED: &str = "harness_install_failed";
+pub const INSTALL_LIST_INVALID: &str = "harness_install_list_invalid";
 
 const NO_VERSION: &str = "0";
 const VERSION_ARGS: [&str; 1] = ["--version"];
@@ -274,6 +276,7 @@ type Reader = Box<dyn Fn(&Pointer) -> Result<Vec<u8>, &'static str> + Send + Syn
 #[derive(Default)]
 struct State {
     running: Option<&'static str>,
+    queued: Vec<&'static str>,
     last: HashMap<&'static str, LastUpdate>,
     latest: HashMap<&'static str, Latest>,
 }
@@ -551,5 +554,108 @@ impl Updates {
         let fixed = install_command(id, roots)?;
         let home = roots.home.clone();
         Self::spawn(running, move || installed_now(&fixed, &home, after), |_| {})
+    }
+
+    /// The harnesses waiting in the install queue, in the order they install; the one
+    /// installing now is no longer listed. Output: their catalog ids.
+    pub fn queued(&self) -> Vec<String> {
+        let state = self.state();
+        assert!(state.queued.len() <= harnesses::specs().len());
+        state.queued.iter().map(|id| (*id).to_owned()).collect()
+    }
+
+    /// Puts a list of harnesses in the install queue: each a catalog harness once, never the
+    /// RCLI that comes with the app, at most every catalog harness, while Install from the app
+    /// is on and no other list waits. Inputs: the engine database and the ids, aliases
+    /// allowed. Output: the catalog ids in install order, or the refusal code.
+    pub fn queue(
+        &self,
+        db: &Connection,
+        ids: &[String],
+    ) -> Result<Vec<&'static str>, &'static str> {
+        if settings(db).map_err(|_| SETTINGS_UNREADABLE)?.install == InstallFromApp::Off {
+            return Err(INSTALL_OFF);
+        }
+        if ids.is_empty() || ids.len() > harnesses::specs().len() {
+            return Err(INSTALL_LIST_INVALID);
+        }
+        let mut picked: Vec<&'static str> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let spec = harnesses::spec(id).ok_or(INSTALL_LIST_INVALID)?;
+            if spec.id == BUNDLED || picked.contains(&spec.id) {
+                return Err(INSTALL_LIST_INVALID);
+            }
+            picked.push(spec.id);
+        }
+        let mut state = self.state();
+        if !state.queued.is_empty() {
+            return Err(BUSY);
+        }
+        state.queued.clone_from(&picked);
+        assert!(state.queued.len() == ids.len());
+        Ok(picked)
+    }
+
+    /// Installs the queued harnesses one after another: each starts only once no update or
+    /// install runs, a refusal or a wait past `wait_max` becomes that harness's last record,
+    /// and the rest still install. It drains only the list queued when it began, so a list
+    /// queued after that belongs to its own drain. Inputs: what starts one install, the pause
+    /// between looks and the longest wait for the job slot. Output: none.
+    pub fn drain(
+        self: &Arc<Self>,
+        mut start: impl FnMut(&'static str) -> Result<(), &'static str>,
+        pause: Duration,
+        wait_max: Duration,
+    ) {
+        assert!(!pause.is_zero() && pause <= wait_max);
+        let looks = wait_max.as_millis() / pause.as_millis().max(1);
+        let taken = self.state().queued.len();
+        assert!(taken <= harnesses::specs().len());
+        for _ in 0..taken {
+            let Some(id) = self.next_queued() else {
+                break;
+            };
+            let mut result = Err(BUSY);
+            for _ in 0..=looks {
+                if self.idle() {
+                    result = start(id);
+                    if result != Err(BUSY) {
+                        break;
+                    }
+                }
+                std::thread::sleep(pause);
+            }
+            self.dequeue(id, result.err());
+        }
+    }
+
+    /// The next harness on the install queue, left on it until its install started or was
+    /// refused, so a read never finds it neither queued nor running. Output: its catalog id,
+    /// none when the queue is empty.
+    fn next_queued(&self) -> Option<&'static str> {
+        self.state().queued.first().copied()
+    }
+
+    /// Takes a harness off the front of the install queue once its install started, and in
+    /// the same step records a refusal as its last record. Inputs: the catalog id and the
+    /// refusal code, none when the install started.
+    fn dequeue(&self, id: &'static str, refusal: Option<&'static str>) {
+        let mut state = self.state();
+        assert_eq!(state.queued.first().copied(), Some(id));
+        if let Some(code) = refusal {
+            state.last.insert(
+                id,
+                LastUpdate {
+                    ok: false,
+                    code: Some(code.to_owned()),
+                    output: String::new(),
+                    from: None,
+                    to: None,
+                    ended_ms: now_ms(),
+                },
+            );
+        }
+        state.queued.remove(0);
+        assert!(state.last.len() <= harnesses::specs().len());
     }
 }
