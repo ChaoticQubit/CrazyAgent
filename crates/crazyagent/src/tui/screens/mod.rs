@@ -4,6 +4,7 @@ pub mod app_setup;
 pub(in crate::tui) mod changes;
 pub mod clone_repo;
 pub(in crate::tui) mod console;
+pub(in crate::tui) mod demo;
 pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;
@@ -215,6 +216,7 @@ pub enum Place {
     AddFolder,
     CloneRepo,
     Usage,
+    Demo,
     Onboarding {
         path: String,
         name: String,
@@ -378,7 +380,8 @@ pub trait Screen {
             | Place::AddProject
             | Place::AddFolder
             | Place::CloneRepo
-            | Place::Usage => None,
+            | Place::Usage
+            | Place::Demo => None,
         }
     }
 }
@@ -419,6 +422,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
+        Place::Demo => Box::new(demo::DemoPage::new()),
         Place::Onboarding {
             path,
             name,

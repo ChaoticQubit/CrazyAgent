@@ -183,7 +183,10 @@ fn a_pool_the_engine_marks_unavailable_shows_its_reason_and_cannot_be_picked() {
     );
     let rows = text(&render(&mut shell, 100, 40));
     assert!(rows.contains("rcli"), "{rows}");
-    assert!(rows.contains(pool_reason("demo_pool_not_ready").as_str()), "{rows}");
+    assert!(
+        rows.contains(pool_reason("demo_pool_not_ready").as_str()),
+        "{rows}"
+    );
     shell.key(Key::Char(' '));
     shell.key(Key::Down);
     shell.key(Key::Char(' '));
@@ -200,7 +203,11 @@ fn a_pool_the_engine_marks_unavailable_shows_its_reason_and_cannot_be_picked() {
 fn pool_rows_name_ready_accounts_by_their_accounts_words_and_keep_the_engine_order() {
     let rows = pool_rows(
         &view(None, &[("pool-b", Some("demo_new_code")), ("pool-a", None)]),
-        &[summary("pool-a", "Main", &["acc-1", "acc-2", "acc-3", "acc-gone"])],
+        &[summary(
+            "pool-a",
+            "Main",
+            &["acc-1", "acc-2", "acc-3", "acc-gone"],
+        )],
         &[
             account("acc-1", "Work", AccountStatus::SignedIn),
             account("acc-2", "Work", AccountStatus::KeySaved),
@@ -209,9 +216,15 @@ fn pool_rows_name_ready_accounts_by_their_accounts_words_and_keep_the_engine_ord
     );
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].name, "pool-b");
-    assert_eq!(rows[0].reason.as_deref(), Some(format!("{POOL_UNKNOWN} (demo_new_code)").as_str()));
+    assert_eq!(
+        rows[0].reason.as_deref(),
+        Some(format!("{POOL_UNKNOWN} (demo_new_code)").as_str())
+    );
     assert_eq!(rows[1].name, "Main");
-    assert_eq!(rows[1].ready, vec!["Work (acc-1)".to_owned(), "Work (acc-2)".to_owned()]);
+    assert_eq!(
+        rows[1].ready,
+        vec!["Work (acc-1)".to_owned(), "Work (acc-2)".to_owned()]
+    );
     assert_eq!(rows[1].reason, None);
 }
 
@@ -261,8 +274,15 @@ fn an_applied_create_gives_the_picked_pool_to_the_demo_then_opens_it() {
         Ok(DemoReply::Created),
     ));
     let (_, assigns) = sent(&mut shell);
-    assert_eq!(assigns, vec![(Some(pool), ProjectId::new(PROJECT_ID).unwrap())]);
-    assert_eq!(shell.place(), Some(Place::Demo), "the demo opens only once its pool is given");
+    assert_eq!(
+        assigns,
+        vec![(Some(pool), ProjectId::new(PROJECT_ID).unwrap())]
+    );
+    assert_eq!(
+        shell.place(),
+        Some(Place::Demo),
+        "the demo opens only once its pool is given"
+    );
     shell.arrive(Arrival::PoolEdited(Ok(())));
     assert!(
         matches!(shell.place(), Some(Place::Project { ref id, tab: ProjectTab::Conversation, .. }) if id.as_str() == PROJECT_ID),
@@ -308,7 +328,10 @@ fn a_refused_create_gives_no_pool_and_says_why_in_the_demo_s_words() {
     let (_, assigns) = sent(&mut shell);
     assert!(assigns.is_empty());
     assert_eq!(shell.place(), Some(Place::Demo));
-    assert!(text(&render(&mut shell, 100, 40)).contains("already holds a project or folder named CrazyAgent demo"));
+    assert!(
+        text(&render(&mut shell, 100, 40))
+            .contains("already holds a project or folder named CrazyAgent demo")
+    );
     assert!(refusal("demo_brand_new").contains("demo_brand_new"));
     for (code, sentence) in REFUSALS {
         assert_eq!(refusal(code), sentence, "{code}");
@@ -332,7 +355,10 @@ fn an_unknown_create_outcome_reads_the_demo_again_and_goes_on_only_when_it_exist
     assert_eq!((reads, assigns.len()), (1, 0));
     shell.arrive(read(view(Some(PROJECT_ID), &[("pool-a", None)])));
     let (_, assigns) = sent(&mut shell);
-    assert_eq!(assigns, vec![(Some(pool), ProjectId::new(PROJECT_ID).unwrap())]);
+    assert_eq!(
+        assigns,
+        vec![(Some(pool), ProjectId::new(PROJECT_ID).unwrap())]
+    );
 
     let mut lost = one_ready_pool();
     lost.key(Key::Char(' '));
@@ -356,19 +382,39 @@ fn an_unknown_create_outcome_reads_the_demo_again_and_goes_on_only_when_it_exist
 fn the_guide_ticks_each_step_from_the_demo_read_and_shows_only_on_the_demo_project() {
     let demo_id = ProjectId::new(PROJECT_ID).unwrap();
     assert!(guide(&view(None, &[]), &demo_id).is_none());
-    assert!(guide(&view(Some(PROJECT_ID), &[]), &ProjectId::new("another").unwrap()).is_none());
+    assert!(
+        guide(
+            &view(Some(PROJECT_ID), &[]),
+            &ProjectId::new("another").unwrap()
+        )
+        .is_none()
+    );
     let mut read = view(Some(PROJECT_ID), &[]);
     read.steps.goal_sent = true;
     read.steps.agent_started = true;
     let shown = guide(&read, &demo_id).unwrap();
     assert_eq!(
-        shown.steps.iter().map(|step| (step.id, step.done)).collect::<Vec<_>>(),
-        vec![("goal", true), ("agents", true), ("question", false), ("changes", false), ("delete", false)]
+        shown
+            .steps
+            .iter()
+            .map(|step| (step.id, step.done))
+            .collect::<Vec<_>>(),
+        vec![
+            ("goal", true),
+            ("agents", true),
+            ("question", false),
+            ("changes", false),
+            ("delete", false)
+        ]
     );
     assert_eq!(shown.current, 2);
     read.steps.question_answered = true;
     read.steps.change_set_accepted = true;
-    assert_eq!(guide(&read, &demo_id).unwrap().current, 4, "delete never ticks");
+    assert_eq!(
+        guide(&read, &demo_id).unwrap().current,
+        4,
+        "delete never ticks"
+    );
 }
 
 #[test]
@@ -379,7 +425,12 @@ fn the_guide_lines_show_the_goal_every_step_and_the_current_step_s_place() {
     let lines = guide_lines(&read, &ProjectId::new(PROJECT_ID).unwrap(), 96, &ctx);
     let shown: Vec<String> = lines
         .iter()
-        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
         .collect();
     let all = shown.join("\n");
     assert!(all.contains(GUIDE_TITLE), "{all}");

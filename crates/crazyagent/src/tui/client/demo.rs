@@ -87,9 +87,12 @@ impl NativeOwner {
                 .await
                 .map(|view| DemoReply::View(Box::new(view)))
                 .map_err(problem),
-            DemoQuery::Create { pool, generation } => {
-                created(controller.create_demo(pool, generation).await.map_err(problem)?)
-            }
+            DemoQuery::Create { pool, generation } => created(
+                controller
+                    .create_demo(pool, generation)
+                    .await
+                    .map_err(problem)?,
+            ),
         }
     }
 }
