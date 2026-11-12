@@ -3435,7 +3435,10 @@ fallback_allowed = false
             .await;
         }
 
-        async fn prepare_next_turn(&self, request_id: &str) -> crate::storage::MasterRuntimeResult {
+        /// Sends one owner message to the case's master through the owner's Submit, as the
+        /// clients send it. Input: the request id, which becomes the turn's id. Output: the
+        /// master session's id.
+        async fn submit_turn(&self, request_id: &str) -> crate::protocol::SessionId {
             let state = self
                 .owner_state(OwnerRead::ProjectMaster {
                     project_id: master_project(),
@@ -3459,10 +3462,39 @@ fallback_allowed = false
                 },
             )
             .await;
+            session.session_id
+        }
+
+        async fn prepare_next_turn(&self, request_id: &str) -> crate::storage::MasterRuntimeResult {
+            let session_id = self.submit_turn(request_id).await;
             let host = self.service.owner_runtime().unwrap();
-            host.prepare_master_turn(&session.project_id, &session.session_id, &id(request_id))
+            host.prepare_master_turn(&master_project(), &session_id, &id(request_id))
                 .await
                 .unwrap()
+        }
+
+        /// One master turn as the owner's clients read it from the engine. Inputs: the
+        /// session and the turn's request id. Output: the stored turn.
+        async fn master_turn(
+            &self,
+            session_id: &crate::protocol::SessionId,
+            request_id: &str,
+        ) -> crate::master_session::MasterTurnView {
+            let state = self
+                .owner_state(OwnerRead::ProjectMasterTurns {
+                    project_id: master_project(),
+                    session_id: session_id.clone(),
+                    cursor: None,
+                    limit: 16,
+                })
+                .await;
+            let OwnerData::ProjectMasterTurns { page } = state.data else {
+                panic!("actual master turn page missing")
+            };
+            page.turns
+                .into_iter()
+                .find(|turn| turn.id == id(request_id))
+                .expect("the turn is stored")
         }
     }
 
@@ -3780,25 +3812,50 @@ fallback_allowed = false
         .unwrap();
     }
 
-    /// The stand-in Codex of the case folder (DEC-150 M-6). Any call but `exec` exits at
-    /// once. `exec` writes an answer where `-o` names for the model `good-model`, prints the
-    /// provider's refusal code and fails for `bad-model`, and fails silently for any other.
+    /// The stand-in Codex of the case folder (DEC-150 M-6, M-10). `exec` writes an answer
+    /// where `-o` names for `good-model`, prints the provider's refusal code and fails for
+    /// `bad-model`, and fails for any other. `app-server` starts one master thread and turn
+    /// in Codex 0.164's shapes and refuses the turn's model with `modelNotFound`, then exits
+    /// once its input closes. Any other call exits at once.
     const TEST_LAUNCH_CODEX: &str = r#"#!/bin/sh
-[ "$1" = exec ] || exit 0
+mode=
 out=
 model=
 while [ $# -gt 0 ]; do
   case "$1" in
+    exec) mode=exec ;;
+    app-server) mode=server ;;
     -o) out=$2; shift ;;
     -m) model=$2; shift ;;
+    -c) shift ;;
   esac
   shift
 done
-case "$model" in
-  good-model) printf 'OK\n' > "$out"; exit 0 ;;
-  bad-model) printf '%s\n' '{"type":"error","message":"model_not_found"}'; exit 1 ;;
+case "$mode" in
+  exec)
+    case "$model" in
+      good-model) printf 'OK\n' > "$out"; exit 0 ;;
+      bad-model) printf '%s\n' '{"type":"error","message":"model_not_found"}'; exit 1 ;;
+    esac
+    exit 1 ;;
+  server) ;;
+  *) exit 0 ;;
 esac
-exit 1
+IFS= read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+IFS= read -r line
+IFS= read -r line
+case "$line" in
+  *'"sandbox":"danger-full-access"'*) approval=never; sandbox='{"type":"dangerFullAccess"}' ;;
+  *) approval=on-request; sandbox='{"type":"readOnly","networkAccess":false}' ;;
+esac
+cwd=$(pwd -P)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"$approval\",\"approvalsReviewer\":\"user\",\"sandbox\":$sandbox}}"
+IFS= read -r line
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+printf '%s\n' '{"method":"error","params":{"threadId":"stand-in-thread","turnId":"stand-in-turn","willRetry":false,"error":{"message":"The model does not exist.","codexErrorInfo":"modelNotFound"}}}'
+/bin/cat > /dev/null
+exit 0
 "#;
 
     /// The origin of one id in a harness's section. Inputs: the section and the id.
@@ -3896,6 +3953,207 @@ exit 1
                 Some("No signed-in Codex account in this pool.")
             );
             assert_eq!(origin_of(&models, "good-model"), Some(Origin::Pending));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Checks a stored master turn ended as the provider's refusal of the master model, in
+    /// the reason and cause the desktop's `turnLine` and the TUI's `turn_lines` word, with
+    /// no reply from another model. Input: the turn as the clients read it.
+    fn assert_model_refused(turn: &crate::master_session::MasterTurnView) {
+        use crate::master_session::{MasterReason, MasterTurnPhase};
+        assert_eq!(turn.phase, MasterTurnPhase::Failed);
+        assert_eq!(turn.reason, Some(MasterReason::ModelRefused));
+        assert_eq!(turn.cause.as_deref(), Some("master_model_refused"));
+        assert!(turn.reply.is_none(), "no reply from another model");
+        let wire = serde_json::to_value(turn).unwrap();
+        assert_eq!(wire["reason"], "model_refused");
+        assert_eq!(wire["cause"], "master_model_refused");
+    }
+
+    /// Counts the model fallback notices the owner was given for the case's Codex master.
+    /// Input: the engine database. Output: the count.
+    fn fallback_notices(db: &rusqlite::Connection) -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM owner_notices WHERE kind='pool_failover' AND subject LIKE 'model_fallback:project-a:codex:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Opens a signed-in Codex master whose owner picked a master model the provider
+    /// refuses, saves the owner's fallback rule, and drives the first turn through the
+    /// real owner runtime and the case's Codex (DEC-150 M-10). Input: the rule. Output: the
+    /// case, the master session, the refused model and the engine database.
+    async fn refused_master_turn(
+        rule: crate::model_choice::rules::FallbackRule,
+    ) -> (
+        Case,
+        crate::protocol::SessionId,
+        String,
+        rusqlite::Connection,
+    ) {
+        use crate::harness_settings::Scope;
+        use crate::model_choice::rules::{Rule, RuleWritten, rules, set_rule};
+        use crate::model_choice::{Slot, Written, store};
+        let mut case = Case::open_registered(
+            MASTER_CATALOG,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            },
+            true,
+        )
+        .await;
+        long_lived_codex_auth(&case.guard.as_ref().unwrap().profile_path().unwrap());
+        case.complete_sign_in().await;
+        case.open_master().await;
+        let host = case.service.owner_runtime().unwrap();
+        let root = super::super::changes::engine_root(&host.authority).unwrap();
+        let db = crate::storage::versioned::open(&root).unwrap();
+        let catalog = crate::model_choice::catalog("codex");
+        let model = catalog[0].clone();
+        assert_ne!(
+            model, "model-a",
+            "the master model differs from the account's"
+        );
+        let version = store::values(&db, "codex", &catalog, &Scope::App, None)
+            .unwrap()
+            .rows
+            .iter()
+            .find(|row| row.slot == Slot::Master)
+            .unwrap()
+            .version;
+        let written = store::set(
+            &db,
+            "codex",
+            &catalog,
+            &Scope::App,
+            Slot::Master,
+            &json!(model),
+            version,
+        )
+        .unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+        let version = rules(&db).unwrap().fallback_version;
+        let written = set_rule(&db, Rule::Fallback(rule), version).unwrap();
+        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+
+        let session = case.submit_turn("refused-turn").await;
+        let refused = host
+            .drive_master_turn(&master_project(), &session, &id("refused-turn"))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, "master_model_refused");
+        assert_model_refused(&case.master_turn(&session, "refused-turn").await);
+        assert!(
+            crate::team::model_pick::refused(
+                &db,
+                &master_project(),
+                &CredentialRef::new("connection-a").unwrap(),
+                &model,
+                crate::team::now_ms(),
+            )
+            .unwrap(),
+            "the launch recorded the refusal for the turn's account"
+        );
+        assert_eq!(
+            fallback_notices(&db),
+            0,
+            "the refused turn itself tells no fallback"
+        );
+        (case, session, model, db)
+    }
+
+    /// DEC-150 M-10 under Stop: a master model the provider refuses ends the turn with the
+    /// refusal's words, and the owner's next message stops the same way while the refusal
+    /// holds, never falling back to the account's model or telling a fallback.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_refused_master_model_stops_the_master_with_its_words_and_no_fallback_under_stop() {
+        use crate::model_choice::rules::FallbackRule;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (case, session, model, db) = refused_master_turn(FallbackRule::Stop).await;
+            let host = case.service.owner_runtime().unwrap();
+            assert_eq!(case.submit_turn("stopped-turn").await, session);
+            let stopped = host
+                .drive_master_turn(&master_project(), &session, &id("stopped-turn"))
+                .await
+                .unwrap_err();
+            assert_eq!(stopped.0, "master_model_refused");
+            assert_model_refused(&case.master_turn(&session, "stopped-turn").await);
+            assert_eq!(fallback_notices(&db), 0, "Stop tells no fallback");
+            assert!(
+                crate::team::model_pick::refused(
+                    &db,
+                    &master_project(),
+                    &CredentialRef::new("connection-a").unwrap(),
+                    &model,
+                    crate::team::now_ms(),
+                )
+                .unwrap()
+            );
+            drop(db);
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// DEC-150 M-10 under Notice: after the provider refused the master model, the owner's
+    /// next message runs on the account's own model and the owner is told once, in a Pool
+    /// failover notice naming the refused model, with no team message left behind.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_refused_master_model_runs_the_account_s_model_next_and_tells_the_owner_once_under_notice()
+     {
+        use crate::model_choice::rules::FallbackRule;
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (case, _session, model, db) = refused_master_turn(FallbackRule::Notice).await;
+            let prepared = admitted(case.prepare_next_turn("fallback-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let (_, chosen) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(chosen, None, "the account's own model runs");
+            assert_eq!(fallback_notices(&db), 1, "the owner is told");
+            let (settings, chosen) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(chosen, None);
+            assert_eq!(fallback_notices(&db), 1, "the owner is told once");
+            let told: String = db
+                .query_row(
+                    "SELECT text FROM owner_notices WHERE subject LIKE 'model_fallback:project-a:codex:%'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(told.contains(&model), "{told}");
+
+            let (profile, _) = host
+                .acquire_master_profile(&prepared, &id("fallback-turn"))
+                .await
+                .unwrap();
+            let launch = host
+                .prepare_master_host(&prepared, &profile, settings, None)
+                .unwrap();
+            let args = arguments(&launch.command);
+            drop(launch);
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == "model=\"model-a\""),
+                "the account's own model runs: {args:?}"
+            );
+            assert!(!args.contains(&format!("model=\"{model}\"")), "{args:?}");
+            let team: i64 = db
+                .query_row(
+                    "SELECT COUNT(*) FROM team_messages WHERE project='project-a'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(team, 0, "an owner-host fallback leaves no team message");
+            drop(profile);
+            drop(db);
+            case.close().await;
         })
         .await
         .unwrap();
