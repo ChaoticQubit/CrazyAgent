@@ -625,7 +625,12 @@ fn editor_and_terminal_control_sockets_are_refused_by_class() {
             "{relative}"
         );
     }
-    for plain in ["screenshots/app.sock", "unicode/app.sock", "codec.sock"] {
+    for plain in [
+        "screenshots/app.sock",
+        "unicode/app.sock",
+        "codec.sock",
+        "code/app/dev.sock",
+    ] {
         assert_eq!(escape_class(&base.join(plain)), None, "{plain}");
     }
 }

@@ -88,7 +88,8 @@ const CONTROL_WORDS: [&str; 13] = [
     "windsurf",
     "hammerspoon",
 ];
-const CONTROL_NAMES: [&str; 5] = ["vim", "code", "screen", "screens", "uscreens"];
+const CONTROL_NAMES: [&str; 4] = ["vim", "screen", "screens", "uscreens"];
+const CONTROL_FOLDER_NAMES: [&str; 1] = ["code"];
 const CONTROL_PORTS: [u16; 4] = [2375, 2376, 9222, 9229];
 const KEY_STARTS: [&str; 2] = ["gpg", "ssh"];
 const KEY_NAME_WORDS: [&str; 3] = ["agent", "gpg", "ssh"];
@@ -287,7 +288,13 @@ fn escape_class(real: &Path) -> Option<&'static str> {
     if marked(&words, &HOST_ESCAPE_NAMES, &HOST_ESCAPE_WORDS) {
         return Some("grant_socket_host");
     }
-    if marked(&words, &CONTROL_NAMES, &CONTROL_WORDS) {
+    let folder = words
+        .len()
+        .checked_sub(2)
+        .and_then(|at| words.get(at..=at))
+        .unwrap_or_default();
+    if marked(&words, &CONTROL_NAMES, &CONTROL_WORDS) || marked(folder, &CONTROL_FOLDER_NAMES, &[])
+    {
         return Some("grant_socket_agent");
     }
     let name = words.last().map(String::as_str).unwrap_or_default();
@@ -327,7 +334,6 @@ fn socket_fit(real: &Path) -> Result<(), &'static str> {
         .ok_or("grant_socket_missing")?;
     ownership(socket, parent, nix::unistd::getuid().as_raw())?;
     let links = meta.map_or(0, |meta| meta.nlink());
-    assert!(links >= 1);
     if links != 1 {
         return Err("grant_socket_owner");
     }
