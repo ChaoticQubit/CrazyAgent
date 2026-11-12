@@ -340,7 +340,7 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
 /// Checks a harness file, chosen or found, before it is pinned or stored: an absolute path
 /// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
 /// file, no version-manager shim, outside every folder agents can write ([`AgentSpace`]),
-/// and in folders no other user can change.
+/// in folders no other user can change, whose real file passes the pin's own file rule.
 /// Inputs: the id, the path, the agent space and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
@@ -373,15 +373,16 @@ pub fn check(
     if crate::service::changeable_by_others(path).is_some() {
         return Err(failure(PATH_CHANGEABLE));
     }
+    crate::engine::pinnable(&metadata)?;
     assert!(path.is_absolute());
     Ok(path.to_path_buf())
 }
 
 /// Picks the file a pin may use from what a search finds: the first candidate, in search
-/// order and then on PATH, that passes [`check`], so a shim or a file in a folder another
-/// user can change never hides a good install after it. Inputs: the id, the search, the PATH
-/// value and the agent space. Output: the entry, the first refusal when every candidate
-/// failed, or none when nothing was found.
+/// order and then on PATH, that passes [`check`], so a shim, a file the pin refuses or one
+/// in a folder another user can change never hides a good install after it. Inputs: the id,
+/// the search, the PATH value and the agent space. Output: the entry, the first refusal when
+/// every candidate failed, or none when nothing was found.
 pub fn pick(
     id: &str,
     search: &Search,
