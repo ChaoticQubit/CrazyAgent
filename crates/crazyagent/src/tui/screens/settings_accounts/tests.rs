@@ -628,6 +628,7 @@ fn removing_an_account_in_a_pool_names_the_pool_and_takes_it_out() {
     let mut details = AccountDetails::new(accounts[0].clone(), Accounts::with(accounts.clone()));
     details.key(&Key::Right, &mut ctx);
     details.key(&Key::Right, &mut ctx);
+    details.key(&Key::Right, &mut ctx);
     details.key(&Key::Enter, &mut ctx);
     let (modal, _) = details.modal(&ctx).expect("a confirm before removing");
     assert_eq!(modal.title, "Remove account");
