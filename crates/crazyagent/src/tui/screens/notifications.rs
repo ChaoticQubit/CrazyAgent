@@ -1,7 +1,7 @@
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::notifications::{
-    ACTION_IDS_MAX, Notice, NoticeAction, NoticeFilter, NoticeKind, NoticeQuery, NoticeTarget,
-    PAGE_MAX,
+    FoldChange, Notice, NoticeAction, NoticeFilter, NoticeFold, NoticeKind, NoticeQuery,
+    NoticeTarget, PAGE_MAX,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -148,6 +148,7 @@ impl Notifications {
             NoticeAction::Read { .. }
                 | NoticeAction::Unread { .. }
                 | NoticeAction::Delete { .. }
+                | NoticeAction::Folds { .. }
                 | NoticeAction::ReadAll { .. }
         ) {
             return;
@@ -161,24 +162,37 @@ impl Notifications {
         }
     }
 
-    /// Sends one change over the ids of the marked rows, or of the row under the cursor
-    /// when none is marked, in pieces of at most `ACTION_IDS_MAX` ids, then clears the
-    /// marks. Inputs: the change builder and the context. Output: none.
-    fn change(&mut self, build: fn(Vec<i64>) -> NoticeAction, ctx: &mut Ctx) {
+    /// The fold one row stands for under the filter it was listed in, which reaches every
+    /// item the row holds at or below its newest id, past the ids the row names. Input:
+    /// the row. Output: the fold.
+    fn fold_of(&self, row: &Notice) -> NoticeFold {
+        NoticeFold {
+            kind: row.kind,
+            project_id: row.project_id.clone(),
+            filter: self.filter,
+            newest: row.id,
+        }
+    }
+
+    /// Sends one change to every item of the marked rows, or of the row under the cursor
+    /// when none is marked, as folds in pieces of at most `PAGE_MAX`, then clears the
+    /// marks. Inputs: the change and the context. Output: none.
+    fn change(&mut self, change: FoldChange, ctx: &mut Ctx) {
         let rows = self.rows();
-        let picked: Vec<i64> = if self.marked.is_empty() {
+        let folds: Vec<NoticeFold> = if self.marked.is_empty() {
             rows.get(self.cursor)
-                .map(|row| row.ids.clone())
+                .map(|row| vec![self.fold_of(row)])
                 .unwrap_or_default()
         } else {
             rows.iter()
                 .filter(|row| self.marked.contains(&row.id))
-                .flat_map(|row| row.ids.iter().copied())
+                .map(|row| self.fold_of(row))
                 .collect()
         };
-        for ids in picked.chunks(ACTION_IDS_MAX) {
-            assert!(!ids.is_empty() && ids.len() <= ACTION_IDS_MAX);
-            send(build(ids.to_vec()), ctx);
+        for piece in folds.chunks(usize::from(PAGE_MAX)) {
+            assert!(!piece.is_empty() && piece.len() <= usize::from(PAGE_MAX));
+            let folds = piece.to_vec();
+            send(NoticeAction::Folds { folds, change }, ctx);
         }
         self.marked.clear();
     }
@@ -188,9 +202,16 @@ impl Notifications {
             return Flow::Handled;
         };
         if row.unread > 0 {
-            for ids in row.ids.chunks(ACTION_IDS_MAX) {
-                send(NoticeAction::Read { ids: ids.to_vec() }, ctx);
-            }
+            let action = if row.folded == 1 {
+                NoticeAction::Read { ids: vec![row.id] }
+            } else {
+                let folds = vec![self.fold_of(&row)];
+                NoticeAction::Folds {
+                    folds,
+                    change: FoldChange::Read,
+                }
+            };
+            send(action, ctx);
         }
         match place_of(&row.target, ctx) {
             Ok(Place::Home) => Flow::Go(Place::Home),
@@ -404,9 +425,9 @@ impl Screen for Notifications {
                     self.marked.insert(id);
                 }
             }
-            Key::Char('r') => self.change(|ids| NoticeAction::Read { ids }, ctx),
-            Key::Char('u') => self.change(|ids| NoticeAction::Unread { ids }, ctx),
-            Key::Char('d') => self.change(|ids| NoticeAction::Delete { ids }, ctx),
+            Key::Char('r') => self.change(FoldChange::Read, ctx),
+            Key::Char('u') => self.change(FoldChange::Unread, ctx),
+            Key::Char('d') => self.change(FoldChange::Delete, ctx),
             Key::Char('a') => send(
                 NoticeAction::ReadAll {
                     project_id: self.project.clone(),
