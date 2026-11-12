@@ -140,18 +140,20 @@ fn scope(project: Option<ProjectId>) -> Scope {
 
 impl OwnerClient {
     /// Reads a harness's Models section app-wide or for one project (DEC-150): the master,
-    /// agent and allowed slots with their versions, and every candidate id. Inputs: the
-    /// harness and the project, none for the app. Output: the section, or a
+    /// agent and allowed slots with their versions, and every candidate id. `fresh` marks a
+    /// Models view opening, which reads the harness's own list once first. Inputs: the
+    /// harness, the project, none for the app, and `fresh`. Output: the section, or a
     /// `MODEL_CHOICE_PROTOCOL_CODES` refusal.
     pub async fn model_choice_values(
         &self,
         harness: &str,
         project: Option<ProjectId>,
+        fresh: bool,
     ) -> Result<Models, EngineError> {
         let action = Action::Values {
             harness: harness.into(),
             project,
-            fresh: false,
+            fresh,
         };
         match self.model_choice_exchange(action).await? {
             Reply::Values { models } => Ok(models),
@@ -364,9 +366,19 @@ async fn handle(
             .and_then(|id| super::harness_settings::registered(engine, authority, id)),
         _ => None,
     };
+    let live = live_due(&action)
+        .and_then(crate::model_choice::harness_id)
+        .filter(|harness| crate::model_choice::live::reader(harness).is_some());
     tokio::task::spawn_blocking(move || {
-        let installed =
-            executable.and_then(|path| installed::version_cached(&path, installed::LIMIT));
+        if let Some(harness) = live {
+            let read = executable
+                .as_deref()
+                .and_then(|path| crate::model_choice::live::read(harness, path, &root));
+            store::live_record(&versioned::open(&root)?, harness, read.as_deref())?;
+        }
+        let installed = executable
+            .as_deref()
+            .and_then(|path| installed::version_cached(path, installed::LIMIT));
         run(&root, action, installed.as_deref())
     })
     .await
@@ -377,8 +389,14 @@ async fn handle(
 /// (`fresh`, DEC-150 addendum 11), never a re-read, a change or a rule. Input: the action.
 /// Output: the harness, or none.
 fn live_due(action: &Action) -> Option<&str> {
-    let _ = action;
-    None
+    match action {
+        Action::Values {
+            harness,
+            fresh: true,
+            ..
+        } => Some(harness),
+        _ => None,
+    }
 }
 
 /// Reads one model choice request from an owner frame body, at most `REQUEST_BYTES_MAX`
@@ -403,7 +421,7 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         store::values(
             &db,
             harness,
-            &crate::model_choice::catalog(harness),
+            &store::catalog(&db, harness)?,
             &Scope::App,
             installed,
         )
@@ -415,7 +433,7 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
             models: store::values(
                 &db,
                 &harness,
-                &crate::model_choice::catalog(&harness),
+                &store::catalog(&db, &harness)?,
                 &scope(project),
                 installed,
             )?,
@@ -429,7 +447,7 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         } => Ok(store::set(
             &db,
             &harness,
-            &crate::model_choice::catalog(&harness),
+            &store::catalog(&db, &harness)?,
             &scope(project),
             slot,
             &value,
@@ -444,19 +462,15 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         } => Ok(store::reset(
             &db,
             &harness,
-            &crate::model_choice::catalog(&harness),
+            &store::catalog(&db, &harness)?,
             &scope(project),
             slot,
             version,
         )?
         .into()),
         Action::Add { harness, model } => {
-            let begun = store::custom_begin(
-                &db,
-                &harness,
-                &crate::model_choice::catalog(&harness),
-                &model,
-            )?;
+            let begun =
+                store::custom_begin(&db, &harness, &store::catalog(&db, &harness)?, &model)?;
             Ok(Reply::Added {
                 added: begun.into(),
                 models: app(&harness)?,

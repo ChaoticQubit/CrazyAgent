@@ -1,8 +1,8 @@
 use super::rules::PickRule;
 use super::{
-    CUSTOM_MAX, Candidate, Models, NOT_SUPPORTED, Origin, Row, Slot, VALUE_JSON_MAX, Written,
-    assert_catalog, fallback, harness_id, item, layered, model_valid, supported, unavailable,
-    value_ok,
+    CATALOG_MODELS_MAX, CUSTOM_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, Origin, Row,
+    Slot, VALUE_JSON_MAX, Written, assert_catalog, fallback, harness_id, item, layered,
+    model_valid, supported, unavailable, value_ok,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS model_live (
     reported INTEGER NOT NULL CHECK (reported IN (0, 1)),
     read_ms INTEGER NOT NULL
 ) WITHOUT ROWID;";
+
+/// The longest kept live list a row may hold: `CATALOG_MODELS_MAX` quoted ids and commas.
+const LIVE_JSON_MAX: usize = CATALOG_MODELS_MAX * (MODEL_BYTES_MAX + 3) + 2;
 
 /// What a spawn's model pick does: run on the model named, none for the account's own,
 /// run on the default instead because the owner's pick rule overrules every pick, refuse
@@ -85,13 +88,15 @@ pub fn values(
     }
     assert_eq!(rows.len(), Slot::ALL.len());
     let reason = super::unqualified(harness, installed);
+    let reported = super::live::reader(harness).is_some()
+        && live_kept(tx, harness)?.is_some_and(|(_, reported)| reported);
     Ok(Models {
         harness: harness.to_owned(),
         rows,
         candidates,
         qualified: reason.is_none(),
         reason,
-        live_note: None,
+        live_note: (!reported).then(|| super::live::not_reported(harness)),
     })
 }
 
@@ -100,8 +105,14 @@ pub fn values(
 /// names. Every launch, pick and Models read checks against this list. Inputs: the engine
 /// database and the harness name. Output: the ids, or `model_choice_unavailable`.
 pub fn catalog(db: &Connection, harness: &str) -> Result<Vec<String>, EngineError> {
-    let _ = db;
-    Ok(super::catalog(harness))
+    let shipped = super::catalog(harness);
+    let Some(harness) = harness_id(harness) else {
+        return Ok(shipped);
+    };
+    let Some((live, _)) = live_kept(db, harness)? else {
+        return Ok(shipped);
+    };
+    Ok(super::live::merged(harness, &shipped, &live))
 }
 
 /// Keeps what one live read of a harness's model list found: a reported list replaces the
@@ -114,8 +125,119 @@ pub fn live_record(
     harness: &str,
     read: Option<&[String]>,
 ) -> Result<(), EngineError> {
-    let _ = (db, harness, read);
-    Ok(())
+    let harness = known(harness)?;
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
+    tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    let earlier = live_kept(&tx, harness)?.map(|(models, _)| models);
+    let mut models = match read {
+        None => earlier.unwrap_or_default(),
+        Some(read) => {
+            let saved = saved_ids(&tx, harness)?;
+            let shipped = super::catalog(harness);
+            let held: Vec<String> = earlier
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| saved.contains(id) && !read.contains(id) && !shipped.contains(id))
+                .collect();
+            let room = CATALOG_MODELS_MAX.saturating_sub(shipped.len() + held.len());
+            let mut seen = std::collections::BTreeSet::new();
+            let mut models: Vec<String> = read
+                .iter()
+                .filter(|id| {
+                    model_valid(harness, id)
+                        && !shipped.contains(id)
+                        && !held.contains(id)
+                        && seen.insert(id.as_str())
+                })
+                .take(room)
+                .cloned()
+                .collect();
+            models.extend(held);
+            models
+        }
+    };
+    models.truncate(CATALOG_MODELS_MAX);
+    assert_catalog(harness, &models);
+    let json = serde_json::to_string(&models).map_err(unavailable)?;
+    assert!(json.len() <= LIVE_JSON_MAX);
+    tx.execute(
+        "INSERT INTO model_live(harness, models_json, reported, read_ms)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(harness) DO UPDATE SET models_json = excluded.models_json,
+         reported = excluded.reported, read_ms = excluded.read_ms",
+        params![harness, json, read.is_some(), crate::team::now_ms()],
+    )
+    .map_err(unavailable)?;
+    tx.commit().map_err(unavailable)
+}
+
+/// Reads the live list kept for a harness and whether its last read reported it. Inputs:
+/// the engine database and the harness id. Output: the ids and the flag, none when no
+/// read was kept, or `model_choice_unavailable` for a row out of contract.
+fn live_kept(db: &Connection, harness: &str) -> Result<Option<(Vec<String>, bool)>, EngineError> {
+    if !table(db, "model_live")? {
+        return Ok(None);
+    }
+    let row: Option<(String, bool)> = db
+        .query_row(
+            "SELECT models_json, reported FROM model_live WHERE harness = ?1",
+            [harness],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some((json, reported)) = row else {
+        return Ok(None);
+    };
+    if json.len() > LIVE_JSON_MAX {
+        return Err(unavailable(()));
+    }
+    let models: Vec<String> = serde_json::from_str(&json).map_err(unavailable)?;
+    let mut seen = std::collections::BTreeSet::new();
+    if models.len() > CATALOG_MODELS_MAX
+        || !models
+            .iter()
+            .all(|id| model_valid(harness, id) && seen.insert(id.as_str()))
+    {
+        return Err(unavailable(()));
+    }
+    Ok(Some((models, reported)))
+}
+
+/// Lists every model id a saved slot of a harness names, at any scope: a master or agent
+/// model, or an id on an allowed list. Inputs: the engine database and the harness id.
+/// Output: the ids, or `model_choice_unavailable`.
+fn saved_ids(
+    db: &Connection,
+    harness: &str,
+) -> Result<std::collections::BTreeSet<String>, EngineError> {
+    let mut ids = std::collections::BTreeSet::new();
+    if !exists(db)? {
+        return Ok(ids);
+    }
+    let mut query = db
+        .prepare("SELECT value_json FROM model_choices WHERE harness = ?1")
+        .map_err(unavailable)?;
+    let mut rows = query.query([harness]).map_err(unavailable)?;
+    while let Some(row) = rows.next().map_err(unavailable)? {
+        let json: String = row.get(0).map_err(unavailable)?;
+        if json.len() > VALUE_JSON_MAX {
+            return Err(unavailable(()));
+        }
+        match serde_json::from_str::<Value>(&json).map_err(unavailable)? {
+            Value::String(id) => {
+                ids.insert(id);
+            }
+            Value::Array(items) => {
+                ids.extend(items.into_iter().filter_map(|item| match item {
+                    Value::String(id) => Some(id),
+                    _ => None,
+                }));
+            }
+            _ => {}
+        }
+    }
+    Ok(ids)
 }
 
 /// Sets one slot at one scope as the next version of its item, when the owner read the
@@ -725,10 +847,13 @@ pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), E
 }
 
 fn exists(db: &Connection) -> Result<bool, EngineError> {
+    table(db, "model_custom")
+}
+
+fn table(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
-         AND name = 'model_custom')",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [name],
         |row| row.get(0),
     )
     .map_err(unavailable)

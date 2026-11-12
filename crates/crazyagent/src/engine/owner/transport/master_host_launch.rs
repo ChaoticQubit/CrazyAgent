@@ -3077,7 +3077,7 @@ fn master_choice(
     let model = crate::model_choice::store::launch_model(
         db,
         harness,
-        &crate::model_choice::catalog(harness),
+        &crate::model_choice::store::catalog(db, harness)?,
         Some(project),
         crate::model_choice::Slot::Master,
     )?;

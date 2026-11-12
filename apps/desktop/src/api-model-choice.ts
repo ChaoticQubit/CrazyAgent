@@ -32,14 +32,16 @@ export interface ModelCandidate {
 }
 
 /** A harness's Models section from the engine: its three slots in page order, every
- * candidate, the harness's list first, then the owner's ids, and whether the list was
- * checked on the installed harness version, with the reason when it was not. */
+ * candidate, the harness's list first, then the owner's ids, whether the list was checked on
+ * the installed harness version, with the reason when it was not, and the engine's line
+ * while the harness reported no live list of its own. */
 export interface Models {
   harness: string;
   rows: ModelRow[];
   candidates: ModelCandidate[];
   qualified: boolean;
   reason: string | null;
+  live_note: string | null;
 }
 
 /** The Models page: the section, the project it was read for (null on the app page) and the
@@ -213,6 +215,13 @@ export function uncheckedLine(models: Pick<Models, "qualified" | "reason">): str
   return `Version not checked: ${displayText(models.reason)}.`;
 }
 
+/** Says that the harness reported no live model list, in the engine's words (DEC-141); the
+ * shipped ids still show. Input: the section. Output: the sentence, or "". */
+export function liveLine(models: Pick<Models, "live_note">): string {
+  if (models.live_note === null) return "";
+  return `${displayText(models.live_note)}.`;
+}
+
 /** A slot value in words. Input: the value. Output: the words. */
 export function valueText(value: ModelValue): string {
   if (value === null) return ACCOUNT_MODEL;
@@ -341,10 +350,11 @@ export function removedLine(removed: boolean, id: string): string {
   return removed ? `${displayText(id)} is removed.` : `${displayText(id)} was already gone.`;
 }
 
-/** Reads one harness's Models section. Inputs: the harness id and the project id, or null for
- * the app. Output: the page. */
-export function loadModels(harness: string, projectId: string | null): Promise<Result<ModelsPage>> {
-  return call<ModelsPage>("desktop_model_choice", { harness, projectId });
+/** Reads one harness's Models section; fresh marks the section opening, which reads the
+ * harness's own model list once first. Inputs: the harness id, the project id, or null for
+ * the app, and fresh. Output: the page. */
+export function loadModels(harness: string, projectId: string | null, fresh: boolean): Promise<Result<ModelsPage>> {
+  return call<ModelsPage>("desktop_model_choice", { harness, projectId, fresh });
 }
 
 /** Sets one slot at the page's scope. Inputs: the harness, the project or null, the slot, the

@@ -470,6 +470,10 @@ impl ModelsPage {
                 .reason
                 .as_ref()
                 .is_none_or(|reason| reason.len() <= UNQUALIFIED_REASON_BYTES_MAX)
+            && models
+                .live_note
+                .as_ref()
+                .is_none_or(|note| note.len() <= crate::model_choice::live::NOTE_BYTES_MAX)
     }
 
     fn items(&self) -> Vec<Item> {
@@ -1245,6 +1249,13 @@ impl ModelsPage {
                 )
                 .into_iter()
                 .map(|part| styled(part, Role::Warning, theme)),
+            );
+        }
+        if let Some(note) = &models.live_note {
+            lines.extend(
+                wrap(&format!("{}.", printable(note)), limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
             );
         }
         if matches!(self.edit, Some(Edit::Ticks { .. })) {

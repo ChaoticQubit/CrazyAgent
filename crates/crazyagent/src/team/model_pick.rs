@@ -26,7 +26,7 @@ pub(crate) fn pin(
     pick: Option<&ModelPick>,
 ) -> Result<Result<String, String>, EngineError> {
     assert!(task > 0);
-    let catalog = crate::model_choice::catalog(harness);
+    let catalog = store::catalog(tx, harness)?;
     let picked = pick.map(|pick| pick.model.as_str());
     let shown = super::bound_text(harness, 64);
     let model = match store::pick(tx, harness, &catalog, project, picked)? {
@@ -147,7 +147,7 @@ pub(crate) fn wanted(
     if let Some(pick) = pinned(db, task)? {
         return still_allowed(db, project, harness, &pick.model);
     }
-    let catalog = crate::model_choice::catalog(harness);
+    let catalog = store::catalog(db, harness)?;
     store::launch_model(
         db,
         harness,
@@ -177,7 +177,7 @@ pub(crate) fn start_model(
             None => Ok(None),
         };
     }
-    let catalog = crate::model_choice::catalog(harness);
+    let catalog = store::catalog(db, harness)?;
     store::launch_model(
         db,
         harness,
@@ -207,7 +207,7 @@ pub(crate) fn master_lines(
             continue;
         }
         seen.push(harness);
-        let catalog = crate::model_choice::catalog(harness);
+        let catalog = store::catalog(db, harness)?;
         let Some(offer) = store::offer(db, harness, &catalog, project)? else {
             continue;
         };
@@ -255,7 +255,7 @@ fn still_allowed(
     harness: &str,
     model: &str,
 ) -> Result<Option<String>, EngineError> {
-    let catalog = crate::model_choice::catalog(harness);
+    let catalog = store::catalog(db, harness)?;
     Ok(
         match store::pick(db, harness, &catalog, project, Some(model))? {
             Pick::Run(run) => run,

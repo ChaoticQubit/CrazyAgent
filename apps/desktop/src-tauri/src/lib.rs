@@ -4536,9 +4536,12 @@ async fn desktop_model_choice(
     state: State<'_, NativeState>,
     harness: String,
     project_id: Option<String>,
+    fresh: bool,
 ) -> Result<ModelsPage, BridgeError> {
     main_window(&webview)?;
-    let call = read(&state).await?.model_choice(harness, project_id)?;
+    let call = read(&state)
+        .await?
+        .model_choice(harness, project_id, fresh)?;
     call.await
 }
 

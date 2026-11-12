@@ -1,4 +1,6 @@
 use super::{CATALOG_MODELS_MAX, harness_id, model_valid};
+use serde_json::Value;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -12,11 +14,16 @@ pub const OUTPUT_BYTES_MAX: usize = 2 * 1024 * 1024;
 /// What a Models section says, before the harness name, while it shows no list the
 /// harness reported itself.
 pub const NOT_REPORTED: &str = "live list not reported by";
+/// The longest line a Models section may show for an unreported list; a client refuses a
+/// section with a longer one.
+pub const NOTE_BYTES_MAX: usize = 128;
 
 /// The folder under the engine root that holds each read's private home.
+#[cfg(unix)]
 const HOMES: &str = "model-lists";
 /// Every variable a harness finds its home, config, cache or temporary files by, each set to
 /// the read's private home.
+#[cfg(unix)]
 const HOME_VARIABLES: &[&str] = &[
     "HOME",
     "XDG_CONFIG_HOME",
@@ -27,6 +34,7 @@ const HOME_VARIABLES: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "TMPDIR",
 ];
+#[cfg(unix)]
 const SYSTEM_PATH: &str = "/usr/bin:/bin";
 
 /// How a harness prints its model list.
@@ -148,8 +156,11 @@ pub fn reader(harness: &str) -> Option<Reader> {
 /// word for word in the desktop and the TUI (DEC-141). Input: the harness name or alias.
 /// Output: the line.
 pub fn not_reported(harness: &str) -> String {
-    let _ = harness;
-    String::new()
+    let spec = crate::harnesses::spec(harness);
+    let name = spec.map_or(harness, |spec| spec.name);
+    let line = format!("{NOT_REPORTED} {name}");
+    assert!(spec.is_none() || line.len() <= NOTE_BYTES_MAX);
+    line
 }
 
 /// Reads the model ids one harness printed. Text shapes are strict: a line that is not
@@ -158,8 +169,96 @@ pub fn not_reported(harness: &str) -> String {
 /// `CATALOG_MODELS_MAX` distinct valid ids in the harness's order, none when it reported
 /// none.
 pub fn parse(harness: &str, shape: Shape, output: &[u8]) -> Option<Vec<String>> {
-    let _ = (harness, shape, output);
-    None
+    let harness = harness_id(harness)?;
+    let text = std::str::from_utf8(output).ok()?;
+    let found = match shape {
+        Shape::CodexCatalog => codex_ids(text)?,
+        Shape::Lines => line_ids(harness, text)?,
+        Shape::PiTable => pi_ids(harness, text)?,
+        Shape::Dashed => dashed_ids(harness, text)?,
+        Shape::JsonIds => json_ids(text)?,
+    };
+    let mut seen = BTreeSet::new();
+    let ids: Vec<String> = found
+        .into_iter()
+        .filter(|id| model_valid(harness, id) && seen.insert(id.clone()))
+        .take(CATALOG_MODELS_MAX)
+        .collect();
+    super::assert_catalog(harness, &ids);
+    (!ids.is_empty()).then_some(ids)
+}
+
+fn codex_ids(text: &str) -> Option<Vec<String>> {
+    let catalog: Value = serde_json::from_str(text).ok()?;
+    let models = catalog.get("models")?.as_array()?;
+    Some(
+        models
+            .iter()
+            .filter(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+fn line_ids(harness: &str, text: &str) -> Option<Vec<String>> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| one_id(harness, line))
+        .collect()
+}
+
+fn pi_ids(harness: &str, text: &str) -> Option<Vec<String>> {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let mut header = lines.next()?.split_whitespace();
+    if header.next() != Some("provider") || header.next() != Some("model") {
+        return None;
+    }
+    lines
+        .map(|line| {
+            let mut columns = line.split_whitespace();
+            let provider = columns.next()?;
+            let model = columns.next()?;
+            one_id(harness, &format!("{provider}/{model}"))
+        })
+        .collect()
+}
+
+fn dashed_ids(harness: &str, text: &str) -> Option<Vec<String>> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(|rest| one_id(harness, rest.trim()))
+        .collect()
+}
+
+fn json_ids(text: &str) -> Option<Vec<String>> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let items = match &value {
+        Value::Array(items) => items,
+        Value::Object(object) => object.get("models")?.as_array()?,
+        _ => return None,
+    };
+    Some(
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(id) => Some(id.as_str()),
+                Value::Object(object) => ["id", "model_id", "modelId", "slug"]
+                    .iter()
+                    .find_map(|key| object.get(*key).and_then(Value::as_str)),
+                _ => None,
+            })
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+/// Takes one word that is a whole valid model id. Inputs: the harness id and the word.
+/// Output: the id, none for an empty word, several words or an invalid id.
+fn one_id(harness: &str, word: &str) -> Option<String> {
+    (!word.is_empty() && !word.contains(char::is_whitespace) && model_valid(harness, word))
+        .then(|| word.to_owned())
 }
 
 /// Joins a harness's shipped list and the ids it reported (DEC-150 addendum 11 Q4): the
@@ -167,8 +266,16 @@ pub fn parse(harness: &str, shape: Shape, output: &[u8]) -> Option<Vec<String>> 
 /// id valid for the harness and distinct, cut at `CATALOG_MODELS_MAX`. Inputs: the harness
 /// id, the shipped ids and the reported ids. Output: the catalog.
 pub fn merged(harness: &str, shipped: &[String], live: &[String]) -> Vec<String> {
-    let _ = (harness, live, CATALOG_MODELS_MAX, model_valid);
-    shipped.to_vec()
+    let mut seen = BTreeSet::new();
+    let joined: Vec<String> = shipped
+        .iter()
+        .chain(live)
+        .filter(|id| model_valid(harness, id) && seen.insert(id.as_str()))
+        .take(CATALOG_MODELS_MAX)
+        .cloned()
+        .collect();
+    super::assert_catalog(harness, &joined);
+    joined
 }
 
 /// Reads one harness's model list once, through the tool resolver (Q1 a): the registered
@@ -176,6 +283,16 @@ pub fn merged(harness: &str, shipped: &[String], live: &[String]) -> Vec<String>
 /// home. Inputs: the harness id, its registered executable and the engine root. Output:
 /// the reported ids, none when it has no reader, cannot be resolved or reported none.
 #[cfg(unix)]
+pub(crate) fn read(harness: &str, executable: &Path, root: &Path) -> Option<Vec<String>> {
+    reader(harness)?;
+    let places = crate::tools::Places::from_environment(Some(root));
+    let tool = crate::harnesses::interactive::launch_tool(executable, &places).ok()?;
+    read_with(harness, &tool, root, LIMIT)
+}
+
+/// Reports no live list where the engine cannot run a harness in a private home with its
+/// own process group. Inputs: as on unix. Output: none.
+#[cfg(not(unix))]
 pub(crate) fn read(harness: &str, executable: &Path, root: &Path) -> Option<Vec<String>> {
     let _ = (harness, executable, root, LIMIT);
     None
@@ -193,15 +310,22 @@ pub(crate) fn read_with(
     root: &Path,
     limit: Duration,
 ) -> Option<Vec<String>> {
-    let _ = (
-        harness,
-        tool,
-        root,
-        limit,
-        HOMES,
-        HOME_VARIABLES,
-        SYSTEM_PATH,
-        OUTPUT_BYTES_MAX,
-    );
-    None
+    assert!(!limit.is_zero());
+    let reader = reader(harness)?;
+    let argv = tool.argv();
+    let (program, words) = argv.split_first()?;
+    let home = crate::setup::process::staging_folder(&root.join(HOMES), "home").ok()?;
+    let mut command = std::process::Command::new(program);
+    command
+        .args(words)
+        .args(reader.args)
+        .env_clear()
+        .env("PATH", SYSTEM_PATH)
+        .current_dir(&home);
+    for name in HOME_VARIABLES {
+        command.env(name, &home);
+    }
+    let output = crate::tools::probe::run_bounded(&mut command, limit, OUTPUT_BYTES_MAX);
+    let _ = std::fs::remove_dir_all(&home);
+    parse(harness, reader.shape, &output?)
 }

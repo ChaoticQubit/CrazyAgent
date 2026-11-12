@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Result } from "../../api";
 import type { SettingScope } from "../../api-harness-settings";
 import {
   ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, PICK_HELP, PICK_OPTIONS, SLOT_HELP, SLOT_LABELS,
   addModel, addedLine, allowedChange, allowedDraft, canResetModel, catalogLine, choiceChange, choiceDraft, choiceOptions,
   loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, originWord, passedOverLine,
-  removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, tickable, toggleAllowed, uncheckedLine,
+  liveLine, removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, tickable, toggleAllowed, uncheckedLine,
   valueText,
 } from "../../api-model-choice";
 import type { FallbackRule, ModelCandidate, ModelRow, ModelRules, ModelSlot, ModelsPage, PickRule } from "../../api-model-choice";
@@ -128,7 +128,8 @@ export function ModelsView(props: ModelsViewProps) {
   assert((scope === "project") === (value.project_id !== null), "a project page names its project");
   const about = scope === "project" ? "A model set here wins over the app value for this project only." : "Changes apply the next time the master or an agent starts with this harness.";
   const unchecked = uncheckedLine(value.models);
-  return <SettingSection title="Models" about={<>{catalogLine(value, name)} {unchecked ? `${unchecked} ` : ""}{about}</>}>
+  const live = liveLine(value.models);
+  return <SettingSection title="Models" about={<>{catalogLine(value, name)} {unchecked ? `${unchecked} ` : ""}{live ? `${live} ` : ""}{about}</>}>
     {value.models.rows.map((row) => <SlotLine key={row.slot} row={row} candidates={value.models.candidates} scope={scope}
       draft={drafts[row.slot]} busy={busy === row.slot} note={notes[row.slot] ?? ""}
       onDraft={(draft) => props.onDraft(row.slot, draft)} onSave={() => props.onSave(row)} onReset={() => props.onReset(row)} />)}
@@ -233,12 +234,24 @@ function AppOnly({ harness, page, onChanged }: { harness: string; page: Loaded<M
   </>;
 }
 
-/** One harness's Models block, app-wide or for one project: reads the section, keeps each
- * slot's draft and sends a set or reset with the version it read, reading again after a
- * stale refusal. The app page also lists the owner's model ids and the model rules. Inputs:
- * the harness id, its name and the project id, or null for the app. */
+/** One harness's Models block, app-wide or for one project: reads the section, the harness's
+ * live list only on opening and Retry, keeps each slot's draft and sends a set or reset with
+ * the version it read, reading again after a stale refusal. The app page also lists the
+ * owner's model ids and the model rules. Inputs: the harness id, its name and the project
+ * id, or null for the app. */
 export function ModelsSection({ harness, name, projectId }: { harness: string; name: string; projectId: string | null }) {
-  const [page, reload] = useLoad(() => loadModels(harness, projectId), [harness, projectId]);
+  const fresh = useRef(false);
+  const opened = useRef("");
+  const [page, reload] = useLoad(() => {
+    const shown = `${harness}\n${projectId ?? ""}`;
+    if (opened.current !== shown) {
+      opened.current = shown;
+      fresh.current = true;
+    }
+    const live = fresh.current;
+    fresh.current = false;
+    return loadModels(harness, projectId, live);
+  }, [harness, projectId]);
   const [drafts, setDrafts] = useState<ModelDrafts>({});
   const [notes, setNotes] = useState<Partial<Record<ModelSlot, string>>>({});
   const [busy, setBusy] = useState<ModelSlot | null>(null);
@@ -274,10 +287,15 @@ export function ModelsSection({ harness, name, projectId }: { harness: string; n
     settle(row.slot, await resetModelChoice(harness, projectId, row.slot, row.version));
   }
 
+  function retry() {
+    fresh.current = true;
+    reload();
+  }
+
   return <div className="pj set-groups models-section">
     <ModelsView page={page} name={name} scope={projectId === null ? "app" : "project"} drafts={drafts} busy={busy} notes={notes}
       onDraft={(slot, draft) => setDrafts((old) => ({ ...old, [slot]: draft }))}
-      onSave={(row) => void save(row)} onReset={(row) => void reset(row)} onRetry={reload} />
+      onSave={(row) => void save(row)} onReset={(row) => void reset(row)} onRetry={retry} />
     {projectId === null && <AppOnly harness={harness} page={page} onChanged={reload} />}
   </div>;
 }

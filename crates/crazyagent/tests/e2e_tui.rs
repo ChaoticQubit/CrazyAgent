@@ -2390,7 +2390,7 @@ mod models {
             self.owner(move |controller| {
                 Box::pin(async move {
                     controller
-                        .model_choice_values(harness, project.then(project_id))
+                        .model_choice_values(harness, project.then(project_id), false)
                         .await
                         .unwrap()
                 })

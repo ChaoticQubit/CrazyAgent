@@ -145,6 +145,10 @@ pub fn page_of(
             .reason
             .as_ref()
             .is_some_and(|reason| reason.len() > UNQUALIFIED_REASON_BYTES_MAX)
+        || models
+            .live_note
+            .as_ref()
+            .is_some_and(|note| note.len() > crazyagent::model_choice::live::NOTE_BYTES_MAX)
     {
         return Err(failure("owner_read_failed"));
     }
@@ -175,19 +179,21 @@ impl NativeBridge {
     }
 
     /// Reads one harness's Models section app-wide or for one project, run without the
-    /// bridge lock (DEC-150). Inputs: the harness id and the project id, None for the app.
-    /// Output: the page, or the engine's refusal.
+    /// bridge lock (DEC-150); `fresh` marks the section opening, which reads the harness's
+    /// own list once first. Inputs: the harness id, the project id, None for the app, and
+    /// `fresh`. Output: the page, or the engine's refusal.
     pub fn model_choice(
         &self,
         harness: String,
         project_id: Option<String>,
+        fresh: bool,
     ) -> Result<Unlocked<ModelsPage>, BridgeError> {
         let harness = window_harness(harness)?;
         let project = window_project(project_id.clone())?;
         let client = self.model_choice_client()?;
         Ok(Box::pin(async move {
             let models = client
-                .model_choice_values(&harness, project)
+                .model_choice_values(&harness, project, fresh)
                 .await
                 .map_err(model_choice_error)?;
             page_of(models, &harness, project_id)

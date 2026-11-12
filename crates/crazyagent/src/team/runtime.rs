@@ -3830,7 +3830,7 @@ impl TeamRuntime {
         harness: &str,
         paused: &BTreeSet<CredentialRef>,
     ) -> Result<Result<Option<TeamAccount>, String>, EngineError> {
-        let catalog = crate::model_choice::catalog(harness);
+        let catalog = crate::model_choice::store::catalog(&self.connection, harness)?;
         let wanted = crate::model_choice::store::launch_model(
             &self.connection,
             harness,
@@ -6916,7 +6916,7 @@ impl TeamRuntime {
             let own = crate::model_choice::store::launch_model(
                 &self.connection,
                 &slot.harness,
-                &crate::model_choice::catalog(&slot.harness),
+                &crate::model_choice::store::catalog(&self.connection, &slot.harness)?,
                 Some(project),
                 crate::model_choice::Slot::Agent,
             )?;
