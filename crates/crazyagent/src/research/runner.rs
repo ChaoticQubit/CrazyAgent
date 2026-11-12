@@ -4358,7 +4358,7 @@ mod tests {
             reviewed
                 .iter()
                 .all(|argument| !argument.contains("project_doc_max_bytes"))
-                && reviewed.iter().any(|argument| *argument == wanted),
+                && reviewed.contains(&wanted),
             "{reviewed:?}"
         );
     }
