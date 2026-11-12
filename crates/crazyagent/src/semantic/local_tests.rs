@@ -132,7 +132,11 @@ fn embed_is_the_l2_normalized_mean_of_the_first_dims_of_the_token_rows() {
     let rows = model.embed(&texts).unwrap();
     assert_eq!(rows.len(), cases.len());
     for ((text, want), got) in cases.iter().zip(&rows) {
-        assert_eq!(got.len(), FIXTURE_SHAPE.dims, "only the first dims are kept");
+        assert_eq!(
+            got.len(),
+            FIXTURE_SHAPE.dims,
+            "only the first dims are kept"
+        );
         assert_close(got, want, text);
     }
 }
@@ -149,7 +153,9 @@ fn a_repeated_token_counts_once_for_each_time_it_appears() {
 fn a_text_with_no_tokens_embeds_as_zeros_and_no_texts_embed_as_no_rows() {
     let folder = tempfile::tempdir().unwrap();
     let model = fixture_model(folder.path());
-    let rows = model.embed(&["", "   \t\n", "\u{0}\u{fffd}\u{200b}"]).unwrap();
+    let rows = model
+        .embed(&["", "   \t\n", "\u{0}\u{fffd}\u{200b}"])
+        .unwrap();
     for row in &rows {
         assert_eq!(row, &vec![0.0; FIXTURE_SHAPE.dims]);
     }
@@ -213,10 +219,7 @@ fn the_pinned_files_are_the_reviewed_revision_on_huggingface_co() {
         "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
     );
     assert_eq!(DOWNLOAD_BYTES, 125_729_604);
-    assert_eq!(
-        (SHAPE.rows, SHAPE.width, SHAPE.dims),
-        (30_522, 1_024, 256)
-    );
+    assert_eq!((SHAPE.rows, SHAPE.width, SHAPE.dims), (30_522, 1_024, 256));
 }
 
 #[test]

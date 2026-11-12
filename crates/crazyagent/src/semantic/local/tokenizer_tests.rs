@@ -6,7 +6,10 @@ fn fixture() -> Tokenizer {
 }
 
 fn id(token: &str) -> u32 {
-    FIXTURE_VOCAB.iter().position(|known| *known == token).unwrap() as u32
+    FIXTURE_VOCAB
+        .iter()
+        .position(|known| *known == token)
+        .unwrap() as u32
 }
 
 #[test]
@@ -33,9 +36,20 @@ fn the_normalizer_drops_controls_spaces_out_cjk_strips_accents_and_lowercases_ch
         " \u{4e2d}  \u{6587} ",
         "every CJK ideograph is set apart by spaces"
     );
-    assert_eq!(normalize("Caf\u{e9} Na\u{ef}ve \u{c5}NGSTR\u{d6}M"), "cafe naive angstrom");
-    assert_eq!(normalize("cafe\u{301}"), "cafe", "a combining mark already apart goes");
-    assert_eq!(normalize("\u{130}"), "i", "dotted capital I decomposes, loses its dot, then lowercases");
+    assert_eq!(
+        normalize("Caf\u{e9} Na\u{ef}ve \u{c5}NGSTR\u{d6}M"),
+        "cafe naive angstrom"
+    );
+    assert_eq!(
+        normalize("cafe\u{301}"),
+        "cafe",
+        "a combining mark already apart goes"
+    );
+    assert_eq!(
+        normalize("\u{130}"),
+        "i",
+        "dotted capital I decomposes, loses its dot, then lowercases"
+    );
     assert_eq!(
         normalize("\u{3a3}\u{3a3}"),
         "\u{3c3}\u{3c3}",
@@ -132,18 +146,36 @@ fn a_tokenizer_file_that_is_not_the_pinned_bert_uncased_wordpiece_is_refused() {
         good.replace("\"lowercase\": true", "\"lowercase\": false"),
         good.replace("\"strip_accents\": null", "\"strip_accents\": false"),
         good.replace("\"clean_text\": true", "\"clean_text\": false"),
-        good.replace("\"handle_chinese_chars\": true", "\"handle_chinese_chars\": false"),
+        good.replace(
+            "\"handle_chinese_chars\": true",
+            "\"handle_chinese_chars\": false",
+        ),
         good.replace("BertPreTokenizer", "Whitespace"),
-        good.replace("\"type\": \"WordPiece\", \"unk_token\"", "\"type\": \"BPE\", \"unk_token\""),
-        good.replace("\"continuing_subword_prefix\": \"##\"", "\"continuing_subword_prefix\": \"@@\""),
-        good.replace("\"max_input_chars_per_word\": 100", "\"max_input_chars_per_word\": 100000"),
+        good.replace(
+            "\"type\": \"WordPiece\", \"unk_token\"",
+            "\"type\": \"BPE\", \"unk_token\"",
+        ),
+        good.replace(
+            "\"continuing_subword_prefix\": \"##\"",
+            "\"continuing_subword_prefix\": \"@@\"",
+        ),
+        good.replace(
+            "\"max_input_chars_per_word\": 100",
+            "\"max_input_chars_per_word\": 100000",
+        ),
         good.replace("\"unk_token\": \"[UNK]\"", "\"unk_token\": \"[NOPE]\""),
-        good.replace("\"truncation\": null", "\"truncation\": {\"max_length\": 8}"),
+        good.replace(
+            "\"truncation\": null",
+            "\"truncation\": {\"max_length\": 8}",
+        ),
         good.replace("\"padding\": null", "\"padding\": {\"length\": 8}"),
         good.replace("\"naive\": 15", "\"naive\": 16"),
         good.replace("\"naive\": 15", "\"naive\": 14"),
         good.replace("\"special\": true", "\"special\": false"),
-        good.replace("{\"id\": 4, \"content\": \"[MASK]\"", "{\"id\": 3, \"content\": \"[MASK]\""),
+        good.replace(
+            "{\"id\": 4, \"content\": \"[MASK]\"",
+            "{\"id\": 3, \"content\": \"[MASK]\"",
+        ),
         "not json".to_owned(),
     ];
     for (at, text) in refused.iter().enumerate() {

@@ -47,12 +47,30 @@ fn a_file_that_is_not_one_f32_tensor_of_the_pinned_shape_filling_the_file_is_ref
     let data = fixture_data();
     let full = format!("[0,{}]", data.len() * 4);
     let mut refused: Vec<(&str, Vec<u8>)> = vec![
-        ("F16", safetensors_bytes(&tensor("F16", "[16,4]", &full), &data)),
-        ("wider rows", safetensors_bytes(&tensor("F32", "[8,8]", &full), &data)),
-        ("fewer rows", safetensors_bytes(&tensor("F32", "[15,4]", "[0,240]"), &data[..60])),
-        ("one dimension", safetensors_bytes(&tensor("F32", "[64]", &full), &data)),
-        ("short offsets", safetensors_bytes(&tensor("F32", "[16,4]", "[0,252]"), &data)),
-        ("offset start", safetensors_bytes(&tensor("F32", "[16,4]", "[4,260]"), &data)),
+        (
+            "F16",
+            safetensors_bytes(&tensor("F16", "[16,4]", &full), &data),
+        ),
+        (
+            "wider rows",
+            safetensors_bytes(&tensor("F32", "[8,8]", &full), &data),
+        ),
+        (
+            "fewer rows",
+            safetensors_bytes(&tensor("F32", "[15,4]", "[0,240]"), &data[..60]),
+        ),
+        (
+            "one dimension",
+            safetensors_bytes(&tensor("F32", "[64]", &full), &data),
+        ),
+        (
+            "short offsets",
+            safetensors_bytes(&tensor("F32", "[16,4]", "[0,252]"), &data),
+        ),
+        (
+            "offset start",
+            safetensors_bytes(&tensor("F32", "[16,4]", "[4,260]"), &data),
+        ),
         (
             "two tensors",
             safetensors_bytes(
@@ -64,7 +82,10 @@ fn a_file_that_is_not_one_f32_tensor_of_the_pinned_shape_filling_the_file_is_ref
         ),
         ("not json", safetensors_bytes("{not json}", &data)),
         ("an array", safetensors_bytes("[1,2]", &data)),
-        ("no tensor", safetensors_bytes("{\"__metadata__\":{}}", &data)),
+        (
+            "no tensor",
+            safetensors_bytes("{\"__metadata__\":{}}", &data),
+        ),
         ("seven bytes", vec![0; 7]),
     ];
     let mut short = fixture_model_bytes();
@@ -81,7 +102,11 @@ fn a_file_that_is_not_one_f32_tensor_of_the_pinned_shape_filling_the_file_is_ref
     past[..8].copy_from_slice(&file.to_le_bytes());
     refused.push(("header past the file", past));
     for (case, bytes) in refused {
-        assert_eq!(open_bytes(&bytes).err(), Some("search_model_format"), "{case}");
+        assert_eq!(
+            open_bytes(&bytes).err(),
+            Some("search_model_format"),
+            "{case}"
+        );
     }
 }
 
@@ -94,9 +119,19 @@ fn a_row_with_a_value_that_is_not_finite_is_refused_when_read() {
     let header = tensor("F32", "[16,4]", &format!("[0,{}]", data.len() * 4));
     let rows = open_bytes(&safetensors_bytes(&header, &data)).unwrap();
     let mut sum = vec![0.0; FIXTURE_SHAPE.dims];
-    assert_eq!(rows.add(3, 1.0, &mut sum).err(), Some("search_model_format"));
-    assert_eq!(rows.add(4, 1.0, &mut sum).err(), Some("search_model_format"));
+    assert_eq!(
+        rows.add(3, 1.0, &mut sum).err(),
+        Some("search_model_format")
+    );
+    assert_eq!(
+        rows.add(4, 1.0, &mut sum).err(),
+        Some("search_model_format")
+    );
     let mut fine = vec![0.0; FIXTURE_SHAPE.dims];
     rows.add(5, 1.0, &mut fine).unwrap();
-    assert_eq!(fine, vec![5.0, 1.0], "a dim past the kept ones is never read");
+    assert_eq!(
+        fine,
+        vec![5.0, 1.0],
+        "a dim past the kept ones is never read"
+    );
 }

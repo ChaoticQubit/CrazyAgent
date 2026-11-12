@@ -61,7 +61,8 @@ fn names_in(folder: &Path) -> Vec<String> {
 }
 
 fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
-    args.windows(2).any(|pair| pair[0] == flag && pair[1] == value)
+    args.windows(2)
+        .any(|pair| pair[0] == flag && pair[1] == value)
 }
 
 #[test]
@@ -69,8 +70,14 @@ fn a_start_without_the_pinned_size_confirmed_is_refused_and_nothing_starts() {
     let root = tempfile::tempdir().unwrap();
     let downloads = Downloads::new(root.path().to_path_buf());
     assert_eq!(downloads.start(0), Err("search_model_confirm"));
-    assert_eq!(downloads.start(DOWNLOAD_BYTES - 1), Err("search_model_confirm"));
-    assert_eq!(downloads.start(DOWNLOAD_BYTES + 1), Err("search_model_confirm"));
+    assert_eq!(
+        downloads.start(DOWNLOAD_BYTES - 1),
+        Err("search_model_confirm")
+    );
+    assert_eq!(
+        downloads.start(DOWNLOAD_BYTES + 1),
+        Err("search_model_confirm")
+    );
     assert_eq!(downloads.phase(), Phase::NotDownloaded);
     assert_eq!(
         downloads.state(),
@@ -99,7 +106,9 @@ fn the_curl_command_sends_the_pinned_url_on_stdin_follows_one_https_redirect_and
     assert!(has_pair(&args, "--max-filesize", "125018208"));
     assert!(has_pair(&args, "--config", "-"));
     assert!(
-        !args.iter().any(|arg| arg.contains("://") || arg.contains("huggingface")),
+        !args
+            .iter()
+            .any(|arg| arg.contains("://") || arg.contains("huggingface")),
         "the URL never reaches argv: {args:?}"
     );
     let envs: Vec<(String, Option<String>)> = command
@@ -111,7 +120,10 @@ fn the_curl_command_sends_the_pinned_url_on_stdin_follows_one_https_redirect_and
             )
         })
         .collect();
-    assert_eq!(envs, vec![("PATH".to_owned(), Some("/usr/bin:/bin".to_owned()))]);
+    assert_eq!(
+        envs,
+        vec![("PATH".to_owned(), Some("/usr/bin:/bin".to_owned()))]
+    );
     let config = String::from_utf8(config).unwrap();
     assert_eq!(
         config,
@@ -161,7 +173,11 @@ fn a_file_is_kept_only_when_its_size_and_sha256_match_the_pin() {
 #[test]
 fn a_download_lands_both_files_in_the_model_folder_and_the_model_opens_from_them() {
     let source = tempfile::tempdir().unwrap();
-    write_file(source.path(), "tokenizer.json", fixture_tokenizer_json().as_bytes());
+    write_file(
+        source.path(),
+        "tokenizer.json",
+        fixture_tokenizer_json().as_bytes(),
+    );
     write_file(source.path(), "model.safetensors", &fixture_model_bytes());
     let scripts = tempfile::tempdir().unwrap();
     let curl = stand_in(
@@ -177,11 +193,16 @@ fn a_download_lands_both_files_in_the_model_folder_and_the_model_opens_from_them
     let downloads = Downloads::with_curl(root.path().to_path_buf(), curl, pins);
     assert_eq!(downloads.start(DOWNLOAD_BYTES), Err("search_model_confirm"));
     downloads.start(total).unwrap();
-    let phase = wait_for(&downloads, |phase| !matches!(phase, Phase::Downloading { .. }));
+    let phase = wait_for(&downloads, |phase| {
+        !matches!(phase, Phase::Downloading { .. })
+    });
     assert_eq!(phase, Phase::Ready);
     assert_eq!(downloads.state(), ModelState::Ready { size_bytes: total });
     let models = folder(root.path());
-    assert_eq!(names_in(&models), vec!["model.safetensors", "tokenizer.json"]);
+    assert_eq!(
+        names_in(&models),
+        vec!["model.safetensors", "tokenizer.json"]
+    );
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&models).unwrap().permissions().mode();
@@ -207,12 +228,19 @@ fn cancel_kills_the_download_and_leaves_nothing_behind() {
     let pins = fixture_pins();
     let downloads = Downloads::with_curl(root.path().to_path_buf(), curl, pins);
     downloads.start(pins[0].bytes + pins[1].bytes).unwrap();
-    wait_for(&downloads, |phase| phase == Phase::Downloading { done_bytes: 7 });
+    wait_for(&downloads, |phase| {
+        phase == Phase::Downloading { done_bytes: 7 }
+    });
     let started = Instant::now();
     downloads.cancel();
-    let phase = wait_for(&downloads, |phase| !matches!(phase, Phase::Downloading { .. }));
+    let phase = wait_for(&downloads, |phase| {
+        !matches!(phase, Phase::Downloading { .. })
+    });
     assert_eq!(phase, Phase::NotDownloaded, "a cancel is not a failure");
-    assert!(started.elapsed() < Duration::from_secs(30), "the child was killed");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the child was killed"
+    );
     assert!(names_in(&folder(root.path())).is_empty());
 }
 
@@ -228,10 +256,15 @@ fn a_failed_fetch_reads_failed_with_its_code_and_clears_stale_parts() {
     let pins = fixture_pins();
     let downloads = Downloads::with_curl(root.path().to_path_buf(), curl, pins);
     downloads.start(pins[0].bytes + pins[1].bytes).unwrap();
-    let phase = wait_for(&downloads, |phase| !matches!(phase, Phase::Downloading { .. }));
+    let phase = wait_for(&downloads, |phase| {
+        !matches!(phase, Phase::Downloading { .. })
+    });
     assert_eq!(phase, Phase::Failed("search_model_unreachable"));
     match downloads.state() {
-        ModelState::Failed { problem, size_bytes } => {
+        ModelState::Failed {
+            problem,
+            size_bytes,
+        } => {
             assert_eq!(problem.code, "search_model_unreachable");
             assert_eq!(size_bytes, pins[0].bytes + pins[1].bytes);
         }
