@@ -372,6 +372,61 @@ fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_re
     }
 }
 
+/// F19, DEC-107: a worker's merge of its own lead's branch stays refused, with Catch up with
+/// main on or off, and the refusal tells the worker the path that works: its lead's work
+/// reaches its branch through Update on its change set, so it tells its lead (HB CM#335).
+#[test]
+fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let git = crate::research::runner::sandboxed_git();
+    for catch_up in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "task"][..],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+            &["checkout", "-q", "-b", "task--ann"],
+            &["commit", "-q", "--allow-empty", "-m", "ann work"],
+            &["checkout", "-q", "task"],
+            &["commit", "-q", "--allow-empty", "-m", "lead work"],
+            &["checkout", "-q", "task--ann"],
+        ] {
+            let done = git_run(git, repo.path(), home.path(), args);
+            assert!(done.status.success(), "{args:?} {done:?}");
+        }
+        let tmp = make_tmp(home.path()).unwrap();
+        let _removed = Removed(home.path().to_path_buf());
+        if catch_up {
+            catch_up_git(&tmp).unwrap();
+        }
+        let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+        let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+        let done = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", "task"],
+        );
+        assert!(!done.status.success(), "the lead's branch was merged");
+        let stderr = String::from_utf8_lossy(&done.stderr);
+        assert!(stderr.contains("git merge is refused"), "{stderr}");
+        assert!(
+            stderr.contains(
+                "Work from your lead's branch reaches yours through Update on your change set"
+            ),
+            "{stderr}"
+        );
+        assert!(stderr.contains("tell your lead what you need"), "{stderr}");
+        let after = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
+        assert_eq!(after.stdout, before.stdout);
+    }
+}
+
 /// The worker copy merges only the commit the engine keeps at `refs/crazyagent/main`: with
 /// that ref missing, a branch the agent named `crazyagent/main` holding other work is
 /// refused under either name and the agent's branch keeps its commit.
