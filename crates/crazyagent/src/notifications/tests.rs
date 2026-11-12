@@ -1146,3 +1146,17 @@ fn every_kind_has_one_wire_name_and_its_class() {
     }
     assert_eq!(NoticeKind::parse("wake_paused"), None);
 }
+
+#[test]
+fn every_kind_has_its_own_short_label_that_every_client_shows() {
+    let mut seen = std::collections::BTreeSet::new();
+    for kind in NoticeKind::ALL {
+        let label = kind.label();
+        assert!(!label.is_empty() && label.len() <= 32, "{label}");
+        assert!(label.chars().next().unwrap().is_ascii_uppercase(), "{label}");
+        assert!(seen.insert(label), "{label} is shared");
+    }
+    assert_eq!(NoticeKind::Question.label(), "Question");
+    assert_eq!(NoticeKind::ChangeSetLanded.label(), "Change set landed");
+    assert_eq!(NoticeKind::TeamAlert.label(), "Team alert");
+}
