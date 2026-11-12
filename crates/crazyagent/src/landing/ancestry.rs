@@ -171,10 +171,10 @@ fn plain_commit(text: &str, identity: (&str, &str)) -> bool {
             if committer.replace(person(rest)).is_some() {
                 return false;
             }
-        } else if let Some(rest) = line.strip_prefix("encoding ") {
-            if !matches!(rest.to_ascii_lowercase().as_str(), "utf-8" | "utf8") {
-                return false;
-            }
+        } else if let Some(rest) = line.strip_prefix("encoding ")
+            && !matches!(rest.to_ascii_lowercase().as_str(), "utf-8" | "utf8")
+        {
+            return false;
         }
     }
     matches!(
