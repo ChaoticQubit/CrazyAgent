@@ -101,6 +101,23 @@ test("a refresh the engine queued says it is waiting to run, read from the engin
   }
 });
 
+test("the tab strip sits on its own row and the tab's status, Edit and Refresh share the one row under it", () => {
+  const html = page({ selected: "features", overview: { ...withTab(base(), "features", "- Search\n"), checked_ms: NOW - 3 * 60_000 } });
+  const start = html.indexOf('class="ov-bar"');
+  assert.ok(start > html.indexOf('role="tablist"'), "the row comes after the strip");
+  const bar = html.slice(start, html.indexOf('id="ov-panel"'));
+  assert.match(bar, /Checked 3 min ago/);
+  assert.match(bar, /<button[^>]*id="ov-edit-open"[^>]*>Edit<\/button>/);
+  assert.match(bar, />Refresh<\/button>/);
+  assert.doesNotMatch(bar, /role="tab"/);
+  assert.doesNotMatch(html, /ov-edit-row|ov-meta/);
+  assert.equal((html.match(/>Edit<\/button>/g) ?? []).length, 1, "Edit is shown once, in the row");
+  const readme = page({ selected: "readme", overview: { ...base(), checked_ms: NOW - 3 * 60_000 } });
+  const readmeBar = readme.slice(readme.indexOf('class="ov-bar"'), readme.indexOf('id="ov-panel"'));
+  assert.match(readmeBar, />Refresh<\/button>/);
+  assert.doesNotMatch(readmeBar, />Edit</);
+});
+
 test("Refresh is disabled while a run is going and when the tabs are off", () => {
   assert.match(page({ selected: "features", overview: { ...base(), running: true } }), /<button[^>]*disabled=""[^>]*>Refresh<\/button>/);
   assert.match(page({ selected: "features", overview: { ...base(), refresh: "off" } }), /<button[^>]*disabled=""[^>]*>Refresh<\/button>/);
