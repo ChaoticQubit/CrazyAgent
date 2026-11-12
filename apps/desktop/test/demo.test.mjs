@@ -193,3 +193,56 @@ test("the demo reads and Create the demo go through their own native commands", 
   assert.equal((await api.loadDemo()).kind, "error");
   assert.equal((await api.createDemo("pool-a", 1)).kind, "error");
 });
+
+const receipt = (patch = {}) => ({ kind: "create_demo", operation_id: "op-1", project_id: "crazyagent-demo", outcome: "applied", pending: false, rejection: null, ...patch });
+const steps2 = () => {
+  const calls = [];
+  let generation = 0;
+  return {
+    calls,
+    deps: (patch = {}) => ({
+      create: async (pool, gen) => { calls.push(`create ${pool} ${gen}`); return ok(receipt()); },
+      reconcile: async () => { calls.push("reconcile"); return ok(receipt()); },
+      assign: async (project, pool, gen) => { calls.push(`assign ${project} ${pool} ${gen}`); return ok({ kind: "applied" }); },
+      generation: () => { generation += 1; return generation; },
+      ...patch,
+    }),
+  };
+};
+
+test("Create the demo sends the picked pool, then gives that same pool to the new demo, as New Project does", async () => {
+  const run = steps2();
+  assert.deepEqual(await model.makeDemo("pool-a", run.deps()), { kind: "made", project: "crazyagent-demo", note: null });
+  assert.deepEqual(run.calls, ["create pool-a 1", "assign crazyagent-demo pool-a 2"]);
+});
+
+test("a refused or unconfirmed Create the demo gives no pool and says why", async () => {
+  const refused = steps2();
+  const made = await model.makeDemo("pool-a", refused.deps({ create: async (pool) => { refused.calls.push(`create ${pool}`); return ok(receipt({ outcome: "rejected", rejection: "demo_name_taken" })); } }));
+  assert.deepEqual(made, { kind: "refused", message: words.DEMO_REFUSALS.demo_name_taken });
+  assert.deepEqual(refused.calls, ["create pool-a"]);
+  const failed = steps2();
+  const lost = await model.makeDemo("pool-a", failed.deps({ create: async () => ({ kind: "error", code: "demo_pool_not_ready", message: "x" }) }));
+  assert.deepEqual(lost, { kind: "refused", message: words.DEMO_REFUSALS.demo_pool_not_ready });
+  assert.ok(!failed.calls.some((call) => call.startsWith("assign")));
+  const unsure = steps2();
+  const pending = receipt({ pending: true, outcome: "unknown" });
+  const left = await model.makeDemo("pool-a", unsure.deps({ create: async () => ok(pending), reconcile: async () => { unsure.calls.push("reconcile"); return ok(pending); } }));
+  assert.equal(left.kind, "refused");
+  assert.deepEqual(unsure.calls, ["reconcile"]);
+});
+
+test("a demo made whose pool could not be given still opens, with a line saying to choose the pool again", async () => {
+  const run = steps2();
+  const made = await model.makeDemo("pool-a", run.deps({ assign: async () => ok({ kind: "rejected", code: "settings_read_only" }) }));
+  assert.deepEqual(made, { kind: "made", project: "crazyagent-demo", note: words.DEMO_POOL_UNASSIGNED });
+  const failed = await model.makeDemo("pool-a", steps2().deps({ assign: async () => ({ kind: "error", code: "invalid_project", message: "x" }) }));
+  assert.equal(failed.note, words.DEMO_POOL_UNASSIGNED);
+});
+
+test("a lost Create the demo reply is reconciled once and a settled answer is kept", async () => {
+  const run = steps2();
+  const made = await model.makeDemo("pool-a", run.deps({ create: async (pool, gen) => { run.calls.push(`create ${pool} ${gen}`); return ok(receipt({ pending: true, outcome: "unknown" })); } }));
+  assert.deepEqual(made, { kind: "made", project: "crazyagent-demo", note: null });
+  assert.deepEqual(run.calls, ["create pool-a 1", "reconcile", "assign crazyagent-demo pool-a 2"]);
+});

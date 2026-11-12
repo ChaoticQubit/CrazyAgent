@@ -52,6 +52,10 @@ export const DEMO_REFUSALS: Readonly<Record<string, string>> = {
   demo_seed_failed: "CrazyAgent couldn't write the demo's files into your projects folder. Check that it can be written to, then try again.",
 };
 
+/** The line the demo's page shows when the demo was made but the picked pool could not be
+ * given to it, so its master has no account until the owner chooses the pool again. */
+export const DEMO_POOL_UNASSIGNED = "The demo was made, but the pool you picked wasn't given to it. Choose the pool again in the demo's Settings, Pool, before you send the goal.";
+
 /** The guide panel's title on the demo project's page. */
 export const DEMO_GUIDE_TITLE = "Demo guide";
 
