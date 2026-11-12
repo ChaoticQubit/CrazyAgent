@@ -15437,7 +15437,8 @@ fn merge_commit_landing_refuses_an_unplain_commit_below_a_squash_landed_base() {
 /// so none of them ever enters the owner's history (L3-M1).
 #[test]
 fn merge_commit_landing_refuses_a_carried_commit_whose_tree_fails_the_landing_checks() {
-    let variants: [(&str, fn(&Case)); 3] = [
+    type Variant = (&'static str, fn(&Case));
+    let variants: [Variant; 3] = [
         ("bare layout", |case| {
             for (path, text) in [
                 ("vault/HEAD", "ref: refs/heads/main\n"),
