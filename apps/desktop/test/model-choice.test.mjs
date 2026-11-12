@@ -1,0 +1,217 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import "./load-source.mjs";
+
+const client = await import("../src/api-model-choice.ts");
+const view = await import("../src/screens/settings/models-section.tsx");
+
+const CATALOG = ["opus", "sonnet", "haiku"];
+const candidates = (extra = []) => [...CATALOG.map((id) => ({ id, origin: "catalog" })), ...extra];
+const row = (slot, extra = {}) => ({
+  slot, here: null, effective: slot === "allowed" ? [] : null, source: "default", version: 2, access: { kind: "editable" }, ...extra,
+});
+const page = (rows = {}, extra = {}) => ({
+  models: {
+    harness: "claude-code",
+    rows: ["master", "agent", "allowed"].map((slot) => row(slot, rows[slot])),
+    candidates: candidates(extra.owned ?? []),
+  },
+  project_id: extra.project_id ?? null, qualified_versions: ["2.1.309"], sources: ["https://docs.anthropic.com/en/docs/claude-code/model-config"],
+});
+const section = (loaded, extra = {}) => renderToStaticMarkup(createElement(view.ModelsView, {
+  page: loaded, name: "Claude Code", scope: "app", drafts: {}, busy: null, notes: {},
+  onDraft: () => {}, onSave: () => {}, onReset: () => {}, onRetry: () => {}, ...extra,
+}));
+const ok = (value) => ({ kind: "ok", value });
+
+test("every model choice code the engine can answer has its own sentence", () => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/model_choice.rs", import.meta.url), "utf8");
+  const list = source.split("pub const MODEL_CHOICE_PROTOCOL_CODES: &[&str] = &[")[1].split("];")[0];
+  const codes = [...list.matchAll(/"([a-z_]+)"/g)].map((match) => match[1]);
+  assert(codes.length >= 20, "the engine's code list was read");
+  for (const code of [...codes, "model_choice_stale"]) {
+    assert(client.MODEL_CHOICE_REFUSALS.includes(code), `${code} has a sentence`);
+    const words = client.modelChoiceRefusal({ code });
+    assert.doesNotMatch(words, /model_choice_|owner_|versioned_|_/, `${code} reads as words`);
+    assert.doesNotMatch(words, /\u2014/, "no em dash");
+  }
+  assert.equal(client.modelChoiceRefusal({ code: "model_choice_stale" }), client.MODEL_STALE_LINE);
+  assert.equal(client.modelsNotReady({ kind: "error", code: "model_choice_unavailable", message: "" }), true);
+  assert.equal(client.modelsNotReady({ kind: "not_ready" }), true);
+  assert.equal(client.modelsStale({ kind: "error", code: "model_choice_stale", message: "" }), true);
+  assert.equal(client.modelsStale({ kind: "ok", value: undefined }), false);
+});
+
+test("only catalog and tested ids can be chosen; pending and failed ids say why", () => {
+  const owned = [{ id: "mine-a", origin: "pending" }, { id: "mine-b", origin: "verified" }, { id: "mine-c", origin: "failed" }];
+  assert.deepEqual(client.usableIds(candidates(owned)), [...CATALOG, "mine-b"]);
+  assert.equal(client.originWord("catalog"), "");
+  assert.match(client.originWord("pending"), /test launch/);
+  assert.match(client.originWord("failed"), /failed/);
+  const all = candidates(owned);
+  const draft = ["opus"];
+  assert.equal(client.tickable(all[3], draft), false, "a pending id is never tickable");
+  assert.equal(client.tickable(all[5], draft), false, "a failed id is never tickable");
+  assert.equal(client.tickable(all[4], draft), true, "a tested id is tickable");
+});
+
+test("clearing the master or agent model is a reset, never a set of null", () => {
+  const all = candidates();
+  const unset = row("master");
+  assert.equal(client.choiceDraft(unset, all), "");
+  assert.deepEqual(client.choiceChange(unset, all, ""), { kind: "none" }, "nothing to clear");
+  assert.deepEqual(client.choiceChange(unset, all, "opus"), { kind: "set", value: "opus" });
+  const saved = row("master", { here: "opus", effective: "opus", source: "app" });
+  assert.equal(client.choiceDraft(saved, all), "opus");
+  assert.deepEqual(client.choiceChange(saved, all, "opus"), { kind: "none" });
+  assert.deepEqual(client.choiceChange(saved, all, ""), { kind: "reset" });
+  assert.deepEqual(client.choiceChange(saved, all, "sonnet"), { kind: "set", value: "sonnet" });
+  assert.throws(() => client.choiceChange(saved, all, "not-offered"), /usable/);
+  const app = client.choiceOptions(unset, all, "app");
+  assert.deepEqual(app[0], { value: "", label: client.ACCOUNT_MODEL });
+  assert.deepEqual(app.slice(1).map((option) => option.value), CATALOG);
+  assert.equal(client.choiceOptions(unset, all, "project")[0].label, client.APP_VALUE);
+  assert.equal(client.resetModelLabel(saved, "app"), "Use the account's own model");
+  assert.equal(client.resetModelLabel(saved, "project"), "Use the app value");
+});
+
+test("an allowed list keeps candidate order, at most sixteen ids, and an own empty list saves", () => {
+  const many = Array.from({ length: 20 }, (_, n) => ({ id: `m${n}`, origin: "catalog" }));
+  let draft = [];
+  for (const candidate of many.slice(0, client.ALLOWED_MAX)) draft = client.toggleAllowed(draft, candidate.id, true, many);
+  assert.equal(draft.length, client.ALLOWED_MAX);
+  assert.equal(client.tickable(many[16], draft), false, "the seventeenth id waits for one to be unticked");
+  assert.equal(client.tickable(many[3], draft), true, "a ticked id can always be unticked");
+  assert.throws(() => client.toggleAllowed(draft, "m17", true, many), /ALLOWED_MAX/);
+  assert.deepEqual(client.toggleAllowed(["m5", "m1"], "m3", true, many), ["m1", "m3", "m5"]);
+  assert.deepEqual(client.toggleAllowed(["m1", "m3"], "m1", false, many), ["m3"]);
+
+  const all = candidates();
+  const inherited = row("allowed", { effective: ["opus", "sonnet"], source: "app" });
+  assert.deepEqual(client.allowedDraft(inherited), ["opus", "sonnet"]);
+  assert.deepEqual(client.allowedChange(inherited, all, ["sonnet", "opus"]), { kind: "none" }, "the same ids in another order change nothing");
+  assert.deepEqual(client.allowedChange(inherited, all, []), { kind: "set", value: [] }, "unticking the last id saves an own empty list");
+  assert.deepEqual(client.allowedChange(inherited, all, ["haiku", "opus"]), { kind: "set", value: ["opus", "haiku"] });
+  assert.equal(client.resetModelLabel(inherited, "app"), "Clear the list");
+  assert.equal(client.resetModelLabel(inherited, "project"), "Use the app list");
+});
+
+test("a stored id the harness no longer offers says what runs instead and keeps its reset", () => {
+  const all = candidates();
+  const gone = row("master", { here: "retired-1", effective: null, source: "default" });
+  assert.equal(client.choiceDraft(gone, all), "", "the choice starts on what runs");
+  assert.equal(client.canResetModel(gone), true);
+  assert.match(client.passedOverLine(gone, all), /Saved retired-1 isn't offered now, so Account's own model runs\./);
+  const list = row("allowed", { here: ["opus", "retired-1", "retired-2"], effective: ["opus"], source: "app" });
+  assert.match(client.passedOverLine(list, all), /Saved retired-1, retired-2 aren't offered now and are left out\./);
+  assert.equal(client.passedOverLine(row("master", { here: "opus", effective: "opus", source: "app" }), all), "");
+  assert.equal(client.canResetModel(row("agent")), false, "nothing stored, nothing to reset");
+});
+
+test("the Models section shows each slot with its control, source and catalog line", () => {
+  const markup = section(ok(page({ master: { here: "opus", effective: "opus", source: "app" } })));
+  assert.match(markup, />Models</);
+  assert.match(markup, /Model list checked against Claude Code 2\.1\.309\./);
+  for (const label of ["Master model", "Agent default model", "Allowed models"]) assert.match(markup, new RegExp(`>${label}<`));
+  assert.match(markup, /<select id="models-master"/);
+  assert.match(markup, /<select id="models-agent"/);
+  assert.match(markup, /<option value="" selected="">Account&#x27;s own model<\/option>/, "the agent default starts on the account's model");
+  assert.match(markup, /Set here for every project\./);
+  assert.match(markup, /Nothing set: the account&#x27;s own model runs\./);
+  assert.equal((markup.match(/type="checkbox"/g) ?? []).length, CATALOG.length, "one tick per candidate");
+  assert.match(markup, /aria-label="Use the account&#x27;s own model, Master model"/, "a stored master value offers its reset");
+  assert.doesNotMatch(markup, /aria-label="Save Master model"/, "no change, no Save");
+  const changed = section(ok(page({ master: { here: "opus", effective: "opus", source: "app" } })), { drafts: { master: "sonnet" } });
+  assert.match(changed, /aria-label="Save Master model"/);
+});
+
+test("pending and failed owner ids show their state and stay unticked and disabled", () => {
+  const owned = [{ id: "mine-a", origin: "pending" }, { id: "mine-c", origin: "failed" }];
+  const markup = section(ok(page({}, { owned })));
+  assert.match(markup, /mine-a <span class="small muted">Waiting for its test launch<\/span>/);
+  assert.match(markup, /mine-c <span class="small muted">Test launch failed<\/span>/);
+  assert.equal((markup.match(/type="checkbox" disabled=""/g) ?? []).length, 2, "both owner ids are disabled");
+  assert.doesNotMatch(markup, /<option value="mine-a"/, "a pending id is not a choice");
+});
+
+test("a harness whose model CrazyAgent does not choose shows the reason and no control", () => {
+  const unsupported = { access: { kind: "read_only", reason: "Not supported by this harness" }, source: "not_applied" };
+  const markup = section(ok({ ...page({ master: unsupported, agent: unsupported, allowed: unsupported }), qualified_versions: [], sources: [] }), { name: "OpenCode" });
+  assert.equal((markup.match(/Not supported by this harness/g) ?? []).length >= 3, true);
+  assert.doesNotMatch(markup, /<select|type="checkbox"|aria-label="Save /);
+  assert.match(markup, /CrazyAgent has no model list for OpenCode\./);
+  const stored = section(ok(page({ master: { ...unsupported, here: "opus" } })));
+  assert.match(stored, /aria-label="Clear saved value, Master model"/, "a value stored before stays clearable");
+});
+
+test("a project page offers the app value, keeps inherit and own lists apart, and has no add or rules", () => {
+  const inherit = page({ master: { effective: "opus", source: "app" }, allowed: { effective: ["opus"], source: "app" } }, { project_id: "p1" });
+  const markup = section(ok(inherit), { scope: "project" });
+  assert.match(markup, /<option value="" selected="">Use the app value<\/option>/);
+  assert.match(markup, /Uses the app value: opus\./);
+  assert.doesNotMatch(markup, /aria-label="Use the app value, Master model"/, "nothing stored here, nothing to clear");
+  const own = page({ allowed: { here: [], effective: [], source: "project" } }, { project_id: "p1" });
+  const ownMarkup = section(ok(own), { scope: "project" });
+  assert.match(ownMarkup, /Set for this project\./);
+  assert.match(ownMarkup, /aria-label="Use the app list, Allowed models"/);
+  assert.match(ownMarkup, /None ticked: only the agent default runs\./);
+  assert.throws(() => section(ok(page()), { scope: "project" }), /a project page names its project/);
+});
+
+test("the Models section says when it is loading, not ready or refused", () => {
+  assert.match(section({ kind: "loading" }), /skeleton/);
+  assert.match(section({ kind: "not_ready" }), /Model choice/);
+  assert.match(section({ kind: "error", code: "model_choice_unavailable", message: "" }), /Model choice/);
+  assert.match(section({ kind: "error", code: "model_choice_project_unknown", message: "" }), /This project is no longer in CrazyAgent\./);
+});
+
+test("your model ids lists each owner id with its state and a remove, and adds one", () => {
+  const owned = [{ id: "mine-a", origin: "pending" }, { id: "mine-b", origin: "verified" }];
+  const markup = renderToStaticMarkup(createElement(view.OwnIdsView, {
+    candidates: candidates(owned), field: "", busy: null, note: "", onField: () => {}, onAdd: () => {}, onRemove: () => {},
+  }));
+  assert.match(markup, />Your model ids</);
+  assert.match(markup, /<input id="models-add-id"/);
+  assert.match(markup, /aria-label="Remove mine-a"/);
+  assert.match(markup, /aria-label="Remove mine-b"/);
+  assert.doesNotMatch(markup, /aria-label="Remove opus"/, "catalog ids cannot be removed");
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Add</, "an empty field adds nothing");
+  assert.match(client.addedLine("pending", "mine-a"), /waits for its test launch/);
+  assert.match(client.addedLine("listed", "opus"), /already on this harness&#x27;s model list|already on this harness's model list/);
+  assert.match(client.addedLine("verified", "mine-b"), /already passed its test launch/);
+  assert.match(client.removedLine(true, "mine-a"), /removed/);
+  assert.match(client.removedLine(false, "mine-a"), /already gone/);
+});
+
+test("the model rules show both rules with every option and the one in force", () => {
+  const rules = { pick: "hint", pick_version: 3, fallback: "stop", fallback_version: 1 };
+  const markup = renderToStaticMarkup(createElement(view.ModelRulesView, { rules: ok(rules), busy: null, note: "", onRule: () => {}, onRetry: () => {} }));
+  assert.match(markup, />Model rules</);
+  for (const option of [...client.PICK_OPTIONS, ...client.FALLBACK_OPTIONS]) assert.match(markup, new RegExp(`>${option.label}<`));
+  assert.match(markup, /aria-checked="true"[^>]*>Any offered model</);
+  assert.match(markup, /aria-checked="true"[^>]*>Stop and say why</);
+  assert.match(markup, new RegExp(client.PICK_HELP.hint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/'/g, "&#x27;")));
+  assert.deepEqual(client.PICK_OPTIONS.map((option) => option.value), ["strict", "hint", "default"]);
+  assert.deepEqual(client.FALLBACK_OPTIONS.map((option) => option.value), ["notice", "stop", "silent"]);
+});
+
+test("every call names its command once with exactly the window's arguments", () => {
+  const source = readFileSync(new URL("../src/api-model-choice.ts", import.meta.url), "utf8");
+  assert.match(source, /call<ModelsPage>\("desktop_model_choice", \{ harness, projectId \}\)/);
+  assert.match(source, /call<void>\("desktop_set_model_choice", \{ harness, projectId, slot, value, version \}\)/);
+  assert.match(source, /call<void>\("desktop_reset_model_choice", \{ harness, projectId, slot, version \}\)/);
+  assert.match(source, /call<ModelAdded>\("desktop_add_model", \{ harness, model \}\)/);
+  assert.match(source, /call<boolean>\("desktop_remove_model", \{ harness, model \}\)/);
+  assert.match(source, /call<ModelRules>\("desktop_model_rules"\)/);
+  assert.match(source, /call<void>\("desktop_set_model_rule", \{ rule, value, version \}\)/);
+});
+
+test("the Models section mounts once on the app and the project harness page", () => {
+  const app = readFileSync(new URL("../src/screens/settings/harnesses.tsx", import.meta.url), "utf8");
+  const project = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.equal((app.match(/<ModelsSection harness=\{entry\.id\} name=\{entry\.name\} projectId=\{null\} \/>/g) ?? []).length, 1);
+  assert.equal((project.match(/<ModelsSection key=\{current\.id\} harness=\{current\.id\} name=\{current\.name\} projectId=\{data\.id\} \/>/g) ?? []).length, 1);
+});
