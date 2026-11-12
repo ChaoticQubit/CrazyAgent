@@ -6,10 +6,13 @@ import intake from "../../src/screens/intake/intake.css?inline";
 import graph from "../../src/screens/team/team-graph.css?inline";
 import frame from "../../src/screens/settings/settings.css?inline";
 import { Settings } from "../../src/screens/settings/index.tsx";
+import { UserMenuDialog } from "../../src/screens/user-menu.tsx";
+import { isUserMenuTab } from "../../src/ui/router.ts";
 import { updateStore } from "../../src/screens/settings/updates-state.ts";
 import { SessionContext } from "../../src/state.ts";
 
 export { contrast } from "./contrast.mjs";
+export { dialogFrame } from "./user-dialog.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const PAGE = '<div class="shell"><nav class="sidebar"></nav><main class="main" id="main" tabindex="-1"><div class="page" id="mount"></div></main></div>';
@@ -73,8 +76,9 @@ function answer(scene, command, args) {
   }
 }
 
-/** Mounts the real Settings page on one tab against a fake engine. Inputs: the tab, the scene
- * naming each read's state, and the theme. Output: nothing. */
+/** Mounts the real Settings page on one tab against a fake engine, or for Updates and
+ * Projects folder the real user menu dialog (DEC-151). Inputs: the tab, the scene naming each
+ * read's state, and the theme. Output: nothing. */
 export async function mount(tab, scene = {}, theme = "light") {
   window.__TAURI_INTERNALS__ = { plugins: {}, transformCallback: () => 0, async invoke(command, args) { return answer(scene, command, args); } };
   document.head.innerHTML = "";
@@ -89,7 +93,8 @@ export async function mount(tab, scene = {}, theme = "light") {
     projects: { kind: "ok", value: [{ id: "alpha", name: "Alpha", repository_count: 0 }] },
     noteResult: (result) => result, showToast: () => {}, refreshProjects: async () => {},
   };
-  await act(async () => { root.render(createElement(SessionContext.Provider, { value: session }, createElement(Settings, { tab }))); });
+  const panel = isUserMenuTab(tab) ? createElement(UserMenuDialog, { tab, onClose: () => {} }) : createElement(Settings, { tab });
+  await act(async () => { root.render(createElement(SessionContext.Provider, { value: session }, panel)); });
   await settle(60);
 }
 
@@ -143,10 +148,12 @@ export function alert() {
   return { words: words(node), belowTop: Boolean(node && head && head.getBoundingClientRect().bottom <= node.getBoundingClientRect().top) };
 }
 
-/** Reads the open dialog. Output: its words, empty with none open. */
+/** Reads the open dialog a panel asks with, never the user menu dialog that holds the panel.
+ * Output: its words, empty with none open. */
 export function dialog() {
-  return words(document.querySelector('[role="dialog"], dialog[open]'));
+  return words(document.querySelector('[role="dialog"], dialog[open]:not(:has(> .dialog-body > .user-dialog))'));
 }
+
 
 /** The focused element's accessible name. Output: the name. */
 export function focused() {

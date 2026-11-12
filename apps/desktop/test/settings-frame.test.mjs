@@ -22,9 +22,9 @@ function onFrame(tab, width, check, theme = "light") {
 test("a grouped list replaces the tab row: Access, Agents and App in the approved order", async () => {
   const shown = await onFrame("pools", 1180, ({ evaluate }) => evaluate("Fixture.structure()"));
   assert.deepEqual(shown.groups, [
-    { name: "Access", links: ["Accounts", "Pools", "GitHub", "Profile"] },
+    { name: "Access", links: ["Accounts", "Pools"] },
     { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting", "Master"] },
-    { name: "App", links: ["Projects folder", "Sandbox", "Team alerts", "Updates"] },
+    { name: "App", links: ["Sandbox", "Team alerts"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
   assert.equal(shown.tabs, 0, "no tab roles are left");
@@ -32,14 +32,27 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
 });
 
 test("the list refuses a section left out, repeated or unknown, and names every section today", () => {
-  const { SETTINGS_TABS } = router;
-  const every = SETTINGS_TABS.slice(0, -1);
+  const { LISTED_TABS } = settings;
+  const every = LISTED_TABS.slice(0, -1);
   const list = (ids) => [{ title: "One", items: ids.map((id) => ({ id, label: id })) }];
   const refused = /must name every section once/;
-  assert.doesNotThrow(() => settings.assertEverySection(settings.SETTINGS_GROUPS, SETTINGS_TABS));
-  assert.throws(() => settings.assertEverySection(list(every), SETTINGS_TABS), refused);
-  assert.throws(() => settings.assertEverySection(list([...every, every[0]]), SETTINGS_TABS), refused);
-  assert.throws(() => settings.assertEverySection(list([...every, "nope"]), SETTINGS_TABS), refused);
+  assert.doesNotThrow(() => settings.assertEverySection(settings.SETTINGS_GROUPS, LISTED_TABS));
+  assert.throws(() => settings.assertEverySection(list(every), LISTED_TABS), refused);
+  assert.throws(() => settings.assertEverySection(list([...every, every[0]]), LISTED_TABS), refused);
+  assert.throws(() => settings.assertEverySection(list([...every, "nope"]), LISTED_TABS), refused);
+});
+
+test("Profile, Updates, GitHub and Projects folder leave the list for the user menu and keep their routes (DEC-151)", () => {
+  const four = ["profile", "updates", "github", "home"];
+  assert.deepEqual([...router.USER_MENU_TABS], four);
+  const listed = settings.SETTINGS_GROUPS.flatMap((group) => group.items.map((item) => item.id));
+  for (const tab of four) {
+    assert.ok(!listed.includes(tab), `${tab} is not in the Settings list`);
+    assert.ok(!settings.LISTED_TABS.includes(tab), `${tab} is not a listed section`);
+    assert.ok(router.SETTINGS_TABS.includes(tab), `${tab} keeps its route for deep links`);
+    assert.deepEqual(router.parseRoute(`#/settings/${tab}`), { name: "settings", tab });
+  }
+  assert.deepEqual([...settings.LISTED_TABS].sort(), router.SETTINGS_TABS.filter((tab) => !four.includes(tab)).sort());
 });
 
 test("the list stands left of the panel at the default size and stays in view while the panel scrolls", async () => {

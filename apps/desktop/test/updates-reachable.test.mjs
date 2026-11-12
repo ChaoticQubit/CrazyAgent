@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const { AppView } = await import("../src/app.tsx");
 const { updateStore } = await import("../src/screens/settings/updates-state.ts");
+const { closeUserDialog, openUserDialog } = await import("../src/screens/user-menu.tsx");
 
 const profile = { name: "Mira Okafor", role: "", bio: "", preferred_stack: [], working_style: { detail: "terse", initiative: "ask_first" } };
 
@@ -19,7 +20,7 @@ function session(patch = {}) {
 }
 
 const UPDATES = { name: "settings", tab: "updates" };
-const render = (patch, route = { name: "home" }) => renderToStaticMarkup(createElement(AppView, { session: session(patch), route }));
+const render = (patch, route = { name: "home" }, under = undefined) => renderToStaticMarkup(createElement(AppView, { session: session(patch), route, under }));
 
 function standalone(markup) {
   assert.match(markup, /<h1>Updates<\/h1>/);
@@ -61,7 +62,7 @@ test("first run offers Check for updates before the profile is saved", () => {
   assert.match(welcome, />Check for updates<\/button>/);
 });
 
-test("Settings, Updates opens on its own while the engine is down, outdated, launching, or before first run finishes", () => {
+test("Updates opens on its own while the engine is down, outdated, launching, or before first run finishes", () => {
   standalone(render({ engine: "down" }, UPDATES));
   standalone(render({ engine: "outdated" }, UPDATES));
   standalone(render({ engine: "connecting" }, UPDATES));
@@ -69,10 +70,43 @@ test("Settings, Updates opens on its own while the engine is down, outdated, lau
   standalone(render({ profile: { kind: "ok", value: null } }, UPDATES));
 });
 
-test("with the engine running and a profile saved, Updates stays inside Settings in the shell", () => {
+test("with the engine running and a profile saved, a deep link to Updates opens its dialog over Home in the shell", () => {
   const markup = render({}, UPDATES);
   assert.match(markup, /class="sidebar"/);
-  assert.match(markup, /<h1>Settings<\/h1>/);
-  assert.match(markup, /href="#\/settings\/updates" aria-current="page"/);
-  assert.doesNotMatch(markup, />Back<\/button>/);
+  assert.match(markup, /<dialog class="dialog wide"/);
+  assert.match(markup, />Updates<\/h2>/);
+  assert.match(markup, /href="#\/home" aria-current="page"/);
+  assert.doesNotMatch(markup, /<h1>Settings<\/h1>|settings-nav|>Back<\/button>/);
+});
+
+for (const [tab, title] of [["profile", "Profile"], ["updates", "Updates"], ["github", "GitHub"], ["home", "Projects folder"]]) {
+  test(`a deep link to ${title} opens its dialog over the page the owner was on, not the Settings page`, () => {
+    const markup = render({}, { name: "settings", tab }, { name: "metrics" });
+    assert.match(markup, /class="sidebar"/);
+    assert.match(markup, new RegExp(`<dialog class="dialog wide"[^>]*><div class="dialog-head"><h2 id="[^"]+">${title}</h2>`));
+    assert.match(markup, /class="user-dialog"/);
+    assert.match(markup, /href="#\/metrics" aria-current="page"/);
+    assert.doesNotMatch(markup, /<h1>Settings<\/h1>|settings-nav/);
+  });
+}
+
+test("Updates open as a dialog stays in view on its own when the engine stops under it, as an install does", () => {
+  openUserDialog("updates");
+  try {
+    standalone(render({ engine: "down" }));
+    standalone(render({ engine: "connecting" }));
+    assert.match(render({}), /<dialog class="dialog wide"/, "back in the shell once the engine runs");
+  } finally {
+    closeUserDialog();
+  }
+  assert.match(render({ engine: "down" }), /<h1>CrazyAgent&#x27;s engine isn&#x27;t running<\/h1>/);
+});
+
+test("another user dialog left open does not take the engine-down page", () => {
+  openUserDialog("profile");
+  try {
+    assert.match(render({ engine: "down" }), /<h1>CrazyAgent&#x27;s engine isn&#x27;t running<\/h1>/);
+  } finally {
+    closeUserDialog();
+  }
 });
