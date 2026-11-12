@@ -239,6 +239,15 @@ impl NativeProfileCustody {
         match *self {}
     }
 
+    pub(crate) fn repair_legacy_configured_home(
+        &mut self,
+        _host: &HostStamp,
+        _connection: &ModelConnection,
+        _profile_ref: &CredentialRef,
+    ) -> Result<(), EngineError> {
+        match *self {}
+    }
+
     /// Builds the owner receipt for a prepared profile, exactly as on Unix.
     /// Takes the binding, the requested and prepared references and the profile key.
     /// Returns the receipt; a mismatched reference or key trips an assertion.

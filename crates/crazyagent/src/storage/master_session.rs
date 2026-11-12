@@ -3908,7 +3908,13 @@ fn register_generated_rcli_profile(
                 member: Some(&member),
                 configured_home: &home,
             };
-            register_rcli_profile(db, config, sources, custody, registration).map(|_| ())
+            let repaired = custody
+                .as_mut()
+                .map_err(|failure| failure.clone())
+                .and_then(|custody| custody.repair_legacy_configured_home(host, &member, &account));
+            repaired.and_then(|()| {
+                register_rcli_profile(db, config, sources, custody, registration).map(|_| ())
+            })
         } else if let Some(record) = stale {
             refresh_rcli_profile(db, config, sources, custody, host, &member, record)
         } else {
