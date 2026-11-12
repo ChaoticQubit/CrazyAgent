@@ -187,6 +187,10 @@ struct Mac {
 
 impl Mac {
     fn new(shape: Shape) -> Self {
+        assert!(
+            cfg!(feature = "clean-mac-gate"),
+            "{REFUSED}: this build has no system-root remap, so the engine would see this Mac's real Homebrew; run scripts/gate/clean-mac.sh, which builds with --features clean-mac-gate"
+        );
         let temp = tempfile::Builder::new()
             .prefix("cm-")
             .tempdir_in(std::env::temp_dir().canonicalize().unwrap())
@@ -554,7 +558,9 @@ impl Owner {
             .unwrap()
     }
 
-    async fn live_on(&mut self) {
+    /// Asks for the live master. Output: none when the engine took the change, else the
+    /// code it refused it with.
+    async fn live_on(&mut self) -> Option<String> {
         let version = self.team().await.settings_version;
         let generation = self.next();
         let response = self
@@ -569,7 +575,11 @@ impl Owner {
             )
             .await
             .unwrap();
-        assert_eq!(applied(response), OwnerResult::Applied);
+        match applied(response) {
+            OwnerResult::Applied => None,
+            OwnerResult::Rejected { code } => Some(code),
+            other => panic!("the live master start came back as {other:?}"),
+        }
     }
 }
 
@@ -589,21 +599,22 @@ fn found(state: &DependencyState) -> bool {
     )
 }
 
-/// Stops the gate before any live start when the engine sees a tool outside this shape's
-/// private Mac: the build has no system-root remap, so a live start could run the host's
-/// real Codex. Inputs: the shape's Mac, its setup list and Codex catalog row.
-fn refuse_host_tools(mac: &Mac, setup: &SetupStatus, codex: &HarnessEntry) {
+/// Fails the shape before any live start when setup or the harness catalog sees a tool
+/// outside this shape's private Mac: with the remap on, only a search that skips the one
+/// tool resolver looks in this Mac's real Homebrew, and a live start could then run the
+/// host's real Codex. Inputs: the shape's Mac, its setup list and Codex catalog row.
+fn stop_on_host_tools(mac: &Mac, setup: &SetupStatus, codex: &HarnessEntry) {
     if let Some(executable) = &codex.executable {
         assert!(
             executable.starts_with(&mac.run),
-            "{REFUSED}: the engine found Codex at {} outside the gate's Mac; build with --features clean-mac-gate",
+            "the harness catalog found Codex at {} outside the gate's Mac, so it does not search through the one tool resolver; no live start was tried",
             executable.display()
         );
     }
     let tmux_planted = mac.brew().join("bin/tmux").exists();
     assert!(
         tmux_planted || !found(tmux_state(setup)),
-        "{REFUSED}: setup found a tmux the gate never planted; build with --features clean-mac-gate"
+        "setup found a tmux the gate never planted, so its tool list does not search through the one tool resolver the launch path uses: {setup:?}"
     );
 }
 
@@ -676,7 +687,10 @@ async fn pane_says_ran(owner: &mut Owner, team: &TeamStatus) -> bool {
     .unwrap_or(false)
 }
 
-async fn live_outcome(owner: &mut Owner, mac: &Mac) -> Live {
+async fn live_outcome(owner: &mut Owner, mac: &Mac, refused: Option<String>) -> Live {
+    if let Some(code) = refused {
+        return Live::Stopped(owner.team().await.live_problem.unwrap_or(code));
+    }
     let start = Instant::now();
     let mut last = None;
     while start.elapsed() < LIVE_TIME {
@@ -750,7 +764,7 @@ async fn ready_shape(mac: &mut Mac, report: &mut Report) -> (Owner, SetupStatus,
     report.step("setup tool list and harness catalog");
     let setup = owner.setup().await;
     let codex = owner.codex().await;
-    refuse_host_tools(mac, &setup, &codex);
+    stop_on_host_tools(mac, &setup, &codex);
     (owner, setup, codex)
 }
 
@@ -763,8 +777,8 @@ async fn a_nothing_installed_mac_says_what_is_missing_and_never_waits_forever() 
     assert!(!found(tmux_state(&setup)), "{setup:?}");
     assert_eq!(codex.status, HarnessStatus::NotInstalled, "{codex:?}");
     report.step("live master start");
-    owner.live_on().await;
-    match live_outcome(&mut owner, &mac).await {
+    let refused = owner.live_on().await;
+    match live_outcome(&mut owner, &mac, refused).await {
         Live::Stopped(line) => assert!(
             typed_reason(&line, &["tmux", "codex"]),
             "the stop line is not a typed missing-tool line: {line}"
@@ -797,8 +811,8 @@ async fn a_homebrew_mac_with_npm_codex_runs_the_live_master_through_the_found_no
         "{codex:?}"
     );
     report.step("live master start");
-    owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac).await;
+    let refused = owner.live_on().await;
+    let outcome = live_outcome(&mut owner, &mac, refused).await;
     assert_ran_with(
         &outcome,
         &mac.brew().join("Cellar/node/22.11.0/bin/node"),
@@ -821,8 +835,8 @@ async fn an_nvm_mac_with_npm_codex_runs_the_live_master_through_the_nvm_node() {
         .nvm()
         .join("lib/node_modules/@openai/codex/bin/codex.js");
     report.step("live master start");
-    owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac).await;
+    let refused = owner.live_on().await;
+    let outcome = live_outcome(&mut owner, &mac, refused).await;
     assert_ran_with(&outcome, &mac.nvm().join("bin/node"), &script);
     report.passed = true;
 }
@@ -839,8 +853,8 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
     assert!(!found(tmux_state(&setup)), "{setup:?}");
     assert_eq!(codex.status, HarnessStatus::Ready, "{codex:?}");
     report.step("live master start before tmux");
-    owner.live_on().await;
-    match live_outcome(&mut owner, &mac).await {
+    let refused = owner.live_on().await;
+    match live_outcome(&mut owner, &mac, refused).await {
         Live::Stopped(line) => assert!(
             typed_reason(&line, &["tmux"]),
             "the stop line is not the typed tmux line: {line}"
@@ -858,8 +872,8 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
         tokio::time::sleep(POLL).await;
     }
     report.step("live master start after tmux");
-    owner.live_on().await;
-    let outcome = live_outcome(&mut owner, &mac).await;
+    let refused = owner.live_on().await;
+    let outcome = live_outcome(&mut owner, &mac, refused).await;
     assert_ran_with(
         &outcome,
         &mac.brew().join("Cellar/node/22.11.0/bin/node"),

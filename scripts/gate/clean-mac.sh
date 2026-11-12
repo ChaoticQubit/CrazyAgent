@@ -24,6 +24,11 @@ CRAZYAGENT_CLEAN_MAC_DIR="$gate" cargo test --manifest-path "$repo/Cargo.toml" -
   --features clean-mac-gate --locked --test clean_mac -- --include-ignored --test-threads=1 > "$log" 2>&1
 rc=$?
 
+if grep -q 'error\[E' "$log"; then
+  printf 'clean-mac: BUILD FAILED, %s compile errors, no shape ran (see %s)\n' "$(grep -c 'error\[E' "$log")" "$log" | tee -a "$summary"
+  exit 3
+fi
+
 pass=$(grep -c ': PASS$' "$summary")
 fail=$(grep -c ': FAIL' "$summary")
 {
