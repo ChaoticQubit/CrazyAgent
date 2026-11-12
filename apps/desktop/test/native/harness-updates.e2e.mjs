@@ -330,9 +330,30 @@ test("Harness updates Off: no Check or Update button, and a direct bridge call a
     await until("Off on the page that opened again", "Off", () => shownChoice("mode"));
     await rowShows("aider", "its install line or reason, read once the settings are known", /Install|Homebrew or npm/);
     assert.deepEqual(await buttons("codex"), [], "Off shows no harness buttons");
-    assert.doesNotMatch(await row("codex"), /Version 0\.0\.1/, "Off reads no versions");
+    assert.doesNotMatch(await row("codex"), /Version 0\.0\.1/, "Off shows no version");
     assert.equal(await refused(bridge, "desktop_harness_update", "codex"), "harness_update_off");
     assert.deepEqual(npmCalls(fakes.codex.log), [], "npm never ran");
+  }));
+
+test("A found harness the tool resolver can't run reads Can't run with the resolver's line and Try again, never Ready, and Try again reads it once it runs", { timeout: 600000 }, (t) =>
+  onEngine(t, "ca-harness-cant-run-", async ({ bridge, me, page, open, name, rowShows, buttons, fakes }) => {
+    const line = "codex needs ca-e2e-missing-runtime, which is missing. Install it, or run setup again from Settings. Then try again.";
+    script(fakes.codex.harness, "#!/usr/bin/env ca-e2e-missing-runtime\n");
+    await open();
+    const blocked = await rowShows("codex", "the resolver's line", line);
+    assert.match(blocked, /Can't run/);
+    assert.doesNotMatch(blocked, /Ready|Version/, "a harness that can't run never reads Ready or a version");
+    assert.deepEqual(await buttons("codex"), [`Try again: ${name("codex")}`], "Try again is its only button");
+    assert.equal((await versions(bridge, "codex")).needs?.line, line, "the row shows the engine's needs line");
+    assert.doesNotMatch(await page.evaluate("document.body.innerText"), /Install Node\.js/, "a need other than Node offers no Node.js install");
+    await me.capture("cant-run");
+    script(fakes.codex.harness, "#!/bin/sh\necho \"codex-cli 0.0.1\"\n");
+    await me.click(`Try again: ${name("codex")}`, "button");
+    const runs = await rowShows("codex", "the version once it runs", "Version 0.0.1.");
+    assert.match(runs, /Ready/);
+    assert.doesNotMatch(runs, /Can't run/);
+    assert.deepEqual(npmCalls(fakes.codex.log), [], "Try again asked npm nothing");
+    await me.capture("runs-again");
   }));
 
 test("Check for harness updates Only when I choose: opening the page runs no check", { timeout: 600000 }, (t) =>
