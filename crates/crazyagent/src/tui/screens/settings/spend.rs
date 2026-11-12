@@ -128,6 +128,9 @@ pub(in crate::tui) fn outcome_words(attempt: &SpendAttempt) -> String {
             "The provider didn't say whether the reset was used. Check the limits after the next refresh."
         }
         "usage_spend_off" => "Spending free resets is off. Turn it on in Settings, Pools.",
+        "usage_spend_unconfirmed" => {
+            "Spend confirmation now asks first. Use a free reset again and confirm it."
+        }
         "usage_spend_no_account" => "This account is no longer in your settings.",
         "usage_spend_not_in_app" => "This account can't spend a free reset from CrazyAgent.",
         "usage_spend_not_signed_in" => {
