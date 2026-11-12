@@ -29615,6 +29615,59 @@ fn a_stop_fallback_fails_a_task_no_pool_account_can_run_instead_of_starting_it()
     assert_eq!(agents, 0);
 }
 
+/// The owner's Wake of a sub-agent started on a model no pool account can run now picks
+/// its account as a new start does (DEC-150 F4): under the Stop fallback rule it stays
+/// stopped and the team note names the model, instead of waking on the endpoint's own.
+#[test]
+fn an_owner_wake_of_an_agent_on_a_model_no_pool_account_runs_keeps_the_stop_rule() {
+    use crate::model_choice::rules::{FallbackRule, Rule};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    codex_model(&fixture, "gpt-a", crate::model_choice::Slot::Agent);
+    model_rule(&fixture, Rule::Fallback(FallbackRule::Stop));
+    let sub = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+            params![sub, PROJECT, format!("worktrees/agent-{sub}")],
+        )
+        .unwrap();
+    super::super::model_pick::record_agent(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        sub,
+        Some("gpt-a"),
+    )
+    .unwrap();
+    team.start_again(sub, None, &fixture.access).unwrap();
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_agents WHERE id=?1", [sub], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "stopped");
+    let notes: Vec<String> = fixture
+        .status()
+        .messages
+        .into_iter()
+        .filter(|message| message.state == MessageState::Note)
+        .map(|message| message.text)
+        .collect();
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("The agent could not restart") && note.contains("gpt-a")),
+        "{notes:?}"
+    );
+    assert_eq!(
+        super::super::model_pick::agent_model(&fixture.connection, sub).unwrap(),
+        Some("gpt-a".to_owned()),
+        "the record keeps the owner's model"
+    );
+}
+
 /// A projects home move recorded before its folders move holds the project: a task
 /// delegated meanwhile stays queued with no agent and no worktree, and starts once the
 /// move is finished.
