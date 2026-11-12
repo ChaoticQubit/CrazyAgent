@@ -299,6 +299,29 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Says whether an agent's worktree record waits in `team_retiring` for its files to go,
+/// not marked as left behind, so a task sent to it waits instead of failing (F10). Inputs:
+/// the store, the project and the agent. Output: the answer, false before the table is
+/// made.
+pub(crate) fn retiring(db: &Connection, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
+    let table: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_retiring')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !table {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_retiring WHERE agent=?1 AND project=?2 AND leftover=0)",
+        params![id, project.as_str()],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
 /// Says whether a confirmed agent's waiting record is marked as one whose worktree record
 /// git already removed, leaving files the engine could not delete. Inputs: the store, the
 /// project and the agent. Output: the answer, false when no record waits.
