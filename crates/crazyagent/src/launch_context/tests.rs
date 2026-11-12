@@ -858,14 +858,24 @@ impl Drop for Unpinned {
     }
 }
 
-/// CTX-M1 residual (rv-secreview r2 I3): an earlier run that pinned Codex's own
-/// `skills/.system` with an ACL denying its removal or a mode without write, or left a folder
-/// without write or an immutable file inside it, never refuses the next Codex launches in that
-/// home: each launch clears what pins the folder, moves it away and removes it, parking nothing.
+/// CTX-M1 residual (rv-secreview r2 I3), V231-ACL: an earlier run that pinned Codex's own
+/// `skills/.system` with an ACL denying its removal or a mode without write, or left inside it
+/// a folder without write, an immutable file, a file or link whose own ACL denies its removal,
+/// or a folder with no access holding an immutable file, never refuses the next Codex launches
+/// there: each launch clears what pins the folder, moves it away and removes it, parking nothing.
 #[cfg(target_os = "macos")]
 #[test]
 fn pinned_codex_system_skills_never_refuse_the_next_launches() {
-    for pin in ["acl", "mode", "inner mode", "inner flag"] {
+    let pins = [
+        "acl",
+        "mode",
+        "inner mode",
+        "inner flag",
+        "inner acl",
+        "inner link acl",
+        "closed folder",
+    ];
+    for pin in pins {
         let directory = tempfile::tempdir().unwrap();
         let _unpinned = Unpinned(directory.path().to_path_buf());
         let home = directory.path().canonicalize().unwrap().join("codex");
@@ -892,6 +902,15 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
                 "acl" => chmod(&["+a", "everyone deny delete"], &system),
                 "mode" => chmod(&["0500"], &system),
                 "inner mode" => chmod(&["0500"], &planted),
+                "inner acl" => chmod(&["+a", "everyone deny delete"], &planted.join("SKILL.md")),
+                "inner link acl" => {
+                    let link = planted.join("link");
+                    std::os::unix::fs::symlink("SKILL.md", &link).unwrap();
+                    chmod(&["-h", "+a", "everyone deny delete"], &link)
+                }
+                "closed folder" => {
+                    chflags("uchg", &planted.join("SKILL.md")) && chmod(&["0000"], &planted)
+                }
                 _ => chflags("uchg", &planted.join("SKILL.md")),
             };
             assert!(pinned, "{pin}: launch {launch} pins the planted skills");
