@@ -3281,7 +3281,7 @@ fn the_master_discards_a_finished_harness_set_with_its_reason_for_the_owner() {
     let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
     let (agent, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
     let label = super::super::events::label(&fixture.connection, agent).unwrap();
-    let call = json!({"agent": "@docs-writer", "reason": "The owner chose the other wording"});
+    let call = json!({"agent": "@docs-writer", "reason": "The owner chose the other wording."});
     assert_eq!(
         as_master(&mut fixture, tool::DISCARD_TOOL, call.clone()),
         (

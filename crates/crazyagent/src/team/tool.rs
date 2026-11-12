@@ -926,7 +926,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
                 if agent_name_valid(agent)
                     && !reason.trim().is_empty()
                     && reason.len() <= DISCARD_REASON_BYTES_MAX
-                    && !reason.chars().any(char::is_control) =>
+                    && !reason.chars().any(char::is_control)
+                    && !crate::memory::hidden_text(reason) =>
             {
                 Ok(Call::Discard {
                     agent: agent.trim().to_owned(),

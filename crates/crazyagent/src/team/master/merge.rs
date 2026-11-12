@@ -316,7 +316,12 @@ pub(super) fn discard(
         Ok(found) => found,
         Err(refused) => return Ok((refused, true)),
     };
-    let reason = bound_text(reason.trim(), crate::team::tool::DISCARD_REASON_BYTES_MAX);
+    let reason = reason.trim();
+    let reason = reason
+        .strip_suffix('.')
+        .filter(|kept| !kept.trim().is_empty())
+        .unwrap_or(reason);
+    let reason = bound_text(reason, crate::team::tool::DISCARD_REASON_BYTES_MAX);
     assert!(!reason.is_empty());
     let now = u64::try_from(now_ms()).unwrap_or(0);
     let discarded =

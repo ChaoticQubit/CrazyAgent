@@ -1409,5 +1409,8 @@ fn a_discard_call_needs_a_harness_name_and_a_one_line_reason() {
         json!({"agent": "@docs", "reason": "x".repeat(DISCARD_REASON_BYTES_MAX + 1)})
     ));
     assert!(refused(json!({"reason": "Not needed"})));
+    assert!(refused(
+        json!({"agent": "@docs", "reason": "Not needed\u{200b}"})
+    ));
     assert!(TEAM_TOOLS.contains(&DISCARD_TOOL) && !LEAD_TOOLS.contains(&DISCARD_TOOL));
 }
