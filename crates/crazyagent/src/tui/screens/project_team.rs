@@ -3282,28 +3282,34 @@ impl TeamView {
                 .harnesses
                 .iter()
                 .any(|harness| harness.role == AgentRole::Master);
-        let hidden = scrolled_rows(packed, left);
-        let won = hidden.saturating_sub(1);
+        let scrolled = scrolled_rows(packed, left);
+        let won = scrolled.saturating_sub(1);
         let plan_gives_way = usize::from(plan_can_go && left > won);
-        let window = packed - 1 - hidden;
-        assert!(hidden == 0 || window >= 1, "one scrolled row stays in view");
-        assert!(hidden == 0 || spacers == 2, "blank rows go before settings");
+        let in_view = packed - 1 - scrolled;
         assert!(
-            plan_gives_way == 0 || hidden == 0 || window == 1,
+            scrolled == 0 || in_view >= 1,
+            "one scrolled row stays in view"
+        );
+        assert!(
+            scrolled == 0 || spacers == 2,
+            "blank rows go before settings"
+        );
+        assert!(
+            plan_gives_way == 0 || scrolled == 0 || in_view == 1,
             "the settings scroll before the plan line goes"
         );
-        self.settings_scroll_max.set(hidden);
-        self.settings_window.set(window);
+        self.settings_scroll_max.set(scrolled);
+        self.settings_window.set(in_view);
         if plan_gives_way == 1 {
             lines.remove(summary_rows);
         }
-        if hidden > 0 {
-            let offset = self.settings_scroll.min(hidden);
-            lines.drain(1 + offset + window..packed);
+        if scrolled > 0 {
+            let offset = self.settings_scroll.min(scrolled);
+            lines.drain(1 + offset + in_view..packed);
             lines.drain(1..1 + offset);
             lines.insert(
-                1 + window,
-                scroll_marker(offset > 0, offset < hidden, content, look),
+                1 + in_view,
+                scroll_marker(offset > 0, offset < scrolled, content, look),
             );
         }
         let fixed = fixed - spacers - briefed - plan_gives_way - won;
