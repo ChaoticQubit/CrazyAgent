@@ -1,5 +1,5 @@
 use super::agent_copy::{CLAUDE_RECORD, CODEX_RECORD};
-use super::generated_configured_rcli::HOMES;
+use super::generated_configured_rcli::{CONFIG, HOMES};
 use super::staging::remove_tree;
 use super::*;
 
@@ -113,6 +113,33 @@ pub(crate) fn remove_sign_in(root: &Path, profile_ref: &CredentialRef) -> Result
         };
         unlink(&keychains, KEYCHAIN)
     })
+}
+
+/// Tells whether the generated SDK home of an API key account holds its config but no key
+/// file, as a keyed account saved before DEC-150 addendum 9a left it (KY-M1). Inputs: the
+/// engine root and the credential reference. Output: true only then; a missing home is
+/// false, and a link or an unsafe folder on the way is a refusal.
+pub(crate) fn generated_home_needs_key(
+    root: &Path,
+    profile_ref: &CredentialRef,
+) -> Result<bool, EngineError> {
+    let anchor = engine_root(root)?;
+    let key = digest(profile_ref.as_str().as_bytes());
+    let Some(homes) = present(&anchor, OsStr::new(HOMES))? else {
+        return Ok(false);
+    };
+    let Some(home) = present(&homes.file, OsStr::new(&key))? else {
+        return Ok(false);
+    };
+    let Some(sdk) = present(&home.file, OsStr::new(SDK))? else {
+        return Ok(false);
+    };
+    let held = |name: &str| match rustix::fs::statat(&sdk.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(error) => Err(unsafe_custody(error)),
+    };
+    Ok(held(CONFIG)? && !held(SDK_KEYS)?)
 }
 
 /// Deletes the generated SDK home of a removed API key account, its key first so a home
