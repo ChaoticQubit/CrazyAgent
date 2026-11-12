@@ -40,7 +40,8 @@ const WALL_ONLY: [&str; 2] = [
 ];
 
 #[test]
-fn every_bound_command_is_listed_in_the_build_and_all_but_the_wall_only_ones_granted_to_main() {
+fn every_bound_command_is_listed_in_the_build_and_granted_to_main_or_for_the_wall_only_ones_to_the_wall()
+ {
     let bound = bound_commands(include_str!("../src/lib.rs"));
     assert!(bound.len() > 100, "{}", bound.len());
     for hooks in [
@@ -88,5 +89,17 @@ fn every_bound_command_is_listed_in_the_build_and_all_but_the_wall_only_ones_gra
         missing(&granted, &for_main),
         Vec::<String>::new(),
         "granted, not for the main window"
+    );
+    let wall_granted: BTreeSet<String> = quoted(
+        include_str!("../capabilities/terminal-wall.json"),
+        "allow-desktop-",
+    )
+    .into_iter()
+    .map(|permission| permission["allow-".len()..].replace('-', "_"))
+    .collect();
+    assert_eq!(
+        missing(&wall_only, &wall_granted),
+        Vec::<String>::new(),
+        "wall only, not granted to the wall"
     );
 }
