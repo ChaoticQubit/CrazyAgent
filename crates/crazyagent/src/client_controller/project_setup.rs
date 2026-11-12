@@ -50,6 +50,39 @@ impl OwnerController {
         self.send_pending().await
     }
 
+    /// Reads the demo project's state: whether it exists, which of its five steps
+    /// happened, the goal words and which pools can run it.
+    /// Input: none. Output: the demo view, the same one every client reads.
+    pub async fn project_demo(&mut self) -> Result<crate::demo::DemoView, EngineError> {
+        match self.read(OwnerRead::ProjectDemo).await?.data {
+            OwnerData::ProjectDemo { demo } => Ok(demo),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Creates the demo project in the projects home from the chosen pool, as one
+    /// retained owner mutation; the client assigns the pool after it is Applied.
+    /// Input: the pool and a nonzero client generation.
+    /// Output: the engine response; a rejection carries a demo code.
+    pub async fn create_demo(
+        &mut self,
+        pool: CredentialRef,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        self.project_demo().await?;
+        self.begin_mutation(
+            OwnerMutation::CreateDemo {
+                project_id: crate::demo::demo_id()?,
+                pool,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
     /// Reads the stored setup of one project.
     /// Takes the project id.
     /// Returns the setup, or none for a project created without one.

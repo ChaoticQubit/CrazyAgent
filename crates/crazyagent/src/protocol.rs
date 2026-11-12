@@ -233,6 +233,10 @@ pub enum Command {
         on: bool,
     },
     #[serde(skip_deserializing)]
+    OwnerNotifications {
+        action: crate::notifications::NoticeAction,
+    },
+    #[serde(skip_deserializing)]
     OwnerMemory {
         action: crate::memory::library::LibraryAction,
     },
