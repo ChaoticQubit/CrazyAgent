@@ -137,7 +137,7 @@ pub(crate) fn read_round(
         .iter()
         .filter(|(key, _)| !shown.contains(key.as_str()))
         .collect();
-    unlisted.sort_by_key(|(key, (_, checked_ms))| (*checked_ms, key.as_str()));
+    unlisted.sort_by(|one, other| one.1.1.cmp(&other.1.1).then_with(|| one.0.cmp(other.0)));
     for (key, (mark, _)) in unlisted.into_iter().take(GONE_CHECKS_PER_ROUND) {
         match history::still_there(db, project, agents, key, mark.place.as_deref()) {
             Ok(true) => round.kept.push(key.clone()),
