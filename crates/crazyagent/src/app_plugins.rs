@@ -177,12 +177,21 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 }
 
 const PLAIN: &[(&str, &str)] = &[
-    ("app_plugin_yaml_too_large", "the file is larger than 16 KiB."),
+    (
+        "app_plugin_yaml_too_large",
+        "the file is larger than 16 KiB.",
+    ),
     ("app_plugin_yaml_encoding", "the file is not UTF-8 text."),
     ("app_plugin_yaml_empty", "the file has no settings."),
     ("app_plugin_yaml_tab", "use spaces, not tabs, to indent."),
-    ("app_plugin_yaml_anchor", "anchors (&name) are not supported."),
-    ("app_plugin_yaml_alias", "aliases (*name) are not supported."),
+    (
+        "app_plugin_yaml_anchor",
+        "anchors (&name) are not supported.",
+    ),
+    (
+        "app_plugin_yaml_alias",
+        "aliases (*name) are not supported.",
+    ),
     ("app_plugin_yaml_tag", "tags (!name) are not supported."),
     (
         "app_plugin_yaml_block_scalar",
@@ -192,12 +201,18 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_yaml_flow_map",
         "{ } maps are not supported; put each key on its own line, and quote a value that starts with {.",
     ),
-    ("app_plugin_yaml_directive", "% directives are not supported."),
+    (
+        "app_plugin_yaml_directive",
+        "% directives are not supported.",
+    ),
     (
         "app_plugin_yaml_documents",
         "a plugin file holds one document; remove this --- or ... line.",
     ),
-    ("app_plugin_yaml_duplicate_key", "this key is already set above."),
+    (
+        "app_plugin_yaml_duplicate_key",
+        "this key is already set above.",
+    ),
     (
         "app_plugin_yaml_indent",
         "the indent does not match the lines around it.",
@@ -231,17 +246,29 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_yaml_syntax",
         "expected key: value; put a value holding \": \" in quotes.",
     ),
-    ("app_plugin_yaml_top_level", "the file must be a map of key: value lines."),
+    (
+        "app_plugin_yaml_top_level",
+        "the file must be a map of key: value lines.",
+    ),
     (
         "app_plugin_yaml_flow_list",
         "[ ] lists hold single values on one line, closed with ].",
     ),
     ("app_plugin_yaml_depth", "the settings are nested too deep."),
-    ("app_plugin_schema_unknown", "this app reads schema: 1 plugins only."),
+    (
+        "app_plugin_schema_unknown",
+        "this app reads schema: 1 plugins only.",
+    ),
     ("app_plugin_kind_unknown", "the only kind is embedding."),
-    ("app_plugin_field_unknown", "this field is not part of a plugin file."),
+    (
+        "app_plugin_field_unknown",
+        "this field is not part of a plugin file.",
+    ),
     ("app_plugin_field_missing", "this field is required."),
-    ("app_plugin_field_invalid", "this value has the wrong type or length."),
+    (
+        "app_plugin_field_invalid",
+        "this value has the wrong type or length.",
+    ),
     (
         "app_plugin_name_invalid",
         "a name is 1 to 40 lowercase letters, digits or -, starting with a letter.",
@@ -266,16 +293,34 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_secret_needs_https",
         "a plugin that sends a secret must use https.",
     ),
-    ("app_plugin_host_invalid", "a host is an exact lowercase name, with no * or port."),
-    ("app_plugin_host_undeclared", "the URL's host is not in hosts."),
-    ("app_plugin_host_unused", "this host is declared but the plugin never calls it."),
-    ("app_plugin_hosts_limit", "a plugin declares at most 4 hosts."),
+    (
+        "app_plugin_host_invalid",
+        "a host is an exact lowercase name, with no * or port.",
+    ),
+    (
+        "app_plugin_host_undeclared",
+        "the URL's host is not in hosts.",
+    ),
+    (
+        "app_plugin_host_unused",
+        "this host is declared but the plugin never calls it.",
+    ),
+    (
+        "app_plugin_hosts_limit",
+        "a plugin declares at most 4 hosts.",
+    ),
     (
         "app_plugin_secret_invalid",
         "a secret name is 1 to 32 lowercase letters, digits or _, starting with a letter.",
     ),
-    ("app_plugin_secrets_limit", "a plugin declares at most 4 secrets."),
-    ("app_plugin_secret_duplicate", "each secret needs its own name."),
+    (
+        "app_plugin_secrets_limit",
+        "a plugin declares at most 4 secrets.",
+    ),
+    (
+        "app_plugin_secret_duplicate",
+        "each secret needs its own name.",
+    ),
     (
         "app_plugin_secret_undeclared",
         "this secret is not in the plugin's secrets list.",
@@ -296,7 +341,10 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_inputs_missing",
         "the body needs one value of exactly \"{{inputs}}\".",
     ),
-    ("app_plugin_inputs_repeated", "use \"{{inputs}}\" only once."),
+    (
+        "app_plugin_inputs_repeated",
+        "use \"{{inputs}}\" only once.",
+    ),
     (
         "app_plugin_header_invalid",
         "a header name is letters, digits or -, and its value one line of plain text.",
@@ -305,7 +353,10 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_header_reserved",
         "the app sets this header itself.",
     ),
-    ("app_plugin_headers_limit", "a plugin sets at most 16 headers."),
+    (
+        "app_plugin_headers_limit",
+        "a plugin sets at most 16 headers.",
+    ),
     (
         "app_plugin_vectors_invalid",
         "vectors is a path like data.*.embedding with exactly one *.",
@@ -314,7 +365,10 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_dimensions_invalid",
         "dimensions is a whole number from 64 to 1024.",
     ),
-    ("app_plugin_batch_invalid", "batch is a whole number from 1 to 128."),
+    (
+        "app_plugin_batch_invalid",
+        "batch is a whole number from 1 to 128.",
+    ),
     (
         "app_plugin_file_name_mismatch",
         "the file name must be the plugin's name followed by .yaml.",
@@ -327,13 +381,19 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_folder_unsafe",
         "the plugins folder is not a private folder owned by you.",
     ),
-    ("app_plugin_folder_unavailable", "the plugins folder could not be read."),
+    (
+        "app_plugin_folder_unavailable",
+        "the plugins folder could not be read.",
+    ),
     ("app_plugin_not_found", "no plugin has that name."),
     (
         "app_plugin_name_taken",
         "a plugin with this name already exists; remove it or choose replace.",
     ),
-    ("app_plugin_bundled", "plugins that ship with the app can only be turned off."),
+    (
+        "app_plugin_bundled",
+        "plugins that ship with the app can only be turned off.",
+    ),
     (
         "app_plugin_changed",
         "the file changed after its trust screen was shown; review it again.",
@@ -342,14 +402,23 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_needs_review",
         "review this plugin's trust screen before turning it on.",
     ),
-    ("app_plugin_refused", "this plugin's file is refused; fix it first."),
+    (
+        "app_plugin_refused",
+        "this plugin's file is refused; fix it first.",
+    ),
     ("app_plugin_off", "this plugin is turned off."),
     (
         "app_plugin_needs_key",
         "this plugin needs a key: pick an account or enter a key for it.",
     ),
-    ("app_plugin_secret_not_declared", "this plugin does not declare that secret."),
-    ("app_plugin_account_not_found", "that account no longer exists."),
+    (
+        "app_plugin_secret_not_declared",
+        "this plugin does not declare that secret.",
+    ),
+    (
+        "app_plugin_account_not_found",
+        "that account no longer exists.",
+    ),
     (
         "app_plugin_account_has_no_key",
         "that account has no saved API key to use.",
@@ -362,20 +431,35 @@ const PLAIN: &[(&str, &str)] = &[
         "app_plugin_key_store_unavailable",
         "the key could not be saved; nothing was changed.",
     ),
-    ("app_plugin_request_invalid", "the request could not be read."),
+    (
+        "app_plugin_request_invalid",
+        "the request could not be read.",
+    ),
     ("app_plugin_request_bounds", "the request is too large."),
-    ("app_plugin_outcome_unknown", "the engine did not answer in time; check the list again."),
-    ("app_plugins_unavailable", "the engine could not be reached."),
+    (
+        "app_plugin_outcome_unknown",
+        "the engine did not answer in time; check the list again.",
+    ),
+    (
+        "app_plugins_unavailable",
+        "the engine could not be reached.",
+    ),
     (
         "search_confirm_required",
-        "choosing a plugin that sends data off this Mac needs a confirm naming its host.",
+        "choosing a plugin that sends your text to a host needs a confirm naming that host.",
     ),
     (
         "search_choice_unavailable",
         "that plugin is off, not ready or not an embedding plugin.",
     ),
-    ("search_model_missing", "the local model is not downloaded yet."),
-    ("search_model_downloading", "the local model is already downloading."),
+    (
+        "search_model_missing",
+        "the local model is not downloaded yet.",
+    ),
+    (
+        "search_model_downloading",
+        "the local model is already downloading.",
+    ),
     (
         "search_model_download_failed",
         "the local model could not be downloaded; check the connection and try again.",
@@ -384,10 +468,7 @@ const PLAIN: &[(&str, &str)] = &[
         "search_model_mismatch",
         "the downloaded file is not the expected model, so it was deleted.",
     ),
-    (
-        "search_model_cancelled",
-        "the download was cancelled.",
-    ),
+    ("search_model_cancelled", "the download was cancelled."),
     (
         "search_model_store_unavailable",
         "the model folder could not be read or written.",

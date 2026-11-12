@@ -43,7 +43,9 @@ impl Value {
             Self::Float(value) => serde_json::Number::from_f64(*value)
                 .map_or(serde_json::Value::Null, serde_json::Value::Number),
             Self::Str(value) => serde_json::Value::String(value.clone()),
-            Self::List(items) => serde_json::Value::Array(items.iter().map(Self::to_json).collect()),
+            Self::List(items) => {
+                serde_json::Value::Array(items.iter().map(Self::to_json).collect())
+            }
             Self::Map(entries) => serde_json::Value::Object(
                 entries
                     .iter()
@@ -165,7 +167,12 @@ fn list_item(content: &str) -> bool {
     content == "-" || content.starts_with("- ")
 }
 
-fn block(lines: &[Line<'_>], at: &mut usize, indent: usize, depth: usize) -> Result<Value, YamlError> {
+fn block(
+    lines: &[Line<'_>],
+    at: &mut usize,
+    indent: usize,
+    depth: usize,
+) -> Result<Value, YamlError> {
     let line = &lines[*at];
     if depth > DEPTH_MAX {
         return refuse("app_plugin_yaml_depth", line.number);
@@ -177,7 +184,12 @@ fn block(lines: &[Line<'_>], at: &mut usize, indent: usize, depth: usize) -> Res
     }
 }
 
-fn map(lines: &[Line<'_>], at: &mut usize, indent: usize, depth: usize) -> Result<Value, YamlError> {
+fn map(
+    lines: &[Line<'_>],
+    at: &mut usize,
+    indent: usize,
+    depth: usize,
+) -> Result<Value, YamlError> {
     let mut entries: Vec<(String, Value)> = Vec::new();
     while let Some(line) = lines.get(*at) {
         if line.indent < indent {
@@ -245,7 +257,9 @@ fn colon(content: &str) -> Option<usize> {
     bytes
         .iter()
         .enumerate()
-        .find(|(index, byte)| **byte == b':' && bytes.get(index + 1).is_none_or(|next| *next == b' '))
+        .find(|(index, byte)| {
+            **byte == b':' && bytes.get(index + 1).is_none_or(|next| *next == b' ')
+        })
         .map(|(index, _)| index)
 }
 
@@ -305,7 +319,9 @@ fn scalar(text: &str, line: u32) -> Result<Value, YamlError> {
         '?' if text.len() == 1 || text.as_bytes()[1] == b' ' => {
             refuse("app_plugin_yaml_complex_key", line)
         }
-        '-' if text.len() == 1 || text.as_bytes()[1] == b' ' => refuse("app_plugin_yaml_syntax", line),
+        '-' if text.len() == 1 || text.as_bytes()[1] == b' ' => {
+            refuse("app_plugin_yaml_syntax", line)
+        }
         _ => {
             indicator(first, line)?;
             let plain = text.split(" #").next().unwrap_or("").trim_end_matches(' ');

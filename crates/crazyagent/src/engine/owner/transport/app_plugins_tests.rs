@@ -67,9 +67,19 @@ fn search(reply: Reply) -> SearchView {
 fn the_owner_previews_adds_and_removes_a_plugin_through_the_protocol() {
     let (_tmp, root) = engine();
     let first = listing(send(&root, request(json!({"kind": "list"})), None).unwrap());
-    let names: Vec<&str> = first.plugins.iter().map(|plugin| plugin.name.as_str()).collect();
+    let names: Vec<&str> = first
+        .plugins
+        .iter()
+        .map(|plugin| plugin.name.as_str())
+        .collect();
     assert_eq!(names, ["local", "openai", "voyage", "ollama"]);
-    let sha256 = match send(&root, request(json!({"kind": "preview", "yaml": NEAR})), None).unwrap() {
+    let sha256 = match send(
+        &root,
+        request(json!({"kind": "preview", "yaml": NEAR})),
+        None,
+    )
+    .unwrap()
+    {
         Reply::Preview { preview } => match *preview {
             Preview::Ready { trust } => trust.sha256,
             other => panic!("expected a trust screen, got {other:?}"),
@@ -84,17 +94,32 @@ fn the_owner_previews_adds_and_removes_a_plugin_through_the_protocol() {
         )
         .unwrap(),
     );
-    let near = added.plugins.iter().find(|plugin| plugin.name == "near").unwrap();
+    let near = added
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "near")
+        .unwrap();
     assert_eq!(
         (near.origin, &near.status, near.enabled),
         (Origin::User, &PluginStatus::Ready, true)
     );
-    let removed = listing(send(&root, request(json!({"kind": "remove", "name": "near"})), None).unwrap());
+    let removed = listing(
+        send(
+            &root,
+            request(json!({"kind": "remove", "name": "near"})),
+            None,
+        )
+        .unwrap(),
+    );
     assert!(removed.plugins.iter().all(|plugin| plugin.name != "near"));
     assert_eq!(
-        send(&root, request(json!({"kind": "remove", "name": "openai"})), None)
-            .unwrap_err()
-            .0,
+        send(
+            &root,
+            request(json!({"kind": "remove", "name": "openai"})),
+            None
+        )
+        .unwrap_err()
+        .0,
         "app_plugin_bundled"
     );
 }
@@ -121,7 +146,9 @@ fn a_plugin_key_travels_only_in_its_own_frame_and_never_comes_back() {
         "secret_present": false,
     });
     assert_eq!(
-        parse(&serde_json::to_vec(&unannounced).unwrap()).unwrap_err().0,
+        parse(&serde_json::to_vec(&unannounced).unwrap())
+            .unwrap_err()
+            .0,
         "app_plugin_request_invalid"
     );
     let stray = json!({"app_plugins": {"kind": "list"}, "secret_present": true});
@@ -137,13 +164,18 @@ fn a_plugin_key_travels_only_in_its_own_frame_and_never_comes_back() {
         )
         .unwrap(),
     );
-    let voyage = unbound.plugins.iter().find(|plugin| plugin.name == "voyage").unwrap();
+    let voyage = unbound
+        .plugins
+        .iter()
+        .find(|plugin| plugin.name == "voyage")
+        .unwrap();
     assert_eq!(voyage.status, PluginStatus::NeedsKey);
 }
 
 #[test]
 fn requests_are_bounded_and_strict() {
-    let invalid = |body: serde_json::Value| parse(&serde_json::to_vec(&body).unwrap()).unwrap_err().0;
+    let invalid =
+        |body: serde_json::Value| parse(&serde_json::to_vec(&body).unwrap()).unwrap_err().0;
     assert_eq!(
         invalid(json!({"app_plugins": {"kind": "list"}})),
         "app_plugin_request_invalid"
@@ -161,7 +193,9 @@ fn requests_are_bounded_and_strict() {
         "app_plugin_request_invalid"
     );
     assert_eq!(
-        invalid(request(json!({"kind": "remove", "name": "n".repeat(NAME_BYTES_MAX + 1)}))),
+        invalid(request(
+            json!({"kind": "remove", "name": "n".repeat(NAME_BYTES_MAX + 1)})
+        )),
         "app_plugin_request_invalid"
     );
     assert_eq!(
