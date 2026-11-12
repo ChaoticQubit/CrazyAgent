@@ -20,6 +20,7 @@ const TASK: &str = "\nTask:\n\
 - Add a cut order: what to drop first when a version runs late.\n\
 - Describe the release process: branches and review, the tests that must pass before a release, version numbers, packaging and distribution for the target platforms, rollback, and who approves a release.\n\
 - List every point you could not decide from the brief and the research as a question for the owner. Prefer a question the owner answers by picking from a short list.\n\
+- Write each question and each option in plain words the owner understands without reading the code: no file names, no code names and no jargon. Say in the question what the choice changes for the project.\n\
 \nReply format: exactly these three top-level headings, in this order.\n\
 # Roadmap\n\
 (one ## heading per version)\n\
