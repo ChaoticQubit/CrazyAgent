@@ -597,6 +597,7 @@ export function stateView(state: DependencyState): { word: string; tone: Tone; l
   switch (state.state) {
     case "found": return { word: "Found", tone: "ok", line: `Version ${displayText(state.version)} on this Mac.` };
     case "installed": return { word: "Installed", tone: "ok", line: `Version ${displayText(state.version)} installed.` };
+    case "bundled": return { word: "Bundled", tone: "ok", line: `Bundled with CrazyAgent, version ${displayText(state.version)}.` };
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "checking": return { word: "Checking", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
@@ -694,7 +695,7 @@ export function setupBusy(status: SetupStatus): boolean {
 export function setupProgress(status: SetupStatus, ticked: string[]): { done: number; total: number; failed: number } {
   const states = [...status.dependencies.map((item) => item.state.state),
     ...status.pack.filter((item) => ticked.includes(item.id)).map((item) => item.state.state)];
-  const settledStates = new Set(["found", "installed", "on", "off", "failed"]);
+  const settledStates = new Set(["found", "installed", "bundled", "on", "off", "failed"]);
   return { done: states.filter((state) => settledStates.has(state)).length, total: states.length, failed: states.filter((state) => state === "failed").length };
 }
 
