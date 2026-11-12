@@ -743,3 +743,90 @@ fn a_claude_code_id_holds_brackets_only_as_the_catalog_s_1m_suffix() {
         assert!(model_valid("claude-code", &model), "{model}");
     }
 }
+
+/// Removing a project clears its model choices and the team's model records for it, and
+/// moves its choices' versions on (DEC-150 F6), so a project added again under the same
+/// id inherits nothing and a screen read before the removal cannot save onto it.
+#[test]
+fn removing_a_project_clears_its_model_choices_so_a_reused_id_inherits_nothing() {
+    let (_tmp, db) = engine();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let ids = catalog(&["gpt-a", "gpt-b"]);
+    let version = row(
+        &store::values(&db, "codex", &ids, &alpha()).unwrap(),
+        Slot::Master,
+    )
+    .version;
+    let written = store::set(
+        &db,
+        "codex",
+        &ids,
+        &alpha(),
+        Slot::Master,
+        &json!("gpt-b"),
+        version,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    let saw = row(
+        &store::values(&db, "codex", &ids, &alpha()).unwrap(),
+        Slot::Master,
+    )
+    .version;
+    crate::team::model_pick::record_agent(&db, &project, 7, Some("gpt-a")).unwrap();
+    db.execute(
+        "INSERT INTO team_model_fallbacks(project,harness,model,noticed_ms) VALUES (?1,'codex','gpt-a',1)",
+        [PROJECT],
+    )
+    .unwrap();
+    let account = crate::protocol::CredentialRef::new("account-a").unwrap();
+    crate::team::model_pick::refuse(&db, &project, &account, "gpt-a", 1).unwrap();
+
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    let outcome = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: project.clone(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome, crate::protocol::Outcome::Applied),
+        "{outcome:?}"
+    );
+    tx.commit().unwrap();
+    db.execute("INSERT INTO projects(id, body) VALUES(?1,'{}')", [PROJECT])
+        .unwrap();
+
+    let after = store::values(&db, "codex", &ids, &alpha()).unwrap();
+    assert_eq!(row(&after, Slot::Master).here, None, "nothing inherited");
+    assert!(row(&after, Slot::Master).version > saw);
+    let stale = store::set(
+        &db,
+        "codex",
+        &ids,
+        &alpha(),
+        Slot::Master,
+        &json!("gpt-a"),
+        saw,
+    )
+    .unwrap();
+    assert!(matches!(stale, Written::Stale { .. }), "{stale:?}");
+    for table in [
+        "team_agent_models",
+        "team_model_fallbacks",
+        "team_model_refusals",
+    ] {
+        let left: i64 = db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project=?1"),
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{table}");
+    }
+}
