@@ -256,6 +256,7 @@ impl Drop for AgentCredential {
 /// file with the placed device and inode, under the lock every engine placement takes.
 /// Inputs: the agent home, the copy's name and the placed identity. Output: none; a name
 /// that is gone or holds another file is left alone.
+#[allow(clippy::unnecessary_cast)]
 fn remove_placed(home: &File, name: &str, placed: (u64, u64)) {
     let _placing = PLACING.lock().unwrap_or_else(PoisonError::into_inner);
     if let Ok(named) = rustix::fs::statat(home, name, AtFlags::SYMLINK_NOFOLLOW)
@@ -504,6 +505,7 @@ fn read_record(folder: &File, name: &str) -> Result<Vec<u8>, EngineError> {
 /// so a link an agent left at that name is replaced, never followed.
 /// Inputs: the agent home, the file name and the bytes. Output: the placed file's device
 /// and inode, or unavailable.
+#[allow(clippy::unnecessary_cast)]
 pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(u64, u64), EngineError> {
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| unavailable())?;
