@@ -3270,3 +3270,77 @@ async fn an_applied_access_save_stops_the_projects_running_ide() {
     }
     engine.stop().await;
 }
+
+/// F08 (L2): an owner save checks each allowed extra it adds as a request does, refuses a
+/// port the system lends out, logs each extra added and removed as the owner's, and the
+/// Agent access view lists that log newest first with the Apply access changes choice.
+#[tokio::test]
+async fn owner_saves_allowed_extras_checked_and_logged_and_reads_them_back() {
+    use crate::sandbox::policy::{AccessApply, AccessGrant, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(fresh.apply_changes, AccessApply::WhenIdle);
+    assert!(fresh.grants.is_empty() && fresh.grant_log.is_empty());
+
+    let with = |grants: Vec<AccessGrant>| AgentPolicy {
+        grants,
+        apply_changes: AccessApply::NextStart,
+        ..Default::default()
+    };
+    let lent = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            with(vec![AccessGrant::Port { port: 55_000 }]),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(lent), rejected("grant_port_dynamic"));
+
+    let saved = owner
+        .set_project_agent_policy(
+            project.clone(),
+            fresh.version,
+            with(vec![AccessGrant::Port { port: 5432 }]),
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(view.apply_changes, AccessApply::NextStart);
+    assert_eq!(view.grants.len(), 1);
+    assert_eq!(view.grants[0].grant, AccessGrant::Port { port: 5432 });
+    assert_eq!(view.grant_log.len(), 1);
+    assert_eq!(
+        (
+            view.grant_log[0].action.as_str(),
+            view.grant_log[0].by.as_str()
+        ),
+        ("granted", "owner")
+    );
+
+    let removed = owner
+        .set_project_agent_policy(project.clone(), view.version, with(Vec::new()), 4)
+        .await
+        .unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    let after = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert!(after.grants.is_empty());
+    assert_eq!(after.grant_log[0].action, "revoked", "newest first");
+    assert_eq!(after.grant_log.len(), 2);
+    engine.stop().await;
+}
