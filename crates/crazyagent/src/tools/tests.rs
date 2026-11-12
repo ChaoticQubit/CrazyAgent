@@ -514,9 +514,14 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
         resolve("tmux", &places).map_or(true, |tmux| tmux.program != planted),
         "a link into an agent's HOME is never used"
     );
+    assert!(resolve_entry(&setup.join("tmux"), &places).is_err());
     std::fs::remove_file(setup.join("tmux")).unwrap();
     let own = program(&setup.join("tmux"), NODE);
-    assert_eq!(resolve("tmux", &places).unwrap().program, own);
+    assert_eq!(
+        resolve_entry(&setup.join("tmux"), &places).unwrap().program,
+        own,
+        "the setup folder is kept, though an owner tmux found first wins by name"
+    );
 }
 
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
