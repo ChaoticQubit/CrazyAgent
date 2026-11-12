@@ -367,8 +367,12 @@ fn activity_import(connection: &Connection, now: i64) -> Result<Option<Import>, 
     let to = rows.last().map_or(last, |row| row.0);
     let mut items = Vec::new();
     for (id, project, at_ms, kind, text, change_set) in rows {
-        let (Ok(project_id), Some(kind)) = (ProjectId::new(project), ActivityKind::parse(&kind))
-        else {
+        let (Ok(project_id), Some(kind)) = (
+            ProjectId::new(project),
+            ActivityKind::ALL
+                .into_iter()
+                .find(|known| known.name() == kind),
+        ) else {
             continue;
         };
         if now - at_ms > IMPORT_AGE_MS_MAX {
