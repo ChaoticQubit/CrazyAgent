@@ -1384,6 +1384,21 @@ fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
     std::str::from_utf8(field).ok()?.parse().ok()
 }
 
+/// Reads a `ps` user id field. macOS `ps` prints a user id above `i32::MAX` as a negative
+/// number, as `-2` for nobody's 4294967294, so a negative field is that id read back; a
+/// line of such a user is then left out as another user's, never refusing the table. Input:
+/// the field. Output: the user id, or none for any other text.
+#[cfg(unix)]
+fn user_id(field: &str) -> Option<u32> {
+    field.parse::<u32>().ok().or_else(|| {
+        field
+            .parse::<i32>()
+            .ok()
+            .filter(|negative| *negative < 0)
+            .map(i32::cast_unsigned)
+    })
+}
+
 /// Finds no process by its environment where none is listed here: Linux reads no token yet.
 /// Inputs: unused. Output: none found.
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1569,7 +1584,7 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
         let (Some(pid), Some(parent), Some(owner)) = (
             fields.first().and_then(|field| field.parse::<i32>().ok()),
             fields.get(1).and_then(|field| field.parse::<i32>().ok()),
-            fields.get(2).and_then(|field| field.parse::<u32>().ok()),
+            fields.get(2).and_then(|field| user_id(field)),
         ) else {
             return Err(Unstopped::Uncertain);
         };
@@ -1639,7 +1654,7 @@ fn rechecked(listing: &str, asked: &[i32]) -> Option<BTreeMap<i32, (u32, String)
             .parse::<i32>()
             .ok()
             .filter(|pid| asked.contains(pid))?;
-        let owner = fields[1].parse::<u32>().ok()?;
+        let owner = user_id(fields[1])?;
         if found
             .insert(pid, (owner, fields[2..RECHECK_FIELDS].join(" ")))
             .is_some()
@@ -1712,6 +1727,68 @@ pub(crate) mod tests {
             );
         }
         assert_eq!(parse(LISTING, 501, 700).unwrap().len(), 2);
+    }
+
+    /// v2.3.1 gate: macOS `ps` prints nobody's user id, 4294967294, as `-2`. A table with
+    /// such a process is read, that process left out as another user's, and the recheck reads
+    /// the id back the same way; this machine's own table reads too.
+    #[test]
+    fn a_process_ps_shows_with_a_negative_user_id_never_refuses_the_table() {
+        let listing = format!("{LISTING}  83340     1    -2 Ss   Tue Nov 10 20:10:01 2026\n");
+        let rows = parse(&listing, 501, 700).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|(process, _)| process.pid)
+                .collect::<Vec<_>>(),
+            [501, 602]
+        );
+        assert_eq!(user_id("-2"), Some(u32::MAX - 1));
+        assert_eq!(user_id("501"), Some(501));
+        for refused in ["", "-", "x", "-0", "2x", "4294967296", "-2147483649"] {
+            assert_eq!(user_id(refused), None, "{refused}");
+        }
+        assert_eq!(
+            rechecked("  602    -2 Wed Oct 28 03:10:01 2026\n", &[602]).unwrap()[&602].0,
+            u32::MAX - 1
+        );
+        assert!(
+            table(PS_TABLE, &mut None).is_ok(),
+            "this machine's process table is refused"
+        );
+    }
+
+    /// A hold under End whose process table cannot be read signals nothing, neither SIGTERM
+    /// at once nor SIGKILL later, so a failed listing never reaches a process; the probe is
+    /// the child's own wait status, not a table read.
+    #[test]
+    fn a_hold_ending_its_processes_signals_none_while_its_table_cannot_be_read() {
+        let mut leftover = session_sleeper(false);
+        let mut lineage = Lineage::of(leftover.id(), None).unwrap();
+        assert!(!lineage.unchecked, "{lineage:?}");
+        lineage.table = &["/usr/bin/false"];
+        let (held, _released) = std::sync::mpsc::channel::<()>();
+        Leftovers(Box::new(lineage)).hold(
+            None,
+            held,
+            by_in("project-unreadable-end"),
+            LeftoverMode::End,
+        );
+        std::thread::sleep(ENDING_POLL * 8);
+        let waited = leftover.try_wait();
+        let holds = held_in("project-unreadable-end");
+        for hold in &holds {
+            held().remove(&hold.key);
+        }
+        end_pid(i32::try_from(leftover.id()).unwrap());
+        let _ = leftover.wait();
+
+        assert_eq!(holds.len(), 1, "{holds:?}");
+        assert_eq!(holds[0].state, HoldState::Ending);
+
+        assert!(
+            matches!(waited, Ok(None)),
+            "a hold signalled a process its unread table never showed: {waited:?}"
+        );
     }
 
     /// Names come apart from the table, only for the ids asked, each id once: a name that
@@ -2388,10 +2465,15 @@ pub(crate) mod tests {
         }
     }
 
-    /// Tells whether a process still runs and is no zombie. Input: the id. Output: true then.
+    /// Tells whether a process still runs and is no zombie, from a table read that must
+    /// succeed within a few tries: a probe that read a refused table as "not running" would
+    /// pass an End that never ran and fail a hold that never signalled (v2.3.1 gate rows).
+    /// Input: the id. Output: true then; panics when the table cannot be read.
     fn runs(pid: i32) -> bool {
-        table(PS_TABLE, &mut None)
-            .is_ok_and(|rows| rows.iter().any(|(process, _)| process.pid == pid))
+        let rows = (0..5)
+            .find_map(|_| table(PS_TABLE, &mut None).ok())
+            .expect("the test probe could not read the process table");
+        rows.iter().any(|(process, _)| process.pid == pid)
     }
 
     /// Waits up to `wait` for `done`. Inputs: the bound and the condition. Output: whether it
