@@ -9,7 +9,7 @@ import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
-import { createRunDirectories } from "./run-layout.mjs";
+import { chooseHome, clearWebStore, createRunDirectories, runProjects } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -53,9 +53,12 @@ function binary(path) {
 
 function environment() {
   createRunDirectories(evidence);
-  return {
+  const { home, prepared } = chooseHome(join(evidence, "home"));
+  clearWebStore(home);
+  return { projects: runProjects(home), env: {
     PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
-    HOME: join(evidence, "home"),
+    HOME: home,
+    ...(prepared ? { CFFIXED_USER_HOME: home } : {}),
     TMPDIR: join(evidence, "tmp"),
     LANG: "en_US.UTF-8",
     NO_COLOR: "1",
@@ -64,7 +67,7 @@ function environment() {
     CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture,
     CRAZYAGENT_DESKTOP_TEST_EVIDENCE: evidence,
     CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
-  };
+  } };
 }
 
 function signalGroup(entry, signal) {
@@ -202,10 +205,8 @@ function captured(entry) {
 
 async function execute() {
   const binaries = [binary(app), binary(fixture)];
-  const env = environment();
+  const { env, projects } = environment();
   const port = await unusedPort();
-  const projects = join(env.HOME, "Projects");
-  mkdirSync(projects, { mode: 0o700 });
   const engine = launch("engine", fixture,
     [suite === "model-access-read-only" ? "serve" : "serve-model-access",
       engineRoot, projects], env, WEBDRIVER_SECONDS + 30);
