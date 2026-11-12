@@ -540,14 +540,14 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
 
-/// Item text as it is stored and as every client and banner gets it: credential-like words
-/// and lines hidden by `project_setup::redact` line by line, so a token wrapped onto the
-/// next line loses its tail, then one line with hidden characters escaped and local paths
-/// cut, redacted again as that line, at most `TEXT_BYTES_MAX` bytes. Showing it again
+/// Item text as it is stored and as every client and banner gets it: credentials hidden by
+/// `project_setup::redact_values` line by line (a wrapped token loses its tail), then one
+/// line with hidden characters escaped and paths cut, redacted again as one line, at most
+/// `TEXT_BYTES_MAX` bytes. A notice naming a password keeps its words; showing it again
 /// changes nothing. Input: the text. Output: the line, maybe empty.
 pub(crate) fn shown(text: &str) -> String {
-    let lines = crate::project_setup::redact(text);
-    let words = crate::project_setup::redact(&crate::landing::scrubbed(&lines, &[]));
+    let lines = crate::project_setup::redact_values(text);
+    let words = crate::project_setup::redact_values(&crate::landing::scrubbed(&lines, &[]));
     assert!(!words.contains('\n'));
     let mut end = words.len().min(TEXT_BYTES_MAX);
     while !words.is_char_boundary(end) {

@@ -76,6 +76,7 @@ const SECRET_KEY_ENDS: [&str; 10] = [
     "_key",
 ];
 const KEY_SEPARATORS: [&str; 4] = ["=", ":", "=>", ":="];
+const NAMED_KEY_ENDS: [&str; 5] = ["secret", "password", "authorization", "cookie", "apikey"];
 const PLAIN_P_FLAGS: [&str; 13] = [
     "-pthread",
     "-pedantic",
@@ -3572,13 +3573,31 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
 /// known shapes, not every secret: one in another shape, a short value under a key not
 /// named like a credential or one split across messages stays.
 pub(crate) fn redact(text: &str) -> String {
+    redact_lines(text, true)
+}
+
+/// Hides credentials in short text the owner reads at a glance, such as a notification,
+/// like `redact`, except that a line which only names a credential keeps its words: a
+/// credential name hides the value it gives (`password: x`, `secret=x`, `Bearer x`), and
+/// a private key block still hides its lines. Takes the text. Returns it with the same
+/// line breaks.
+pub(crate) fn redact_values(text: &str) -> String {
+    redact_lines(text, false)
+}
+
+/// Redacts text line by line for `redact` and `redact_values`. Takes the text and whether a
+/// line naming a credential field is hidden whole; when not, credential names count as keys
+/// whose values are hidden. Returns the text with the same line breaks.
+fn redact_lines(text: &str, named_lines: bool) -> String {
     let mut key_block = false;
     let mut wrapped = false;
-    text.split('\n')
+    let kept = text
+        .split('\n')
         .map(|line| {
             let lower = line.to_ascii_lowercase();
             key_block |= lower.contains(KEY_BLOCK_BEGIN);
-            let hidden = key_block || SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
+            let named = named_lines && SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
+            let hidden = key_block || named;
             if key_block && lower.contains(KEY_BLOCK_END) {
                 key_block = false;
             }
@@ -3586,12 +3605,14 @@ pub(crate) fn redact(text: &str) -> String {
                 wrapped = false;
                 return HIDDEN_LINE.to_owned();
             }
-            let (kept, ends_hidden) = redact_words(line, wrapped);
+            let (kept, ends_hidden) = redact_words(line, wrapped, !named_lines);
             wrapped = ends_hidden;
             kept
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    assert_eq!(kept.matches('\n').count(), text.matches('\n').count());
+    kept
 }
 
 /// Where the value of a key named like a credential sits.
@@ -3605,13 +3626,12 @@ enum KeyValue {
     Apart,
 }
 
-/// Masks the credential-like words of one line that names no credential field: a word
-/// [`secret_like`] finds, a key's value [`secret_key`] finds, also after a lone
-/// `KEY_SEPARATORS` word, the `user:password` after `-u` or `--user`, a URL's user part
-/// and, when the line before ended in a masked word, a token tail as the line's first
-/// word. Takes the line and whether the line before ended in a masked word. Returns the
-/// line and whether it ends in one.
-fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
+/// Masks the credential-like words of one line: a word [`secret_like`] finds, a key's value
+/// [`secret_key`] finds, also after a lone `KEY_SEPARATORS` word, the `user:password` after
+/// `-u` or `--user`, a URL's user part and, after a line that ended in a masked word, a token
+/// tail as the first word. Takes the line, that flag and whether credential names count as
+/// keys. Returns the line and whether it ends in a masked word.
+fn redact_words(line: &str, wrapped: bool, names: bool) -> (String, bool) {
     let mut kept = String::with_capacity(line.len());
     let mut value_next = false;
     let mut separator_next = false;
@@ -3624,7 +3644,7 @@ fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
             kept.push_str(piece);
             continue;
         }
-        let key = secret_key(word);
+        let key = secret_key(word, names);
         let hide = value_next
             || (user_next && word.contains(':'))
             || (wrapped && first && wrapped_tail(word))
@@ -3646,12 +3666,16 @@ fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
     (kept, ends_hidden)
 }
 
-/// Finds a key named like a credential in a word: a run of letters, digits, `-` and `_`
-/// whose name, in any ASCII case and `-` read as `_`, ends with one of `SECRET_KEY_ENDS`,
-/// followed, after any closing quote, by `=` or a single `:`, a whole-word `--key` flag,
-/// or a key ending the word, whose value follows a lone separator word. Takes the word.
-/// Returns where the key's value sits, or none.
-fn secret_key(word: &str) -> Option<KeyValue> {
+/// Finds a key named like a credential in a word: a run of letters, digits, `-` and `_` whose
+/// name (any ASCII case, `-` as `_`) ends with one of `SECRET_KEY_ENDS`, with `names` also
+/// `NAMED_KEY_ENDS` (and `Bearer` takes the next word), then, after any closing quote, `=`
+/// or a single `:`, a whole-word `--key` flag, or a key ending the word whose value follows
+/// a lone separator word. Takes the word and the flag. Returns where the value sits, or none.
+fn secret_key(word: &str, names: bool) -> Option<KeyValue> {
+    if names && word.eq_ignore_ascii_case("bearer") {
+        return Some(KeyValue::Next);
+    }
+    let endings: &[&str] = if names { &NAMED_KEY_ENDS } else { &[] };
     let bytes = word.as_bytes();
     let name = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
     let mut start = 0;
@@ -3662,7 +3686,7 @@ fn secret_key(word: &str) -> Option<KeyValue> {
         }
         let end = start + bytes[start..].iter().take_while(|&&b| name(b)).count();
         let run = &bytes[start..end];
-        let named = SECRET_KEY_ENDS.iter().any(|ending| {
+        let named = SECRET_KEY_ENDS.iter().chain(endings).any(|ending| {
             let ending = ending.as_bytes();
             run.len() >= ending.len()
                 && run[run.len() - ending.len()..]
