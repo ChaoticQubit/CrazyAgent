@@ -893,6 +893,37 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_background(&id, choice, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_leftovers" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                mode: crazyagent::team::LeftoverMode,
+                generation: u64,
+            }
+            let Args { id, mode, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_leftovers(&id, mode, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_leftover_hold" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                key: u64,
+                end: bool,
+                generation: u64,
+            }
+            let Args { id, key, end, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_leftover_hold(&id, key, end, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_ask_before_merge" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

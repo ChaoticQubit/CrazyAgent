@@ -747,6 +747,14 @@ pub enum TeamAction {
         project_id: ProjectId,
         mode: LeftoverMode,
     },
+    EndLeftovers {
+        project_id: ProjectId,
+        key: u64,
+    },
+    KeepLeftovers {
+        project_id: ProjectId,
+        key: u64,
+    },
     AskBeforeMerge {
         project_id: ProjectId,
         on: bool,
@@ -1038,6 +1046,8 @@ impl TeamAction {
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
             | Self::LeftoversAtEnd { .. }
+            | Self::EndLeftovers { .. }
+            | Self::KeepLeftovers { .. }
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
             | Self::MasterIdleStop { .. }
@@ -1072,6 +1082,8 @@ impl TeamAction {
             | Self::LandOn { project_id, .. }
             | Self::BackgroundAtEnd { project_id, .. }
             | Self::LeftoversAtEnd { project_id, .. }
+            | Self::EndLeftovers { project_id, .. }
+            | Self::KeepLeftovers { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
@@ -2636,6 +2648,20 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::EndLeftovers { key, .. } => Ok(
+            if crate::harnesses::leftovers::end_held(*key, project.as_str()) {
+                Outcome::Applied
+            } else {
+                rejected("leftovers_gone")
+            },
+        ),
+        TeamAction::KeepLeftovers { key, .. } => Ok(
+            if crate::harnesses::leftovers::keep_held(*key, project.as_str()) {
+                Outcome::Applied
+            } else {
+                rejected("leftovers_gone")
+            },
+        ),
         TeamAction::AskBeforeMerge { on, .. } => {
             tx.execute(
                 "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
@@ -3324,6 +3350,8 @@ pub struct TeamStatus {
     pub background_at_end: BackgroundAtEnd,
     #[serde(default)]
     pub leftovers: LeftoverMode,
+    #[serde(default)]
+    pub leftover_holds: Vec<crate::harnesses::leftovers::HeldView>,
     #[serde(default)]
     pub ask_before_merge: bool,
     #[serde(default)]
@@ -5175,6 +5203,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
         leftovers: leftover_mode(connection, project.as_str())?,
+        leftover_holds: crate::harnesses::leftovers::held_in(project.as_str()),
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands,
         access_unreadable,

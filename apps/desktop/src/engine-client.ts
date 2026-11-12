@@ -826,6 +826,22 @@ export type SwitchApply = "when_idle" | "next_start";
  * with the turn and tell the agent first. */
 export type BackgroundAtEnd = { mode: "wait" } | { mode: "grace"; secs: number } | { mode: "stop" };
 
+/** What the engine does with processes an agent leaves running after its stop: end them after
+ * a short grace, keep them running and let the account go, or hold the account and ask. */
+export type LeftoverMode = "end" | "keep" | "ask";
+
+/** One hold of processes an agent left running, as the team view lists it: its engine key,
+ * who left it, the processes it names, where it stands, when it began in Unix milliseconds
+ * and whether it still keeps an account. */
+export type LeftoverHold = {
+  key: number;
+  who: string;
+  names: string;
+  state: "held" | "ending" | "kept";
+  since_ms: number;
+  holds_account: boolean;
+};
+
 /** Where a lead's worker lands its change set: on the lead's branch when the lead accepts it,
  * or only when the owner accepts it. */
 export type ChildLanding = "lead" | "owner";
@@ -936,6 +952,8 @@ export interface TeamStatus {
   master_branch?: string | null;
   land_on?: string | null;
   background_at_end?: BackgroundAtEnd;
+  leftovers?: LeftoverMode;
+  leftover_holds?: LeftoverHold[];
   ask_before_merge?: boolean;
   master_lands?: MasterLands | null;
   access_unreadable?: boolean;
