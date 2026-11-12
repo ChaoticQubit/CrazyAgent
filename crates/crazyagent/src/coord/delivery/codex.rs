@@ -204,9 +204,13 @@ fn release(user_agent: &str) -> Support {
 #[cfg(all(test, unix))]
 mod tests;
 
+/// What one delivery returns: the turn the server named, and the Codex release when it is
+/// newer than the checked ones.
+type Delivery = (Option<String>, Option<(u64, u64, u64)>);
+
 #[cfg(target_os = "macos")]
 mod wire {
-    use super::{Support, release, turn_id};
+    use super::{Delivery, Support, release, turn_id};
     use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
@@ -259,10 +263,6 @@ mod wire {
         }
         Ok(())
     }
-
-    /// What one delivery returns: the turn the server named, and the Codex release when it is
-    /// newer than the checked ones.
-    type Delivery = (Option<String>, Option<(u64, u64, u64)>);
 
     /// Puts text into the agent's thread through one session, trying again once when the
     /// turn changed under the request. Takes the socket, the text, whether an idle thread may
@@ -661,6 +661,7 @@ mod wire {
 
 #[cfg(not(target_os = "macos"))]
 mod wire {
+    use super::Delivery;
     use std::path::Path;
 
     pub(super) fn private_folder(_folder: &Path) -> Result<(), &'static str> {
@@ -672,7 +673,7 @@ mod wire {
         _text: &str,
         _start: bool,
         _pane: u32,
-    ) -> Result<(Option<String>, Option<(u64, u64, u64)>), &'static str> {
+    ) -> Result<Delivery, &'static str> {
         Err("codex_bridge_unsupported")
     }
 
