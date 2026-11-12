@@ -3270,3 +3270,87 @@ async fn an_applied_access_save_stops_the_projects_running_ide() {
     }
     engine.stop().await;
 }
+
+/// F26: a new project gets a first policy that allows every toolchain the owner has
+/// installed; a project whose policy was never saved, as one made before, records the
+/// toolchains it uses on its first save; a later save keeps exactly the choices sent.
+#[tokio::test]
+async fn a_projects_first_policy_records_the_toolchains_it_uses_or_the_owner_has_installed() {
+    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("f26-tools").unwrap();
+    let response = owner
+        .setup_project(project.clone(), spec("Tool shop"), pooled_setup(vec![]), 1)
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM project_agent_policy WHERE project='f26-tools'"),
+        1,
+        "a new project gets its first policy"
+    );
+    let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
+    assert_eq!(fresh.access, AgentAccess::Sandboxed);
+    assert!(
+        fresh
+            .toolchains
+            .iter()
+            .filter(|row| row.installed)
+            .all(|row| row.allowed),
+        "{:?}",
+        fresh.toolchains
+    );
+    let folder = std::fs::read_dir(engine.home())
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.is_dir() && !path.file_name().unwrap().to_string_lossy().starts_with('.'))
+        .expect("the project folder in the home");
+    std::fs::write(folder.join("Cargo.toml"), "[package]\n").unwrap();
+    let database = engine.root.path().join("engine.db");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .execute(
+            "DELETE FROM project_agent_policy WHERE project='f26-tools'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let body = || -> String {
+        rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT body FROM project_agent_policy WHERE project='f26-tools'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let sandboxed = AgentPolicy::default();
+    assert_eq!(sandboxed.access, AgentAccess::Sandboxed);
+    assert!(sandboxed.toolchains.is_empty());
+    let saved = owner
+        .set_project_agent_policy(project.clone(), fresh.version, sandboxed.clone(), 2)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert!(
+        body().contains("{\"toolchain\":\"rust\",\"allowed\":true}"),
+        "the first save records the toolchain the project uses: {}",
+        body()
+    );
+    let view = owner.project_agent_policy(project.clone()).await.unwrap();
+    let saved = owner
+        .set_project_agent_policy(project.clone(), view.version, sandboxed, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    assert!(
+        !body().contains("\"toolchain\""),
+        "a later save keeps exactly the choices sent: {}",
+        body()
+    );
+    engine.stop().await;
+}
