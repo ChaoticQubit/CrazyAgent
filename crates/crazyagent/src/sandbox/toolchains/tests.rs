@@ -417,7 +417,7 @@ fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() 
         assert!(stderr.contains("git merge is refused"), "{stderr}");
         assert!(
             stderr.contains(
-                "Work from your lead's branch reaches yours through Update on your change set"
+                "Work from the lead branch reaches yours through Update on your change set"
             ),
             "{stderr}"
         );
