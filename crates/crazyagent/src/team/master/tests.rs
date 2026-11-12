@@ -1875,6 +1875,7 @@ fn a_message_to_a_finished_worker_wakes_it_once_and_reaches_its_first_prompt_onc
 fn a_live_masters_wakes_of_one_turn_are_one_round_and_the_next_turns_wake_waits_for_keep_going() {
     let mut fixture = Fixture::new();
     master_row(&fixture);
+    store_setup(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
@@ -6488,6 +6489,7 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
 #[test]
 fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
     let mut fixture = Fixture::new();
+    store_setup(&fixture);
     let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
