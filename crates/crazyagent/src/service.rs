@@ -817,7 +817,6 @@ fn read_part(entry: &Path) -> Part {
 /// does too. Inputs: the parts, `me` and `open_stores`. Output: the part's index, or none.
 #[cfg(unix)]
 pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) -> Option<usize> {
-    let _ = open_stores;
     let mut below_exists = false;
     for (depth, part) in parts.iter().enumerate() {
         let changeable = match *part {
@@ -834,7 +833,7 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
                 let store = depth >= 2 && below_exists && owned && folder && mode & 0o1000 != 0;
                 let world = !link && mode & 0o002 != 0;
                 let grouped = folder && mode & 0o020 != 0 && !trusted_group(group);
-                !owned || world || (grouped && !store)
+                !owned || (world && !(store && open_stores)) || (grouped && !store)
             }
         };
         if changeable {
