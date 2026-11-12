@@ -195,8 +195,8 @@ export function routeOf(target: NoticeTarget): { hash: string; anchor: string | 
     formatRoute(section === undefined ? { name: "project", id, tab } : { name: "project", id, tab, section });
   switch (target.page) {
     case "questions": {
-      const anchor = target.question !== null ? `question-${target.question}` : target.agent !== null ? `agent-${target.agent}` : null;
-      return { hash: project(target.project_id, "questions"), anchor };
+      if (target.question === null && target.agent !== null) return { hash: project(target.project_id, "agents", "questions"), anchor: `agent-${target.agent}` };
+      return { hash: project(target.project_id, "questions"), anchor: target.question === null ? null : `question-${target.question}` };
     }
     case "account_sign_in": return { hash: formatRoute({ name: "settings", tab: "accounts", action: "sign_in", account: target.account }), anchor: null };
     case "project_pool": return { hash: project(target.project_id, "settings", "pool"), anchor: null };

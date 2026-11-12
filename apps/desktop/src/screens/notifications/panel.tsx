@@ -21,6 +21,8 @@ export const NEEDS_POLL_MS = 5000;
 const HIGHLIGHT_TRIES_MAX = 30;
 const HIGHLIGHT_TRY_MS = 100;
 const HIGHLIGHT_MS = 2500;
+const NOT_READY_LINE = "The engine is not ready yet. Try again.";
+const REFUSED_LINE = "Couldn't change your notifications. Try again.";
 
 const EMPTY: Record<NoticeFilter, string> = {
   all: "No notifications yet.",
@@ -80,13 +82,14 @@ function NoticeRow({ notice, projectName, picked, onOpen, onPick }: {
  * actions on picked rows, and one row per item or fold with its words when empty. Inputs:
  * the page, the filter, the project picked, the projects, the picked row ids and the
  * actions. Output: the dialog. */
-export function NoticePanelView({ page, filter, projectId, projects, selected, onFilter, onProject, onOpen, onSelect, onMarkAllRead,
+export function NoticePanelView({ page, filter, projectId, projects, selected, problem, onFilter, onProject, onOpen, onSelect, onMarkAllRead,
   onReadSelected, onUnreadSelected, onDeleteSelected, onRetry }: {
   page: Loaded<NoticePage>;
   filter: NoticeFilter;
   projectId: string | null;
   projects: readonly PickedProject[];
   selected: ReadonlySet<number>;
+  problem: string;
   onFilter: (filter: NoticeFilter) => void;
   onProject: (projectId: string | null) => void;
   onOpen: (notice: Notice) => void;
@@ -119,6 +122,7 @@ export function NoticePanelView({ page, filter, projectId, projects, selected, o
       <button type="button" className="btn small" onClick={onUnreadSelected}>Mark unread</button>
       <button type="button" className="btn small danger" onClick={onDeleteSelected}>Delete</button>
     </div>}
+    {problem && <p className="notice-problem" role="alert">{problem}</p>}
     {page.kind === "loading" && <p className="notice-empty">Loading notifications…</p>}
     {page.kind === "not_ready" && <p className="notice-empty">Notifications aren't ready in this engine yet.</p>}
     {page.kind === "error" && <LoadError message={`Couldn't load notifications. ${page.message}`} onRetry={onRetry} />}
@@ -131,22 +135,42 @@ export function NoticePanelView({ page, filter, projectId, projects, selected, o
   </div>;
 }
 
-/** Opens one row's exact page and marks every item the row holds read; an Action stays
- * pending until its state is fixed. Inputs: the row, the filter it was listed under, and the
- * way to go and to send. Output: the anchor of the part to highlight, or null. */
+/** Sends one change to the store and says how it went. Inputs: the change and the way to
+ * send it. Output: an empty string once it stands, else the plain refusal to show. */
+export async function changeProblem(action: NoticeAction, send: (action: NoticeAction) => Promise<Result<void>>): Promise<string> {
+  const result = await send(action);
+  if (result.kind === "ok") return "";
+  if (result.kind === "not_ready") return NOT_READY_LINE;
+  return result.message === "" ? REFUSED_LINE : result.message;
+}
+
+/** Opens one row's exact page and marks what the row holds read: one item by its id, a fold
+ * of several by the fold, so a single item never reaches older items of its kind. An Action
+ * stays pending until its state is fixed. Inputs: the row, the filter it was listed under,
+ * and the way to go and to send. Output: the anchor of the part to highlight, or null, and
+ * the refusal of the read, empty once it stands or when nothing was unread. */
 export async function openNotice(notice: Notice, filter: NoticeFilter, { go, send }: {
   go: (hash: string) => void;
   send: (action: NoticeAction) => Promise<Result<void>>;
-}): Promise<string | null> {
+}): Promise<{ anchor: string | null; problem: string }> {
   const { hash, anchor } = routeOf(notice.target);
   assert(hash.startsWith("#/"), "a notification opens a page of the app");
+  assert(notice.folded >= 1, "a row holds at least one item");
   go(hash);
-  if (notice.unread > 0) {
-    const action = foldsAction([notice], filter, "read");
-    assert(action !== null, "one row is always a valid fold change");
-    await send(action);
-  }
-  return anchor;
+  if (notice.unread === 0) return { anchor, problem: "" };
+  const action = notice.folded === 1 ? { read: { ids: [notice.id] } } : foldsAction([notice], filter, "read");
+  assert(action !== null, "one row is always a valid change");
+  return { anchor, problem: await changeProblem(action, send) };
+}
+
+/** The picks still listed after a reload: a fold that gained an item lists under a newer
+ * id, so its old pick no longer names a row. Inputs: the picks and the page. Output: the
+ * picks the page lists. */
+export function listedPicks(selected: ReadonlySet<number>, page: NoticePage): Set<number> {
+  const listed = new Set(page.items.map((item) => item.id));
+  const kept = new Set([...selected].filter((id) => listed.has(id)));
+  assert(kept.size <= selected.size, "pruning never adds a pick");
+  return kept;
 }
 
 /** Marks the part a notification opened once the page draws it: scrolls to it and lights it
@@ -187,25 +211,41 @@ function NoticePanel({ projects, newest, onClose, onChanged }: {
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
   const [page, setPage] = useState<Loaded<NoticePage>>({ kind: "loading" });
   const [version, setVersion] = useState(0);
+  const [problem, setProblem] = useState("");
   useEffect(() => {
     let live = true;
-    void loadNotifications(panelQuery(filter, projectId)).then((result) => { if (live) setPage(result); });
+    void loadNotifications(panelQuery(filter, projectId)).then((result) => {
+      if (!live) return;
+      setPage(result);
+      if (result.kind === "ok") setSelected((before) => listedPicks(before, result.value));
+    });
     return () => { live = false; };
   }, [filter, projectId, newest, version]);
-  const changed = () => { setSelected(new Set()); setVersion(version + 1); onChanged(); };
+  const run = (action: NoticeAction) => void changeProblem(action, sendNotice).then((refused) => {
+    setProblem(refused);
+    if (refused !== "") return;
+    setSelected(new Set());
+    setVersion((before) => before + 1);
+    onChanged();
+  });
   const picked = (change: FoldChange) => {
     const rows = page.kind === "ok" ? page.value.items.filter((item) => selected.has(item.id)) : [];
     const action = foldsAction(rows, filter, change);
-    if (action !== null) void sendNotice(action).then(changed);
+    if (action !== null) run(action);
   };
-  return <NoticePanelView page={page} filter={filter} projectId={projectId} projects={projects} selected={selected}
-    onFilter={(next) => { setFilter(next); setSelected(new Set()); }}
-    onProject={(next) => { setProjectId(next); setSelected(new Set()); }}
-    onOpen={(notice) => { onClose(); void openNotice(notice, filter, { go: goTo, send: sendNotice }).then((anchor) => { highlight(anchor); onChanged(); }); }}
-    onSelect={(id) => { const next = new Set(selected); if (!next.delete(id)) next.add(id); setSelected(next); }}
-    onMarkAllRead={() => void sendNotice({ read_all: { project_id: projectId } }).then(changed)}
+  return <NoticePanelView page={page} filter={filter} projectId={projectId} projects={projects} selected={selected} problem={problem}
+    onFilter={(next) => { setFilter(next); setSelected(new Set()); setProblem(""); }}
+    onProject={(next) => { setProjectId(next); setSelected(new Set()); setProblem(""); }}
+    onOpen={(notice) => void openNotice(notice, filter, { go: goTo, send: sendNotice }).then(({ anchor, problem: refused }) => {
+      setProblem(refused);
+      if (refused === "") onClose();
+      highlight(anchor);
+      onChanged();
+    })}
+    onSelect={(id) => setSelected((before) => { const next = new Set(before); if (!next.delete(id)) next.add(id); return next; })}
+    onMarkAllRead={() => run({ read_all: { project_id: projectId } })}
     onReadSelected={() => picked("read")} onUnreadSelected={() => picked("unread")} onDeleteSelected={() => picked("delete")}
-    onRetry={() => setVersion(version + 1)} />;
+    onRetry={() => setVersion((before) => before + 1)} />;
 }
 
 /** The bell top right on every page: reads both counts every few seconds and opens the
@@ -239,15 +279,17 @@ export function NoticeBell({ projects }: { projects: readonly PickedProject[] })
   }, [open]);
   return <div className="notice-corner" ref={corner}>
     <NoticeBellView counts={counts} open={open} onToggle={() => setOpen(!open)} />
-    {open && <NoticePanel projects={projects} newest={newest} onClose={() => setOpen(false)} onChanged={() => setTick(tick + 1)} />}
+    {open && <NoticePanel projects={projects} newest={newest} onClose={() => setOpen(false)} onChanged={() => setTick((before) => before + 1)} />}
   </div>;
 }
 
 /** One project's Needs you view: its pending items from the store, folded, with the
- * pending sign-ins of its pool's accounts; nothing while it loads or when nothing waits.
- * Inputs: the merged page, the open action and a retry. Output: the section, or nothing. */
-export function ProjectNeedsYouView({ page, onOpen, onRetry }: {
+ * pending sign-ins of its pool's accounts and the refusal of the last read on open;
+ * nothing while it loads or when nothing waits. Inputs: the merged page, the refusal, the
+ * open action and a retry. Output: the section, or nothing. */
+export function ProjectNeedsYouView({ page, problem = "", onOpen, onRetry }: {
   page: Loaded<NoticePage>;
+  problem?: string;
   onOpen: (notice: Notice) => void;
   onRetry: () => void;
 }) {
@@ -256,6 +298,7 @@ export function ProjectNeedsYouView({ page, onOpen, onRetry }: {
   if (page.value.items.length === 0) return null;
   return <section className="pj-stack-s notice-needs" aria-labelledby="pj-needs-you">
     <h2 id="pj-needs-you">Needs you</h2>
+    {problem && <p className="notice-problem" role="alert">{problem}</p>}
     <ul className="notice-list">
       {page.value.items.map((notice) => <NoticeRow key={notice.id} notice={notice} projectName={null} picked={false} onOpen={onOpen} />)}
     </ul>
@@ -267,6 +310,7 @@ export function ProjectNeedsYouView({ page, onOpen, onRetry }: {
 export function ProjectNeedsYou({ projectId, accounts }: { projectId: string; accounts: readonly string[] }) {
   const [page, setPage] = useState<Loaded<NoticePage>>({ kind: "loading" });
   const [version, setVersion] = useState(0);
+  const [problem, setProblem] = useState("");
   const pool = accounts.join("\n");
   useEffect(() => {
     let live = true;
@@ -280,6 +324,10 @@ export function ProjectNeedsYou({ projectId, accounts }: { projectId: string; ac
     void read();
     return () => { live = false; window.clearTimeout(timer); };
   }, [projectId, pool, version]);
-  return <ProjectNeedsYouView page={page} onRetry={() => setVersion(version + 1)}
-    onOpen={(notice) => void openNotice(notice, "pending", { go: goTo, send: sendNotice }).then((anchor) => { highlight(anchor); setVersion(version + 1); })} />;
+  return <ProjectNeedsYouView page={page} problem={problem} onRetry={() => setVersion((before) => before + 1)}
+    onOpen={(notice) => void openNotice(notice, "pending", { go: goTo, send: sendNotice }).then(({ anchor, problem: refused }) => {
+      setProblem(refused);
+      highlight(anchor);
+      setVersion((before) => before + 1);
+    })} />;
 }
