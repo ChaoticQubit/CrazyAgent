@@ -1102,6 +1102,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
     crate::master_frame_limit::initialize(connection)?;
+    crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1466,6 +1467,7 @@ fn apply(
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
+            | Command::OwnerLearningMark { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1656,6 +1658,7 @@ fn execute(
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
+        Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2822,6 +2825,9 @@ fn owner_read(
         OwnerRead::MasterFrameSettings => crate::master_frame_limit::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
+        },
+        OwnerRead::LearningProgress => OwnerData::LearningProgress {
+            progress: crate::learning::progress(&tx)?,
         },
         OwnerRead::Memories {
             scope,

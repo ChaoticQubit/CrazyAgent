@@ -276,6 +276,10 @@ pub enum OwnerMutation {
     SetMasterFrameSettings {
         settings: crate::master_frame_limit::MasterFrameSettings,
     },
+    SetLearningMark {
+        step: crate::learning::MarkStep,
+        on: bool,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -593,6 +597,10 @@ impl OwnerMutation {
             Self::SetMasterFrameSettings { settings } => Command::OwnerMasterFrames {
                 settings: *settings,
             },
+            Self::SetLearningMark { step, on } => Command::OwnerLearningMark {
+                step: *step,
+                on: *on,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -796,6 +804,7 @@ pub enum OwnerRead {
     MasterFrameSettings,
     ProjectsHome,
     SetupStatus,
+    LearningProgress,
     FoundProjects,
     FolderSize {
         path: String,
@@ -899,6 +908,7 @@ impl OwnerRead {
             | Self::MasterFrameSettings
             | Self::ProjectsHome
             | Self::SetupStatus
+            | Self::LearningProgress
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -1353,6 +1363,9 @@ pub enum OwnerData {
     },
     SetupStatus {
         status: crate::setup::SetupStatus,
+    },
+    LearningProgress {
+        progress: crate::learning::LearningProgress,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,
