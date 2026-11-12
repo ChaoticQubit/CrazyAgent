@@ -4,7 +4,9 @@ mod e2e_support;
 
 use crazyagent::engine::owner::{OwnerData, OwnerRead, OwnerResult};
 use crazyagent::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
-use crazyagent::notifications::{NoticeAction, NoticeReport};
+use crazyagent::notifications::{
+    Banners, Delivery, NoticeAction, NoticeKind, NoticeReport, NoticeSettings,
+};
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{self, Ask, EngineSource, QuestionKind};
 use crazyagent::setup::{Dependency, DependencyState, PackState, SetupStatus};
@@ -1876,4 +1878,133 @@ fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_r
     );
     drop(pty);
     engine.stop();
+}
+
+/// DEC-136a slice 3: saves `seed` as the stored notification settings, opens Settings /
+/// Notifications through Go to against that engine, sends `keys`, saves with Enter and
+/// reads back what the engine holds. Inputs: the settings stored first and the keys.
+/// Output: the settings after the save; panics when the page or the save never shows.
+fn notice_settings_after(seed: NoticeSettings, keys: &[&str]) -> NoticeSettings {
+    let mut engine = Engine::start("ca-e2e-notice-set-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-notice-set-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(NOTICE_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+    notice_change(
+        &runtime,
+        &engine,
+        NoticeAction::SaveSettings { settings: seed },
+    );
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    pty.keys(&["C-k"]);
+    pty.text("Settings / Notif");
+    pty.keys(&["Enter"]);
+    pty.until("Go to opens Settings / Notifications", |screen| {
+        header_row(screen).contains("Settings  /  Notifications")
+            && screen.contains("Action items")
+            && screen.contains("What reaches you, and how long finished items stay.")
+    });
+    pty.keys(keys);
+    pty.until("the pick waits for Enter", |screen| {
+        screen.contains("Save changes")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("the save is confirmed", |screen| {
+        screen.contains("Notification settings saved.")
+    });
+    let settings = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let settings = owner.controller.notification_settings().await.unwrap();
+        owner.controller.detach();
+        settings
+    });
+    drop(pty);
+    engine.stop();
+    settings
+}
+
+/// The default settings with one kind's delivery changed. Inputs: the kind and the
+/// delivery. Output: the settings.
+fn notice_kind(kind: NoticeKind, delivery: Delivery) -> NoticeSettings {
+    let mut settings = NoticeSettings::default();
+    for item in &mut settings.kinds {
+        if item.kind == kind {
+            item.delivery = delivery;
+        }
+    }
+    settings
+}
+
+#[test]
+fn the_tui_saves_an_action_kind_as_bell_only() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["Right"]);
+    assert_eq!(saved, notice_kind(NoticeKind::Question, Delivery::BellOnly));
+}
+
+#[test]
+fn the_tui_saves_an_action_kind_back_to_on() {
+    let saved = notice_settings_after(
+        notice_kind(NoticeKind::Question, Delivery::BellOnly),
+        &["Right"],
+    );
+    assert_eq!(saved, NoticeSettings::default());
+}
+
+#[test]
+fn the_tui_saves_an_info_kind_as_off() {
+    let saved = notice_settings_after(
+        NoticeSettings::default(),
+        &["Down", "Down", "Down", "Down", "Down", "Right", "Right"],
+    );
+    assert_eq!(saved, notice_kind(NoticeKind::AgentFinished, Delivery::Off));
+}
+
+#[test]
+fn the_tui_saves_macos_notifications_off() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["End", "Up", "Right"]);
+    assert_eq!(saved.banners, Banners::Off);
+}
+
+#[test]
+fn the_tui_saves_macos_notifications_for_action_items_only() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["End", "Up", "Right", "Right"]);
+    assert_eq!(saved.banners, Banners::ActionOnly);
+}
+
+#[test]
+fn the_tui_saves_macos_notifications_for_all_items() {
+    let seed = NoticeSettings {
+        banners: Banners::Off,
+        ..NoticeSettings::default()
+    };
+    let saved = notice_settings_after(seed, &["End", "Up", "Right", "Right"]);
+    assert_eq!(saved.banners, Banners::All);
+}
+
+#[test]
+fn the_tui_saves_the_days_done_items_stay() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["End", "4", "5"]);
+    assert_eq!(
+        saved,
+        NoticeSettings {
+            retention_days: 45,
+            ..NoticeSettings::default()
+        }
+    );
 }

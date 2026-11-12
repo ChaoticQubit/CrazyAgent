@@ -241,6 +241,7 @@ pub enum Place {
     CloneRepo,
     Usage,
     Notifications,
+    NotificationSettings,
     Demo,
     Onboarding {
         path: String,
@@ -427,6 +428,7 @@ pub trait Screen {
             | Place::CloneRepo
             | Place::Usage
             | Place::Notifications
+            | Place::NotificationSettings
             | Place::Demo => None,
         }
     }
@@ -488,6 +490,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
         Place::Notifications => Box::new(notifications::Notifications::new()),
+        Place::NotificationSettings => Box::new(settings::notices::NotificationSettingsPage::new()),
         Place::CheckSettings { project } => {
             Box::new(settings::checks::CheckSettingsPage::new(match project {
                 None => process::Scope::App,
