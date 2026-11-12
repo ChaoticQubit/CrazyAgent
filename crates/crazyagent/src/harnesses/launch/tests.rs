@@ -822,6 +822,53 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
     assert_eq!(path, super::TOOLS_OFF_PATH);
 }
 
+/// A headless harness whose file sits inside a project, where agents can write, never
+/// starts: the launch is refused with the tool resolver's owner line for that file, the
+/// same answer the team, research and sign-in launches give.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-refused-entry-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let install = tempfile::tempdir().unwrap();
+    let project = install.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let entry = project.join("bin").join("claude");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable: entry.clone(),
+        working_dir: work.clone(),
+        account: AccountBinding::Subscription { home: home.clone() },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile.clone()),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
+        .unwrap_err()
+        .line();
+    assert_eq!(
+        super::command(&request).unwrap_err(),
+        super::LaunchError(line, None)
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {

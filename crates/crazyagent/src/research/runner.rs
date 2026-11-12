@@ -4193,6 +4193,39 @@ mod tests {
         );
     }
 
+    /// A research harness whose file sits inside a project, where agents can write, gets
+    /// no launch words and no sandbox grant: both answer with the tool resolver's owner line
+    /// before anything runs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_research_harness_inside_a_project_is_refused_before_any_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let harness = base.join("installed").join("project");
+        fs::create_dir_all(harness.join(".crazyagent")).unwrap();
+        let program = harness.join("bin").join("codex");
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let line =
+            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None))
+                .unwrap_err()
+                .line();
+        assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        assert!(matches!(
+            allow_harness(sandbox, &program),
+            Err(RunError::Invalid(code)) if code == line
+        ));
+    }
+
     #[test]
     fn a_harness_installed_after_engine_start_can_run_only_through_the_engines_lookup() {
         let root = engine_root();

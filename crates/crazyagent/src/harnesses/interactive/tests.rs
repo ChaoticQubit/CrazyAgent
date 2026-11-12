@@ -1958,3 +1958,58 @@ fn each_kind_s_display_switches_are_of_the_shape_its_launch_carries() {
         assert!(!claude.variables.is_empty(), "{display:?}");
     }
 }
+
+/// Writes a stand-in harness that exits at once, private to this user. Input: the file.
+fn stand_in(file: &Path) {
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+/// A harness file inside a project, where agents can write, never launches: its words are
+/// the tool resolver's owner line for it, never the file, the same for every caller of
+/// [`launch_words`].
+#[test]
+fn a_harness_entry_inside_a_project_never_launches() {
+    let scratch = tempfile::tempdir().unwrap();
+    let project = scratch.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let entry = project.join("bin").join("codex");
+    stand_in(&entry);
+    let places = crate::tools::Places::from_environment(None);
+    let line = crate::tools::resolve_entry(&entry, &places)
+        .unwrap_err()
+        .line();
+    assert_eq!(launch_words(&entry), Err(LaunchError(line.clone(), None)));
+    assert_eq!(
+        launch_tool(&entry, &places).unwrap_err(),
+        LaunchError(line, None)
+    );
+}
+
+/// A version-manager shim pinned as the harness file starts the real install its name
+/// resolves to; with no real install found the shim itself still launches, unless agents
+/// can write it, as inside a project.
+#[test]
+fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let base = scratch.path().canonicalize().unwrap();
+    let name = "crazyagent-shim-row";
+    let home = base.join("home");
+    let shim = home.join(".volta/bin").join(name);
+    stand_in(&shim);
+    let real = base.join("real");
+    stand_in(&real.join(name));
+    let found = crate::tools::Places::new(vec![real.clone()], Some(home.clone()));
+    assert!(crate::harnesses::is_shim(found.home(), &shim));
+    assert_eq!(launch_tool(&shim, &found).unwrap().entry, real.join(name));
+    let none = crate::tools::Places::new(Vec::new(), Some(home));
+    assert_eq!(launch_tool(&shim, &none).unwrap().entry, shim);
+    let project = base.join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let inside_home = project.join("home");
+    let inside = inside_home.join(".volta/bin").join(name);
+    stand_in(&inside);
+    let places = crate::tools::Places::new(Vec::new(), Some(inside_home));
+    assert!(launch_tool(&inside, &places).is_err());
+}

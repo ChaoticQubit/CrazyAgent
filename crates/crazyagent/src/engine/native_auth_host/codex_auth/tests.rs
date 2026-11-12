@@ -401,3 +401,22 @@ fn native_auth_codex_dropped_names_never_carry_a_letters_only_code() {
     );
     assert_eq!(super::dropped_name("code/KLMN-PQRS", None), "*");
 }
+
+/// A sign-in or token renewal child whose harness file sits inside a project, where agents
+/// can write, never starts unsandboxed: the command is refused with the tool resolver's
+/// owner line for that file.
+#[test]
+fn a_sign_in_harness_inside_a_project_is_refused_with_the_resolvers_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let entry = project.join("bin").join("codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
+        .unwrap_err()
+        .line();
+    let refused = crate::engine::native_auth_host::sign_in_command(&entry).unwrap_err();
+    assert_eq!(refused.0, line);
+}
