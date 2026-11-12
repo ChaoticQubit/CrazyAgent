@@ -1709,11 +1709,14 @@ impl ResearchRunner {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
                 codex_arguments(&mut command, &folder, &output, &home, false, trust, account)?;
-                (output, "events.jsonl")
+                (output, read_only_stdout(harness))
             }
             ResearchHarness::ClaudeCode => {
                 claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
-                (agent.join("output.md"), "output.md")
+                (
+                    agent.join(read_only_stdout(harness)),
+                    read_only_stdout(harness),
+                )
             }
         };
         command
@@ -1806,6 +1809,36 @@ impl ResearchRunner {
         })
     }
 
+    /// Reads what a finished read-only run's agent wrote to its standard output, at most
+    /// the runner's output bound, for a caller that looks for a provider's code in it, such
+    /// as a model test launch (DEC-150 addendum 7). Takes the run's name and harness.
+    /// Returns the text, or none for a bad name or an output that cannot be read.
+    #[cfg(unix)]
+    pub(crate) fn read_only_output(&self, name: &str, harness: ResearchHarness) -> Option<String> {
+        if !valid_run_name(name) {
+            return None;
+        }
+        let agent = self.state.join("agents").join(name);
+        read_bounded(
+            &agent,
+            &agent.join(read_only_stdout(harness)),
+            self.limits.output_bytes_max,
+        )
+        .ok()
+    }
+
+    /// Removes a finished read-only run's agent folder and sandbox profile, for a caller
+    /// that keeps nothing of a run once it read it. Takes the run's name. Returns nothing:
+    /// a part that cannot be removed stays, as a pruned run's would.
+    #[cfg(unix)]
+    pub(crate) fn forget_read_only(&self, name: &str) {
+        if !valid_run_name(name) {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(self.state.join("agents").join(name));
+        let _ = std::fs::remove_file(self.state.join("profiles").join(format!("{name}.sb")));
+    }
+
     /// Refuses a read-only run on Windows before any agent state is made: V1 runs no such
     /// agent there, so the run fails with the owner's plain line. Past that line, the
     /// AppContainer boundary refuses the endpoint-only reach until its firewall rule exists.
@@ -1827,6 +1860,16 @@ impl ResearchRunner {
         let refusal = crate::sandbox::windows::capabilities(&network)
             .expect_err("an endpoint limit needs the AppContainer firewall rule");
         Err(RunError::Sandbox(refusal))
+    }
+}
+
+/// The file a read-only run's agent writes its standard output to, in its agent folder:
+/// Codex's JSON events, or Claude Code's printed reply. Takes the harness. Returns the name.
+#[cfg(unix)]
+fn read_only_stdout(harness: ResearchHarness) -> &'static str {
+    match harness {
+        ResearchHarness::Codex => "events.jsonl",
+        ResearchHarness::ClaudeCode => "output.md",
     }
 }
 

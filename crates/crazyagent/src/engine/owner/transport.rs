@@ -2571,7 +2571,7 @@ async fn serve_admitted(
         }
         Deferred::ModelChoice(a) => {
             let served = model_choice::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(model_choice::MODEL_CHOICE_TIMEOUT, served).await;
+            let _ = tokio::time::timeout(model_choice::MODEL_CHOICE_TEST_TIMEOUT, served).await;
         }
         Deferred::HarnessUpdates(a) => {
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);

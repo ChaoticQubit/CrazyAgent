@@ -253,7 +253,7 @@ mod run {
 
     /// Makes one private engine-owned folder, or checks the one already there is a plain
     /// folder and not a link. Input: the path. Output: the path, or none.
-    fn private_folder(path: PathBuf) -> Option<PathBuf> {
+    pub(crate) fn private_folder(path: PathBuf) -> Option<PathBuf> {
         match std::fs::DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -412,7 +412,7 @@ mod run {
 }
 
 #[cfg(unix)]
-pub(crate) use run::run;
+pub(crate) use run::{private_folder, run};
 
 /// Refuses a cleanup where confined model runs do not exist. Input: the request, unused.
 /// Output: `UNAVAILABLE`.

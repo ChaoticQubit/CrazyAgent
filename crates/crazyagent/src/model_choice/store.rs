@@ -360,8 +360,16 @@ pub fn custom_checked(
 /// `model_choice_harness_unknown` or `model_choice_unavailable`.
 pub fn custom_pending(db: &Connection, harness: &str, model: &str) -> Result<bool, EngineError> {
     let harness = known(harness)?;
-    let _ = (db, harness, model);
-    Ok(false)
+    if !exists(db)? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_custom
+         WHERE harness = ?1 AND model = ?2 AND state = 'pending')",
+        params![harness, model],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
 /// Removes one owner id from a harness. A slot that names it passes it over from then on
