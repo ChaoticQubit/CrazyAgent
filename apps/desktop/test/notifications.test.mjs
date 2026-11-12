@@ -29,7 +29,7 @@ const finished = (id, extra = {}) => ({
 const page = (items, counts = { unread: 2, pending: 1 }) => ({ kind: "ok", value: { items, counts, more: false, newest: items[0]?.id ?? 0 } });
 const projects = [{ id: "p-1", name: "Recipe box" }, { id: "p-2", name: "Tool shop" }];
 const panelView = (loaded, extra = {}) => renderToStaticMarkup(createElement(panel.NoticePanelView, {
-  page: loaded, filter: "all", projectId: null, projects, selected: new Set(),
+  page: loaded, filter: "all", projectId: null, projects, selected: new Set(), problem: "",
   onFilter: forbidden, onProject: forbidden, onOpen: forbidden, onSelect: forbidden, onMarkAllRead: forbidden,
   onReadSelected: forbidden, onUnreadSelected: forbidden, onDeleteSelected: forbidden, onRetry: forbidden, ...extra,
 }));
@@ -68,7 +68,7 @@ test("every kind has one engine name, its class and the label the engine gives i
 test("each target opens its exact page, with the anchor of the item to highlight", () => {
   const opened = (target) => { const { hash, anchor } = api.routeOf(target); return [hash, anchor]; };
   assert.deepEqual(opened({ page: "questions", project_id: "p-1", question: 7, agent: null }), ["#/projects/p-1/questions", "question-7"]);
-  assert.deepEqual(opened({ page: "questions", project_id: "p-1", question: null, agent: 3 }), ["#/projects/p-1/questions", "agent-3"]);
+  assert.deepEqual(opened({ page: "questions", project_id: "p-1", question: null, agent: 3 }), ["#/projects/p-1/agents?section=questions", "agent-3"], "an agent's question or wait is in the Agents tab's drawer, not the owner Questions tab");
   assert.deepEqual(opened({ page: "account_sign_in", account: "work-claude" }), ["#/settings/accounts?action=sign_in&account=work-claude", null]);
   assert.deepEqual(opened({ page: "project_pool", project_id: "p-1" }), ["#/projects/p-1/settings?section=pool", null]);
   assert.deepEqual(opened({ page: "memories", project_id: "p-1" }), ["#/projects/p-1/context?file=%40memory", null]);
@@ -162,13 +162,50 @@ test("opening a row goes to its exact page, marks the row read and leaves its an
   const send = async (action) => { sent.push(action); return { kind: "ok", value: undefined }; };
   const go = (hash) => went.push(hash);
   const folded = finished(30, { folded: 2, ids: [30, 29] });
-  assert.equal(await panel.openNotice(folded, "all", { go, send }), null);
+  assert.deepEqual(await panel.openNotice(folded, "all", { go, send }), { anchor: null, problem: "" });
   assert.deepEqual(went, ["#/projects/p-1/agents"]);
   assert.deepEqual(sent, [{ folds: { change: "read", folds: [{ kind: "agent_finished", project_id: "p-1", filter: "all", newest: 30 }] } }]);
   const read = question(12, { read_ms: 5, unread: 0 });
-  assert.equal(await panel.openNotice(read, "pending", { go, send }), "question-7");
+  assert.deepEqual(await panel.openNotice(read, "pending", { go, send }), { anchor: "question-7", problem: "" });
   assert.equal(sent.length, 1, "a row already read sends nothing");
   assert.deepEqual(went, ["#/projects/p-1/agents", "#/projects/p-1/questions"]);
+});
+
+test("opening one unfolded item reads only that item, so other accounts' sign-ins stay unread", async () => {
+  const sent = [];
+  const send = async (action) => { sent.push(action); return { kind: "ok", value: undefined }; };
+  const sign = { ...question(21), kind: "account_sign_in", project_id: null, text: "home isn't signed in.", target: { page: "account_sign_in", account: "home" } };
+  assert.deepEqual(await panel.openNotice(sign, "pending", { go: () => {}, send }), { anchor: null, problem: "" });
+  assert.deepEqual(sent, [{ read: { ids: [21] } }], "never a fold read, which reaches every older sign-in");
+});
+
+test("a refused read on open says why and still opens the page", async () => {
+  const went = [];
+  const refused = async () => ({ kind: "error", code: "pending_intent", message: "Another change is still being saved." });
+  const opened = await panel.openNotice(finished(30), "all", { go: (hash) => went.push(hash), send: refused });
+  assert.deepEqual(opened, { anchor: null, problem: "Another change is still being saved." });
+  assert.deepEqual(went, ["#/projects/p-1/agents"]);
+});
+
+test("a change to the store says nothing once it stands and the plain refusal when it does not", async () => {
+  const ok = async () => ({ kind: "ok", value: undefined });
+  const refused = async () => ({ kind: "error", code: "notification_folds_invalid", message: "Those items changed. Try again." });
+  const notReady = async () => ({ kind: "not_ready" });
+  assert.equal(await panel.changeProblem({ read_all: { project_id: null } }, ok), "");
+  assert.equal(await panel.changeProblem({ read_all: { project_id: null } }, refused), "Those items changed. Try again.");
+  assert.match(await panel.changeProblem({ read_all: { project_id: null } }, notReady), /not ready/);
+});
+
+test("a refused Delete keeps the picks and shows the refusal in the panel", () => {
+  const markup = panelView(page([question(12), finished(11)]), { selected: new Set([12]), problem: "Another change is still being saved." });
+  assert.match(markup, /role="alert"[^>]*>Another change is still being saved\.</);
+  assert.match(text(markup), /1 selected Mark read Mark unread Delete/);
+  assert.doesNotMatch(panelView(page([question(12)])), /role="alert"/, "no problem, no alert");
+});
+
+test("picks of rows no longer listed are dropped when the page reloads", () => {
+  assert.deepEqual([...panel.listedPicks(new Set([12, 99]), page([question(12), finished(11)]).value)], [12]);
+  assert.deepEqual([...panel.listedPicks(new Set([99]), page([]).value)], []);
 });
 
 test("project names and item text show direction and hidden characters as escapes in the panel", () => {

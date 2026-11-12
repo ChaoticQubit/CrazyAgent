@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -22,6 +23,12 @@ const BELL = "button.notice-bell";
 const PANEL = '[role=dialog][aria-label="Notifications"]';
 const KIND = (kind) => `fieldset[data-kind="${kind}"] label`;
 const BANNERS = 'fieldset[data-setting="banners"] label';
+const ON_TOP = `(() => {
+  const bell = document.querySelector("button.notice-bell");
+  if (!bell) return false;
+  const box = bell.getBoundingClientRect();
+  return document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)?.closest("button.notice-bell") === bell;
+})()`;
 const SHOWN = `(() => {
   const picked = (name) => document.querySelector('input[type=radio][name="' + name + '"]:checked')?.value ?? null;
   const days = document.getElementById("notice-retention-days");
@@ -137,7 +144,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
             assert.ok(Date.now() < deadline, `the reloaded page never showed ${words}`);
           }
         };
-        await steps({ bridge, me, page, open, reload, restart, projectId: receipt.project_id });
+        await steps({ bridge, me, page, open, reload, restart, projectId: receipt.project_id, runtime });
         assert.deepEqual(await page.evaluate("window.__e2eErrors"), [], "the page raised no errors");
       } catch (failure) {
         await me.capture("failure").catch(() => {});
@@ -361,12 +368,63 @@ test("Notifications: a click on an item in the panel opens its exact page and ma
   await me.capture("notifications-panel");
 }));
 
-test("Notifications: Home has no Needs you strip and the bell is on every page", { timeout: 600000 }, (t) => onEngine(t, "ca-notice-home-", async ({ me, page, open }) => {
+test("Notifications: Home has no Needs you strip and the bell is on every page, on top, clear of the page", { timeout: 600000 }, (t) => onEngine(t, "ca-notice-home-", async ({ me, page, open, projectId }) => {
   await open("#/home", "Home", (text) => text.includes("Projects"));
   assert.equal(await page.evaluate(`document.querySelector('section[aria-label="Needs you"]') === null`), true, "Home shows no Needs you strip");
+  await until("New project clear of the bell", true, () => page.evaluate(`(() => {
+    const add = [...document.querySelectorAll(".page-header .actions a")].at(-1);
+    if (!add) return false;
+    const box = add.getBoundingClientRect();
+    return document.elementFromPoint(box.right - 2, box.y + box.height / 2)?.closest("a") === add;
+  })()`));
   for (const hash of ["#/home", "#/metrics", "#/settings/notifications", "#/settings/profile"]) {
     await open(hash, hash, () => true);
     await until(`the bell on ${hash}`, true, () => page.evaluate(`document.querySelector(${JSON.stringify(BELL)}) !== null`));
   }
+  const project = `#/projects/${encodeURIComponent(projectId)}`;
+  await open(`${project}/conversation`, "the Conversation tab", () => true);
+  await until("the whole master view inside the window, nothing clipped below", true, () => page.evaluate(`(() => {
+    const main = document.querySelector(".main")?.getBoundingClientRect();
+    const view = document.querySelector(".pj-fixed")?.getBoundingClientRect();
+    return !!main && !!view && view.bottom <= main.bottom + 0.5;
+  })()`));
+  for (const tab of ["overview", "ide"]) {
+    await open(`${project}/${tab}`, `the ${tab} tab`, () => true);
+    await page.evaluate(`(() => { const main = document.querySelector(".main"); main.scrollTop = main.scrollHeight; })()`);
+    await until(`the bell on top of a scrolled ${tab} tab`, true, () => page.evaluate(ON_TOP));
+  }
   await me.capture("notifications-home");
+}));
+
+/** Puts one team agent waiting on the owner in its terminal in the engine's own tables, the
+ * rows the team runtime writes, so the next reconcile opens a pending Question item for it.
+ * Inputs: the engine root and the project. Output: the agent's id. */
+function waitingAgent(runtime, project) {
+  const store = new DatabaseSync(join(runtime, "engine.db"));
+  try {
+    store.exec("PRAGMA busy_timeout = 5000");
+    const now = Date.now();
+    const agent = Number(store.prepare("INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?,'sub','codex',0,'idle',?,?)")
+      .run(project, now, now).lastInsertRowid);
+    assert.ok(Number.isSafeInteger(agent) && agent > 0, "the engine numbers the team agent");
+    store.prepare("INSERT INTO coord_activity(agent,last_seen,waiting,waiting_since) VALUES (?,?,'question',?)").run(agent, now, now);
+    return agent;
+  } finally {
+    store.close();
+  }
+}
+
+test("Notifications: a click on an agent waiting on the owner opens the Agents tab's questions drawer with that agent highlighted", { timeout: 600000 }, (t) => onEngine(t, "ca-notice-agent-", async ({ me, page, open, projectId, runtime }) => {
+  await open("#/home", "Home", (text) => text.includes("Projects"));
+  const agent = waitingAgent(runtime, projectId);
+  await until("the waiting agent pending in the bell", true, async () => /\b[1-9][0-9]* pending/.test((await bell(page)) ?? ""));
+  await me.follow(BELL);
+  await me.click("Pending", `${PANEL} label`);
+  await me.waitFor("the waiting agent in the panel", (text) => text.includes("in its terminal."));
+  const row = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${PANEL} [data-notice]`)})].find((item) => item.textContent.includes("in its terminal."))?.dataset.notice ?? null`);
+  assert.ok(row !== null, "the waiting agent has a row");
+  await me.follow(`${PANEL} [data-notice="${row}"] .notice-open`);
+  await until("the Agents tab's questions drawer", `#/projects/${encodeURIComponent(projectId)}/agents?section=questions`, () => page.evaluate("location.hash"));
+  await until("the waiting agent highlighted", true, () => page.evaluate(`document.querySelector('[data-notice-anchor="agent-${agent}"].notice-highlight') !== null`));
+  await me.capture("notifications-agent-drawer");
 }));
