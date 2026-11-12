@@ -522,3 +522,38 @@ fn the_team_status_shows_each_task_s_picked_model_and_reason_and_none_for_the_de
         line.len()
     );
 }
+
+#[test]
+fn a_hundred_tasks_with_the_longest_picks_still_fit_one_owner_reply_without_dropping_a_task() {
+    let (_tmp, db) = engine();
+    crate::project_setup::initialize(&db).unwrap();
+    crate::coord::ensure(&db).unwrap();
+    let setup = setup();
+    db.execute_batch(SCHEMA).unwrap();
+    let model = format!("gpt-{}", "a".repeat(120));
+    let reason = "r".repeat(crate::team::tool::MODEL_REASON_BYTES_MAX);
+    for index in 0..crate::team::STATUS_TASKS_MAX {
+        let id = task(&db, &format!("Task {index}"));
+        db.execute(
+            "INSERT INTO team_task_models(task,project,model,reason) VALUES (?1,?2,?3,?4)",
+            params![id, PROJECT, model, reason],
+        )
+        .unwrap();
+    }
+    let full = crate::team::status(&db, &setup).unwrap();
+    assert!(
+        serde_json::to_vec(&full).unwrap().len() > crate::team::STATUS_REPLY_BYTES_MAX,
+        "the row needs picks that overflow one reply"
+    );
+
+    let read = crate::team::owner_status(&db, &setup, None).unwrap();
+
+    assert!(serde_json::to_vec(&read).unwrap().len() <= crate::team::STATUS_REPLY_BYTES_MAX);
+    assert!(!read.partial, "picks are cut before any task is left out");
+    assert_eq!(read.tasks.len(), full.tasks.len());
+    for task in &read.tasks {
+        let pick = task.pick.as_ref().unwrap();
+        assert_eq!(pick.model, model);
+        assert!(pick.reason.ends_with(" more bytes]"), "{}", pick.reason);
+    }
+}
