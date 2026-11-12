@@ -282,15 +282,16 @@ fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
     }
 }
 
-/// Waits for Home's setup panel to show its tools check. The panel shows once the pools and
-/// the accounts are in, and the check is the last answer Home waits for before it decides
-/// where the focus goes, so from that frame on only keys move the focus.
-/// Input: the TUI on its first Home, on an engine with no account. Output: none; panics
-/// when the panel never shows the check.
+/// Waits for Home's side panel to settle on its tools check, the last answer Home waits for
+/// before it moves the focus to the panel, so from that frame on only keys move the focus.
+/// "Get set up" shows the check's words; "Learn CrazyAgent" (DEC-153) shows them only on the
+/// picked row, so there the focus reaching Add an account is the sign.
+/// Input: the TUI on its first Home, on an engine with no account. Output: none; panics.
 fn setup_checked(pty: &Pty) {
-    let screen = pty.until("Home's setup panel shows its tools check", |now| {
-        now.contains("Get set up")
-            && (now.contains("[x] Install tools") || now.contains("Missing: "))
+    let screen = pty.until("Home's side panel settles on its tools check", |now| {
+        (now.contains("Get set up")
+            && (now.contains("[x] Install tools") || now.contains("Missing: ")))
+            || (now.contains("Learn CrazyAgent") && enter_hint(now) == Some("Add an account"))
     });
     assert!(
         enter_hint(&screen).is_some(),

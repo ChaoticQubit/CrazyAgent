@@ -360,13 +360,20 @@ def setup(term, root):
         term.wait("[ Add account ]   [> Skip for now ]", 10)
         term.key(ENTER)
         way = "Continue, then Skip for now on the Accounts step,"
-    term.wait("Get set up", 30)
+    home_panel(term, 30)
     assert not (root / "setup").exists(), "first-run Setup installed something"
     step("first-run Setup checked this computer; %s went Home without installing" % way)
 
 
+def home_panel(term, limit):
+    """Waits for Home's side panel: Get set up, or Learn CrazyAgent while the DEC-153 guide
+    shows. Takes the terminal and the seconds to wait. Returns the screen."""
+    return term.until("waiting for Home's side panel", limit,
+                      lambda current: "Get set up" in current or "Learn CrazyAgent" in current)
+
+
 def home_empty(term):
-    screen = term.wait("Get set up", 10)
+    screen = home_panel(term, 10)
     assert "Add an account" in screen and "Create a pool" in screen, screen
     assert PROJECT not in screen, screen
     assert "Pick your projects folder with f." not in screen, screen
