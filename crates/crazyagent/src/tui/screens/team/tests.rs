@@ -2682,7 +2682,7 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     );
     let restart = rows[4..10].join("\n");
     assert!(
-        restart.contains("It starts again when you open this view again or press n for a new"),
+        restart.contains("It starts again when you open this view again or press + for a new"),
         "{restart}"
     );
     assert!(restart.contains("session."), "{restart}");

@@ -59,7 +59,7 @@ pub(in crate::tui) const MASTER_NO_SESSION: &str =
     "No master session opened, so this conversation won't be in Sessions.";
 const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
-    "It starts again when you open this view again or press n for a new session.";
+    "It starts again when you open this view again or press + for a new session.";
 const MASTER_START_AGAIN: &str = "s starts it again, on the same conversation.";
 const MASTER_HEAD_ROWS: u16 = 1;
 const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
