@@ -167,6 +167,34 @@ fn the_npm_prefix_bin_comes_from_the_found_npm_asked_with_a_cleared_environment(
 }
 
 #[test]
+fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders() {
+    let (_folder, home) = scratch();
+    let tools = home.join("tools");
+    let other = home.join("other");
+    let global = home.join("global/bin");
+    for folder in [&tools, &other, &global] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let npm = program(&tools.join("npm"), "#!/bin/sh\necho \"$HOME/global\"\n");
+    let places = || crate::tools::Places::new(Vec::new(), Some(home.clone()));
+    assert_eq!(
+        probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
+        [global, tools.clone(), other.clone()]
+    );
+    assert_eq!(
+        probed(&[other.clone()], places(), &home, "owner"),
+        [other.clone()],
+        "no npm found, the login folders alone"
+    );
+    std::fs::write(&npm, "#!/bin/sh\necho \"$HOME/absent\"\n").unwrap();
+    assert_eq!(
+        probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
+        [tools, other],
+        "a prefix with no bin folder adds nothing"
+    );
+}
+
+#[test]
 fn a_version_is_the_first_word_with_a_digit_and_a_program_reports_its_own() {
     assert_eq!(reported(b"tmux 3.4\n").as_deref(), Some("3.4"));
     assert_eq!(
@@ -189,6 +217,12 @@ fn a_version_is_the_first_word_with_a_digit_and_a_program_reports_its_own() {
         probe_version(&tool, VERSION_LIMIT).as_deref(),
         Some("1.2.1--version"),
         "asked with --version alone"
+    );
+    let tmux = program(&root.join("tmux"), "#!/bin/sh\necho \"tmux 3.$#$1\"\n");
+    assert_eq!(
+        probe_version(&tmux, VERSION_LIMIT).as_deref(),
+        Some("3.1-V"),
+        "tmux is asked with -V, which it answers, not --version"
     );
     let hanging = program(&root.join("hangs"), "#!/bin/sh\nexec /bin/sleep 30\n");
     let started = Instant::now();

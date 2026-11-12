@@ -96,6 +96,20 @@ pub(crate) fn npm_bin(
     unimplemented!("probe npm_bin")
 }
 
+/// The folders the probes add, in order: the `bin` folder of the global prefix of the npm
+/// the places find once the login folders are added, then the login folders, each kept as
+/// [`kept`] keeps them. Inputs: the kept login folders, the places, HOME and the user name.
+/// Output: the folders.
+pub(crate) fn probed(
+    login: &[PathBuf],
+    places: super::Places,
+    home: &Path,
+    user: &str,
+) -> Vec<PathBuf> {
+    let _ = (login, places, home, user);
+    unimplemented!("probe probed")
+}
+
 /// A version from a version report such as `tmux 3.4` or `codex-cli v0.164.0`: the first
 /// word holding a digit, without a leading `v`, made of digits, letters, `.`, `-` and `+`,
 /// at most [`VERSION_BYTES_MAX`] bytes. Input: the report. Output: the version, or none.
