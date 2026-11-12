@@ -452,8 +452,9 @@ pub(crate) fn fell_back(
     Ok(true)
 }
 
-/// Forgets a told fallback once a model runs again, so a later fallback is told anew.
-/// Takes the database, the project, the harness and the model. Returns a SQLite failure.
+/// Forgets a told fallback once a model runs again, so a later fallback is told anew; with
+/// none told it only reads, so a start takes no write lock. Takes the database, the
+/// project, the harness and the model. Returns a SQLite failure.
 pub(crate) fn ran(
     db: &Connection,
     project: &ProjectId,
@@ -461,6 +462,16 @@ pub(crate) fn ran(
     model: &str,
 ) -> Result<(), EngineError> {
     if !table(db, "team_model_fallbacks")? {
+        return Ok(());
+    }
+    let told: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_model_fallbacks WHERE project=?1 AND harness=?2 AND model=?3)",
+            params![project.as_str(), harness, model],
+            |row| row.get(0),
+        )
+        .map_err(super::error)?;
+    if !told {
         return Ok(());
     }
     db.execute(
