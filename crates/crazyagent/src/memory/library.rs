@@ -830,6 +830,25 @@ pub(crate) fn recall(
     Ok(Ok(found))
 }
 
+/// Finds the memories [`recall`] finds, with the hybrid ranking note when the search index
+/// answered (P-14), worded for memories ([`recall_note`]); the scan carries none. Inputs and
+/// refusals as [`recall`]. Output: the memories and the note.
+pub(crate) fn recall_ranked(
+    connection: &mut rusqlite::Connection,
+    project: &ProjectId,
+    query: &str,
+) -> Result<Result<(Vec<SavedMemory>, Option<String>), String>, EngineError> {
+    let _ = (connection, project, query);
+    unimplemented!("recall_ranked")
+}
+
+/// A hybrid ranking note as recall shows it: a note about "this history" speaks of the saved
+/// memories instead. Input: the note. Output: the note for recall.
+pub(crate) fn recall_note(note: &str) -> String {
+    let _ = note;
+    unimplemented!("recall_note")
+}
+
 /// Answers recall from the search index while it holds every memory change (DEC-105): the
 /// best BM25 matches first, each reloaded from the library and kept only when it is this
 /// project's or app-wide, not waiting for the owner and free of hidden characters, at most
