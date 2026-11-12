@@ -52,6 +52,11 @@ export const DEMO_REFUSALS: Readonly<Record<string, string>> = {
   demo_seed_failed: "CrazyAgent couldn't write the demo's files into your projects folder. Check that it can be written to, then try again.",
 };
 
+/** What Create the demo says when the engine's answer could not be confirmed, and when the
+ * engine has no demo yet. */
+export const DEMO_UNCONFIRMED = "We couldn't confirm the demo was made. Check your projects before trying again.";
+export const DEMO_NOT_READY = "Not ready yet: this engine has no demo.";
+
 /** The line the demo's page shows when the demo was made but the picked pool could not be
  * given to it, so its master has no account until the owner chooses the pool again. */
 export const DEMO_POOL_UNASSIGNED = "The demo was made, but the pool you picked wasn't given to it. Choose the pool again in the demo's Settings, Pool, before you send the goal.";

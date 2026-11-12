@@ -1,14 +1,13 @@
 import { useContext, useEffect, useState } from "react";
 import { checkUnconfirmed, listAccounts, nextGeneration, poolSummaries, receiptResult, type AccountView, type PoolSummary } from "../../api";
 import { createDemo, loadDemo, type DemoView } from "../../api-demo";
-import { needsReconcile, receiptState, settledReceipt } from "../../api-projects";
+import { setProjectPool } from "../../api-projects";
 import { SessionContext, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Notice, PageHeader, Panel, RadioCard, Skeleton, formatRoute } from "../../ui";
-import { DEMO_POLL_MS, demoEntry, demoPoolChoices, pickable, refusalCopy, type DemoEntry, type DemoPoolChoice } from "./model";
+import { DEMO_POLL_MS, demoEntry, demoPoolChoices, makeDemo, pickable, type DemoEntry, type DemoPoolChoice } from "./model";
+import { flash, go } from "../project/flash";
 import { DEMO_ABOUT, DEMO_COST_NOTE, DEMO_CREATE, DEMO_ENTRY, DEMO_EXISTS, DEMO_NO_POOL, DEMO_NO_POOL_ACTION, DEMO_PICK } from "./words";
 import "./demo.css";
-
-const UNCONFIRMED = "We couldn't confirm the demo was made. Check your projects before trying again.";
 
 /** Reads the demo, and reads it again every few seconds while some step is still open, so the
  * entry, the page and the guide follow the engine. Output: the latest read and a reload. */
@@ -105,9 +104,10 @@ function choicesOf(view: Loaded<DemoView>, pools: Loaded<PoolSummary[]>, account
   return { kind: "ok", value: demoPoolChoices(view.value, pools.value, accounts.value) };
 }
 
-/** The demo page: reads the demo, the pools and the accounts, keeps the owner's pick and
- * sends Create the demo, then opens the new demo's Conversation, where the guide starts. A
- * refused or unconfirmed create keeps the pick and says why. Output: the page. */
+/** The demo page: reads the demo, the pools and the accounts, keeps the owner's pick, makes
+ * the demo and gives it the picked pool, then opens its Conversation, where the guide starts,
+ * with a line there when the pool could not be given. A refused or unconfirmed create keeps
+ * the pick and says why. Output: the page. */
 export function DemoPage() {
   const session = useContext(SessionContext);
   const [view, reloadView] = useDemo();
@@ -122,28 +122,25 @@ export function DemoPage() {
     if (pending || picked === null || choices.kind !== "ok" || !pickable(choices.value, picked)) return;
     setPending(true);
     setError(null);
-    const sent = await createDemo(picked, nextGeneration());
-    if (sent.kind !== "ok") {
+    const made = await makeDemo(picked, {
+      create: createDemo,
+      reconcile: async () => {
+        const settled = await checkUnconfirmed();
+        session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
+        return settled;
+      },
+      assign: setProjectPool,
+      generation: nextGeneration,
+    });
+    if (made.kind === "refused") {
       setPending(false);
-      setError(sent.kind === "not_ready" ? "Not ready yet: the demo isn't in this engine." : refusalCopy(sent));
-      return;
-    }
-    let receipt = sent.value;
-    if (needsReconcile(receipt)) {
-      const settled = await checkUnconfirmed();
-      session?.noteResult(settled.kind === "ok" ? receiptResult(settled.value) : settled);
-      receipt = settledReceipt(receipt, settled);
-    }
-    const state = receiptState(receipt);
-    const id = receipt.project_id;
-    if (state.kind !== "applied" || !id) {
-      setPending(false);
-      setError(state.kind === "rejected" ? refusalCopy({ code: state.code }) : UNCONFIRMED);
+      setError(made.message);
       reloadView();
       return;
     }
     await session?.refreshProjects();
-    window.location.hash = formatRoute({ name: "project", id, tab: "conversation" });
+    if (made.note) flash(made.note);
+    go(`/projects/${encodeURIComponent(made.project)}/conversation`);
   }
 
   return <DemoPageView view={view} choices={choices} picked={picked} pending={pending} error={error}
