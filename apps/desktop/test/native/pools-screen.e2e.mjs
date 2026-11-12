@@ -329,7 +329,7 @@ describe("Settings, Pools as one screen on the real desktop app and a writable e
     it(`the default for every pool, ${order.label}, orders a pool on Default`, async () => {
       await click(option(APP, order.label));
       await rowsAre(lineup(order.rows), order.value);
-      await until(() => says("main .pool-app-hint", order.hint), UI_MS, `the hint did not follow ${order.label}`);
+      await until(() => says(`main section[aria-label=${JSON.stringify(APP)}] .pool-app-hint`, order.hint), UI_MS, `the hint did not follow ${order.label}`);
       await until(async () => await picked(POOL_ORDER) === `Default (${order.label})`, UI_MS, `Default did not name ${order.label}`);
       await orderSaid(`Order comes from ${order.label}, the default for every pool`);
       const saved = await command("desktop_account_schedule", {});
