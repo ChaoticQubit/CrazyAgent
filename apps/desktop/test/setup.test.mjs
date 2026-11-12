@@ -75,3 +75,21 @@ test("every setup command the client calls is a desktop command the bridge maps 
     assert.doesNotMatch(client.errorMessage({ code }), / \([a-z0-9_]+\)$/, code);
   }
 });
+
+test("the Node row installs Node alone through its own desktop command, which the bridge maps plainly", () => {
+  const source = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge.rs", import.meta.url), "utf8");
+  const setup = readFileSync(new URL("../src-tauri/src/bridge/intake.rs", import.meta.url), "utf8");
+  const commands = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.equal(typeof client.installDependency, "function");
+  const match = source.match(/export function installDependency\([^)]*\)[^{]*\{\s*return invoke<SetupStatus>\("(desktop_[a-z_]+)", \{ name, generation \}\)/);
+  assert.ok(match, "installDependency must invoke a desktop command with the name and a generation");
+  assert.equal(match[1], "desktop_install_dependency");
+  assert.ok(commands.includes("async fn desktop_install_dependency("), "the command exists");
+  assert.match(commands, /generate_handler!\[[^\]]*\bdesktop_install_dependency,/, "the command is registered");
+  assert.match(setup, /pub async fn install_dependency\([^)]*name: Dependency,\s*generation: u64,?\s*\) -> Result<SetupStatus, BridgeError>/);
+  assert.match(setup, /pub async fn install_dependency\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::InstallDependency \{ name \}, generation\)/);
+  assert.ok(bridge.includes(`=> ("install_dependency", None, None)`));
+  assert.ok(source.includes(`"install_dependency"`), "the pending change kind is known");
+  assert.match(source, /export type DependencyName = "tmux" \| "uv" \| "graphify" \| "node";/);
+});

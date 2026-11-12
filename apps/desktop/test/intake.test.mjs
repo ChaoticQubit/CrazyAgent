@@ -1152,3 +1152,28 @@ test("after an iCloud download Add folder adds only when it finished and was nei
   assert.deepEqual(intake.icloudOutcome("go", { kind: "not_ready" }), { next: "say", text: "Downloading from iCloud isn't in this build." });
   for (const result of [ok, ended, { kind: "not_ready" }]) assert.deepEqual(intake.icloudOutcome("left", result), { next: "none" });
 });
+
+test("the Node row says what Node is for and offers its own Install only while it is missing or failed and setup is idle", () => {
+  const node = (state) => ({ name: "node", label: "Node.js", state });
+  const status = (row, running = false) => ({ dependencies: [row], pack: [], running, version: 1 });
+  const missing = node({ state: "missing" });
+  assert.equal(intake.dependencyView(missing).title, "Node.js");
+  assert.equal(intake.dependencyView(missing).about, "Runs the harnesses CrazyAgent installs with npm.");
+  for (const row of [missing, node({ state: "failed", reason: "The download failed." })]) {
+    assert.equal(intake.rowInstall(row, status(row)), true, row.state.state);
+  }
+  for (const state of [{ state: "found", version: "22.11.0" }, { state: "installed", version: "26.13.1" }, { state: "installing" }, { state: "checking" }]) {
+    assert.equal(intake.rowInstall(node(state), status(node(state))), false, state.state);
+  }
+  assert.equal(intake.rowInstall(missing, status(missing, true)), false, "not while a setup run goes on");
+  const uv = { name: "uv", label: "uv", state: { state: "missing" } };
+  assert.equal(intake.rowInstall(uv, status(uv)), false, "only Node installs alone");
+  const found = (name) => ({ name, label: name, state: { state: "found", version: "1.0" } });
+  const tools = { kind: "ok", value: { dependencies: [found("tmux"), found("uv"), found("graphify"), missing], pack: [], running: false, version: 1 } };
+  assert.equal(intake.toolsStep(tools).done, true, "Node is not one of the tools the first run needs");
+  for (const file of ["../src/screens/intake/setup-step.tsx", "../src/screens/settings/pack.tsx"]) {
+    const screen = readFileSync(new URL(file, import.meta.url), "utf8");
+    assert.match(screen, /rowInstall\(dependency, /, file);
+    assert.match(screen, /installDependency\(dependency\.name\)/, file);
+  }
+});
