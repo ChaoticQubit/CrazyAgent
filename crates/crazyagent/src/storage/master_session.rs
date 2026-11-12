@@ -1209,13 +1209,16 @@ fn preparation(
         .attempt
         .as_ref()
         .ok_or_else(|| error("master_attempt_missing"))?;
+    let bound = record.auth.binding();
+    let live = matches!(
+        turn.phase,
+        MasterTurnPhase::Prepared | MasterTurnPhase::Delivering | MasterTurnPhase::Running
+    );
     if record.attempt_id != attempt.request.id
-        || record.auth.binding().connection != attempt.connection
+        || bound.connection != attempt.connection
         || matches!(record.auth, MasterBootstrapAuth::RcliConfigured(_))
-            && (
-                &record.auth.binding().config_id,
-                record.auth.binding().source_hash.as_str(),
-            ) != session.binding()
+            && (bound.config_id != attempt.config_id
+                || !session.admits_binding(&bound.config_id, &bound.source_hash, live))
         || record.lease.project_id != session.project_id
         || record.lease.task_id != session.bootstrap_task_id
         || record.lease.owner_session != session.session_id
