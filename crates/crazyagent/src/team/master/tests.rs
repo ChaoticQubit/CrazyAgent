@@ -3375,6 +3375,12 @@ fn the_master_merges_after_the_owner_says_accept_all_and_not_before() {
     say(&fixture, "engine", "Accept all.", changed + 1);
     say(&fixture, "owner", "don't accept all", changed + 1);
     say(&fixture, "owner", "accept all of them later", changed + 1);
+    say(
+        &fixture,
+        "owner",
+        "The owner answered your question 3 (\"Merge now?\"):\naccept all",
+        changed + 1,
+    );
     let (waiting, refused) = merge(&mut fixture);
     assert!(waiting.starts_with("Waiting for the owner:"), "{waiting}");
     assert!(!refused);

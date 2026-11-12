@@ -815,7 +815,11 @@ fn blocking(
         return Ok(None);
     }
     let files = dirty_paths(&owner, repository, &tip, &tree)?;
-    if files.len() > super::DIRTY_FILES_MAX {
+    if files.len() > super::DIRTY_FILES_MAX
+        || files
+            .iter()
+            .any(|file| file.len() > super::DIRTY_PATH_BYTES_MAX)
+    {
         return Err(failure("changes_too_large"));
     }
     Ok(Some((reference, tip, files)))
