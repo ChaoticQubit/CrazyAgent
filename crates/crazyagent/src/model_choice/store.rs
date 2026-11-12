@@ -28,6 +28,12 @@ CREATE TABLE IF NOT EXISTS model_custom (
     state TEXT NOT NULL CHECK (state IN ('pending', 'verified', 'failed')),
     checked_ms INTEGER NOT NULL,
     PRIMARY KEY (harness, model)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS model_live (
+    harness TEXT NOT NULL PRIMARY KEY,
+    models_json TEXT NOT NULL,
+    reported INTEGER NOT NULL CHECK (reported IN (0, 1)),
+    read_ms INTEGER NOT NULL
 ) WITHOUT ROWID;";
 
 /// What a spawn's model pick does: run on the model named, none for the account's own,
@@ -85,7 +91,31 @@ pub fn values(
         candidates,
         qualified: reason.is_none(),
         reason,
+        live_note: None,
     })
+}
+
+/// Lists the model ids a harness offers (DEC-150 addendum 11): its shipped ids first, then
+/// the ids its last good live read reported, with every earlier one a saved slot still
+/// names. Every launch, pick and Models read checks against this list. Inputs: the engine
+/// database and the harness name. Output: the ids, or `model_choice_unavailable`.
+pub fn catalog(db: &Connection, harness: &str) -> Result<Vec<String>, EngineError> {
+    let _ = db;
+    Ok(super::catalog(harness))
+}
+
+/// Keeps what one live read of a harness's model list found: a reported list replaces the
+/// kept one, keeping each earlier id a saved slot of the harness still names, so a saved
+/// model is never dropped; none keeps the list and marks the read unreported. Inputs: the
+/// engine database, the harness name and the reported ids, none when it reported none.
+/// Output: Ok, or `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn live_record(
+    db: &Connection,
+    harness: &str,
+    read: Option<&[String]>,
+) -> Result<(), EngineError> {
+    let _ = (db, harness, read);
+    Ok(())
 }
 
 /// Sets one slot at one scope as the next version of its item, when the owner read the

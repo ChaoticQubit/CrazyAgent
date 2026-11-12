@@ -20,6 +20,7 @@ const page = (rows = {}, extra = {}) => ({
     candidates: candidates(extra.owned ?? []),
     qualified: extra.qualified ?? true,
     reason: extra.reason ?? null,
+    live_note: extra.live_note ?? null,
   },
   project_id: extra.project_id ?? null, qualified_versions: ["2.1.309"], sources: ["https://docs.anthropic.com/en/docs/claude-code/model-config"],
 });
@@ -213,7 +214,7 @@ test("the model rules show both rules with every option and the one in force", (
 
 test("every call names its command once with exactly the window's arguments", () => {
   const source = readFileSync(new URL("../src/api-model-choice.ts", import.meta.url), "utf8");
-  assert.match(source, /call<ModelsPage>\("desktop_model_choice", \{ harness, projectId \}\)/);
+  assert.match(source, /call<ModelsPage>\("desktop_model_choice", \{ harness, projectId, fresh \}\)/);
   assert.match(source, /call<void>\("desktop_set_model_choice", \{ harness, projectId, slot, value, version \}\)/);
   assert.match(source, /call<void>\("desktop_reset_model_choice", \{ harness, projectId, slot, version \}\)/);
   assert.match(source, /call<ModelAdded>\("desktop_add_model", \{ harness, model \}\)/);
@@ -227,4 +228,24 @@ test("the Models section mounts once on the app and the project harness page", (
   const project = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.equal((app.match(/<ModelsSection harness=\{entry\.id\} name=\{entry\.name\} projectId=\{null\} \/>/g) ?? []).length, 1);
   assert.equal((project.match(/<ModelsSection key=\{current\.id\} harness=\{current\.id\} name=\{current\.name\} projectId=\{data\.id\} \/>/g) ?? []).length, 1);
+});
+
+test("the engine's live list note shows word for word under the catalog line, and the ids stay", () => {
+  const note = "live list not reported by Claude Code";
+  const unreported = page({}, { live_note: note });
+  assert.equal(client.liveLine(unreported.models), `${note}.`);
+  assert.equal(client.liveLine(page().models), "");
+  const markup = section(ok(unreported));
+  assert.match(markup, /live list not reported by Claude Code\./);
+  assert.match(markup, /<select id="models-master"/, "the shipped ids can still be chosen");
+  assert.doesNotMatch(section(ok(page())), /live list not reported/);
+});
+
+test("the Models section reads the live list only when it opens and on Retry, never after a change", () => {
+  const source = readFileSync(new URL("../src/screens/settings/models-section.tsx", import.meta.url), "utf8");
+  assert.match(source, /loadModels\(harness, projectId, live\)/, "the read names whether it is fresh");
+  assert.match(source, /const live = fresh\.current;\s*fresh\.current = false;/, "only the first read after an open is fresh");
+  assert.match(source, /function retry\(\) \{\s*fresh\.current = true;\s*reload\(\);\s*\}/, "Retry reads it again");
+  assert.match(source, /onRetry=\{retry\}/);
+  assert.doesNotMatch(source, /onRetry=\{reload\}/, "Retry never re-reads stale");
 });

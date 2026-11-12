@@ -49,6 +49,11 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     await shot("models-app-open");
   });
 
+  it("says the live list was not reported by Claude Code, which has no list command, and keeps the shipped ids", async () => {
+    await until(async () => (await text("main")).includes("live list not reported by Claude Code."), UI_MS, "the engine's live list note did not show");
+    assert(await (await $('#models-master option[value="opus"]')).isExisting(), "the shipped ids stay");
+  });
+
   it("choosing a master model and Save stores it app-wide", async () => {
     await choose("#models-master", "opus");
     await click('button[aria-label="Save Master model"]');

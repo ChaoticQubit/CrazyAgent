@@ -48,6 +48,8 @@ enum Action {
     Values {
         harness: String,
         project: Option<ProjectId>,
+        #[serde(default)]
+        fresh: bool,
     },
     Set {
         harness: String,
@@ -149,6 +151,7 @@ impl OwnerClient {
         let action = Action::Values {
             harness: harness.into(),
             project,
+            fresh: false,
         };
         match self.model_choice_exchange(action).await? {
             Reply::Values { models } => Ok(models),
@@ -370,6 +373,14 @@ async fn handle(
     .map_err(|_| failure("model_choice_unavailable"))?
 }
 
+/// Names the harness whose model list one request reads live: only a Models view open
+/// (`fresh`, DEC-150 addendum 11), never a re-read, a change or a rule. Input: the action.
+/// Output: the harness, or none.
+fn live_due(action: &Action) -> Option<&str> {
+    let _ = action;
+    None
+}
+
 /// Reads one model choice request from an owner frame body, at most `REQUEST_BYTES_MAX`
 /// bytes. Input: the body. Output: the action, or `model_choice_request_bounds` or
 /// `model_choice_request_invalid`.
@@ -398,7 +409,9 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
         )
     };
     match action {
-        Action::Values { harness, project } => Ok(Reply::Values {
+        Action::Values {
+            harness, project, ..
+        } => Ok(Reply::Values {
             models: store::values(
                 &db,
                 &harness,

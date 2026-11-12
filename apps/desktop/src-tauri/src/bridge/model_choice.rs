@@ -494,6 +494,7 @@ mod tests {
                 .collect(),
             qualified: true,
             reason: None,
+            live_note: None,
         };
         let all = || Slot::ALL.into_iter().map(row).collect::<Vec<_>>();
         let page = page_of(models(all(), "claude-code", 2), "claude-code", None).unwrap();

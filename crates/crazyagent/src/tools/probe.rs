@@ -413,17 +413,27 @@ fn probe_folders() -> (Vec<PathBuf>, bool) {
 /// standard output when it exits with success in time, else none.
 #[cfg(unix)]
 pub(crate) fn run_timed(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
+    run_bounded(command, limit, OUTPUT_BYTES_MAX)
+}
+
+/// Runs a command as [`run_timed`] does, keeping at most `cap` bytes of its standard
+/// output; a program that writes more blocks on the full pipe and is killed at the limit.
+/// Inputs: the command, the limit and the cap, at least one byte. Output: the standard
+/// output when it exits with success in time, else none.
+#[cfg(unix)]
+pub(crate) fn run_bounded(command: &mut Command, limit: Duration, cap: usize) -> Option<Vec<u8>> {
     use std::os::unix::process::CommandExt;
-    run_leading(command.process_group(0), limit)
+    assert!(cap > 0);
+    run_leading(command.process_group(0), limit, cap)
 }
 
 /// Runs a command that leads its own process group, made so by the caller or by starting a
 /// new session itself, as [`run_timed`] runs it. The output is read without a thread from a
 /// non-blocking read end, closed when the run ends: at most [`OUTPUT_GRACE`] after the
 /// program exits, even when a process outside the group still holds the write end.
-/// Inputs: the command and the limit. Output: the standard output, or none.
+/// Inputs: the command, the limit and the output cap. Output: the standard output, or none.
 #[cfg(unix)]
-fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
+fn run_leading(command: &mut Command, limit: Duration, cap: usize) -> Option<Vec<u8>> {
     use std::process::Stdio;
     command
         .stdin(Stdio::null())
@@ -440,7 +450,7 @@ fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
         if !nonblocking {
             break None;
         }
-        drained(&mut stdout, &mut output);
+        drained(&mut stdout, &mut output, cap);
         match child.try_wait() {
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             Ok(None) | Err(_) => break None,
@@ -457,11 +467,11 @@ fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
         return None;
     }
     let grace = Instant::now() + OUTPUT_GRACE;
-    while drained(&mut stdout, &mut output) == Pipe::Open && Instant::now() < grace {
+    while drained(&mut stdout, &mut output, cap) == Pipe::Open && Instant::now() < grace {
         std::thread::sleep(POLL);
     }
     drop(stdout);
-    assert!(output.len() <= OUTPUT_BYTES_MAX);
+    assert!(output.len() <= cap);
     Some(output)
 }
 
@@ -472,17 +482,15 @@ enum Pipe {
     Ended,
 }
 
-/// Reads what a run's non-blocking output holds now, at most [`OUTPUT_BYTES_MAX`] in all.
-/// Inputs: the read end and the bytes read so far. Output: whether more may come; a full
-/// buffer, the end or a read error ends it.
+/// Reads what a run's non-blocking output holds now, at most `cap` bytes in all.
+/// Inputs: the read end, the bytes read so far and the cap. Output: whether more may come;
+/// a full buffer, the end or a read error ends it.
 #[cfg(unix)]
-fn drained(stdout: &mut std::process::ChildStdout, output: &mut Vec<u8>) -> Pipe {
+fn drained(stdout: &mut std::process::ChildStdout, output: &mut Vec<u8>, cap: usize) -> Pipe {
     use std::io::{ErrorKind, Read};
     let mut chunk = [0_u8; 4096];
     loop {
-        let room = OUTPUT_BYTES_MAX
-            .saturating_sub(output.len())
-            .min(chunk.len());
+        let room = cap.saturating_sub(output.len()).min(chunk.len());
         if room == 0 {
             return Pipe::Ended;
         }
@@ -545,7 +553,7 @@ pub(crate) fn login_path(
         .env("SHELL", shell)
         .env("TERM", "dumb")
         .env("PATH", SYSTEM_PATH);
-    between_markers(&run_leading(&mut command, limit)?)
+    between_markers(&run_leading(&mut command, limit, OUTPUT_BYTES_MAX)?)
 }
 
 /// The folders of a PATH value a launch may search: absolute plain folders of bounded

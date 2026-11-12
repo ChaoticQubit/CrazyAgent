@@ -319,6 +319,7 @@ fn the_largest_models_section_fits_one_owner_frame() {
         candidates,
         qualified: false,
         reason: Some("r".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX)),
+        live_note: Some(crate::model_choice::live::not_reported("claude-code")),
     };
     for reply in [
         Reply::Values {
@@ -332,4 +333,52 @@ fn the_largest_models_section_fits_one_owner_frame() {
         let frame = encode_frame(&reply).unwrap();
         assert!(frame.len() <= crate::protocol::FRAME_BYTES_MAX + 4);
     }
+}
+
+#[test]
+fn only_a_models_view_open_reads_the_live_list() {
+    let action = |body: Value| parse(&serde_json::to_vec(&body).unwrap()).unwrap();
+    let open = action(
+        json!({"model_choice": {"kind": "values", "harness": "codex", "project": null, "fresh": true}}),
+    );
+    assert_eq!(live_due(&open), Some("codex"));
+    let again = action(
+        json!({"model_choice": {"kind": "values", "harness": "codex", "project": null, "fresh": false}}),
+    );
+    assert_eq!(
+        live_due(&again),
+        None,
+        "a re-read after a change starts no harness"
+    );
+    let old_client =
+        action(json!({"model_choice": {"kind": "values", "harness": "codex", "project": null}}));
+    assert_eq!(live_due(&old_client), None);
+    let add =
+        action(json!({"model_choice": {"kind": "add", "harness": "codex", "model": "gpt-x"}}));
+    assert_eq!(live_due(&add), None);
+    assert_eq!(
+        live_due(&action(json!({"model_choice": {"kind": "rules"}}))),
+        None
+    );
+}
+
+#[test]
+fn the_models_reply_carries_the_live_note_and_a_reported_list() {
+    let (_tmp, root) = engine();
+    assert_eq!(
+        values(&root, None).live_note.as_deref(),
+        Some("live list not reported by Codex")
+    );
+    let db = versioned::open(&root).unwrap();
+    store::live_record(&db, "codex", Some(&["gpt-live".to_owned()])).unwrap();
+    let models = values(&root, None);
+    assert_eq!(models.live_note, None);
+    assert!(
+        models
+            .candidates
+            .iter()
+            .any(|candidate| candidate.id == "gpt-live"
+                && candidate.origin == crate::model_choice::Origin::Catalog),
+        "{models:?}"
+    );
 }

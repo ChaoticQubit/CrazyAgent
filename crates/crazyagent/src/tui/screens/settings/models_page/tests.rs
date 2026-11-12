@@ -59,6 +59,7 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
         candidates,
         qualified: true,
         reason: None,
+        live_note: None,
     }
 }
 
@@ -579,6 +580,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         candidates: vec![],
         qualified: true,
         reason: None,
+        live_note: None,
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));
@@ -680,4 +682,24 @@ fn the_page_stands_for_its_place_and_m_on_the_harness_page_opens_it() {
     }
     let opened = crate::tui::screens::open(&place, &mut context);
     assert_eq!(opened.place(), Some(place));
+}
+
+#[test]
+fn the_engines_live_list_note_shows_word_for_word_under_the_catalog_line() {
+    let mut shell = app_page(Models {
+        live_note: Some("live list not reported by Claude Code".into()),
+        ..plain_models()
+    });
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("live list not reported by Claude Code."),
+        "{text}"
+    );
+    assert!(
+        text.contains("Add a model id"),
+        "the shipped ids stay: {text}"
+    );
+    let mut shell = app_page(plain_models());
+    let text = screen(&mut shell);
+    assert!(!text.contains("live list not reported"), "{text}");
 }

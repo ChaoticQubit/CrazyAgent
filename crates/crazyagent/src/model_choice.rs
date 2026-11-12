@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+pub mod live;
 pub mod rules;
 pub mod store;
 #[cfg(all(test, unix))]
@@ -134,9 +135,10 @@ pub struct Row {
 }
 
 /// A harness's Models section at one scope: its three slots in page order, every
-/// candidate id, the catalog's first, then the owner's, and whether the shipped catalog
-/// was checked on the installed harness version, with the reason when it was not. An
-/// unchecked version keeps the catalog ids (DEC-150 G1).
+/// candidate id, the catalog's first, then the owner's, whether the shipped catalog was
+/// checked on the installed harness version, with the reason when it was not (an unchecked
+/// version keeps the catalog ids, DEC-150 G1), and the line shown while no list the
+/// harness reported itself is in use (DEC-150 addendum 11).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Models {
@@ -145,6 +147,7 @@ pub struct Models {
     pub candidates: Vec<Candidate>,
     pub qualified: bool,
     pub reason: Option<String>,
+    pub live_note: Option<String>,
 }
 
 /// What a set or reset did: saved as the next version, refused as stale with the current
