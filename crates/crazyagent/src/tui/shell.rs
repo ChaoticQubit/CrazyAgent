@@ -1305,9 +1305,9 @@ mod tests {
 
     #[test]
     fn show_and_every_tick_read_the_notification_counts_once() {
-        let mut ctx = ctx();
-        ctx.link = Link::Connecting;
-        let mut shell = Shell::new(ctx);
+        let mut connecting = ctx();
+        connecting.link = Link::Connecting;
+        let mut shell = Shell::new(connecting);
         notice_reads(&mut shell);
         shell.arrive(Arrival::Connected(None));
         assert_eq!(

@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+#[path = "engine_support/config.rs"]
 mod engine_support;
 
 use crazyagent::engine::bootstrap::EngineService;
