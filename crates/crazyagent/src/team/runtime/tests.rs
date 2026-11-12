@@ -4544,6 +4544,7 @@ fn terminal_ended_notes(fixture: &Fixture) -> usize {
 
 /// Reads one agent's end rows, oldest first. Inputs: the fixture and the agent. Output: each
 /// row's cause.
+#[cfg(target_os = "macos")]
 fn end_causes(fixture: &Fixture, agent: i64) -> Vec<String> {
     fixture
         .connection
