@@ -8,7 +8,9 @@ use crazyagent::engine::owner::{
     OwnerResponse, OwnerResult,
 };
 use crazyagent::protocol::*;
+use crazyagent::usage::service::{UsageService, start_for_engine};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -58,6 +60,27 @@ async fn await_stop() -> FixtureResult<()> {
     }
 }
 
+/// Starts the engine's usage upkeep beside the fixture engine when the native run sets
+/// `CRAZYAGENT_DESKTOP_TEST_USAGE_UPKEEP=1`, as the engine binary does for a team. It gets no
+/// harness executable and no lookup, so it never spawns a tool or calls a provider, and an
+/// account that is not signed in reads nothing. Input: the fixture root. Output: the upkeep,
+/// none when not asked for, or why it could not start.
+fn usage_upkeep(root: &Path) -> FixtureResult<Option<UsageService>> {
+    match std::env::var_os("CRAZYAGENT_DESKTOP_TEST_USAGE_UPKEEP") {
+        None => Ok(None),
+        Some(value) if value == "1" => start_for_engine(
+            root,
+            &root.join("g"),
+            &root.join("p"),
+            BTreeMap::new(),
+            None,
+        )
+        .map(Some)
+        .map_err(|problem| format!("usage upkeep did not start: {problem}").into()),
+        Some(_) => Err("the usage upkeep switch takes only 1".into()),
+    }
+}
+
 async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()> {
     if !root.is_absolute() || std::fs::read_dir(root)?.next().is_some() {
         return Err("fixture requires a new empty absolute directory".into());
@@ -76,10 +99,20 @@ async fn serve(root: &Path, projects: &Path, metadata: bool) -> FixtureResult<()
         let config = resolve_config(&root.join("g"), &root.join("p"))?;
         EngineService::start(root, "e.sock", &config, &stopped).await?
     };
+    let upkeep = match usage_upkeep(root) {
+        Ok(upkeep) => upkeep,
+        Err(error) => {
+            service.shutdown().await?;
+            return Err(error);
+        }
+    };
     let result = match attach(root, projects).await {
         Ok(()) => await_stop().await,
         Err(error) => Err(error),
     };
+    if let Some(upkeep) = upkeep {
+        let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
+    }
     let cleanup = service.shutdown().await;
     cleanup?;
     result

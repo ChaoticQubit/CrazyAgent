@@ -67,6 +67,7 @@ function environment() {
     CRAZYAGENT_DESKTOP_TEST_FIXTURE: fixture,
     CRAZYAGENT_DESKTOP_TEST_EVIDENCE: evidence,
     CRAZYAGENT_DESKTOP_TEST_SUITE: suite,
+    ...(suite === "pools-spend" ? { CRAZYAGENT_DESKTOP_TEST_USAGE_UPKEEP: "1" } : {}),
   } };
 }
 
