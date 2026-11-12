@@ -229,6 +229,7 @@ fn request(world: &World, cwd: &Path, tools: bool) -> LaunchRequest {
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     }
 }
 

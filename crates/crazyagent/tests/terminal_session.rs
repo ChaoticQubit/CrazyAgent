@@ -305,6 +305,7 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         sandbox_profile: profile,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     };
     let agent = AgentId::new(name).unwrap();
     let session = TerminalSession::start(host.clone(), agent.clone(), request, None).unwrap();
@@ -621,6 +622,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     };
     let agent = AgentId::new("stand-in-3").unwrap();
     let session = TerminalSession::start(host.clone(), agent.clone(), request, None).unwrap();

@@ -817,6 +817,7 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     })
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -925,6 +926,7 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     })
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -1002,6 +1004,7 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     })
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(15);
