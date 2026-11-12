@@ -11608,6 +11608,125 @@ fn a_tools_on_master_s_owner_turn_carries_the_task_start_reminder_only_while_it_
     );
 }
 
+/// F30: while the Task-start reminder is On, a tools-on master's turn for a message the owner
+/// typed in the team chat carries the reminder once, and its turn for the owner's answer to
+/// a question, which the engine relays as an owner message with no owner turn, carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_master_s_turn_for_an_owner_answer_carries_no_task_start_reminder() {
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
+    const ANSWER: &str =
+        "The owner answered your question 1 (\"Which page comes first?\"): / The menu page";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the typed message", |f| {
+        master_replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    let first = pasted(&fixture, master);
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the typed message carries the reminder once: {first}"
+    );
+
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        ANSWER,
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the master answers the relayed answer", |f| {
+        master_replies(f) == 2
+    });
+    let text = pasted(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(second.contains("The menu page"), "{second}");
+    assert!(
+        !second.contains("Task start reminder"),
+        "an answer is not a task start: {second}"
+    );
+}
+
+/// F30: while the Task-start reminder is On, the owner's answer to a question that the engine
+/// types into a tools-on live master's pane carries no reminder, although the message the
+/// owner typed before it carried one.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_live_master_s_relayed_owner_answer_carries_no_task_start_reminder() {
+    const ANSWER: &str =
+        "The owner answered your question 1 (\"Which page comes first?\"): / The menu page";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let project = fixture.setup.project_id.clone();
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's first turn ends", |f| {
+        pasted(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let first = pasted(&fixture, master);
+    assert!(first.contains("Task start reminder"), "{first}");
+
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        ANSWER,
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the live master's second turn ends", |f| {
+        pasted(f, master).contains("The menu page") && live_turns(&f.connection) == (2, false)
+    });
+    let text = pasted(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(
+        !second.contains("Task start reminder"),
+        "an answer is not a task start: {second}"
+    );
+}
+
 /// DEC-116: while the Task-start reminder is On, an owner message the engine types into a
 /// tools-on live master's pane carries the reminder naming its approved skill once; after
 /// the owner sets it Off, the next typed owner message carries none.
@@ -16386,6 +16505,86 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
             "running".to_owned(),
             None
         )]
+    );
+    team.workers.clear();
+}
+
+/// F30: the Task-start reminder marks the start of a task, not every turn. While the setting
+/// is On, a kept session's turn that only carries its team messages (`WAKE_TASK`) gets no
+/// reminder, while a real task pinned to the same kind of kept session still gets it once.
+#[test]
+fn a_kept_session_s_message_wake_carries_no_task_start_reminder_and_a_real_task_does() {
+    const REMINDER: &str = "Task start reminder: query the project graph first.";
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let woken = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let tasked = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    for agent in [woken, tasked] {
+        let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+        worker.starts.text = Some(REMINDER.to_owned());
+        team.workers.insert(agent, worker);
+    }
+    crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(lead),
+            to: crate::coord::Party::Agent(woken),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Merge your branch".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    let asleep = team.asleep(&project);
+    team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+        .unwrap();
+    let (orders, turns) = channel();
+    team.workers.get_mut(&woken).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the woken agent's kept session got no turn");
+    };
+    assert!(typed.contains(super::super::master::WAKE_TASK), "{typed}");
+    assert!(
+        !typed.contains(REMINDER),
+        "a message wake is not a task start: {typed}"
+    );
+
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Finish the page.','queued',?2)",
+            params![PROJECT, now_ms()],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_task_pins(task,project,agent) VALUES (?1,?2,?3)",
+            params![task, PROJECT, tasked],
+        )
+        .unwrap();
+    let (orders, turns) = channel();
+    team.workers.get_mut(&tasked).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the pinned task got no turn");
+    };
+    assert_eq!(
+        typed.matches(REMINDER).count(),
+        1,
+        "a real task starts with the reminder once: {typed}"
     );
     team.workers.clear();
 }

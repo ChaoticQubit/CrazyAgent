@@ -3628,6 +3628,7 @@ impl TeamRuntime {
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
         if author == "owner"
+            && owner_typed(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
             && crate::coord::settings::read(&self.connection, project)?.task_start
                 == crate::coord::settings::TaskStart::On
@@ -4688,7 +4689,8 @@ impl TeamRuntime {
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
     /// team note says the edit waits for a later message, once per edited text until it is
-    /// delivered (DEC-111 QR1). An owner message ends with the master's Task-start reminder
+    /// delivered (DEC-111 QR1). A message the owner typed in the team chat, never a relayed
+    /// answer, ends with the master's Task-start reminder (F30)
     /// while the setting is On and it still fits the input limit beside the message and the
     /// edit, which it never cuts (DEC-116, OP4-L1). While the master's app
     /// does not read keys the message waits, and past `READY_WAIT` one note and the problem
@@ -4744,6 +4746,7 @@ impl TeamRuntime {
             None => (None, typed),
         };
         if author == "owner"
+            && owner_typed(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
             && typed.len() + "\n\n".len() + reminder.len() <= super::master::INPUT_TEXT_MAX
             && crate::coord::settings::read(&self.connection, project)?.task_start
@@ -5661,7 +5664,13 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
-            if let Some(text) = &self.workers[&agent].starts.text
+            let wake_only = matches!(
+                task_text,
+                super::master::WAKE_TASK | super::master::WAKE_DELIVERED
+            ) && !woken_fresh
+                && self.workers[&agent].kept_session;
+            if !wake_only
+                && let Some(text) = &self.workers[&agent].starts.text
                 && crate::coord::settings::read(&self.connection, project)?.task_start
                     == crate::coord::settings::TaskStart::On
             {
@@ -11097,6 +11106,24 @@ fn settle_takeover(
     }
     let (project, session) = (project.as_str(), session.as_str());
     crate::master_sessions::note_continued(connection, project, session, launch, resumed)
+}
+
+/// Tells whether the owner typed a team message in the team chat, the only owner message that
+/// starts a master's task and so carries its Task-start reminder (F30); an answer to a
+/// question the engine relays as the owner's has no owner turn. Takes the connection, the
+/// project and the message id. Returns the answer, or the SQLite failure.
+fn owner_typed(
+    connection: &Connection,
+    project: &ProjectId,
+    message: i64,
+) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_owner_turns WHERE message=?1 AND project=?2)",
+            params![message, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// Writes what a live master is typed for one pending message: the owner's direct prompt
