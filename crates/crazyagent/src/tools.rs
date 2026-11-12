@@ -27,6 +27,15 @@ const TEMP_FOLDERS: [&str; 7] = [
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// Linux package folders often missing from the engine's PATH: Linuxbrew, where setup
+/// installs tmux, and the NixOS system and default profiles. They are looked in before the
+/// system folders, under the same entry checks as every other place.
+#[cfg(target_os = "linux")]
+const LINUX_FOLDERS: [&str; 3] = [
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/run/current-system/sw/bin",
+    "/nix/var/nix/profiles/default/bin",
+];
 /// Node version managers' real install folders under HOME, as (versions folder, bin folder
 /// inside one version): the files their shims start, never the shims themselves.
 const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
@@ -138,6 +147,8 @@ impl Places {
                     .map(|relative| below(home, relative)),
             );
         }
+        #[cfg(target_os = "linux")]
+        folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
         Self::kept(folders, home, engine_roots(engine_root))
     }
@@ -198,7 +209,7 @@ impl Places {
     /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]) or inside
     /// the engine's data folder outside its `setup` folder. Input: the path. Output: the
     /// answer.
-    fn agent_writable(&self, path: &Path) -> bool {
+    pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
@@ -581,7 +592,7 @@ fn shebang(file: &Path) -> Option<Shebang> {
 /// `clean-mac-gate` feature, never a release, reads them under the gate's root
 /// ([`gate_root`]), so the clean-Mac gate sees none of this computer's Homebrew tools.
 /// Output: the two folders.
-fn homebrew_folders() -> Vec<PathBuf> {
+pub(crate) fn homebrew_folders() -> Vec<PathBuf> {
     let root = gate_root();
     HOMEBREW_FOLDERS
         .iter()

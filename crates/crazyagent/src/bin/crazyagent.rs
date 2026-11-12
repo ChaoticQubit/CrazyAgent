@@ -584,7 +584,11 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             .claude
             .or(chosen.claude)
             .or_else(|| found("claude-code")),
-        rcli: crazyagent::paths::rcli_entry(explicit.rcli, path.as_deref(), executable.parent()),
+        rcli: crazyagent::paths::rcli_entry(
+            explicit.rcli,
+            &crazyagent::tools::Places::from_environment(Some(layout.root())),
+            executable.parent(),
+        ),
     };
     Ok(EngineStart {
         root: layout.root().to_path_buf(),
@@ -775,6 +779,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         harnesses.codex.as_deref(),
                         harnesses.claude.as_deref(),
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         agents,
                         service
                             .owner_runtime()

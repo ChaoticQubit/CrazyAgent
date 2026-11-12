@@ -526,25 +526,68 @@ fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
 /// The words that start a harness with no search path, as the tool resolver reads its file
 /// ([`crate::tools::Resolved::argv`]): the file itself, or for a script that asks `env` for
 /// its interpreter, such as an npm-built Codex asking for `node`, that interpreter's
-/// absolute file, its words and then the script. A file the resolver cannot read stays
-/// one word, so the launch reports it as before. Input: the harness file. Output: the
-/// words, or the resolver's owner line when the interpreter is missing.
+/// absolute file, its words and then the script. Input: the harness file. Output: the
+/// words, or the resolver's owner line when it cannot run ([`launch_tool`]).
 pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError> {
     let places = crate::tools::Places::from_environment(None);
-    let words = match crate::tools::resolve_entry(executable, &places) {
-        Ok(resolved) if resolved.argv().len() > 1 => resolved.argv(),
-        Ok(_) => return Ok(vec![text(executable)?]),
-        Err(missing) if missing.reason == crate::tools::Reason::NeedsInterpreter => {
-            return Err(LaunchError(missing.line(), None));
+    let resolved = launch_tool(executable, &places)?;
+    let words = match resolved.kind {
+        crate::tools::Kind::Native => vec![resolved.entry.into_os_string()],
+        _ => {
+            let argv = resolved.argv();
+            if argv.len() > 1 {
+                argv
+            } else {
+                vec![resolved.entry.into_os_string()]
+            }
         }
-        Err(_) => return Ok(vec![text(executable)?]),
     };
     let words = words
         .iter()
         .map(|word| text(Path::new(word)))
         .collect::<Result<Vec<String>, LaunchError>>()?;
-    assert!(words.len() >= 2);
+    assert!(!words.is_empty());
     Ok(words)
+}
+
+/// The harness the engine starts for a pinned file, only after the tool resolver's entry
+/// checks ([`crate::tools::resolve_entry`]). A version-manager shim starts the real install
+/// its name resolves to, else the shim itself while agents and other users cannot change
+/// it. Inputs: the harness file and the places. Output: the tool, or the resolver's owner
+/// line for why it cannot run.
+pub(crate) fn launch_tool(
+    executable: &Path,
+    places: &crate::tools::Places,
+) -> Result<crate::tools::Resolved, LaunchError> {
+    let refused = |missing: crate::tools::Missing| LaunchError(missing.line(), None);
+    if !super::is_shim(places.home(), executable) {
+        return crate::tools::resolve_entry(executable, places).map_err(refused);
+    }
+    let name = executable
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default();
+    match crate::tools::resolve(name, places) {
+        Ok(found) => Ok(found),
+        Err(_)
+            if executable.is_absolute()
+                && !places.agent_writable(executable)
+                && crate::service::changeable_by_others(executable).is_none() =>
+        {
+            Ok(as_given(executable))
+        }
+        Err(missing) => Err(refused(missing)),
+    }
+}
+
+/// A harness file taken as it is, a native program that is its own entry and real file.
+/// Input: the file. Output: the tool.
+fn as_given(executable: &Path) -> crate::tools::Resolved {
+    crate::tools::Resolved {
+        entry: executable.to_path_buf(),
+        program: executable.to_path_buf(),
+        kind: crate::tools::Kind::Native,
+    }
 }
 
 fn text(path: &Path) -> Result<String, LaunchError> {

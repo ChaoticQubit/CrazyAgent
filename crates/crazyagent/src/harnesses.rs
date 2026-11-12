@@ -33,7 +33,7 @@ const SYSTEM_DIRECTORIES: [&str; 4] = [
     "/usr/bin",
 ];
 #[cfg(not(target_os = "linux"))]
-const SYSTEM_DIRECTORIES: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+const SYSTEM_DIRECTORIES: [&str; 1] = ["/usr/bin"];
 const HOME_DIRECTORIES: [&str; 10] = [
     ".local/bin",
     ".npm-global/bin",
@@ -212,9 +212,15 @@ impl Search {
     }
 
     /// Builds the engine search from this process's PATH and HOME and the built-in system
-    /// folders, with no registered executables. Output: the search ([`Search::engine`]).
+    /// folders, with no registered executables; off Linux, Homebrew's folders come first
+    /// from the tool resolver's own list ([`crate::tools::homebrew_folders`]), so the
+    /// clean-Mac gate's remap covers the catalog and its pin. Output: the search
+    /// ([`Search::engine`]).
     pub fn from_environment() -> Self {
-        let system: Vec<PathBuf> = SYSTEM_DIRECTORIES.iter().map(PathBuf::from).collect();
+        let mut system: Vec<PathBuf> = Vec::new();
+        #[cfg(not(target_os = "linux"))]
+        system.extend(crate::tools::homebrew_folders());
+        system.extend(SYSTEM_DIRECTORIES.iter().map(PathBuf::from));
         Self::engine(
             std::env::var_os("PATH").as_deref(),
             &system,
