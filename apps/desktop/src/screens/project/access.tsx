@@ -107,8 +107,11 @@ export const SHARED_ACCESS_CHOICES: { access: SharedAccess; label: string; help:
   { access: "read_write", label: "Read-write", help: "Agents may also change files in shared top-level folders git does not track. Tracked files change only in their worktree." },
 ];
 
-/** What stays closed in shared folders and how the owner shares a secret back, the same in the TUI. */
-export const SHARED_SECRETS_LINE = "Secret files stay closed to agents wherever they sit: .env files, keys, certificates and credential files. Their names stay listed. To let agents read one, add its path inside the project folder, one per line.";
+/** What stays closed in shared folders, the same in the TUI. */
+export const SHARED_SECRETS_LINE = "Secret files stay closed to agents wherever they sit: .env files, keys, certificates and credential files. Their names stay listed.";
+
+/** How the owner shares a secret back for reading. */
+export const SHARED_SECRETS_HOW = "To let agents read one, add its path inside the project folder, one per line.";
 
 /** What the Linux and Windows sandboxes can and can't do with this setting, the engine's OFF_MACOS_LINE. */
 export const SHARED_FOLDERS_OFF_MACOS = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";
@@ -312,7 +315,7 @@ export function SharedFoldersChoices({ prefix, value, secretsText, local, access
       </label>)}
     </div>
     <label htmlFor={`${prefix}-shared-secrets`}>Secret files agents may read</label>
-    <p className="pj-help" id={`${prefix}-shared-secrets-help`}>{SHARED_SECRETS_LINE}</p>
+    <p className="pj-help" id={`${prefix}-shared-secrets-help`}>{SHARED_SECRETS_LINE} {SHARED_SECRETS_HOW}</p>
     <textarea id={`${prefix}-shared-secrets`} className="pj-input" rows={3} value={secretsText} spellCheck={false} aria-describedby={`${prefix}-shared-secrets-help`}
       onChange={(event) => onSecretsText(event.target.value)} />
     {sharedSecretsOf(secretsText).length > SHARED_SECRETS_MAX && <p className="pj-error" role="alert">At most {SHARED_SECRETS_MAX} secret paths.</p>}
