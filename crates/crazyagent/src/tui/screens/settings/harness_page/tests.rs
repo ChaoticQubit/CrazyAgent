@@ -271,6 +271,35 @@ fn the_harness_page_renders_locked_lines_at_80_columns() {
 }
 
 #[test]
+fn the_app_page_keeps_every_codex_setting_in_view_at_80x24() {
+    let mut shell = app_page(QUALIFIED);
+    let shown = render(&mut shell, 80, 24);
+    for label in [
+        "Hide agent reasoning",
+        "Reasoning effort",
+        "Status label",
+        "Project doc limit",
+        "Sandbox",
+        "Approvals",
+    ] {
+        assert!(
+            shown.lines().any(|line| line
+                .trim_start()
+                .trim_start_matches("> ")
+                .starts_with(label)),
+            "{label} is off the page:\n{shown}"
+        );
+    }
+    assert!(
+        shown.contains("Codex 0.51.0 is qualified."),
+        "the version stays on the page:\n{shown}"
+    );
+    for title in ["Settings (3)", "Set by CrazyAgent (3)"] {
+        assert!(shown.contains(title), "{title}:\n{shown}");
+    }
+}
+
+#[test]
 fn the_project_page_renders_overrides_and_app_only_rows_at_120_columns() {
     let mut shell = project_page(120, 36);
     assert_eq!(
