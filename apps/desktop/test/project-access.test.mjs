@@ -287,6 +287,8 @@ test("the shared folders choice is saved with the policy, the saved one unless t
   assert.deepEqual(access.SHARED_SCOPE_CHOICES.map((choice) => [choice.scope, choice.label]), [["all", "All local folders"], ["chosen", "Chosen folders"], ["none", "None"]]);
   assert.deepEqual(access.SHARED_ACCESS_CHOICES.map((choice) => [choice.access, choice.label]), [["read_only", "Read-only"], ["read_write", "Read-write"]]);
   assert.deepEqual(access.DEFAULT_SHARED_FOLDERS, SHARED, "All with Read-only by default");
+  const readWrite = access.SHARED_ACCESS_CHOICES.find((choice) => choice.access === "read_write");
+  assert.match(readWrite.help, /node_modules, target and venv stay writable, and your own tools run what is in them outside the sandbox\./, "Read-write says which program folders stay writable and who runs them (L4 r2 L1)");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/shared_folders.rs", import.meta.url), "utf8");
   for (const choice of [...access.SHARED_SCOPE_CHOICES, ...access.SHARED_ACCESS_CHOICES]) {
     assert.ok(engine.includes(`=> "${choice.label}"`), `${choice.label} is the engine's label`);

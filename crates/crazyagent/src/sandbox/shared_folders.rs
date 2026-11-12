@@ -162,7 +162,7 @@ impl SharedAccess {
         match self {
             Self::ReadOnly => "Agents read shared folders and never change them.",
             Self::ReadWrite => {
-                "Agents may also change files in shared top-level folders git does not track, but not in hidden folders such as .venv or .vscode. Folders inside stay in place: agents can't move or delete them. Tracked files change only in their worktree."
+                "Agents may also change files in shared top-level folders git does not track, but not in hidden folders such as .venv or .vscode. Folders such as node_modules, target and venv stay writable, and your own tools run what is in them outside the sandbox. Folders inside stay in place: agents can't move or delete them. Tracked files change only in their worktree."
             }
         }
     }

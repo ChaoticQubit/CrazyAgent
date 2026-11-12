@@ -260,9 +260,9 @@ fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_wr
 }
 
 /// L4 r1 M1: Read-write never opens a hidden folder the owner's own tools run unconfined
-/// (.venv, .vscode, .claude, .codex) or the engine's graphify-out, while a program folder such
-/// as node_modules opens; graphify-out is never kept out or offered, and the sandbox refuses a
-/// write grant for any of them.
+/// (.venv, .vscode, .claude, .codex) or the engine's graphify-out, while node_modules, target
+/// and venv open and the help says so (L4 r2 L1); graphify-out is never kept out or offered,
+/// and the sandbox refuses a write grant for any of them.
 #[cfg(unix)]
 #[test]
 fn read_write_keeps_hidden_and_engine_folders_read_only() {
@@ -274,6 +274,8 @@ fn read_write_keeps_hidden_and_engine_folders_read_only() {
         ".codex/config.toml",
         "graphify-out/graph.json",
         "node_modules/left-pad/index.js",
+        "target/debug/build.rs",
+        "venv/bin/python",
     ] {
         let file = root.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -285,10 +287,18 @@ fn read_write_keeps_hidden_and_engine_folders_read_only() {
     };
     let opened = plan(&root, &write).unwrap();
     assert!(opened.writes.contains(&root.join("program")), "{opened:?}");
+    for open in ["node_modules", "target", "venv"] {
+        assert!(
+            opened.writes.contains(&root.join(open)),
+            "{open}: {opened:?}"
+        );
+    }
+    let help = SharedAccess::ReadWrite.help();
     assert!(
-        opened.writes.contains(&root.join("node_modules")),
-        "{opened:?}"
+        help.contains("Folders such as node_modules, target and venv stay writable, and your own tools run what is in them outside the sandbox."),
+        "L4 r2 L1: the help says which program folders stay writable and who runs them: {help}"
     );
+    assert!(!SharedAccess::ReadOnly.help().contains("node_modules"));
     for closed in [".venv", ".vscode", ".claude", ".codex", "graphify-out"] {
         assert!(
             !opened.writes.contains(&root.join(closed)),
