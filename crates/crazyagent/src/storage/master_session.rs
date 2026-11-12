@@ -6744,9 +6744,10 @@ auth = { method = "none" }"#;
 
     /// KY-M1 (DEC-150 addendum 9a): a keyed RCLI key saved under an rcli builtin provider id
     /// before the fix, already in the pool, left a slot-less generated home naming that id.
-    /// The next master turn rewrites it to the hashed id and runs, with no owner action.
+    /// The next master turn rewrites it to the hashed id, registers it and prepares, with no
+    /// owner action.
     #[tokio::test]
-    async fn a_pooled_keyed_rcli_key_saved_before_the_builtin_id_fix_runs_the_master_unaided() {
+    async fn a_pooled_keyed_rcli_key_saved_before_the_builtin_id_fix_prepares_the_master_unaided() {
         let case = Fixture::legacy_keyed().await;
         let connection = legacy_keyed_connection();
         assert_eq!(

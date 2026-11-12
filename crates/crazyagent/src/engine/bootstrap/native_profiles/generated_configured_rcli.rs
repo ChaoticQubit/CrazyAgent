@@ -232,10 +232,11 @@ impl NativeProfileCustody {
         self.register_locked(host, connection, profile_ref, captured, &locked)
     }
 
-    /// Repairs, before a master turn registers it, the slot-less SDK home a keyed account
+    /// Repairs, before a master turn registers it, the generated SDK home a keyed account
     /// saved before DEC-150 addendum 9a left: one holding exactly the engine's old config
     /// naming the builtin provider id gets the current config. Inputs: host, connection and
-    /// profile reference. Output: Ok; any other home is left as it is for registration.
+    /// the account's profile reference. Output: Ok; any other home, or a connection the
+    /// engine generates no config for, is left as it is for registration to judge.
     pub(crate) fn repair_legacy_configured_home(
         &mut self,
         host: &HostStamp,
@@ -245,18 +246,15 @@ impl NativeProfileCustody {
         let auth = match connection.auth {
             ModelAuthentication::ApiKey { .. } => "apiKey",
             ModelAuthentication::None {} => "none",
-            _ => return Err(failure("rcli_profile_not_configurable")),
+            _ => return Ok(()),
         };
-        let (bytes, Some(legacy)) = generated_config(connection, auth)? else {
+        let Ok((bytes, Some(legacy))) = generated_config(connection, auth) else {
             return Ok(());
         };
         self.verify()?;
-        let (root, root_manifest, _) = self.root(host)?;
+        let (_, root_manifest, _) = self.root(host)?;
         let _root_lock = lock(&root_manifest.file)?;
         let key = digest(profile_ref.as_str().as_bytes());
-        if scan_slots(&root.file)?.contains_key(&key) {
-            return Ok(());
-        }
         let homes = self.homes()?;
         staging::sweep(&homes.file, STAGING)?;
         if require_generated(&homes, &key, &legacy).is_ok() {
