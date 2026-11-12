@@ -951,17 +951,12 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
     let case = case.reopen().await;
 
-    let before = snapshot(&case);
     assert_eq!(
-        case.resume("resume-stale-rcli", &rcli.session_id, false)
-            .await,
-        OwnerResult::Rejected {
-            code: "master_source_conflict".into()
-        },
-        "an RCLI session cannot move to a new engine run, so a send would refuse it too"
+        case.resume("resume-rcli", &rcli.session_id, false).await,
+        OwnerResult::Applied,
+        "an RCLI session moves to the new engine run as a send does (PA-6, DEC-092)"
     );
-    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
-
+    assert_eq!(case.shown().await.session_id, rcli.session_id);
     assert_eq!(
         case.resume("resume-native", &native.session_id, false)
             .await,
@@ -975,19 +970,25 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
         OwnerResult::Applied
     );
 
-    let changed = CONFIG.replace("configured-claude-model", "replaced-claude-model");
-    assert_ne!(changed, CONFIG);
+    let changed = CONFIG
+        .replace("configured-claude-model", "replaced-claude-model")
+        .replace("\"local-model\"", "\"replaced-local-model\"");
+    assert_eq!(changed.matches("replaced-").count(), 2);
     let case = case.reopen_with(Some(&changed)).await;
     let before = snapshot(&case);
-    assert_eq!(
-        case.resume("resume-out-of-scope", &native.session_id, false)
-            .await,
-        OwnerResult::Rejected {
-            code: "master_source_conflict".into()
-        },
-        "the session's own pool changed, so it no longer runs under the current settings"
-    );
-    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+    for (id, session) in [
+        ("resume-rcli-out-of-scope", &rcli.session_id),
+        ("resume-out-of-scope", &native.session_id),
+    ] {
+        assert_eq!(
+            case.resume(id, session, false).await,
+            OwnerResult::Rejected {
+                code: "master_source_conflict".into()
+            },
+            "{id}: the session's own pool changed, so it no longer runs under the current settings"
+        );
+        assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+    }
     case.close().await;
 }
 
