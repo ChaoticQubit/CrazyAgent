@@ -238,6 +238,7 @@ fn main() {
         "desktop_questions",
         "desktop_answer_question",
         "desktop_dismiss_question",
+        "desktop_dismiss_questions",
         "desktop_question_counts",
         "desktop_notify_question",
         "desktop_notification_target",

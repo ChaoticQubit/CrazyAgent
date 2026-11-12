@@ -8,6 +8,11 @@ export type QuestionStatus = "pending" | "answered" | "dismissed" | "answered_in
 /** How the owner answers a question: pick one option, pick any options, or write free text. */
 export type QuestionKind = "single" | "multi" | "text";
 
+/** Who closed a question when the owner did not answer or dismiss it in the Questions view:
+ * the master withdrew it, it was asked again as a choice, or the master reported the answer
+ * the owner typed in its terminal. */
+export type ClosedBy = "master" | "replaced" | "relay";
+
 /** One question an agent or an engine step asked the owner, as the engine recorded it. The
  * `version` goes back with an answer or a dismissal, so a question that changed since the
  * owner read it is refused as stale. */
@@ -23,9 +28,21 @@ export interface OwnerQuestion {
   status: QuestionStatus;
   version: number;
   answer: string | null;
+  closed_by?: ClosedBy | null;
   created_ms: number;
   settled_ms: number | null;
 }
+
+/** What one "Dismiss all" did: the questions dismissed, the ones that changed since the owner
+ * read them, and each one refused with its code. */
+export interface QuestionsDismissed {
+  settled: number[];
+  stale: number[];
+  refused: { id: number; code: string }[];
+}
+
+/** The most questions one "Dismiss all" sends, one page of the list. */
+export const BULK_DISMISS_MAX = 50;
 
 /** One page of a project's questions; pass `next` back as `after` for the older ones. */
 export interface QuestionPage {
@@ -83,6 +100,7 @@ const REFUSALS: Record<string, string> = {
   questions_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the list before you try again.",
   questions_in_terminal: "This question was asked in an agent's terminal. Answer it there.",
   questions_delivery_full: "The master's conversation is full right now. Try again after it reads its messages.",
+  questions_bulk_invalid: `Dismiss between 1 and ${BULK_DISMISS_MAX} waiting questions at once.`,
   owner_authentication_failed: "CrazyAgent couldn't confirm this app with the engine. Restart the app, then try again.",
   owner_authority_unavailable: "The engine isn't ready for owner actions yet. Try again in a moment.",
   owner_busy: "The engine is busy with other owner requests. Try again in a moment.",
@@ -138,8 +156,14 @@ export function askedInTerminal(question: Pick<OwnerQuestion, "asker">): boolean
   return question.asker.startsWith("terminal:");
 }
 
-/** The status word and tone of a question's badge. Input: the status. Output: the badge. */
-export function statusBadge(status: QuestionStatus): { word: string; tone: "warn" | "ok" | "neutral" } {
+/** The status word and tone of a question's badge, naming the master when it closed the
+ * question. Inputs: the status and who closed it, if not the owner. Output: the badge. */
+export function statusBadge(status: QuestionStatus, closedBy: ClosedBy | null = null): { word: string; tone: "warn" | "ok" | "neutral" } {
+  if (status !== "pending") {
+    if (closedBy === "master") return { word: "Withdrawn by the master", tone: "neutral" };
+    if (closedBy === "replaced") return { word: "Asked again as a choice", tone: "neutral" };
+    if (closedBy === "relay") return { word: "Answered in the master's terminal", tone: "ok" };
+  }
   switch (status) {
     case "pending": return { word: "Waiting for you", tone: "warn" };
     case "answered": return { word: "Answered", tone: "ok" };
@@ -212,6 +236,28 @@ export function answerQuestion(id: number, version: number, choice: QuestionChoi
  * version the owner read. Output: ok once recorded, or the refusal. */
 export function dismissQuestion(id: number, version: number): Promise<Result<void>> {
   return call<void>("desktop_dismiss_question", { id, version });
+}
+
+/** Dismisses many pending questions at once; each asker is told once, as for one dismissal.
+ * Input: the questions, at most `BULK_DISMISS_MAX`, each with the version the owner read.
+ * Output: what happened to each, or the refusal. */
+export function dismissQuestions(questions: readonly Pick<OwnerQuestion, "id" | "version">[]): Promise<Result<QuestionsDismissed>> {
+  if (questions.length === 0 || questions.length > BULK_DISMISS_MAX) throw new Error("a Dismiss all sends 1 to 50 questions");
+  return call<QuestionsDismissed>("desktop_dismiss_questions", { items: questions.map((question) => [question.id, question.version]) });
+}
+
+/** What the confirm dialog of "Dismiss all" says. Input: how many questions it dismisses.
+ * Output: the line. */
+export function bulkDismissNote(count: number): string {
+  return `All ${count} waiting questions leave the list. Each agent that asked is told once and can ask again; a question asked in an agent's terminal still waits there.`;
+}
+
+/** What the owner reads after "Dismiss all". Input: the outcome. Output: the line. */
+export function bulkDismissedLine(outcome: QuestionsDismissed): string {
+  const parts = [`Dismissed ${outcome.settled.length} ${outcome.settled.length === 1 ? "question" : "questions"}.`];
+  if (outcome.stale.length > 0) parts.push(`${outcome.stale.length} changed since you read them. Review them again.`);
+  if (outcome.refused.length > 0) parts.push(`${outcome.refused.length} could not be dismissed: ${questionsRefusal(outcome.refused[0])}`);
+  return parts.join(" ");
 }
 
 /** Reads how many questions wait for the owner in each project. Output: the counts. */

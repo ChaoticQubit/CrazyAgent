@@ -12,7 +12,7 @@ use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
 use bridge::notify::Notices;
 use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
-use bridge::questions::{QuestionCount, QuestionPage};
+use bridge::questions::{QuestionCount, QuestionPage, QuestionsDismissed};
 use bridge::terminal::Terminals;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
@@ -3829,6 +3829,17 @@ async fn desktop_dismiss_question(
 }
 
 #[tauri::command]
+async fn desktop_dismiss_questions(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    items: Vec<(u64, u64)>,
+) -> Result<QuestionsDismissed, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.dismiss_questions(items)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_question_counts(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4732,6 +4743,7 @@ native_commands! {
     desktop_questions,
     desktop_answer_question,
     desktop_dismiss_question,
+    desktop_dismiss_questions,
     desktop_question_counts,
     desktop_notify_question,
     desktop_notification_target,
