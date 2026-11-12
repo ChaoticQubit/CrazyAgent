@@ -4159,8 +4159,9 @@ impl TeamRuntime {
     /// once no turn is open and the owner is not typing, and clears those starts, so switching
     /// it off and on never counts as a crash. With no master running and a saved master
     /// harness that has no live terminal, such as RCLI, it turns the live master off with one
-    /// note, so the one-turn master answers (F06). Takes the setup, live access and paused
-    /// accounts.
+    /// note, so the one-turn master answers (F06). Each time the owner switches it on, as
+    /// Start or Try again, the tool probes look again at once, so a tool the owner just
+    /// installed is found. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4169,6 +4170,11 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let on = super::master::live(&self.connection, project)?;
+        if !on {
+            self.live_switched_on.remove(project);
+        } else if self.live_switched_on.insert(project.clone()) {
+            (self.tools_refresh)();
+        }
         if self.workers.values().any(|w| {
             &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
         }) {
