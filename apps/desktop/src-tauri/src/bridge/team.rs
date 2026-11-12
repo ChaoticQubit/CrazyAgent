@@ -387,6 +387,39 @@ impl NativeBridge {
         .await
     }
 
+    /// Sets what a project's agents leave running after their stop does (DEC-147.4): End them,
+    /// Keep running and release the account, or Ask me. Takes the project id, the setting and
+    /// the client generation. Returns the actual commit receipt.
+    pub async fn team_leftovers(
+        &mut self,
+        id: &str,
+        mode: crazyagent::team::LeftoverMode,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::LeftoversAtEnd { project_id, mode }, generation)
+            .await
+    }
+
+    /// Ends or keeps the processes one hold of a project lists, the owner's End or Keep in the
+    /// team view. Takes the project id, the hold's key, whether to end them and the client
+    /// generation. Returns the actual commit receipt; a hold that is gone is refused.
+    pub async fn team_leftover_hold(
+        &mut self,
+        id: &str,
+        key: u64,
+        end: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = if end {
+            TeamAction::EndLeftovers { project_id, key }
+        } else {
+            TeamAction::KeepLeftovers { project_id, key }
+        };
+        self.team_action(action, generation).await
+    }
+
     /// Turns a project's "Ask me before merging into the master's branch" setting on or
     /// off: on, the master's merge of a finished harness waits for the owner's Accept.
     /// Takes the project id, the switch and the client generation. Returns the actual

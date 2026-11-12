@@ -196,7 +196,8 @@ async fn stand_in_host_at(
         ..budget()
     };
     let clock = Some(Duration::from_millis(limits.wall_time_ms));
-    CodexHostProcess::spawn_guarded(command, &limits, clock, Some(profile), unconfined)
+    let lease = Some((profile, fixture.project_id.clone()));
+    CodexHostProcess::spawn_guarded(command, &limits, clock, lease, unconfined)
         .await
         .unwrap()
 }
@@ -442,6 +443,44 @@ async fn closing_a_full_access_codex_host_names_what_it_left_running_and_keeps_t
     }
 }
 
+/// L1 r1 security L1: a Codex host turn's leftovers follow its project's Keep: the hold is
+/// listed in that project's owner view as kept, the account goes at once and the orphan is
+/// never signalled.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_codex_host_hold_follows_its_projects_keep_and_is_listed_for_the_owner() {
+    use crate::engine::master_host_fixture::{MasterFixture, ORPHANING_HARNESS, Orphan};
+    use crate::harnesses::leftovers::{self, HoldState, LeftoverMode};
+
+    let mut fixture = MasterFixture::new("codex");
+    let project = fixture.project_id.as_str().to_owned();
+    leftovers::set_mode(&project, LeftoverMode::Keep);
+    let body = format!("{ORPHANING_HARNESS}exec /bin/sleep 30\n");
+    let mut process = stand_in_host_at(&mut fixture, &body, true).await;
+    let orphan = Orphan::wait(&fixture.project);
+    let closed = process.close().await;
+    assert_eq!(
+        closed.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned())
+    );
+    let listed = leftovers::held_in(&project);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].who, "a Codex host turn");
+    assert_eq!(listed[0].state, HoldState::Kept);
+    assert!(!listed[0].holds_account);
+    assert!(
+        fixture.sign_in("codex-kept-next", 2).is_ok(),
+        "Keep held the account"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        rustix::process::test_kill_process(orphan.0),
+        Ok(()),
+        "Keep signalled the orphan"
+    );
+    drop(orphan);
+}
+
 /// SETSID-L2: a Full access Codex host's process that left its session and lost its parent
 /// before the close, running a program whose environment macOS hides, is still named: the
 /// follow from the start kept it.
@@ -606,6 +645,7 @@ async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_frames_with
         home,
         action,
         CredentialRef::new("group-master-account").unwrap(),
+        fixture.project_id.clone(),
         Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
         "stand-in instructions",
@@ -676,6 +716,7 @@ async fn stand_in_master(
         home,
         action,
         CredentialRef::new("group-master-account").unwrap(),
+        fixture.project_id.clone(),
         Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
         "stand-in instructions",

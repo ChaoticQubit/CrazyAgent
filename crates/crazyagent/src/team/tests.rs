@@ -6813,6 +6813,98 @@ fn background_commands_at_task_end_default_to_a_thirty_minute_grace() {
     }
 }
 
+/// DEC-147.4: a project with no saved Leftover processes choice ends them; every saved
+/// choice reads back, and the store refuses any other name.
+#[test]
+fn leftover_processes_default_to_end_them_and_each_choice_reads_back() {
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("leftovers").unwrap();
+    assert_eq!(
+        leftover_mode(&connection, project.as_str()).unwrap(),
+        LeftoverMode::End
+    );
+    for mode in [LeftoverMode::Keep, LeftoverMode::Ask, LeftoverMode::End] {
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_leftovers(project,mode) VALUES (?1,?2)",
+                rusqlite::params![project.as_str(), mode.stored()],
+            )
+            .unwrap();
+        assert_eq!(leftover_mode(&connection, project.as_str()).unwrap(), mode);
+    }
+    assert!(
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_leftovers(project,mode) VALUES (?1,'kill')",
+                [project.as_str()],
+            )
+            .is_err()
+    );
+    let other = ProjectId::new("leftovers-other").unwrap();
+    assert_eq!(
+        leftover_mode(&connection, other.as_str()).unwrap(),
+        LeftoverMode::End
+    );
+}
+
+/// The owner's leftover setting is saved through its team action and read back in the team
+/// status with the project's holds; End and Keep on a hold that is gone, or belongs to
+/// another project, are refused and change nothing (DEC-147.4).
+#[test]
+fn the_leftover_setting_is_saved_and_end_or_keep_of_a_gone_hold_is_refused() {
+    let (_directory, mut connection) = database();
+    let setup = stored("team-leftovers", Vec::new());
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-leftovers", &["local-a"]);
+    let project = setup.project_id.clone();
+    let before = status(&connection, &setup).unwrap();
+    assert_eq!(before.leftovers, LeftoverMode::End);
+    assert!(before.leftover_holds.is_empty());
+    for mode in [LeftoverMode::Ask, LeftoverMode::Keep, LeftoverMode::End] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::LeftoversAtEnd {
+                    project_id: project.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().leftovers, mode);
+    }
+    for action in [
+        TeamAction::EndLeftovers {
+            project_id: project.clone(),
+            key: u64::MAX,
+        },
+        TeamAction::KeepLeftovers {
+            project_id: project.clone(),
+            key: u64::MAX,
+        },
+    ] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            rejected("leftovers_gone")
+        );
+        tx.commit().unwrap();
+    }
+}
+
 /// Opening the team runtime makes the usage tables once, so a turn end writes its token and
 /// turn rows without making them again (AL4 r2).
 #[test]

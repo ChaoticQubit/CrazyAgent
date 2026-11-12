@@ -968,3 +968,150 @@ fn a_path_without_a_hold_only_watches_and_never_claims() {
         "the group ran until the test ended it"
     );
 }
+
+/// Collects what an output reader hands the session until it ends, a skipped line as
+/// `skipped` and the end as `closed`. Takes the receiver. Returns the items in order.
+#[cfg(unix)]
+fn handed(lines: std::sync::mpsc::Receiver<super::Line>) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| match line {
+            super::Line::Bytes(bytes) => String::from_utf8(bytes).unwrap(),
+            super::Line::Skipped => "skipped".to_owned(),
+            super::Line::Closed => "closed".to_owned(),
+        })
+        .collect()
+}
+
+/// Owner 11-11, no output cap: a harness stdout line longer than `LINE_BYTES_MAX` is passed
+/// over to its newline and reported once as skipped, the line after it still arrives, and
+/// output past the old 8 MiB total never ends the session.
+#[cfg(unix)]
+#[test]
+fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "head -c {} /dev/zero | tr '\\0' x; printf '\\nnext\\n'",
+            2 * super::LINE_BYTES_MAX + 1
+        ))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
+    let reader = std::thread::spawn(move || super::forward(stdout, sender));
+    let got = handed(lines);
+    reader.join().unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_eq!(got, ["skipped", "next\n", "closed"]);
+}
+
+/// Owner 11-11: a durable harness output file with a line longer than `LINE_BYTES_MAX` is
+/// read on past it, the line after it arrives, and a file that ends inside a skipped line
+/// hands none of its rest.
+#[cfg(unix)]
+#[test]
+fn a_durable_output_line_past_the_line_bound_is_skipped_and_never_handed_in_part() {
+    let folder = tempfile::tempdir().unwrap();
+    let long = "x".repeat(2 * super::LINE_BYTES_MAX + 1);
+    for (body, want) in [
+        (
+            format!("{long}\nnext\n"),
+            vec!["skipped", "next\n", "closed"],
+        ),
+        (long.clone(), vec!["skipped", "closed"]),
+    ] {
+        let path = folder.path().join("output");
+        std::fs::write(&path, &body).unwrap();
+        let output = std::fs::File::open(&path).unwrap();
+        let probe = std::fs::File::open(&path).unwrap();
+        let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
+        let reader = std::thread::spawn(move || super::tail(output, probe, sender));
+        let got = handed(lines);
+        reader.join().unwrap();
+        assert_eq!(got, want, "{} bytes", body.len());
+    }
+}
+
+/// L1C r1 F2: a durable output log the session has read to its end past
+/// `DURABLE_OUTPUT_KEPT_MAX` is emptied while its harness still holds it, and the session
+/// reads on from the start, where the harness's next appends land; the agent is never
+/// stopped and the log on disk stays bounded.
+#[cfg(unix)]
+#[test]
+fn a_durable_output_log_read_past_its_bound_is_emptied_and_read_on() {
+    use std::io::Write;
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("output.log");
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .create_new(true)
+        .open(&path)
+        .unwrap();
+    rustix::fs::flock(
+        &writer,
+        rustix::fs::FlockOperation::NonBlockingLockExclusive,
+    )
+    .unwrap();
+    writer.set_len(super::DURABLE_OUTPUT_KEPT_MAX + 1).unwrap();
+    writer.write_all(b"\n").unwrap();
+    let output = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let probe = std::fs::File::open(&path).unwrap();
+    let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
+    let reader = std::thread::spawn(move || super::tail(output, probe, sender));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::fs::metadata(&path).unwrap().len() > super::DURABLE_OUTPUT_KEPT_MAX {
+        assert!(
+            std::time::Instant::now() < until,
+            "the log was never emptied"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    writer.write_all(b"next\n").unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 5);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    drop(writer);
+    let got = handed(lines);
+    reader.join().unwrap();
+    assert_eq!(got, ["skipped", "next\n", "closed"]);
+}
+
+/// L1C r1 F2: the watcher of a reattached agent, whose log nothing reads, empties the log
+/// once it passes `DURABLE_OUTPUT_KEPT_MAX`; a log within the bound and a path that now
+/// names another file are left alone.
+#[cfg(unix)]
+#[test]
+fn an_unread_durable_output_log_past_its_bound_is_emptied_only_when_it_is_the_probed_file() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("output.log");
+    let log = std::fs::File::create(&path).unwrap();
+    log.set_len(super::DURABLE_OUTPUT_KEPT_MAX).unwrap();
+    let probe = std::fs::File::open(&path).unwrap();
+    assert!(!super::trim_unread_output(&path, &probe));
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        super::DURABLE_OUTPUT_KEPT_MAX
+    );
+
+    log.set_len(super::DURABLE_OUTPUT_KEPT_MAX + 1).unwrap();
+    let moved = folder.path().join("moved.log");
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::write(&path, b"other\n").unwrap();
+    assert!(!super::trim_unread_output(&path, &probe));
+    assert_eq!(std::fs::read(&path).unwrap(), b"other\n");
+    assert_eq!(
+        std::fs::metadata(&moved).unwrap().len(),
+        super::DURABLE_OUTPUT_KEPT_MAX + 1
+    );
+
+    std::fs::remove_file(&path).unwrap();
+    std::fs::rename(&moved, &path).unwrap();
+    assert!(super::trim_unread_output(&path, &probe));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+}

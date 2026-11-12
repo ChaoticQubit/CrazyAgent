@@ -1068,5 +1068,54 @@ fn a_bounded_turn_its_token_outlasts_gets_no_keeper() {
     drop(copy);
 }
 
+#[test]
+fn dropping_an_earlier_copy_leaves_a_later_copy_or_another_file_at_the_same_name() {
+    let mut case = UseCase::new();
+    let expires = now() + 3 * 86_400;
+    private_file(&case.home().join("auth.json"), &codex_auth(expires));
+    let agent = agent_home(&case);
+    let path = agent.join("auth.json");
+    let guard = execution(&mut case);
+    let earlier = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let first = std::fs::symlink_metadata(&path).unwrap().ino();
+    let later = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let second = std::fs::symlink_metadata(&path).unwrap().ino();
+    assert_ne!(first, second, "each placement is a new file");
+    drop(earlier);
+    assert_eq!(
+        entries(&agent),
+        ["auth.json"],
+        "the later start's copy stays"
+    );
+    assert_eq!(std::fs::symlink_metadata(&path).unwrap().ino(), second);
+    drop(later);
+    assert!(
+        entries(&agent).is_empty(),
+        "the later copy leaves with its own drop"
+    );
+
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let other = agent.join("other.json");
+    private_file(&other, b"another file");
+    std::fs::rename(&other, &path).unwrap();
+    drop(copy);
+    assert_eq!(std::fs::read(&path).unwrap(), b"another file");
+    std::fs::remove_file(&path).unwrap();
+
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    std::fs::remove_file(&path).unwrap();
+    drop(copy);
+    assert!(entries(&agent).is_empty(), "a copy already gone is fine");
+    drop(guard);
+}
+
 #[cfg(target_os = "macos")]
 mod renewal_tests;

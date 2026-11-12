@@ -1,4 +1,4 @@
-use super::agent_copy::{AgentKeychain, Harness, Record, account_record, place};
+use super::agent_copy::{AgentKeychain, Harness, Placed, Record, account_record, place};
 use super::{HeldLock, Manifest, NativeProfileUse, failure, take_lock};
 use crate::adapters::claude::{REFRESH_WINDOW, RENEWAL_TURN};
 use crate::adapters::codex::CodexProtocol;
@@ -405,31 +405,29 @@ pub(super) struct Keeper {
 
 impl Keeper {
     /// Starts the keeper. Inputs: the renewal, the agent home, the copy's file name, the
-    /// agent's keychain when its harness keeps one, and the copy's expiry. Output: the
-    /// running keeper, or unavailable when no thread starts.
+    /// slot its placed identity is recorded in, the agent's keychain when its harness keeps
+    /// one, and the copy's expiry. Output: the running keeper, or unavailable when no thread
+    /// starts.
     pub(super) fn start(
         renewal: Renewal,
         agent: File,
         name: &'static str,
+        placed: Placed,
         keychain: Option<AgentKeychain>,
         expires: Duration,
     ) -> Result<Self, EngineError> {
         let (stop, stopped) = channel();
         let open = Arc::new(Mutex::new(true));
         let gate = Arc::clone(&open);
+        let copy = KeptCopy {
+            agent,
+            name,
+            placed,
+            keychain,
+        };
         std::thread::Builder::new()
             .name("credential-keeper".into())
-            .spawn(move || {
-                keep(
-                    &renewal,
-                    &agent,
-                    name,
-                    keychain.as_ref(),
-                    expires,
-                    &stopped,
-                    &gate,
-                )
-            })
+            .spawn(move || keep(&renewal, &copy, expires, &stopped, &gate))
             .map_err(|_| failure("native_profile_credential_unavailable"))?;
         Ok(Self {
             stop: Some(stop),
@@ -454,14 +452,21 @@ fn idle(stopped: &Receiver<()>, wait: Duration) -> bool {
     matches!(stopped.recv_timeout(wait), Err(RecvTimeoutError::Timeout))
 }
 
-/// The keeper's loop. Inputs: the renewal, the agent home, the copy's name, the agent's
-/// keychain or none, its expiry, the stop channel and the gate a copy is written under.
-/// Output: none; it returns when stopped.
+/// The copy a keeper renews: the agent home, the copy's name, the slot that records the
+/// device and inode of the file last placed there, and the agent's keychain or none.
+struct KeptCopy {
+    agent: File,
+    name: &'static str,
+    placed: Placed,
+    keychain: Option<AgentKeychain>,
+}
+
+/// The keeper's loop. Inputs: the renewal, the copy, its expiry, the stop channel and the
+/// gate a copy is written and its identity recorded under. Output: none; it returns when
+/// stopped.
 fn keep(
     renewal: &Renewal,
-    agent: &File,
-    name: &'static str,
-    keychain: Option<&AgentKeychain>,
+    copy: &KeptCopy,
     mut expires: Duration,
     stopped: &Receiver<()>,
     gate: &Mutex<bool>,
@@ -480,11 +485,16 @@ fn keep(
             if !*open {
                 return;
             }
-            if place(agent, name, &record.copy).is_ok()
-                && keychain.is_none_or(|keychain| keychain.forget().is_ok())
-            {
-                expires = record.expires;
-                continue;
+            if let Ok(placed) = place(&copy.agent, copy.name, &record.copy) {
+                *copy.placed.lock().unwrap_or_else(PoisonError::into_inner) = placed;
+                if copy
+                    .keychain
+                    .as_ref()
+                    .is_none_or(|keychain| keychain.forget().is_ok())
+                {
+                    expires = record.expires;
+                    continue;
+                }
             }
         }
         if !idle(stopped, RETRY) {

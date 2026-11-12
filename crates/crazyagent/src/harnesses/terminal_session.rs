@@ -55,9 +55,8 @@ pub struct TerminalSession {
     reader: TranscriptReader,
     queue: VecDeque<LaunchEvent>,
     limits: LaunchLimits,
-    deadline: Instant,
+    deadline: Option<Instant>,
     checked: Instant,
-    events: usize,
     ready: bool,
     first: Option<FirstScreen>,
     folder: Option<FolderStep>,
@@ -345,9 +344,8 @@ impl TerminalSession {
             reader,
             queue: VecDeque::from([ready]),
             limits: request.limits,
-            deadline: Instant::now() + request.limits.run_time,
+            deadline: Some(Instant::now() + request.limits.run_time),
             checked: Instant::now(),
-            events: 0,
             ready: false,
             first: None,
             folder,
@@ -502,22 +500,21 @@ impl TerminalSession {
 
     /// Waits up to `wait` for the next event of the turn the engine started. Text, tool
     /// use and turn ends from turns the owner typed into the pane are not reported.
-    /// Output: Some(event), None on timeout, or an error past a limit or once the pane ended.
+    /// No count of events or record bytes ends the pane (owner 11-11). Output: Some(event),
+    /// None on timeout, or an error past the run time or once the pane ended.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
         let until = Instant::now() + wait;
         loop {
             if let Some(event) = self.queue.pop_front() {
-                self.events += 1;
-                if self.events > self.limits.events {
-                    self.halt();
-                    return Err(failure("launch_event_limit"));
-                }
                 return Ok(Some(event));
             }
             if self.exited {
                 return Err(failure("launch_closed"));
             }
-            if Instant::now() >= self.deadline {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.halt();
                 return Err(failure("launch_deadline"));
             }
@@ -525,14 +522,23 @@ impl TerminalSession {
             if !self.queue.is_empty() {
                 continue;
             }
-            let left = until
-                .min(self.deadline)
+            let left = self
+                .deadline
+                .map_or(until, |deadline| until.min(deadline))
                 .saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);
             }
             std::thread::sleep(left.min(POLL));
         }
+    }
+
+    /// Lifts the launch's run time from this pane, so only `stop` or the pane's own end ends
+    /// it, as a live master needs: the runtime's Master run time bounds it (F01). Takes the
+    /// session. Returns nothing.
+    pub fn clear_deadline(&mut self) {
+        self.deadline = None;
+        assert!(self.deadline.is_none());
     }
 
     /// Follows every turn in the pane from now on, the ones the owner types included, as a
@@ -584,7 +590,10 @@ impl TerminalSession {
             if self.exited {
                 return Err(failure("launch_closed"));
             }
-            if Instant::now() >= self.deadline {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.halt();
                 return Err(failure("launch_deadline"));
             }
@@ -592,8 +601,9 @@ impl TerminalSession {
             if !self.facts.is_empty() {
                 continue;
             }
-            let left = until
-                .min(self.deadline)
+            let left = self
+                .deadline
+                .map_or(until, |deadline| until.min(deadline))
                 .saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);
@@ -787,10 +797,6 @@ impl TerminalSession {
                 return Err(problem);
             }
         };
-        if self.reader.bytes() > self.limits.output_bytes as u64 {
-            self.halt();
-            return Err(failure("launch_output_limit"));
-        }
         if self.reader.bytes() != self.grown.0 {
             self.grown = (self.reader.bytes(), Instant::now());
         }

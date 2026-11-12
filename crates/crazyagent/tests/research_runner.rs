@@ -304,26 +304,28 @@ fn research_that_runs_out_of_time_is_stopped_and_retried_then_failed() {
     );
 }
 
+/// Owner 11-11, no output cap: research output past the bytes kept in its log never stops
+/// the agent; the run goes on until its wall time, which is the only bound that ends it.
 #[test]
-fn research_output_beyond_the_limit_stops_the_agent() {
+fn research_output_beyond_the_log_bound_does_not_stop_the_agent() {
     let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
     let id = jobs
         .enqueue("project-a", "market_research", "codex", true)
         .unwrap();
     let (port, _server) = hanging_endpoint();
-    let mut bounds = limits(Duration::from_secs(60));
+    let mut bounds = limits(Duration::from_secs(3));
     bounds.output_bytes_max = 16;
+    let started = Instant::now();
     let run = runner(&case, bounds)
         .run_once(&project(&case, Some(endpoint(port))))
         .unwrap()
         .unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(3));
     assert_eq!(run.status, ResearchStatus::Failed);
     let job = jobs.get(id).unwrap().unwrap();
-    assert_eq!(
-        job.error.as_deref(),
-        Some("Agent output exceeded the limit")
-    );
+    assert_eq!(job.error.as_deref(), Some("Agent ran out of time"));
+    assert!(job.output_bytes > 16, "{}", job.output_bytes);
     assert!(!process_group_alive(run.process_group.unwrap()));
 }
 

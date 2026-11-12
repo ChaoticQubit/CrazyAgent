@@ -9,12 +9,22 @@ use std::io::{Read, Write};
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 pub(super) const CODEX_RECORD: &str = "auth.json";
 pub(super) const CLAUDE_RECORD: &str = ".credentials.json";
 const RECORD_BYTES_MAX: u64 = 65_536;
 const USABLE_MIN: Duration = Duration::from_secs(60);
+
+/// Held across every engine rename into a copy's name and every removal of a copy, so a
+/// removal that finds its own file at the name removes that file and never one an engine
+/// placement renamed there in between.
+static PLACING: Mutex<()> = Mutex::new(());
+
+/// The device and inode of the file a credential last placed at its name, shared with its
+/// keeper, which records each renewed copy it places there.
+pub(super) type Placed = Arc<Mutex<(u64, u64)>>;
 
 /// How far ahead a turn with no time bound has its copy checked when it starts: the day a
 /// team agent's copy is checked for. After that its keeper renews the copy, however long
@@ -101,11 +111,13 @@ pub(super) struct Record {
 
 /// An account credential copied into one agent's own home for one turn, with the keeper
 /// that renews it when the turn may outlast it. Dropping it stops the keeper and then
-/// removes the copy and any record of it in the agent's own keychain, so nothing outlives
-/// the turn that needed it.
+/// removes the copy it placed and any record of it in the agent's own keychain, so nothing
+/// outlives the turn that needed it, and a newer copy placed at the same name for a later
+/// start of the same agent stays.
 pub(crate) struct AgentCredential {
     home: File,
     name: &'static str,
+    placed: Placed,
     keychain: Option<AgentKeychain>,
     keeper: Option<Keeper>,
 }
@@ -218,29 +230,38 @@ impl AgentCredential {
     /// reaches the copy, and keeps the copy and the home's descriptor for the engine's life.
     /// Takes the credential. Returns nothing.
     pub(crate) fn retain(mut self) {
-        self.stop_renewing();
-        std::mem::forget(self);
-    }
-
-    /// Stops the keeper of a copy that processes of an agent may still read after its stop,
-    /// so no renewed token reaches the copy; the copy stays until the credential is dropped.
-    /// Takes the credential. Returns nothing.
-    pub(crate) fn stop_renewing(&mut self) {
         drop(self.keeper.take());
         assert!(self.keeper.is_none());
+        std::mem::forget(self);
     }
 }
 
 impl Drop for AgentCredential {
-    /// Stops the keeper, then removes the copy beneath the agent home's descriptor and its
-    /// record in the agent's keychain. Input: the credential being dropped. Output: none; a
-    /// copy or record already gone is fine.
+    /// Stops the keeper, after which the placed identity no longer changes, then removes
+    /// the copy beneath the agent home's descriptor only while its name still holds that
+    /// file, and its record in the agent's keychain, which this handoff alone created.
+    /// Input: the credential being dropped. Output: none; a copy or record already gone, or
+    /// a copy replaced, is left alone.
     fn drop(&mut self) {
         drop(self.keeper.take());
-        let _ = rustix::fs::unlinkat(&self.home, self.name, AtFlags::empty());
+        let placed = *self.placed.lock().unwrap_or_else(PoisonError::into_inner);
+        remove_placed(&self.home, self.name, placed);
         if let Some(keychain) = &self.keychain {
             let _ = keychain.forget();
         }
+    }
+}
+
+/// Removes the file at `name` in the agent home only while that name still refers to the
+/// file with the placed device and inode, under the lock every engine placement takes.
+/// Inputs: the agent home, the copy's name and the placed identity. Output: none; a name
+/// that is gone or holds another file is left alone.
+fn remove_placed(home: &File, name: &str, placed: (u64, u64)) {
+    let _placing = PLACING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Ok(named) = rustix::fs::statat(home, name, AtFlags::SYMLINK_NOFOLLOW)
+        && (named.st_dev as u64, named.st_ino) == placed
+    {
+        let _ = rustix::fs::unlinkat(home, name, AtFlags::empty());
     }
 }
 
@@ -348,10 +369,11 @@ impl NativeProfileUse {
         };
         let name = harness.copy_name();
         let keychain = agent_keychain(harness, agent_home, &self.custody.anchor.path)?;
-        place(&home, name, &record.copy)?;
+        let placed = Arc::new(Mutex::new(place(&home, name, &record.copy)?));
         let mut credential = AgentCredential {
             home,
             name,
+            placed: Arc::clone(&placed),
             keychain,
             keeper: None,
         };
@@ -369,6 +391,7 @@ impl NativeProfileUse {
                 renewal,
                 agent,
                 name,
+                placed,
                 credential.keychain.clone(),
                 record.expires,
             )?);
@@ -479,8 +502,9 @@ fn read_record(folder: &File, name: &str) -> Result<Vec<u8>, EngineError> {
 
 /// Writes the copy under a fresh private name in the agent home and renames it into place,
 /// so a link an agent left at that name is replaced, never followed.
-/// Inputs: the agent home, the file name and the bytes. Output: done, or unavailable.
-pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineError> {
+/// Inputs: the agent home, the file name and the bytes. Output: the placed file's device
+/// and inode, or unavailable.
+pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(u64, u64), EngineError> {
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| unavailable())?;
     let temporary = format!(".{name}.{:016x}", u64::from_le_bytes(nonce));
@@ -496,8 +520,12 @@ pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineE
     let written = rustix::fs::fchmod(&file, Mode::from_raw_mode(0o600))
         .map_err(|_| unavailable())
         .and_then(|()| file.write_all(bytes).map_err(|_| unavailable()))
-        .and_then(|()| {
-            rustix::fs::renameat(home, temporary.as_str(), home, name).map_err(|_| unavailable())
+        .and_then(|()| rustix::fs::fstat(&file).map_err(|_| unavailable()))
+        .and_then(|stat| {
+            let _placing = PLACING.lock().unwrap_or_else(PoisonError::into_inner);
+            rustix::fs::renameat(home, temporary.as_str(), home, name)
+                .map(|()| (stat.st_dev as u64, stat.st_ino))
+                .map_err(|_| unavailable())
         });
     if written.is_err() {
         let _ = rustix::fs::unlinkat(home, temporary.as_str(), AtFlags::empty());
