@@ -646,6 +646,66 @@ fn a_refused_save_over_a_four_line_text_keeps_the_problem_in_view_at_80_by_24() 
     assert!(tall.contains("so yours were not saved."), "{tall}");
 }
 
+/// A refused save over a newer text longer than the room left keeps the problem line and
+/// both editor rows in view at 80x24 (backlog 39): after the blank rows and the long intro,
+/// the quote of the text that landed gives way from the bottom, down to one row, and its
+/// more line counts what it hid. At 120x40 the quote shows up to its six rows.
+#[test]
+fn a_refused_save_over_a_long_newer_text_keeps_the_problem_and_both_editor_rows_in_view_at_80_by_24()
+ {
+    let names = [
+        "One.", "Two.", "Three.", "Four.", "Five.", "Six.", "Seven.", "Eight.", "Nine.", "Ten.",
+        "Eleven.", "Twelve.",
+    ];
+    for count in [5, 7, 12] {
+        let mut shell = opened(Scope::App, "Old rule.\nSecond rule.");
+        typed(&mut shell, "Mine. ");
+        shell.key(Key::Ctrl('s'));
+        let save = ProcessQuery::Save {
+            project: None,
+            text: "Mine. Old rule.\nSecond rule.".into(),
+            version: READ_VERSION,
+            opened: None,
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        let stale = SavedText::Stale {
+            version: READ_VERSION,
+            current: ProcessText {
+                text: names[..count].join("\n"),
+                version: READ_VERSION + 1,
+            },
+            writer: crate::storage::versioned::LastWriter::Owner,
+        };
+        shell.arrive(answered(save, Ok(ProcessReply::Saved(stale))));
+        let shown = render(&mut shell, 80, 24).join("\n");
+        for text in [
+            "since you opened it.",
+            "One.",
+            "more lines",
+            "Keep mine",
+            "Instructions for agents",
+            "Mine. ",
+            "Second rule.",
+            "so yours were not saved.",
+        ] {
+            assert!(shown.contains(text), "{count} rows, {text}:\n{shown}");
+        }
+        let last = names[count.min(LINES_SHOWN_MAX) - 1];
+        assert!(
+            !shown.contains(last),
+            "{count} rows: the quote gave way:\n{shown}"
+        );
+        let tall = render(&mut shell, 120, 40).join("\n");
+        assert!(tall.contains(last), "{count} rows:\n{tall}");
+        let more = match count.saturating_sub(LINES_SHOWN_MAX) {
+            0 => !tall.contains("more lines"),
+            hidden => tall.contains(&format!("{hidden} more lines")),
+        };
+        assert!(more, "{count} rows:\n{tall}");
+        assert!(tall.contains("so yours were not saved."), "{tall}");
+    }
+}
+
 #[test]
 fn stale_save_shows_the_conflict_choices() {
     let stale = |named: u64, text: &str| {
