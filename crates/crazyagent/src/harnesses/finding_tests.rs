@@ -526,6 +526,26 @@ fn the_engine_search_finds_a_harness_in_the_engine_npm_prefix_after_the_owners_f
 }
 
 #[test]
+fn an_owner_harness_in_a_home_folder_wins_over_the_one_the_engine_installed() {
+    let case = Case::new();
+    let bin = crate::setup::harness_prefix(&case.engine).join("bin");
+    let relative = bin.strip_prefix(&case.root).unwrap().to_str().unwrap();
+    let installed = case.file(&format!("{relative}/codex"), 0o755);
+    let search = Search::engine(None, &[], Some(case.home.clone())).with_engine(&case.engine);
+    assert_eq!(
+        search.find("codex"),
+        Some(installed.clone()),
+        "the engine copy is the fallback"
+    );
+    let owned = case.file("home/.local/bin/codex", 0o755);
+    assert_eq!(search.find("codex"), Some(owned.clone()));
+    assert_eq!(search.candidates("codex"), [owned, installed]);
+    let looked = search.looked("codex");
+    let at = |folder: &Path| looked.iter().position(|seen| seen == folder).unwrap();
+    assert!(at(&bin) > at(&case.home.join(".local/bin")));
+}
+
+#[test]
 fn an_npm_harness_the_engine_installed_in_its_setup_folder_passes_and_other_engine_data_stays_refused()
  {
     let case = Case::new();
