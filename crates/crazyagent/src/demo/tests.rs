@@ -67,7 +67,10 @@ fn database(root: &Path) -> Connection {
          CREATE TABLE master_sessions(id TEXT PRIMARY KEY, project TEXT);
          CREATE TABLE master_turns(session TEXT, ordinal INTEGER, input INTEGER);
          CREATE TABLE team_agents(project TEXT, role TEXT, created_ms INTEGER);
-         CREATE TABLE landing_change_sets(project TEXT, state TEXT, created_ms INTEGER);",
+         CREATE TABLE landing_change_sets(project TEXT, state TEXT, created_ms INTEGER);
+         CREATE TABLE team_messages(id INTEGER PRIMARY KEY, project TEXT);
+         CREATE TABLE team_notifications(id INTEGER PRIMARY KEY, project TEXT, kind TEXT,
+             text TEXT, created_ms INTEGER, seen_ms INTEGER);",
     )
     .unwrap();
     crate::questions::initialize(&db).unwrap();
