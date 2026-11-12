@@ -113,6 +113,8 @@ fn native_protocols_and_existing_profile_rejections_remain_intact() {
         profile(&path, &logical);
         assert!(checked_configured_profile(&path, &logical).is_ok());
         logical.provider = CredentialRef::new("openai").unwrap();
+        profile(&path, &configured_sdk_connection(&logical).unwrap());
+        assert!(checked_configured_profile(&path, &logical).is_ok());
         profile(&path, &logical);
         assert!(checked_configured_profile(&path, &logical).is_err());
     }
@@ -122,4 +124,67 @@ fn native_protocols_and_existing_profile_rejections_remain_intact() {
     logical.protocol = CredentialRef::new("unsupported-protocol").unwrap();
     assert!(configured_sdk_connection(&logical).is_err());
     assert!(checked_configured_profile(&path, &logical).is_err());
+}
+
+/// A keyed Anthropic API, OpenAI API or OpenRouter account, saved by Accounts under the
+/// provider name rcli keeps for its own builtin provider, launches the RCLI master: its
+/// profile names a hashed provider id that never shadows an rcli builtin, the launch's
+/// re-check passes, and a profile naming the builtin id itself is still refused, as rcli's
+/// `RESERVED_CUSTOM_PROVIDER_IDS` refuses it.
+#[test]
+fn a_keyed_account_under_a_builtin_provider_name_launches_on_a_hashed_provider_id() {
+    let home = home();
+    let path = fs::canonicalize(home.path()).unwrap();
+    let mut seen = Vec::new();
+    for (provider, protocol, url) in [
+        ("openai", "openai-chat", "https://api.openai.com/v1"),
+        (
+            "anthropic",
+            "anthropic-messages",
+            "https://api.anthropic.com/v1",
+        ),
+        ("openrouter", "openai-chat", "https://openrouter.ai/api/v1"),
+    ] {
+        let mut logical = connection();
+        logical.provider = CredentialRef::new(provider).unwrap();
+        logical.protocol = CredentialRef::new(protocol).unwrap();
+        logical.endpoint = ModelEndpoint::Http { url: url.into() };
+        logical.model.author = CredentialRef::new(provider).unwrap();
+        logical.auth = ModelAuthentication::ApiKey {
+            credential_ref: CredentialRef::new("synthetic-key-ref-a").unwrap(),
+        };
+        let selection = configured_sdk_connection(&logical).unwrap();
+        assert_eq!(selection.protocol, logical.protocol, "{provider}");
+        assert_eq!(selection.endpoint, logical.endpoint, "{provider}");
+        assert_eq!(selection.model, logical.model, "{provider}");
+        let id = selection.provider.as_str();
+        assert_eq!(id.len(), 64, "{provider}");
+        assert!(
+            id.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "{provider}"
+        );
+        assert!(!RESERVED_PROVIDER_IDS.contains(&id), "{provider}");
+        assert!(!seen.contains(&id.to_owned()), "{provider}");
+        seen.push(id.to_owned());
+        assert_eq!(configured_sdk_connection(&logical).unwrap(), selection);
+        profile(&path, &selection);
+        let digest = checked_configured_profile(&path, &logical).unwrap();
+        assert_eq!(
+            checked_profile_config(&path, &logical, Some(&digest)).unwrap(),
+            digest
+        );
+        profile(&path, &logical);
+        assert!(
+            checked_configured_profile(&path, &logical).is_err(),
+            "{provider}: a builtin id in the profile stays refused"
+        );
+    }
+    for reserved in RESERVED_PROVIDER_IDS {
+        let mut logical = connection();
+        logical.provider = CredentialRef::new(*reserved).unwrap();
+        logical.protocol = CredentialRef::new("openai-chat").unwrap();
+        let id = configured_sdk_connection(&logical).unwrap().provider;
+        assert!(!RESERVED_PROVIDER_IDS.contains(&id.as_str()), "{reserved}");
+    }
 }

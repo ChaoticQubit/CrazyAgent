@@ -200,6 +200,18 @@ impl RcliMasterLaunch {
     }
 }
 
+/// The provider ids rcli keeps for its own builtin providers and refuses for a configured
+/// one (`RESERVED_CUSTOM_PROVIDER_IDS` in rcli's src/config/providers.ts, 3.0.4). A profile
+/// naming one is never a valid master selection.
+pub(crate) const RESERVED_PROVIDER_IDS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "google",
+    "openrouter",
+    "gemini",
+    "google-gemini",
+];
+
 /// Projects a logical connection into the supported isolated SDK selection.
 /// Takes the complete connection without configuration or project revisions.
 /// Returns a physical selection while retaining the original connection.
@@ -488,15 +500,7 @@ fn validate_selection(
         || !provider.id.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
         })
-        || [
-            "openai",
-            "anthropic",
-            "google",
-            "openrouter",
-            "gemini",
-            "google-gemini",
-        ]
-        .contains(&provider.id.as_str())
+        || RESERVED_PROVIDER_IDS.contains(&provider.id.as_str())
         || provider.name.trim().is_empty()
         || provider.enabled == Some(false)
         || provider.protocol != connection.protocol.as_str()
