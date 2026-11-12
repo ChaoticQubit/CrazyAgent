@@ -91,6 +91,8 @@ test("App plugins (A2, A3, A4): Add opens a paste box with Pick a .yaml file, Ch
   assert.match(empty, /<button[^>]*disabled=""[^>]*>[^<]*(<[^>]*>)*Check/u, "Check waits for text");
   const typed = render({ dialog: { kind: "add", yaml: "schema: 1\n", checking: false } });
   assert.doesNotMatch(typed, /<button[^>]*disabled=""[^>]*>[^<]*(<[^>]*>)*Check/u);
+  assert.match(empty, /<textarea[^>]*id="app-plugin-yaml"[^>]*maxLength="16385"|<textarea[^>]*maxLength="16385"[^>]*id="app-plugin-yaml"/u,
+    "a paste one past 16 KB stays whole so the engine refuses it, never cut into a different manifest");
 });
 
 test("App plugins (A2, A13): the trust screen names kind, hosts, secrets, how it runs and the SHA-256, with Confirm and Cancel", () => {
