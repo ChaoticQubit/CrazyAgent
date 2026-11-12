@@ -172,7 +172,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   if (session.profile.kind === "ok" && profile === null && updates) return <UpdatesAlone session={session} />;
   if (session.profile.kind === "ok" && profile === null || route.name === "welcome") {
     return <SessionContext.Provider value={session}>
-      <Welcome onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
+      <Welcome profile={profile} onSaved={(_, next, note) => { if (note) session.showToast(note); void session.refreshProfile().then(() => navigate(next ?? { name: "home" }, true)); }}
         onSkip={(next, note) => { if (note) session.showToast(note); navigate(next ?? { name: "home" }, true); }} />
     </SessionContext.Provider>;
   }

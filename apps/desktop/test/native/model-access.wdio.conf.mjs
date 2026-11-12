@@ -19,6 +19,8 @@ const SPECS = {
   "pools-screen": "pools-screen.e2e.mjs",
   "first-run-guide": "first-run-guide.e2e.mjs",
   "first-run-skip-guide": "first-run-skip-guide.e2e.mjs",
+  "learning-replay-guide": "learning-replay-guide.e2e.mjs",
+  "learning-replay-first-run": "learning-replay-first-run.e2e.mjs",
 };
 assert(SPECS[process.env.CRAZYAGENT_DESKTOP_TEST_SUITE], "a suite this configuration runs");
 
