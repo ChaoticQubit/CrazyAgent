@@ -5304,16 +5304,16 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     let defaults = coordination(&connection, &project).unwrap();
     assert_eq!(defaults.settings, CoordSettings::default());
     assert_eq!(defaults.harnesses.len(), HarnessKind::ALL.len());
-    assert_eq!(
-        row(&defaults, HarnessKind::ClaudeCode),
-        (SubagentMode::AppSpawned, Delivery::Auto, true)
-    );
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
+    for harness in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
         assert_eq!(
             row(&defaults, harness),
-            (SubagentMode::AppSpawned, Delivery::Auto, false)
+            (SubagentMode::AppSpawned, Delivery::Auto, true)
         );
     }
+    assert_eq!(
+        row(&defaults, HarnessKind::Rcli),
+        (SubagentMode::AppSpawned, Delivery::Auto, false)
+    );
     assert_eq!(
         status(&connection, &setup).unwrap().coordination,
         Some(defaults)
@@ -5390,7 +5390,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     );
     assert_eq!(
         row(&saved, HarnessKind::Codex),
-        (SubagentMode::AppSpawned, Delivery::Auto, false)
+        (SubagentMode::AppSpawned, Delivery::Auto, true)
     );
     let other = stored("team-coord-other", vec![]);
     assert_eq!(

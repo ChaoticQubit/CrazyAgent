@@ -953,7 +953,17 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
         vec![ended, resent.clone()]
     );
     assert_eq!(f.session(&reader, "p").await.unwrap().current_turn, None);
-    assert_eq!(f.history(&reader, "p").await.entries.len(), 1);
+    let texts = |page: ConversationPage| -> Vec<String> {
+        page.entries.into_iter().map(|entry| entry.text).collect()
+    };
+    assert_eq!(
+        texts(f.history(&reader, "p").await),
+        [
+            "Plan without a configured profile.",
+            "Use the revised requirement."
+        ],
+        "the send after the restart is kept as the session's next owner message (PA-6)"
+    );
     f.close(&reader, "close-stale", &session).await;
     let (_, fresh) = f
         .open(&reader, "reopen", "p", selection(MasterBackend::Rcli))
@@ -968,7 +978,14 @@ async fn master_blocked_turn_is_durable_and_allows_a_new_planning_turn() {
         Some("rcli_profile_configuration_required")
     );
     assert_eq!(next.ordinal, 1);
-    assert_eq!(f.history(&reader, "p").await.entries.len(), 2);
+    assert_eq!(
+        texts(f.history(&reader, "p").await),
+        [
+            "Plan without a configured profile.",
+            "Use the revised requirement.",
+            "Use the revised requirement.",
+        ]
+    );
     f.stop().await;
 }
 
@@ -1127,23 +1144,34 @@ async fn master_submit_rechecks_source_even_when_configuration_values_are_unchan
         .await;
     let global = f.root.path().join("global.toml");
     std::fs::write(&global, format!("{CATALOG}\n")).unwrap();
-    rejected(
-        owner
-            .request(mutation(
-                "stale-turn",
-                f.revision(&owner).await,
-                MasterOwnerAction::Submit {
-                    project_id: project("p"),
-                    session_id: session.session_id.clone(),
-                    text: "Changed source must be checked.".into(),
-                },
-            ))
-            .await
-            .unwrap(),
+    let (config_id, source_hash) = f.basis(&owner).await;
+    assert_eq!(config_id, session.config_id);
+    assert_ne!(source_hash, session.source_hash);
+    f.submit(
+        &owner,
+        "rebound-turn",
+        &session,
+        "Changed source must be checked.",
+    )
+    .await;
+    let current = f.session(&owner, "p").await.unwrap();
+    assert_eq!(current.session_id, session.session_id);
+    assert_eq!(current.config_id, session.config_id);
+    assert_eq!(current.source_hash, session.source_hash);
+    assert_eq!(
+        current.rebound.len(),
+        1,
+        "the send reads the changed source"
     );
-    std::fs::write(&global, CATALOG).unwrap();
-    assert!(f.page(&owner, &session).await.turns.is_empty());
-    assert!(f.history(&owner, "p").await.entries.is_empty());
+    assert_eq!(current.rebound[0].config_id, session.config_id);
+    assert_eq!(current.rebound[0].source_hash, source_hash);
+    assert_eq!(current.rebound[0].engine_epoch, None);
+    let turns = f.page(&owner, &session).await.turns;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].id, RequestId::new("rebound-turn").unwrap());
+    let history = f.history(&owner, "p").await.entries;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].text, "Changed source must be checked.");
     f.stop().await;
 }
 
