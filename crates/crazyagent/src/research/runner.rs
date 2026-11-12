@@ -907,7 +907,10 @@ impl ResearchRunner {
                     .hand_to_agent(&home, self.limits.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let policy = jobs
             .agent_policy(&project)
@@ -1601,7 +1604,10 @@ impl ResearchRunner {
                     .hand_to_agent(&home, run.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let work = agent.join("work");
         private_directory(&work)?;
@@ -3176,6 +3182,22 @@ fn codex_retry_limited(line: &str) -> bool {
             .is_some_and(|(_, cause)| rate_limited(cause))
 }
 
+/// Gives a Claude Code research agent that reaches its model by key or address, with no
+/// signed-in account handed to it, its own keychain in its home as a handoff gives a
+/// signed-in one, so a harness that stores anything there never makes macOS ask the owner
+/// to create a keychain (DEC-146 KCA-M2). Codex keeps nothing in a keychain. Inputs: the
+/// research state folder, the harness and the agent home. Output: done, or the refusal.
+fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Result<(), RunError> {
+    #[cfg(target_os = "macos")]
+    if matches!(harness, ResearchHarness::ClaudeCode) {
+        crate::engine::keychain::fresh_profile_keychain(state, home, &[])
+            .map_err(|_| RunError::Account("agent_keychain_unavailable".into()))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (state, harness, home);
+    Ok(())
+}
+
 /// Tells whether a research agent that exited failing was refused for a rate or usage
 /// limit: Codex's own failure message in its stdout log, or the first line of Claude
 /// Code's printed reply. Takes the harness, the agent state folder, the report path and
@@ -3532,6 +3554,50 @@ mod tests {
     use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    /// A Claude Code research agent with no signed-in account handed to it gets one agent
+    /// keychain of its own as its home's default and search list, and a Codex one gets no
+    /// keychain folder at all (DEC-146 r1 KCA-M2).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_claude_research_agent_without_a_lease_gets_its_own_default_keychain() {
+        use crate::credentials::test_keychain::TestKeychain;
+        let dir = tempfile::Builder::new()
+            .prefix("ca-research-keychain-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let state = dir.path().canonicalize().unwrap().join("research");
+        let homes = [state.join("claude/home"), state.join("codex/home")];
+        for home in &homes {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        endpoint_keychain(&state, ResearchHarness::Codex, &homes[1]).unwrap();
+        assert!(!homes[1].join("Library").exists());
+        endpoint_keychain(&state, ResearchHarness::ClaudeCode, &homes[0]).unwrap();
+        let found: Vec<PathBuf> = fs::read_dir(homes[0].join("Library/Keychains"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_str().unwrap().ends_with(".keychain-db"))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("agent-")
+        );
+        let keychain = TestKeychain::adopt(&homes[0], found[0].clone());
+        let text = found[0].to_str().unwrap();
+        assert!(keychain.setting("default-keychain").contains(text));
+        assert!(keychain.setting("list-keychains").contains(text));
+        assert!(
+            endpoint_keychain(&state, ResearchHarness::ClaudeCode, dir.path()).is_err(),
+            "a home outside the research state got a keychain"
+        );
+    }
 
     #[test]
     fn a_research_job_network_follows_the_project_choice_only_with_tools() {

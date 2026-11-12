@@ -11938,13 +11938,13 @@ fn a_live_master_s_reminder_is_left_out_when_only_the_owner_message_and_its_edit
     );
 }
 
-/// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
-/// background commands stop when its turn ends: its rollout reports no such commands, so
-/// the engine neither holds its turn for them nor stops them, and the line would be untrue
-/// (rv-audit S3 F2). Its task still reaches it and ends.
+/// Under Stop, a Codex sub-agent whose app keeps running between tasks is told that its
+/// background commands stop when its turn ends, as a Claude Code pane is: its rollout reports
+/// each command it leaves running and that command's end, so the engine holds its turn for
+/// them and stops them at the turn's end (DEC-141 PA-10). Its task still reaches it and ends.
 #[cfg(target_os = "macos")]
 #[test]
-fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
+fn under_stop_a_kept_codex_agent_is_told_its_background_commands_stop() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
@@ -11958,7 +11958,47 @@ fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
     assert!(text.contains("Write page.md"), "{text}");
-    assert!(!text.contains(BACKGROUND_STOPS_LINE), "{text}");
+    assert!(text.contains(BACKGROUND_STOPS_LINE), "{text}");
+}
+
+/// Under Stop, a sub-agent kept on pipes, a headless Claude Code session on a local endpoint
+/// account, is not told that its background commands stop when its turn ends: a piped
+/// session reports none of them, so the engine cannot stop them and they keep running
+/// (rv-audit S3 F2). Its task still reaches it and ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_piped_agent_is_not_told_its_background_commands_stop() {
+    let fixture = Fixture::new(1);
+    let mut setup = fixture.setup.clone();
+    setup.team.sub_harnesses = vec![HarnessSlot {
+        harness: "claude-code".into(),
+        agents: 1,
+        tools: false,
+    }];
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    let mut team = piped_runtime(&fixture);
+    delegate_claude(&fixture, "Run the compile check.");
+    fixture.until(&mut team, "the task is done", |f| {
+        task_of(f, "Run the compile check.").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    let turns = std::fs::read_to_string(stand_in_file(&fixture, agent, "turns")).unwrap();
+    team.shutdown().unwrap();
+    assert_eq!(
+        serde_json::to_string(BACKGROUND_STOPS_LINE).unwrap(),
+        format!("\"{BACKGROUND_STOPS_LINE}\""),
+        "the line reads the same inside the piped turn's JSON, so its absence below is real"
+    );
+    assert_eq!(turns.lines().count(), 1, "{turns}");
+    assert!(turns.contains("Run the compile check."), "{turns}");
+    assert!(!turns.contains(BACKGROUND_STOPS_LINE), "{turns}");
 }
 
 /// Under Stop, an agent whose harness starts for each turn on a signed-in account is told

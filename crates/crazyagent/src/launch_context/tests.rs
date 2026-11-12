@@ -858,14 +858,26 @@ impl Drop for Unpinned {
     }
 }
 
-/// CTX-M1 residual (rv-secreview r2 I3): an earlier run that pinned Codex's own
-/// `skills/.system` with an ACL denying its removal or a mode without write, or left a folder
-/// without write or an immutable file inside it, never refuses the next Codex launches in that
-/// home: each launch clears what pins the folder, moves it away and removes it, parking nothing.
+/// CTX-M1 residual (rv-secreview r2 I3), V231-ACL: an earlier run that pinned Codex's own
+/// `skills/.system` with an ACL denying its removal or a mode without write, or left inside it
+/// a folder without write, an immutable folder, an immutable file, a file or link whose own ACL
+/// denies its removal, or a folder with no access holding an immutable file, never refuses the
+/// next Codex launches there: each launch clears what pins the folder, moves it away and
+/// removes it, parking nothing (ACL r1 F1: the immutable folder needs the folder flag pass).
 #[cfg(target_os = "macos")]
 #[test]
 fn pinned_codex_system_skills_never_refuse_the_next_launches() {
-    for pin in ["acl", "mode", "inner mode", "inner flag"] {
+    let pins = [
+        "acl",
+        "mode",
+        "inner mode",
+        "inner folder flag",
+        "inner flag",
+        "inner acl",
+        "inner link acl",
+        "closed folder",
+    ];
+    for pin in pins {
         let directory = tempfile::tempdir().unwrap();
         let _unpinned = Unpinned(directory.path().to_path_buf());
         let home = directory.path().canonicalize().unwrap().join("codex");
@@ -892,6 +904,16 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
                 "acl" => chmod(&["+a", "everyone deny delete"], &system),
                 "mode" => chmod(&["0500"], &system),
                 "inner mode" => chmod(&["0500"], &planted),
+                "inner folder flag" => chflags("uchg", &planted),
+                "inner acl" => chmod(&["+a", "everyone deny delete"], &planted.join("SKILL.md")),
+                "inner link acl" => {
+                    let link = planted.join("link");
+                    std::os::unix::fs::symlink("SKILL.md", &link).unwrap();
+                    chmod(&["-h", "+a", "everyone deny delete"], &link)
+                }
+                "closed folder" => {
+                    chflags("uchg", &planted.join("SKILL.md")) && chmod(&["0000"], &planted)
+                }
                 _ => chflags("uchg", &planted.join("SKILL.md")),
             };
             assert!(pinned, "{pin}: launch {launch} pins the planted skills");
@@ -933,6 +955,7 @@ fn listed(folders: &[&Path]) -> String {
         .arg("-ledn")
         .args(folders)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     let output = crate::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success());
@@ -1111,30 +1134,45 @@ fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
     }
 }
 
-/// DEC-141 PA-19: what an earlier run left pinned in an agent home, an ACL on the home that
-/// denies new folders and removals, an ACL on `skills` that denies its removal or an immutable
-/// file at `skills`, refuses no launch of any harness. Codex, which loads skills from its home, has those pins released and starts with
-/// an empty `skills` folder, on the same terms as Claude Code and RCLI.
+/// DEC-141 PA-19, ACL r1 F2: what an earlier run left pinned in an agent home, an ACL on the
+/// home that denies new folders and removals or one that denies listing it, an ACL on `skills`
+/// that denies its removal, a `skills` folder without write or an immutable file at `skills`,
+/// refuses no launch of any harness. Codex, which loads skills from its home, has those pins
+/// released and starts with an empty `skills` folder, on the same terms as Claude Code and RCLI.
 #[cfg(target_os = "macos")]
 #[test]
 fn skills_left_pinned_in_a_home_refuse_no_launch_of_any_harness() {
+    let pins = [
+        "home acl",
+        "home list acl",
+        "skills acl",
+        "skills mode",
+        "skills file flag",
+    ];
     for harness in ["claude-code", "codex", "rcli"] {
-        for pin in ["home acl", "skills acl", "skills file flag"] {
+        for pin in pins {
             let directory = tempfile::tempdir().unwrap();
             let _unpinned = Unpinned(directory.path().to_path_buf());
             let home = directory.path().canonicalize().unwrap().join("home");
             fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
             let skills = home.join("skills");
-            if pin == "home acl" {
+            if pin == "home acl" || pin == "home list acl" {
                 let planted = skills.join(CODEX_SYSTEM_SKILLS).join("planted");
                 fs::create_dir_all(&planted).unwrap();
                 fs::write(planted.join("SKILL.md"), "planted\n").unwrap();
-                let denied = &["+a", "everyone deny add_subdirectory,delete_child"];
-                assert!(chmod(denied, &home), "{harness}, {pin}: pinned");
+                let denied = if pin == "home acl" {
+                    "everyone deny add_subdirectory,delete_child"
+                } else {
+                    "everyone deny list"
+                };
+                assert!(chmod(&["+a", denied], &home), "{harness}, {pin}: pinned");
             } else if pin == "skills acl" {
                 fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
                 let denied = &["+a", "everyone deny delete"];
                 assert!(chmod(denied, &skills), "{harness}, {pin}: pinned");
+            } else if pin == "skills mode" {
+                fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+                assert!(chmod(&["0500"], &skills), "{harness}, {pin}: pinned");
             } else {
                 fs::write(&skills, "planted\n").unwrap();
                 assert!(chflags("uchg", &skills), "{harness}, {pin}: pinned");
@@ -1235,6 +1273,187 @@ fn a_skills_entry_swapped_for_an_owner_s_file_during_its_release_keeps_the_owner
     assert!(
         listed(&[&owner]).contains("deny write"),
         "the release cleared the owner's ACL"
+    );
+}
+
+/// V231-ACL (DEC-141 PA-19): a Codex `skills` folder whose removal beside the home needs a
+/// release, because a folder in it has no write, leaves an owner's file that folder holds a
+/// hard link to and a file its link names with their ACL entry and mode: the release changes
+/// nothing with a second link and follows no link. The launch starts and nothing stays parked.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_released_skills_folder_leaves_an_owner_s_linked_file_and_a_link_s_target_as_they_were() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let skills = home.join("skills");
+    let kept = skills.join("kept");
+    fs::create_dir_all(&kept).unwrap();
+    let (owner, target) = (root.join("owner.txt"), root.join("target.txt"));
+    for file in [&owner, &target] {
+        fs::write(file, "owner\n").unwrap();
+        assert!(
+            chmod(&["+a", "everyone deny write"], file),
+            "the owner adds an ACL entry"
+        );
+        assert!(chmod(&["0400"], file), "the owner makes the file read only");
+    }
+    fs::hard_link(&owner, kept.join("linked")).unwrap();
+    std::os::unix::fs::symlink(&target, kept.join("link")).unwrap();
+    assert!(
+        chmod(&["0500"], &kept),
+        "the agent takes write off a folder"
+    );
+
+    let held = lock_only(&home, "codex");
+
+    assert_eq!(held.as_ref().err().map(|problem| problem.0.as_str()), None);
+    assert!(fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none()));
+    for (file, name) in [(&owner, "linked file"), (&target, "link's target")] {
+        assert!(
+            listed(&[file]).contains("deny write"),
+            "the release cleared the ACL of the {name}"
+        );
+        let mode = fs::symlink_metadata(file).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o400, "the release changed the mode of the {name}");
+    }
+    let parked = fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        .filter(|name| name.starts_with(&format!(".{STATE}-parked-")))
+        .collect::<Vec<_>>();
+    assert!(parked.is_empty(), "the launch parks {parked:?}");
+    drop(held);
+}
+
+/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write, which cannot move to a
+/// new parent, gains the owner's write through the descriptor its release opened, never its
+/// name: a process an earlier run left that moves the folder aside and links an owner's read
+/// only file with an ACL entry at `skills` meanwhile leaves the owner's file with its mode and
+/// ACL entry, the moved folder opened up, and the launch with an empty `skills` folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let owner = root.join("owner.txt");
+    fs::write(&owner, "owner\n").unwrap();
+    assert!(
+        chmod(&["+a", "everyone deny write"], &owner),
+        "the owner adds an ACL entry"
+    );
+    assert!(
+        chmod(&["0400"], &owner),
+        "the owner makes the file read only"
+    );
+    let skills = home.join("skills");
+    fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+    assert!(
+        chmod(&["0500"], &skills),
+        "the agent takes write off skills"
+    );
+    let moved = home.join("skills.moved");
+    let (swapped, aside, linked) = (skills.clone(), moved.clone(), owner.clone());
+    AFTER_SKILLS_OPEN.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move || {
+            fs::rename(&swapped, &aside).unwrap();
+            fs::hard_link(&linked, &swapped).unwrap();
+        }));
+    });
+
+    let held = lock_only(&home, "codex");
+
+    assert!(
+        AFTER_SKILLS_OPEN.with(|step| step.borrow().is_none()),
+        "the release never reached the swap"
+    );
+    assert_eq!(held.as_ref().err().map(|problem| problem.0.as_str()), None);
+    assert!(
+        listed(&[&owner]).contains("deny write"),
+        "the release cleared the owner's ACL"
+    );
+    let mode = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&owner), 0o400, "the release changed the owner's mode");
+    assert_eq!(
+        mode(&moved),
+        0o700,
+        "the release left the folder without write"
+    );
+    assert!(fs::read_dir(&skills).is_ok_and(|mut entries| entries.next().is_none()));
+    drop(held);
+}
+
+/// ACL r1 F2 residual (DEC-141 PA-19): a Codex `skills` folder with no access at all opens for
+/// no descriptor and cannot move to a new parent, and is never opened up by its name, which a
+/// process an earlier run left could swap for an owner's file: that Codex launch is refused
+/// with [`SKILLS_KEPT`] and the folder is left as it was, while a Claude Code launch starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_skills_folder_with_no_access_refuses_codex_and_is_left_as_it_was() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let skills = home.join("skills");
+    fs::create_dir_all(skills.join(CODEX_SYSTEM_SKILLS)).unwrap();
+    assert!(
+        chmod(&["0000"], &skills),
+        "the agent takes all access off skills"
+    );
+
+    let refused = lock_only(&home, "codex");
+
+    assert_eq!(
+        refused.err().map(|problem| problem.0),
+        Some(SKILLS_KEPT.to_owned())
+    );
+    let mode = fs::symlink_metadata(&skills).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0, "the refused launch changed the folder's mode");
+    let started = lock_only(&home, "claude-code");
+    assert_eq!(
+        started.as_ref().err().map(|problem| problem.0.as_str()),
+        None
+    );
+    drop(started);
+}
+
+/// ACL r1 F2 (DEC-141 PA-19): the one home [`release`] clears by its path, with a `chmod -N`
+/// that would follow a link, is never a link: one given a link to an owner's folder with an
+/// ACL entry stops before any tool runs, and the owner's folder keeps its ACL entry.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_released_by_its_path_is_never_a_link() {
+    let directory = tempfile::tempdir().unwrap();
+    let _unpinned = Unpinned(directory.path().to_path_buf());
+    let root = directory.path().canonicalize().unwrap();
+    let owner = root.join("owner");
+    fs::DirBuilder::new().mode(0o700).create(&owner).unwrap();
+    assert!(
+        chmod(&["+a", "everyone deny delete"], &owner),
+        "the owner adds an ACL entry"
+    );
+    let link = root.join("codex");
+    std::os::unix::fs::symlink(&owner, &link).unwrap();
+
+    let released = std::panic::catch_unwind(|| release(&link, false));
+
+    let stop = released.expect_err("a link was released by its path");
+    let message = stop
+        .downcast_ref::<&str>()
+        .map(|text| text.to_string())
+        .or_else(|| stop.downcast_ref::<String>().cloned());
+    assert_eq!(
+        message.as_deref(),
+        Some("a home released by its path is never a link")
+    );
+    assert!(
+        listed(&[&owner]).contains("deny delete"),
+        "the release cleared the ACL of the link's target"
     );
 }
 
@@ -4254,7 +4473,9 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
             .args(["--skip-git-repo-check", "-C"])
             .arg(&work)
             .args(turn)
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let output = crate::spawn_gate::output(&mut command).unwrap();
         let shown = format!(
             "{}{}",

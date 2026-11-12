@@ -1,4 +1,4 @@
-use super::agent_copy::{Harness, Placed, Record, account_record, place};
+use super::agent_copy::{AgentKeychain, Harness, Placed, Record, account_record, place};
 use super::{HeldLock, Manifest, NativeProfileUse, failure, take_lock};
 use crate::adapters::claude::{REFRESH_WINDOW, RENEWAL_TURN};
 use crate::adapters::codex::CodexProtocol;
@@ -394,8 +394,10 @@ fn exchange(
 
 /// Keeps one agent's copy fresh for the rest of its turn: wakes four minutes before the
 /// copy lapses (inside Claude Code's refresh window), renews, and replaces the copy when
-/// the account's record is newer; retries every 30 seconds. Stopped on drop, after which
-/// it writes no copy; `open` is false once stopped and is held while a copy is written.
+/// the account's record is newer, then deletes any stale record of it from the agent's own
+/// keychain, so the harness reads the new copy; retries every 30 seconds. Stopped on drop,
+/// after which it writes no copy; `open` is false once stopped and is held while a copy is
+/// written.
 pub(super) struct Keeper {
     stop: Option<Sender<()>>,
     open: Arc<Mutex<bool>>,
@@ -403,13 +405,15 @@ pub(super) struct Keeper {
 
 impl Keeper {
     /// Starts the keeper. Inputs: the renewal, the agent home, the copy's file name, the
-    /// slot its placed identity is recorded in and its expiry. Output: the running keeper,
-    /// or unavailable when no thread starts.
+    /// slot its placed identity is recorded in, the agent's keychain when its harness keeps
+    /// one, and the copy's expiry. Output: the running keeper, or unavailable when no thread
+    /// starts.
     pub(super) fn start(
         renewal: Renewal,
         agent: File,
         name: &'static str,
         placed: Placed,
+        keychain: Option<AgentKeychain>,
         expires: Duration,
     ) -> Result<Self, EngineError> {
         let (stop, stopped) = channel();
@@ -419,6 +423,7 @@ impl Keeper {
             agent,
             name,
             placed,
+            keychain,
         };
         std::thread::Builder::new()
             .name("credential-keeper".into())
@@ -447,12 +452,13 @@ fn idle(stopped: &Receiver<()>, wait: Duration) -> bool {
     matches!(stopped.recv_timeout(wait), Err(RecvTimeoutError::Timeout))
 }
 
-/// The copy a keeper renews: the agent home, the copy's name and the slot that records the
-/// device and inode of the file last placed there.
+/// The copy a keeper renews: the agent home, the copy's name, the slot that records the
+/// device and inode of the file last placed there, and the agent's keychain or none.
 struct KeptCopy {
     agent: File,
     name: &'static str,
     placed: Placed,
+    keychain: Option<AgentKeychain>,
 }
 
 /// The keeper's loop. Inputs: the renewal, the copy, its expiry, the stop channel and the
@@ -481,8 +487,14 @@ fn keep(
             }
             if let Ok(placed) = place(&copy.agent, copy.name, &record.copy) {
                 *copy.placed.lock().unwrap_or_else(PoisonError::into_inner) = placed;
-                expires = record.expires;
-                continue;
+                if copy
+                    .keychain
+                    .as_ref()
+                    .is_none_or(|keychain| keychain.forget().is_ok())
+                {
+                    expires = record.expires;
+                    continue;
+                }
             }
         }
         if !idle(stopped, RETRY) {

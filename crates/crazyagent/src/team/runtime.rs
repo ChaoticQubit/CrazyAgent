@@ -7525,12 +7525,14 @@ impl TeamRuntime {
         self.note_lead(project, lead, body)
     }
 
-    /// Tells whether a stored agent with tools runs on a harness kind whose native sub-agents
-    /// are threads of its own process (PA-7), read from its row; tools off runs none (r1).
-    /// Takes the agent. Returns the answer, false when unread.
-    fn native_threads_lead(&self, agent: i64) -> bool {
+    /// Tells whether a stored agent runs on a harness kind whose native sub-agents are
+    /// threads of its own process (PA-7), and if so whether it has tools, without which it
+    /// starts none (r1), read from its row. Takes the agent. Returns Some(tools) for such a
+    /// harness, None for any other harness or when unread.
+    fn threads_lead_tools(&self, agent: i64) -> Option<bool> {
         use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
-        self.connection
+        let (harness, tools) = self
+            .connection
             .query_row(
                 "SELECT harness,tools FROM team_agents WHERE id=?1",
                 [agent],
@@ -7538,18 +7540,17 @@ impl TeamRuntime {
             )
             .optional()
             .ok()
-            .flatten()
-            .filter(|(_, tools)| *tools)
-            .and_then(|(harness, _)| HarnessKind::from_harness(&harness))
-            .map(native_sub_agents)
-            == Some(NativeSubAgents::Threads)
+            .flatten()?;
+        (HarnessKind::from_harness(&harness).map(native_sub_agents)
+            == Some(NativeSubAgents::Threads))
+        .then_some(tools)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch,
     /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
     /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
-    /// done, or a Codex lead's sub-agents in its own worktree (PA-7). Takes the project and
-    /// the agent. Returns the line, empty for an agent with no task branch of its own.
+    /// done, or, for a Codex lead with tools, its sub-agents in its own worktree (PA-7).
+    /// Takes the project and the agent. Returns the line, empty with no task branch.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
             .connection
@@ -7582,23 +7583,25 @@ impl TeamRuntime {
                 finish = super::tool::FINISH_WORK_TOOL
             );
         }
+        let plain = format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        );
         if !matches!(
             super::lead_mode(&self.connection, project, agent),
             Ok(crate::coord::settings::SubagentMode::Native)
         ) {
-            return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
-            );
+            return plain;
         }
-        if self.native_threads_lead(agent) {
-            return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
-            );
+        match self.threads_lead_tools(agent) {
+            Some(false) => plain,
+            Some(true) => format!(
+                "{plain} Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
+            ),
+            None => format!(
+                "{plain} Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+                folder = crate::agent_git::TEAMMATES_FOLDER
+            ),
         }
-        format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
-            folder = crate::agent_git::TEAMMATES_FOLDER
-        )
     }
 
     /// The branch a new sub-agent of a lead works on (DEC-104 K5b, Q32): `<the lead's task
@@ -7817,6 +7820,17 @@ impl TeamRuntime {
         for directory in [&agent, &own_home, &tmp] {
             private_directory(directory)
                 .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
+        }
+        #[cfg(target_os = "macos")]
+        if launch == "claude-code" && matches!(account.reach, TeamReach::Endpoint { .. }) {
+            crate::engine::keychain::fresh_profile_keychain(&self.state, &own_home, &[]).map_err(
+                |_| {
+                    with_code(
+                        "the agent's own keychain could not be made",
+                        Some("agent_keychain_unavailable"),
+                    )
+                },
+            )?;
         }
         let relay = match &account.reach {
             TeamReach::Endpoint {
@@ -11494,10 +11508,10 @@ fn run_code(error: &RunError) -> &str {
 
 /// The prompt one turn is typed with: the task's own, and under Stop the line telling the
 /// agent its background commands stop when its turn ends, only where the engine stops them:
-/// a session that ends with the turn, or a pane app whose record reports them. A kept
-/// session reporting none, such as a Codex app's, keeps them running, so its agent is not
-/// told so (rv-audit S3 F2). Takes the prompt, the turn's rules and whether the engine stops
-/// them. Returns the prompt.
+/// a session that ends with the turn, or a pane app whose record reports them, as Claude
+/// Code's and Codex's do (DEC-141 PA-10). A kept session reporting none, such as a headless
+/// agent's on pipes, keeps them running, so its agent is not told so (rv-audit S3 F2). Takes
+/// the prompt, the turn's rules and whether the engine stops them. Returns the prompt.
 fn told(prompt: String, rules: TurnRules, stops: bool) -> String {
     if rules.background == super::BackgroundAtEnd::Stop && stops {
         format!("{prompt}\n{BACKGROUND_STOPS_LINE}")

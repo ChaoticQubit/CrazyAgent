@@ -171,8 +171,11 @@ def wait_turn(database, child, master, phase):
             assert turn["attempt"] is None and turn["runtime"] is None and turn["reply"] is None
             assert turn["reason"] == "runtime_unavailable", turn
             assert turn["cause"] == "rcli_profile_configuration_required", turn
+            accounts = {account["connection"]: account["reason"] for account in turn.get("accounts", [])}
+            assert accounts.get("api-connection") == "runtime_unavailable", turn
             tui_flow.expect(master, phase.capitalize(), child)
-            tui_flow.expect(master, "Model runtime unavailable (rcli_profile_configuration_required)", child)
+            tui_flow.expect(master, "No account in this master's pool can run it now: (rcli_profile_configuration_required)", child)
+            tui_flow.expect(master, "(api-connection): Model runtime unavailable", child)
             tui_flow.expect(master, turn["id"], child)
             tui_flow.expect(master, str(turn["input_cursor"]), child)
             return turn
