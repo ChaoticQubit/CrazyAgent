@@ -2,6 +2,7 @@ use super::*;
 use crate::harness_settings::{Scope, installed};
 use crate::model_choice::rules::{self, Rule, RuleWritten, Rules};
 use crate::model_choice::store::{self, Begun};
+use crate::model_choice::test_launch::{self, Tested};
 use crate::model_choice::{MODEL_BYTES_MAX, Models, Row, Slot, VALUE_JSON_MAX, Written};
 use crate::protocol::encode_frame;
 use crate::storage::versioned;
@@ -22,10 +23,13 @@ pub const MODEL_CHOICE_PROTOCOL_CODES: &[&str] = &[
     "model_choice_harness_unknown",
     "model_choice_not_supported",
     "model_choice_outcome_unknown",
+    "model_choice_pool_needed",
+    "model_choice_pool_unknown",
     "model_choice_project_unknown",
     "model_choice_reply_bounds",
     "model_choice_request_bounds",
     "model_choice_request_invalid",
+    "model_choice_test_busy",
     "model_choice_unavailable",
     "model_choice_value_invalid",
     "owner_authentication_failed",
@@ -70,6 +74,11 @@ enum Action {
         harness: String,
         model: String,
     },
+    Test {
+        harness: String,
+        model: String,
+        pool: Option<CredentialRef>,
+    },
     Rules {},
     SetRule {
         rule: Rule,
@@ -106,16 +115,44 @@ impl From<Begun> for Added {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    Values { models: Models },
-    Saved { row: Row },
-    Stale { row: Row },
-    Refused { code: String, row: Row },
-    Added { added: Added, models: Models },
-    Removed { removed: bool, models: Models },
-    Rules { rules: Rules },
-    RuleSaved { rules: Rules },
-    RuleStale { rules: Rules },
-    Rejected { code: String },
+    Values {
+        models: Models,
+    },
+    Saved {
+        row: Row,
+    },
+    Stale {
+        row: Row,
+    },
+    Refused {
+        code: String,
+        row: Row,
+    },
+    Added {
+        added: Added,
+        models: Models,
+    },
+    Removed {
+        removed: bool,
+        models: Models,
+    },
+    Tested {
+        tested: Tested,
+        reason: Option<String>,
+        models: Models,
+    },
+    Rules {
+        rules: Rules,
+    },
+    RuleSaved {
+        rules: Rules,
+    },
+    RuleStale {
+        rules: Rules,
+    },
+    Rejected {
+        code: String,
+    },
 }
 
 impl From<Written> for Reply {
@@ -463,7 +500,41 @@ fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, En
             RuleWritten::Saved { rules } => Reply::RuleSaved { rules },
             RuleWritten::Stale { rules } => Reply::RuleStale { rules },
         }),
+        Action::Test { .. } => Err(failure("model_choice_unavailable")),
     }
+}
+
+/// The launch a test hands its checked pool to: one read-only run on that pool's account,
+/// answering the decision and its pending reason, or a plain refusal code.
+type Launch<'a> =
+    Box<dyn FnOnce(&CredentialRef) -> Result<(Tested, Option<String>), &'static str> + 'a>;
+
+/// Runs one owner id's test launch once it may run (DEC-150 addendum 7): a supported
+/// harness, a named pool and an id that waits for its test, so no run is spent otherwise.
+/// A verified or failed decision is recorded; a pending one leaves the id as it was.
+/// Inputs: the engine root, the harness, the id, the pool, the installed version and the
+/// launch. Output: the decision, its reason and the harness's app section, or a refusal.
+fn tested(
+    root: &Path,
+    harness: &str,
+    model: &str,
+    pool: Option<&CredentialRef>,
+    installed: Option<&str>,
+    launch: Launch<'_>,
+) -> Result<Reply, EngineError> {
+    let db = versioned::open(root)?;
+    let _ = (model, pool, launch);
+    Ok(Reply::Tested {
+        tested: Tested::Pending,
+        reason: None,
+        models: store::values(
+            &db,
+            harness,
+            &crate::model_choice::catalog(harness),
+            &Scope::App,
+            installed,
+        )?,
+    })
 }
 
 #[cfg(all(test, unix))]

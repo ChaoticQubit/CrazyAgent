@@ -10,6 +10,10 @@ use std::collections::BTreeSet;
 
 pub mod rules;
 pub mod store;
+/// The test launch that verifies or fails an owner-added model id (DEC-150 S6): one
+/// tools-off read-only run on an account of the pool the owner picks, decided by its
+/// answer or the provider's refusal code.
+pub mod test_launch;
 #[cfg(all(test, unix))]
 mod tests;
 
