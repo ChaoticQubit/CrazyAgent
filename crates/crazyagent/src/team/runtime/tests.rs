@@ -30486,6 +30486,59 @@ fn an_owner_message_renews_the_live_masters_run_time() {
     team.shutdown().unwrap();
 }
 
+/// The owner's answer to an agent's question renews the live master's run time like a
+/// message does, so a master the owner just answered for runs on with work in flight
+/// though the owner wrote nothing to it for longer than its run time (F01, S1R1-L2).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_answer_to_an_agents_question_renews_the_live_masters_run_time() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_run_time(&fixture, Some(86_400));
+    let (mut team, id) = idle_live_master(&fixture, &host, Duration::from_secs(3600));
+    crate::coord::touch(&fixture.connection, id, now_ms()).unwrap();
+    let question = crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: fixture.setup.project_id.clone(),
+            from: crate::coord::Party::Agent(id),
+            to: crate::coord::Party::Owner,
+            kind: crate::coord::MessageKind::Question,
+            question: Some((crate::coord::QuestionFor::Me, crate::coord::Severity::Low)),
+            work: None,
+            reply_to: None,
+            body: "Which footer colour?".into(),
+            idempotency_key: None,
+        },
+        now_ms(),
+    )
+    .unwrap();
+    owner_last_seen(&fixture, now_ms() - 2 * RUN_DAY_MS);
+    assert!(fixture.status().master_deadline_ms.unwrap() < now_ms());
+    let answered = now_ms();
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::AnswerQuestion {
+            project_id: fixture.setup.project_id.clone(),
+            message: question,
+            text: "Dark blue".into(),
+        }],
+    );
+    assert!(fixture.status().master_deadline_ms.unwrap() >= answered + RUN_DAY_MS);
+    stand_in_work(&fixture);
+    tick_for(&mut team, Duration::from_secs(2));
+    assert_ne!(fixture.agent_status(id).0, AgentStatus::Stopped);
+    assert!(super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap());
+    assert_eq!(
+        noted(
+            &fixture,
+            &crate::team::master_limits::run_stopped_line(86_400)
+        ),
+        0
+    );
+    team.shutdown().unwrap();
+}
+
 /// A restarted engine that adopts the live master starts its run time afresh: neither the
 /// pane's start before the restart nor the old 24 h pane deadline carries over, so a pane
 /// that started 25 h earlier, under a 1 day run time with work in flight, runs on (F01).

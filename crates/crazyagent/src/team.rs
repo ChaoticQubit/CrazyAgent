@@ -2390,7 +2390,25 @@ pub fn execute(
     access: &ModelAccess,
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
-    perform(tx, access, action, true)
+    let outcome = perform(tx, access, action, true)?;
+    owner_acted(tx, action, outcome)
+}
+
+/// Renews the project's live master run time once an owner team action applied, an answer
+/// to an agent's question as much as a message or a setting (F01), so a master the owner
+/// just acted for is not stopped as left alone. Takes the transaction, the action and its
+/// outcome. Returns the outcome, or any SQLite failure.
+fn owner_acted(
+    tx: &Transaction<'_>,
+    action: &TeamAction,
+    outcome: Outcome,
+) -> Result<Outcome, EngineError> {
+    if outcome == Outcome::Applied
+        && let Some(project) = action.project()
+    {
+        master_limits::owner_acted(tx, project, now_ms())?;
+    }
+    Ok(outcome)
 }
 
 /// Executes one owner team action whose message an engine surface framed around the
@@ -2403,7 +2421,8 @@ pub(crate) fn execute_framed(
     access: &ModelAccess,
     action: &TeamAction,
 ) -> Result<Outcome, EngineError> {
-    perform(tx, access, action, false)
+    let outcome = perform(tx, access, action, false)?;
+    owner_acted(tx, action, outcome)
 }
 
 /// Executes one owner team action, recording its message as an owner turn only when the

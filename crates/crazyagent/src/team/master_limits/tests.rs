@@ -403,7 +403,31 @@ fn a_restarted_or_adopted_pane_starts_a_fresh_clock_and_an_ended_one_has_none() 
 }
 
 #[test]
-fn the_round_line_names_the_round_and_the_limit() {
+fn an_owner_action_renews_the_clock_and_an_earlier_one_never_moves_it_back() {
+    let connection = database();
+    let project = project();
+    owner_acted(&connection, &project, START).unwrap();
+    assert_eq!(run_deadline(&connection, &project).unwrap(), None);
+    clock_started(&connection, &project, 9, START).unwrap();
+    owner_acted(&connection, &project, START + DAY_MS).unwrap();
+    assert_eq!(
+        run_deadline(&connection, &project).unwrap(),
+        Some(START + 8 * DAY_MS)
+    );
+    owner_acted(&connection, &project, START + 1).unwrap();
+    assert_eq!(
+        run_deadline(&connection, &project).unwrap(),
+        Some(START + 8 * DAY_MS)
+    );
+    clock_started(&connection, &project, 12, START + 2 * DAY_MS).unwrap();
+    assert_eq!(
+        run_deadline(&connection, &project).unwrap(),
+        Some(START + 9 * DAY_MS)
+    );
+}
+
+#[test]
+fn the_round_line_names_the_rounds_used_and_the_limit() {
     let open = Rounds {
         used: 1,
         max: None,
@@ -439,7 +463,7 @@ fn the_round_line_names_the_round_and_the_limit() {
     let huge = Rounds {
         used: u32::MAX,
         max: Some(20),
-        kept_going: false,
+        kept_going: true,
     };
     assert!(huge.results_line().len() <= ROUND_LINE_BYTES_MAX);
 }
@@ -458,7 +482,7 @@ fn the_limit_note_tells_the_owner_how_to_go_on() {
     let five = Rounds {
         used: 5,
         max: Some(5),
-        kept_going: true,
+        kept_going: false,
     };
     assert!(
         five.limit_note()

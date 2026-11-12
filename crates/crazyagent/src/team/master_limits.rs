@@ -167,7 +167,8 @@ pub fn time_left_words(left: i64) -> String {
 }
 
 /// Creates the master limit tables: the owner's choices per project and the clock of each
-/// running live master, which counts from its pane's start. Takes the engine database.
+/// running live master, which counts from its pane's start or the owner's last team action,
+/// whichever is later. Takes the engine database.
 /// Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -296,7 +297,6 @@ pub fn rounds(connection: &Connection, project: &ProjectId) -> Result<Rounds, En
     })
 }
 
-/// Starts the clock of a project's live master at its pane's start, on a fresh launch and on
 /// Whether a hand-off key already holds a round of the owner's current goal, so more work
 /// handed over in that same master turn joins it instead of starting another. Takes a
 /// connection, the project and the key. Returns the answer, or any SQLite failure.
@@ -366,6 +366,7 @@ fn goal_start(
     Ok((goal, typed, sent.max(typed)))
 }
 
+/// Starts the clock of a project's live master at its pane's start, on a fresh launch and on
 /// an adopt alike, so no restart carries an earlier start. Takes a connection, the project,
 /// the master's agent id and the time in milliseconds. Returns any SQLite failure.
 pub(crate) fn clock_started(
@@ -382,6 +383,26 @@ pub(crate) fn clock_started(
             params![project.as_str(), agent, now],
         )
         .map_err(error)?;
+    Ok(())
+}
+
+/// Renews a project's live master run time on an owner team action, such as an answer to
+/// an agent's question: its clock counts from now when that is later than its pane's start
+/// or the owner's last action. Takes a connection, the project and the time in
+/// milliseconds. Returns any SQLite failure.
+pub(crate) fn owner_acted(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<(), EngineError> {
+    assert!(now >= 0);
+    let renewed = connection
+        .execute(
+            "UPDATE team_master_clocks SET since_ms=MAX(since_ms,?2) WHERE project=?1",
+            params![project.as_str(), now],
+        )
+        .map_err(error)?;
+    assert!(renewed <= 1);
     Ok(())
 }
 
@@ -403,7 +424,8 @@ pub(crate) fn clock_ended(
 }
 
 /// When a project's live master reaches its run time: the latest of its pane's start, the
-/// owner's last team message and the owner's last key in its terminal, plus the owner's
+/// owner's last team action, the owner's last team message and the owner's last key in its
+/// terminal, plus the owner's
 /// Master run time. The runtime's stop and the time left the clients show both read it.
 /// Takes a connection and the project. Returns the deadline in milliseconds, none under No
 /// limit or while no live master pane runs, or any SQLite failure.
