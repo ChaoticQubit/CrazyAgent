@@ -191,8 +191,9 @@ pub fn install(engine_root: &Path) -> Result<NodeRuntime, InstallError> {
 /// with the pinned SHA-256, unpacks it there, checks the tree (`check_tree`) and that its
 /// node reports the pinned version, then moves it to `<engine root>/setup/node`, links
 /// node, npm and npx in `setup/bin` and makes the private npm prefix. A failure removes the
-/// staging folder and leaves any earlier Node as it was. Nothing runs with sudo. Inputs:
-/// the engine root and the pin. Output: the runtime, or the setup code.
+/// staging folder; before the move it leaves any earlier Node as it was, after it the checked
+/// new Node stays and the earlier one is gone. Nothing runs with sudo. Inputs: the engine
+/// root and the pin. Output: the runtime, or the setup code.
 pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRuntime, InstallError> {
     let valid = (pin.url.starts_with("https://") || pin.url.starts_with("file:///"))
         && pin.url.len() <= 2048

@@ -237,6 +237,39 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
 }
 
 #[test]
+fn a_failure_after_the_checked_node_is_moved_in_keeps_it_and_drops_the_earlier_one() {
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let kept = folder(root.path());
+    std::fs::write(kept.join("earlier"), "the earlier Node").unwrap();
+    let prefix = crate::setup::harness_prefix(root.path());
+    std::fs::remove_dir_all(&prefix).unwrap();
+    std::fs::write(&prefix, "not a folder").unwrap();
+    assert_eq!(
+        install_pin(root.path(), &pin_for(&archive, &sha256)),
+        Err(InstallError("setup_store_unavailable"))
+    );
+    assert!(
+        kept.join("bin/node").is_file(),
+        "the checked new Node stays"
+    );
+    assert!(!kept.join("earlier").exists(), "the earlier Node is gone");
+    let hidden: Vec<String> = std::fs::read_dir(root.path().join("setup"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert!(
+        hidden.is_empty(),
+        "the staging folder is removed: {hidden:?}"
+    );
+}
+
+#[test]
 fn a_link_that_climbs_out_through_another_link_is_refused_though_its_words_stay_inside() {
     let work = tempfile::tempdir().unwrap();
     let limits = Limits {
