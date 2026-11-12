@@ -121,6 +121,18 @@ impl NativeModel {
             NativeModel::Harness => "harness",
         }
     }
+
+    /// Reads a stored or sent value: exactly one option name. Input: the value. Output:
+    /// the option, none for anything else.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let model = match value.as_str()? {
+            "follow" => NativeModel::Follow,
+            "harness" => NativeModel::Harness,
+            _ => return None,
+        };
+        assert_eq!(Value::from(model.as_str()), *value);
+        Some(model)
+    }
 }
 
 /// Where one candidate model id comes from: the harness's model catalog, or an id the
@@ -310,19 +322,23 @@ pub fn harness_id(name: &str) -> Option<&'static str> {
 }
 
 /// Tells whether CrazyAgent chooses this harness's model in one slot: the master runs on
-/// Claude Code and Codex with a chosen model, and team agents start only on those two.
+/// Claude Code and Codex with a chosen model, team agents start only on those two, and
+/// only harnesses with native sub-agents (Claude Code teams, Codex threads) have a Native
+/// sub-agent model.
 /// Inputs: the catalog harness id and the slot. Output: the answer.
 pub fn supported(harness: &str, slot: Slot) -> bool {
     match slot {
         Slot::Master => matches!(harness, "claude-code" | "codex"),
         Slot::Agent | Slot::Allowed => crate::team::launch_harness(harness).is_some(),
-        Slot::Native => false,
+        Slot::Native => crate::coord::settings::HarnessKind::from_harness(harness)
+            .is_some_and(crate::coord::settings::native_supported),
     }
 }
 
 /// Checks one value for a slot: a usable model id for the master and agent slots, a list
-/// of at most `ALLOWED_MAX` distinct usable ids for the allowed slot. Inputs: the harness
-/// id, the slot, the value and the usable ids. Output: true when the value may be saved.
+/// of at most `ALLOWED_MAX` distinct usable ids for the allowed slot, one option name for
+/// the native slot. Inputs: the harness id, the slot, the value and the usable ids.
+/// Output: true when the value may be saved.
 pub(crate) fn value_ok(harness: &str, slot: Slot, value: &Value, usable: &[String]) -> bool {
     let known = |id: &str| model_valid(harness, id) && usable.iter().any(|one| one == id);
     match slot {
@@ -334,12 +350,13 @@ pub(crate) fn value_ok(harness: &str, slot: Slot, value: &Value, usable: &[Strin
                     .iter()
                     .all(|id| id.as_str().is_some_and(|id| known(id) && seen.insert(id)))
         }),
-        Slot::Native => false,
+        Slot::Native => NativeModel::from_value(value).is_some(),
     }
 }
 
 /// The value a slot falls back to when nothing usable is set: null for a model, so the
-/// account's own model runs, and an empty list for the allowed slot.
+/// account's own model runs, an empty list for the allowed slot and Follow the agent's
+/// model for the native slot.
 pub(crate) fn fallback(slot: Slot) -> Value {
     match slot {
         Slot::Master | Slot::Agent => Value::Null,

@@ -156,8 +156,15 @@ pub fn native_model(
     harness: &str,
     project: Option<&ProjectId>,
 ) -> Result<NativeModel, EngineError> {
-    let _ = (db, harness, project);
-    Ok(NativeModel::Follow)
+    let Some(harness) = harness_id(harness).filter(|id| supported(id, Slot::Native)) else {
+        return Ok(NativeModel::Follow);
+    };
+    let own = snapshot(db)?;
+    let tx = own.as_deref().unwrap_or(db);
+    let (value, _) = effective(tx, harness, project, Slot::Native, &[])?;
+    let model = NativeModel::from_value(&value).expect("a layered native value passed value_ok");
+    assert!(supported(harness, Slot::Native));
+    Ok(model)
 }
 
 /// Checks the model the master or a lead picked for a new agent under the owner's pick

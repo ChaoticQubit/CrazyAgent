@@ -348,6 +348,7 @@ impl Plan {
             Some(cap) => context.with_native_sub_agents(cap),
             None => context,
         };
+        let context = context.with_native_model(self.native_model);
         match &self.tmux {
             Some(tmux) => context.with_native_team(tmux, &self.working_dir),
             None => context,
@@ -9174,6 +9175,11 @@ impl TeamRuntime {
         } else {
             None
         };
+        let native_model = if native || native_threads.is_some() {
+            self.native_model(&stored.project_id, launch)?
+        } else {
+            crate::model_choice::NativeModel::Follow
+        };
         if native && hookless {
             return Err(with_code(
                 NATIVE_NEEDS_HOOKS,
@@ -9561,7 +9567,7 @@ impl TeamRuntime {
             native,
             tmux: native_tmux,
             native_threads,
-            native_model: crate::model_choice::NativeModel::Follow,
+            native_model,
             hookless,
             #[cfg(unix)]
             scratch_pin,
