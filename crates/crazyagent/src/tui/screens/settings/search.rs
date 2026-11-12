@@ -310,6 +310,13 @@ impl SearchPage {
                     .map(|part| styled(part, Role::Error, theme)),
             );
         }
+        if let Some(note) = &view.note {
+            lines.extend(
+                wrap(&safe(note), limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Warning, theme)),
+            );
+        }
         lines.push(styled("Rank search with", Role::Heading, theme));
         let mark = |chosen: bool| if chosen { "(*) " } else { "( ) " };
         lines.push(list_row(
