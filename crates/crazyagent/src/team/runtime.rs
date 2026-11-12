@@ -7738,14 +7738,6 @@ impl TeamRuntime {
                 seat.role == AgentRole::Master,
             )?,
         };
-        let thread = std::thread::Builder::new()
-            .name(format!("team-agent-{id}"))
-            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap, by))
-            .map_err(error)?;
-        let team_tool =
-            seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
-        let ask_tool =
-            seat.role != AgentRole::Master && seat.tools && self.delegation_tool.is_some();
         let parent: Option<i64> = self
             .connection
             .query_row("SELECT parent FROM team_agents WHERE id=?1", [id], |row| {
@@ -7754,6 +7746,14 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?
             .flatten();
+        let thread = std::thread::Builder::new()
+            .name(format!("team-agent-{id}"))
+            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap, by))
+            .map_err(error)?;
+        let team_tool =
+            seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
+        let ask_tool =
+            seat.role != AgentRole::Master && seat.tools && self.delegation_tool.is_some();
         self.hooks_checked.remove(&id);
         self.workers.insert(
             id,
