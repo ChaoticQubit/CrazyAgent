@@ -4,6 +4,7 @@ pub mod app_setup;
 pub(in crate::tui) mod changes;
 pub mod clone_repo;
 pub(in crate::tui) mod console;
+pub(in crate::tui) mod first_run_accounts;
 pub mod home;
 pub mod home_folder;
 pub(in crate::tui) mod intake;
@@ -211,6 +212,7 @@ pub enum Place {
     HomeFolder {
         first_run: bool,
     },
+    FirstRunAccounts,
     AddProject,
     AddFolder,
     CloneRepo,
@@ -231,6 +233,7 @@ pub enum Flow {
     Open(Place),
     Replace(Box<dyn Screen>),
     Back,
+    Go(Place),
 }
 
 impl std::fmt::Debug for Flow {
@@ -241,6 +244,7 @@ impl std::fmt::Debug for Flow {
             Self::Open(place) => write!(formatter, "Open({place:?})"),
             Self::Replace(screen) => write!(formatter, "Replace({:?})", screen.crumbs()),
             Self::Back => formatter.write_str("Back"),
+            Self::Go(place) => write!(formatter, "Go({place:?})"),
         }
     }
 }
@@ -258,7 +262,8 @@ impl std::fmt::Debug for Flow {
 /// 1. Implement this trait. Add a `Place` when Go to or another screen opens
 ///    it, and build it in `open`.
 /// 2. Move with `Flow`: `Open(place)` pushes, `Replace(screen)` swaps the top,
-///    `Back` pops. An `Esc` returned as `Ignored` goes back.
+///    `Back` pops, `Go(place)` leaves for Home with the place on top. An `Esc`
+///    returned as `Ignored` goes back.
 /// 3. Ask for engine data with `ctx.request(Request::..)` in `shown`. Shared
 ///    data lands in `ctx.store`; every open screen sees each `Arrival`.
 /// 4. Add key tests next to the screen and a render test against a design
@@ -375,6 +380,7 @@ pub trait Screen {
             | Place::NewProject
             | Place::Setup { .. }
             | Place::HomeFolder { .. }
+            | Place::FirstRunAccounts
             | Place::AddProject
             | Place::AddFolder
             | Place::CloneRepo
@@ -415,6 +421,7 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             name.clone(),
         )),
         Place::HomeFolder { first_run } => Box::new(home_folder::HomeFolder::new(*first_run, ctx)),
+        Place::FirstRunAccounts => Box::new(first_run_accounts::FirstRunAccounts::new()),
         Place::AddProject => Box::new(add_project::AddProject::new()),
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),

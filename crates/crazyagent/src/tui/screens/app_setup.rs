@@ -372,7 +372,7 @@ enum Sent {
 
 /// The setup page: the tools CrazyAgent needs on this machine and the default
 /// skills and plugins pack, with ticks. First run shows it after the projects
-/// home folder: Enter installs and continues to Home, and continuing past the
+/// home folder: Enter installs and continues to the Accounts step, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
 /// remove, the projects home folder, the GitHub account, the Linux sockets
 /// setting, when finished agents' worktrees go, what quitting does to team agents and
@@ -562,7 +562,7 @@ impl AppSetup {
 
     fn run(&mut self, ctx: &mut Ctx) -> Flow {
         let running = match &self.setup {
-            Load::NotReady if self.first_run => return Flow::Replace(open(&Place::Home, ctx)),
+            Load::NotReady if self.first_run => return Self::next_step(ctx),
             Load::Failed(_) => {
                 self.reload(ctx);
                 return Flow::Handled;
@@ -643,7 +643,7 @@ impl AppSetup {
         let problems = self.problems();
         if problems == 0 {
             if self.first_run {
-                return Flow::Replace(open(&Place::Home, ctx));
+                return Self::next_step(ctx);
             }
             ctx.say(Message::success(
                 "Setup finished.",
@@ -1452,8 +1452,14 @@ impl AppSetup {
         }
     }
 
+    /// Leaves first run's Setup for the Accounts step, the only way first run
+    /// leaves this page. Input: the context. Output: the flow that replaces Setup.
+    fn next_step(ctx: &mut Ctx) -> Flow {
+        Flow::Replace(open(&Place::FirstRunAccounts, ctx))
+    }
+
     /// True when no setup run is going and no change waits for the engine.
-    /// Input: none. Output: whether first run may leave for Home.
+    /// Input: none. Output: whether first run may leave for its Accounts step.
     fn quiet(&self) -> bool {
         !self.started && self.sent.is_none()
     }
@@ -2093,9 +2099,7 @@ impl Screen for AppSetup {
                 self.reload(ctx);
                 Flow::Handled
             }
-            Key::Char('c') if self.first_run && self.quiet() && checked => {
-                Flow::Replace(open(&Place::Home, ctx))
-            }
+            Key::Char('c') if self.first_run && self.quiet() && checked => Self::next_step(ctx),
             Key::Char('d') if !self.first_run => {
                 self.ask_remove(ctx);
                 Flow::Handled
