@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { projectsUsing } from "../../api-projects";
 import { accountLabels, accountRanking, accountSchedule, createPool, deletePool, listAccounts, newPoolId, poolInput, poolSummaries, readyForAgents, savePool, POOL_MEMBER_MAX, type AccountSchedule, type AccountView, type PoolMember, type PoolRanking, type PoolSummary, type RankedAccount, type Result } from "../../api";
 import { loadExtras, loadUsage, type AccountLimits, type LimitExtras } from "../../api-usage";
@@ -105,9 +105,47 @@ export function setupNote(failures: { name: string; message: string }[]): string
   return `${list} ${names.length === 1 ? "isn't" : "aren't"} ready for agents yet. ${failures[0]!.message}`;
 }
 
-/** Sets accounts up for agents one at a time. Inputs: the accounts and the session's result
- * recorder. Output: the accounts that are not ready, each with a plain message. */
-export async function readyEach(targets: { id: string; name: string }[], note: <T>(result: Result<T>) => Result<T>): Promise<{ name: string; message: string }[]> {
+/** The set-up runs the app holds, one at a time and outside any view: the bridge keeps one
+ * selected account from inspect to set-up, so two runs would move it under each other. `running`
+ * names the run held now: a pool id for its Get ready, "" for a run after a save, null for none. */
+const readyRuns: { tail: Promise<unknown>; running: string | null; listeners: Set<() => void> } = { tail: Promise.resolve(), running: null, listeners: new Set() };
+
+function holdReady(running: string | null) {
+  readyRuns.running = running;
+  for (const listener of readyRuns.listeners) listener();
+}
+
+/** Listens for the held set-up run to change, for `useSyncExternalStore`. Input: the listener.
+ * Output: the function that stops listening. */
+export function subscribeReadyRun(listener: () => void): () => void {
+  readyRuns.listeners.add(listener);
+  return () => { readyRuns.listeners.delete(listener); };
+}
+
+/** Names the set-up run the app holds now. Output: a pool id for its Get ready, "" for a run
+ * after a save, or null when none runs. */
+export function readyRunning(): string | null {
+  return readyRuns.running;
+}
+
+/** Sets accounts up for agents one at a time, after any run the app already holds. Inputs: the
+ * accounts, the session's result recorder and what the run is for: a pool id for Get ready, ""
+ * after a save. Output: the accounts that are not ready, each with a plain message. */
+export function readyEach(targets: { id: string; name: string }[], note: <T>(result: Result<T>) => Result<T>, purpose = ""): Promise<{ name: string; message: string }[]> {
+  if (targets.length === 0) return Promise.resolve([]);
+  const run = readyRuns.tail.then(async () => {
+    holdReady(purpose);
+    try {
+      return await setUpEach(targets, note);
+    } finally {
+      holdReady(null);
+    }
+  });
+  readyRuns.tail = run.catch(() => undefined);
+  return run;
+}
+
+async function setUpEach(targets: { id: string; name: string }[], note: <T>(result: Result<T>) => Result<T>): Promise<{ name: string; message: string }[]> {
   const failures: { name: string; message: string }[] = [];
   for (const target of targets) {
     const ready = note(await readyForAgents(target.id));
@@ -569,7 +607,7 @@ export function Pools({ creating }: { creating: boolean }) {
   const [deleting, setDeleting] = useState<PoolSummary>();
   const [users, setUsers] = useState<string[]>();
   const [removing, setRemoving] = useState(false);
-  const [preparing, setPreparing] = useState<string | null>(null);
+  const preparing = useSyncExternalStore(subscribeReadyRun, readyRunning, readyRunning);
   const [refusal, setRefusal] = useState<string>();
   const { saved, apply, changing } = usePoolChanges((poolsMoved) => {
     rereadSchedule();
@@ -609,12 +647,10 @@ export function Pools({ creating }: { creating: boolean }) {
   const reread = () => { reload(); rerank(); };
 
   const prepareAll = async (pool: PoolSummary) => {
-    setPreparing(pool.id);
     setRefusal(undefined);
     const names = accountLabels(accounts.kind === "ok" ? accounts.value : []);
     const ids = keyedMembers(pool);
-    const failures = await readyEach(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })), session.noteResult);
-    setPreparing(null);
+    const failures = await readyEach(ids.map((id) => ({ id, name: names.get(id) ?? "An account" })), session.noteResult, pool.id);
     setRefusal(setupNote(failures));
     if (failures.length === 0) session.showToast(`${pool.name} is ready for agents.`);
   };

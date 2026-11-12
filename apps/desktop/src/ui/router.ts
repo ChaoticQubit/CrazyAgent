@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 
 export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "pack", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "profile", "updates"] as const;
+/** The settings tabs the user menu under the profile name opens as dialogs over the page
+ * (DEC-151), in menu order; the Settings list leaves them out, and their routes stay so a
+ * deep link opens the dialog. */
+export const USER_MENU_TABS = ["profile", "updates", "github", "home"] as const;
 export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings", "ide"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new", "sign_in"] as const;
@@ -10,6 +14,8 @@ const ACCOUNT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SKILL_ID = /^[a-z0-9-]{1,64}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
+export type UserMenuTab = typeof USER_MENU_TABS[number];
+export type ListedSettingsTab = Exclude<SettingsTab, UserMenuTab>;
 export type ProjectTab = typeof PROJECT_TABS[number];
 export type NewProjectStep = typeof NEW_PROJECT_STEPS[number];
 export type SettingsAction = typeof SETTINGS_ACTIONS[number];
@@ -27,6 +33,12 @@ export type Route =
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
   return choices.find((choice) => choice === value) ?? fallback;
+}
+
+/** Whether a settings tab opens from the user menu as a dialog rather than in the Settings
+ * list. Input: the tab. Output: the answer. */
+export function isUserMenuTab(tab: SettingsTab): tab is UserMenuTab {
+  return (USER_MENU_TABS as readonly SettingsTab[]).includes(tab);
 }
 
 /** Reads the app's hash route. Unknown or malformed routes go Home; a missing tab or step

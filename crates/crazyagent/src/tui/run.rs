@@ -497,6 +497,9 @@ pub(super) fn refused_arrival(request: Request) -> Option<Arrival> {
         Request::Cleanup(query) => OwnerEvent::Cleanup(Box::new(
             super::client::cleanup::CleanupEvent::failed(*query, OWNER_BUSY),
         )),
+        Request::Learning(query) => OwnerEvent::Learning(Box::new(
+            super::client::learning::LearningEvent::failed(*query, OWNER_BUSY),
+        )),
         Request::Recovery(query) => {
             OwnerEvent::Recovery(Box::new(super::client::recovery::RecoveryEvent {
                 query: *query,
@@ -571,6 +574,7 @@ fn send(
         Request::Roadmap(query) => connection.roadmap(*query),
         Request::Questions(query) => connection.questions(*query),
         Request::Cleanup(query) => connection.cleanup(*query),
+        Request::Learning(query) => connection.learning(*query),
         Request::Reveal(query) => connection.reveal(*query),
         Request::Reconnect => connection.reconnect(),
     };

@@ -74,11 +74,11 @@ test("real Tab keys walk the projects, then the bottom group, then the profile a
   assert.equal(walked.back, "Mira Okafor");
 });
 
-test("every link in the sidebar opens its own page, and a flagged project shows its flag", async () => {
+test("every link in the sidebar opens its own page, a flagged project shows its flag, and the profile name is no link", async () => {
   const { hrefs } = await onSidebar('2, { name: "home" }, "running", "light", "Mira Okafor", "3"', 800, ({ evaluate }) => evaluate("Fixture.structure()"));
   assert.deepEqual(hrefs, {
     "Project 03alerts": "#/projects/p0/overview", "Project 1": "#/projects/p1/overview", Home: "#/home", "New project": "#/projects/new?step=basics",
-    Settings: "#/settings/accounts", Metrics: "#/metrics", "Mira Okafor": "#/settings/profile",
+    Settings: "#/settings/accounts", Metrics: "#/metrics",
   });
 });
 

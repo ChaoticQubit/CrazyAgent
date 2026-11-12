@@ -1616,6 +1616,39 @@ fn a_reply_that_leaves_asked_tabs_out_writes_the_others_and_names_the_ones_left_
 }
 
 #[test]
+fn a_run_that_got_an_account_drops_the_no_account_line_and_keeps_any_other() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let (_, waiting) = runs.claims.pop().unwrap();
+    assert!(wait_for_account(&db, &project, waiting, NO_ACCOUNT, 5).unwrap());
+    let overview = read(&db, &project, folder.path(), 6).unwrap();
+    assert_eq!(overview.failure.as_deref(), Some(NO_ACCOUNT));
+    assert!(overview.stale && !overview.running);
+
+    assert_eq!(tick(&db, &mut runs, 6).unwrap(), 1);
+    let found = runs.claims.last().unwrap().1;
+    assert!(account_found(&db, &project, found).unwrap());
+    let overview = read(&db, &project, folder.path(), 7).unwrap();
+    assert!(overview.running && overview.failure.is_none());
+    assert_eq!(
+        runs.end(&db, folder.path(), Ended::Failed(UNFINISHED), 8),
+        1
+    );
+
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 9).unwrap(), 1);
+    let next = runs.claims.last().unwrap().1;
+    assert!(
+        !account_found(&db, &project, next).unwrap(),
+        "another line stays until the run ends"
+    );
+    let overview = read(&db, &project, folder.path(), 10).unwrap();
+    assert_eq!(overview.failure.as_deref(), Some(UNFINISHED));
+}
+
+#[test]
 fn the_prompt_asks_for_every_tab_and_never_lets_the_agent_leave_one_out() {
     for with_competitors in [false, true] {
         let text = prompt("EVIDENCE", &[], with_competitors);

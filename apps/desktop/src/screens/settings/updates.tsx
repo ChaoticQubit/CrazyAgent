@@ -199,7 +199,7 @@ export function useUpdateWatch(announce: (message: string) => void) {
         updateStore.dispatch({ kind: "check_done", update: result.value, at: Date.now() });
         if (shouldAnnounce(announced, result.value) && result.value) {
           announced = result.value.version;
-          announce(`CrazyAgent ${result.value.version} is ready. Install it in Settings, Updates.`);
+          announce(`CrazyAgent ${result.value.version} is ready. Install it from Updates in the menu under your name.`);
         }
       } else if (result.kind === "error") {
         updateStore.dispatch({ kind: "check_failed", code: result.code });

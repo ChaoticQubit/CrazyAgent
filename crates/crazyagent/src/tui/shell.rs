@@ -1,6 +1,7 @@
 use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use super::client::settings::{SettingsEvent, SettingsJob};
 use super::clock;
@@ -21,6 +22,8 @@ use super::text::{cells, join, list_row, pad, styled};
 use super::theme::{Role, Theme};
 use super::widgets::{TextField, buttons};
 use crate::harnesses::HarnessStatus;
+use crate::learning::MarkStep;
+use crate::terminal::TerminalFrame;
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
@@ -290,6 +293,9 @@ impl Shell {
             .last_mut()
             .expect("the stack is never empty")
             .shown(ctx);
+        for step in visit_marks(self.top().place()) {
+            self.ctx.learn(*step);
+        }
     }
 
     /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
@@ -398,6 +404,7 @@ impl Shell {
                     self.show();
                 }
             }
+            Flow::Go(place) => self.go(place),
         }
     }
 
@@ -659,7 +666,16 @@ impl Shell {
                 {
                     self.questions(event);
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::Learning(event) = event.as_ref()
+                {
+                    self.learning(event);
+                }
             }
+            Arrival::Terminal {
+                frame: TerminalFrame::Attached { .. },
+                ..
+            } => self.ctx.learn(MarkStep::Terminal),
             _ => {}
         }
         super::screens::new_project_page::carry_background(&arrival, &mut self.ctx);
@@ -675,6 +691,29 @@ impl Shell {
         self.apply(top_flow);
         if !was_ready && self.ctx.link == Link::Ready && matches!(arrival, Arrival::Connected(_)) {
             self.show();
+        }
+    }
+
+    /// Keeps the learning read for Home, keeping the last good read over a failed one, and
+    /// answers a mark: a set mark reads the steps again, a refused one is sent again on the
+    /// next visit. Input: the learning reply. Output: none.
+    fn learning(&mut self, event: &LearningEvent) {
+        if let LearningQuery::Mark { step, .. } = &event.query {
+            match &event.result {
+                Ok(_) => self
+                    .ctx
+                    .request(Request::Learning(Box::new(LearningQuery::Progress))),
+                Err(_) => self.ctx.unlearn(*step),
+            }
+            return;
+        }
+        let learning = &mut self.ctx.store.learning;
+        match &event.result {
+            Ok(LearningReply::Progress(progress)) => *learning = Load::Ready(progress.clone()),
+            Ok(LearningReply::Marked) => unreachable!("a learning read answers with the steps"),
+            Err(_) if learning.ready().is_some() => {}
+            Err(code) if not_ready(code) => *learning = Load::NotReady,
+            Err(code) => *learning = Load::Failed(code.clone()),
         }
     }
 
@@ -978,6 +1017,19 @@ impl Shell {
         {
             frame.set_cursor_position(cursor);
         }
+    }
+}
+
+/// The learning marks opening a place sets: Usage shows the owner's usage and metrics, the
+/// app's or a project's Process page the process. Input: the top screen's place. Output:
+/// the marks, none for other places.
+fn visit_marks(place: Option<Place>) -> &'static [MarkStep] {
+    match place {
+        Some(Place::Usage) => &[MarkStep::Metrics, MarkStep::Usage],
+        Some(Place::Settings(SettingsSection::Process) | Place::ProjectProcess { .. }) => {
+            &[MarkStep::Process]
+        }
+        _ => &[],
     }
 }
 

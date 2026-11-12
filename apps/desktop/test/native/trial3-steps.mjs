@@ -154,7 +154,7 @@ export const TRIAL3_STEPS = [
         await type("#process-app", FIXTURE_INSTRUCTIONS);
         await click("//form[.//*[@id=\"process-app\"]]//button[normalize-space(.)=\"Save\"]");
         await until(async () => !(await text("form")).includes("Not saved yet."), UI_MS, "the fixture instruction set was not saved");
-        await go("#/settings/profile");
+        await go("#/settings/accounts");
         await go("#/settings/process");
         await until(() => shown("#process-app"), UI_MS, "the app instructions editor was never shown again");
       }

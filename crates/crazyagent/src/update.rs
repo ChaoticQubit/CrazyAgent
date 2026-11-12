@@ -1112,7 +1112,7 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
     if inside_app_bundle(&executable) {
         return Err(fail(
             "update_inside_app",
-            "This crazyagent belongs to the CrazyAgent app. Update the app instead: open CrazyAgent, then Settings > Updates.",
+            "This crazyagent belongs to the CrazyAgent app. Update the app instead: open CrazyAgent, then Updates in the menu under your name.",
         ));
     }
     let install = executable

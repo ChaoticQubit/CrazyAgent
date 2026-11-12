@@ -1295,6 +1295,25 @@ pub(crate) fn sign_in_rechecking(
     Ok(running || reproof_due(tx, connection, host)?)
 }
 
+/// Tells whether an account check or sign-in of this engine run holds its profile now: a
+/// fence stamped with the active engine's database and run whose flow is not uncertain. Its
+/// fence goes when the flow ends. An uncertain flow keeps its fence until recovery and an
+/// earlier run's fence has no flow left, so both count as none. Input: the engine
+/// connection. Output: the answer, false when the tables cannot be read.
+#[cfg(unix)]
+pub(crate) fn account_check_running(db: &Connection) -> bool {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences AS fence JOIN owner_meta AS meta
+           ON meta.singleton=1 AND meta.schema_version=1 AND meta.runtime_state='active'
+           AND fence.db_instance=meta.db_instance AND fence.engine_epoch=meta.engine_epoch
+           JOIN native_auth_operations AS operation ON operation.id=fence.operation_id
+           AND operation.phase<>'uncertain')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
 /// The earlier engine run a connection's newest sign-in was proved under, when it finished
 /// authenticated in this database under another run, looking past newer account checks
 /// the host never ran (LB-26). Inputs: the transaction, the connection and the running

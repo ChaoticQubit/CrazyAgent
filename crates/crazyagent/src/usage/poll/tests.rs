@@ -497,3 +497,37 @@ fn a_key_balance_read_over_plain_http_is_refused_outside_the_loopback_test() {
     );
     assert!(server.seen().is_empty(), "nothing left the engine");
 }
+
+#[test]
+fn a_detail_only_read_makes_one_request_with_the_private_query() {
+    let secret = token();
+    let server = Server::start(|_, _| {
+        Answer::json(
+            200,
+            serde_json::json!({"cedar_ember": {"eligible": true, "grants": [
+                {"resets_left": 1, "paused": false}
+            ]}}),
+        )
+    });
+    let read = claude_detail(
+        local(&server, "/api/oauth/usage"),
+        &credential(&secret, None, None),
+        true,
+        NOW,
+    );
+    assert_eq!(
+        read,
+        Field::Known(super::super::extras::Resets {
+            count: 1,
+            kinds: vec![],
+            next_expiry_ms: None,
+        })
+    );
+    let seen = server.seen();
+    assert_eq!(seen.len(), 1, "no window poll rides along");
+    assert_eq!(seen[0].query, super::super::extras::CLAUDE_DETAIL_QUERY);
+    assert_eq!(
+        seen[0].header("authorization"),
+        Some(format!("Bearer {secret}").as_str())
+    );
+}

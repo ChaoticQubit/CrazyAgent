@@ -199,6 +199,10 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Learning(query) => {
+                    sent.push("learning");
+                    connection.learning(*query).unwrap();
+                }
                 other => panic!("intake pages never send {other:?}"),
             }
         }
@@ -1172,6 +1176,9 @@ async fn first_run_setup_continues_without_installing_and_home_lists_what_is_mis
     assert!(help.contains("c Continue without installing"), "{rows:#?}");
 
     shell.key(Key::Char('c'));
+    assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
     settle_setup(&mut shell, &mut connection).await;
     let rows = render(&mut shell, 80, 24);
@@ -1267,6 +1274,81 @@ async fn home_hides_get_set_up_only_when_an_account_a_pool_and_tools_are_ready()
         status.dependencies
     );
     assert_eq!(shows(&rows, "[ ] Install tools"), !found, "{rows:#?}");
+}
+
+/// DEC-153: a fresh engine has every learning step open, so Home shows Learn CrazyAgent with
+/// setup under Basics; h hides the guide through the engine's skipped mark and Home falls
+/// back to Get set up while setup is not done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn home_reads_learn_crazyagent_from_the_engine_and_hide_guide_keeps_get_set_up() {
+    let mut engine = Engine::start().await;
+    let mut ctx = screen_ctx(&engine.user());
+    ctx.store.learning = Load::Idle;
+    let screen = open(&Place::Home, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    settle_setup(&mut shell, &mut connection).await;
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Learn CrazyAgent"), "{rows:#?}");
+    assert!(shows(&rows, " of 13 done"), "{rows:#?}");
+    assert!(shows(&rows, "Basics"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Create a project"), "{rows:#?}");
+    assert!(!shows(&rows, "Get set up"), "{rows:#?}");
+    let footer = rows.last().unwrap();
+    assert!(footer.contains("h Hide guide"), "{rows:#?}");
+    let done = |rows: &[String]| -> usize {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(" of 13 done"))
+            .expect("the progress line");
+        let text = row.rsplit('│').next().unwrap().trim();
+        text.split(' ').next().unwrap().parse().unwrap()
+    };
+    let before = done(&rows);
+
+    shell.key(Key::Char('u'));
+    assert_eq!(shell.place(), Some(Place::Usage));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        sent.contains(&"learning"),
+        "the visit sends the metrics and usage marks: {sent:?}"
+    );
+    let engine_read = engine.controller.learning_progress().await.unwrap();
+    for id in [
+        crate::learning::StepId::Metrics,
+        crate::learning::StepId::Usage,
+    ] {
+        assert!(
+            engine_read
+                .steps
+                .iter()
+                .any(|step| step.id == id && step.done()),
+            "{id:?} ticks from the visit: {engine_read:?}"
+        );
+    }
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(done(&render(&mut shell, 80, 24)), before + 2);
+
+    shell.key(Key::Char('h'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"learning"), "{sent:?}");
+    pump(&mut shell, &mut connection).await;
+    assert!(
+        matches!(&shell.ctx.store.learning, Load::Ready(progress) if progress.skipped),
+        "{:?}",
+        shell.ctx.store.learning
+    );
+    assert!(
+        engine.controller.learning_progress().await.unwrap().skipped,
+        "the engine keeps the skip"
+    );
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "Get set up"), "{rows:#?}");
+    assert!(!shows(&rows, "Learn CrazyAgent"), "{rows:#?}");
+    assert!(shows(&rows, "[ ] Add an account"), "{rows:#?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1230,3 +1230,122 @@ async fn a_stale_tool_cache_record_never_takes_the_cache_of_a_project_added_agai
     drop(owner);
     engine.stop().await;
 }
+
+/// Reads the Learn CrazyAgent steps the owner client sees as done. Input: the owner client.
+/// Output: the done step ids in order.
+async fn learned(owner: &mut OwnerController) -> Vec<crate::learning::StepId> {
+    owner
+        .learning_progress()
+        .await
+        .unwrap()
+        .steps
+        .iter()
+        .filter(|step| step.done())
+        .map(|step| step.id)
+        .collect()
+}
+
+#[tokio::test]
+async fn remove_from_dashboard_keeps_the_learning_ticks_the_projects_rows_gave() {
+    use crate::learning::StepId;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    write_db(
+        &engine,
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (9,'setup-pooled','sub','codex',1,'stopped',0,0);",
+    );
+    let before = learned(&mut owner).await;
+    assert!(
+        before.contains(&StepId::Project) && before.contains(&StepId::Agents),
+        "{before:?}"
+    );
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled' AND role='sub'"),
+        0
+    );
+    assert_eq!(
+        learned(&mut owner).await,
+        before,
+        "the ticks outlive the rows"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// Delete everything, the demo project's last step among them, keeps the Learn CrazyAgent
+/// ticks its rows gave (DEC-153). Runs on macOS only, the one platform that offers Delete
+/// everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn delete_everything_keeps_the_learning_ticks_the_projects_rows_gave() {
+    use crate::learning::StepId;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    write_db(
+        &engine,
+        "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (9,'setup-pooled','sub','codex',1,'stopped',0,0);",
+    );
+    let before = learned(&mut owner).await;
+    assert!(
+        before.contains(&StepId::Project) && before.contains(&StepId::Agents),
+        "{before:?}"
+    );
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner.delete_project(project, NAME.into(), 2).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0);
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_agents WHERE project='setup-pooled' AND role='sub'"),
+        0
+    );
+    assert_eq!(
+        learned(&mut owner).await,
+        before,
+        "the ticks outlive the rows"
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+const LATCH_FAILS: &str = "CREATE TRIGGER learning_marks_fail BEFORE INSERT ON learning_marks
+     BEGIN SELECT RAISE(ABORT, 'learning_marks_fail'); END;";
+
+#[tokio::test]
+async fn a_failing_learning_latch_never_blocks_remove_from_dashboard() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    write_db(&engine, LATCH_FAILS);
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0, "the records go though the latch failed");
+    assert_eq!(engine.rows("SELECT count(*) FROM learning_marks"), 0);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A learning latch that fails never blocks Delete everything: the project's records still go
+/// once its folders reached the Trash, and no learning mark is kept (DEC-153, LE2-L1). Runs on
+/// macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_failing_learning_latch_never_blocks_delete_everything() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    write_db(&engine, LATCH_FAILS);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner.delete_project(project, NAME.into(), 2).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0, "the records go though the latch failed");
+    assert_eq!(engine.rows("SELECT count(*) FROM learning_marks"), 0);
+    drop(owner);
+    engine.stop().await;
+}
