@@ -220,7 +220,7 @@ fn opened_local(root: &Path) -> Option<Arc<local::LocalModel>> {
 /// Opens `root`'s local runtime on the indexer thread, outside the lock, and at most once
 /// per [`LOCAL_RETRY_MS`] after a failure. Inputs: the engine root and the time. Output:
 /// the model, or none while it is missing or failing.
-fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalModel>> {
+pub(crate) fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalModel>> {
     {
         let mut slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(model) = cached_local(&mut slot, root) {
@@ -239,6 +239,14 @@ fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalModel>> {
     let model = opened.as_ref().ok().map(|(_, model)| Arc::clone(model));
     *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), opened));
     model
+}
+
+/// Why a search cannot use the built-in model yet, read without opening it (rv-code2
+/// HYB3-L1): its files are missing, its last open of these same files failed, or it is
+/// still loading. Input: the engine root. Output: the note.
+pub(crate) fn local_note(root: &Path) -> &'static str {
+    let _ = root;
+    unimplemented!("rv-code2 HYB3-L1")
 }
 
 /// Marks `root`'s local runtime failed after an embed error, so it is opened again later.

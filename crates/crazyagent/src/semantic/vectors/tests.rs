@@ -602,6 +602,53 @@ fn the_local_model_stamp_follows_the_files_so_a_deleted_or_replaced_model_is_dro
     drop(held);
 }
 
+#[cfg(unix)]
+#[test]
+fn the_built_in_model_note_names_missing_or_failed_files_and_says_loading_only_before_an_open() {
+    use crate::semantic::{local, local_note, open_local};
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(local_note(root.path()), NOTE_MODEL_MISSING);
+    let place = local::folder(root.path());
+    std::fs::create_dir_all(&place).unwrap();
+    let make = || {
+        for pin in local::PINNED {
+            std::fs::File::create(place.join(pin.name))
+                .unwrap()
+                .set_len(pin.bytes)
+                .unwrap();
+        }
+    };
+    make();
+    assert_eq!(
+        local_note(root.path()),
+        NOTE_LOADING,
+        "files there and no open yet"
+    );
+    assert!(
+        open_local(root.path(), 1_000).is_none(),
+        "zeroed files fail their check"
+    );
+    assert_eq!(local_note(root.path()), NOTE_MODEL_FAILED);
+    assert!(open_local(root.path(), 2_000).is_none());
+    assert_eq!(
+        local_note(root.path()),
+        NOTE_MODEL_FAILED,
+        "never loading for good"
+    );
+    let held = std::fs::File::open(place.join(local::TOKENIZER.name)).unwrap();
+    for pin in local::PINNED {
+        std::fs::remove_file(place.join(pin.name)).unwrap();
+    }
+    assert_eq!(local_note(root.path()), NOTE_MODEL_MISSING);
+    make();
+    assert_eq!(
+        local_note(root.path()),
+        NOTE_LOADING,
+        "a new download is tried again"
+    );
+    drop(held);
+}
+
 #[test]
 fn fusion_adds_reciprocal_ranks_with_k_60_and_keeps_full_text_order_on_ties() {
     assert_eq!(fuse(&[1, 2, 3], &[3, 4]), [3, 1, 2, 4]);

@@ -95,6 +95,10 @@ pub(crate) const NOTE_UNAVAILABLE: &str =
 /// The ranking is words only: the local search model is still loading.
 pub(crate) const NOTE_LOADING: &str =
     "Ranked by words only this time: the search model is still loading.";
+/// The ranking is words only: the built-in model's files are not on this computer.
+pub(crate) const NOTE_MODEL_MISSING: &str = "Ranked by words only: the built-in search model is not on this computer. Download it in Settings, Search.";
+/// The ranking is words only: the built-in model's files failed their check.
+pub(crate) const NOTE_MODEL_FAILED: &str = "Ranked by words only: the built-in search model's files failed their check. Download it again in Settings, Search.";
 /// The ranking is words only: an HTTP plugin is still turning this query into a vector.
 pub(crate) const NOTE_QUERY_PENDING: &str = "Ranked by words only this time: the search plugin is still reading this query. Ask again in a few seconds to rank by meaning too.";
 /// The ranking is words only: the plugin has read none of this history yet.
