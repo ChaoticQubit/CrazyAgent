@@ -681,3 +681,167 @@ fn the_page_stands_for_its_place_and_m_on_the_harness_page_opens_it() {
     let opened = crate::tui::screens::open(&place, &mut context);
     assert_eq!(opened.place(), Some(place));
 }
+
+fn pool(name: &str) -> crate::pools::PoolSummary {
+    crate::pools::PoolSummary {
+        id: crate::protocol::CredentialRef::new(name).unwrap(),
+        name: name.to_owned(),
+        summary: "1 Claude".into(),
+        members: Vec::new(),
+        project_count: 0,
+        provider_quota_policy: Default::default(),
+    }
+}
+
+fn with_own(origin: Origin) -> Models {
+    models(
+        [
+            unset(Slot::Master),
+            unset(Slot::Agent),
+            unset(Slot::Allowed),
+        ],
+        &[("my-model", origin)],
+    )
+}
+
+fn test_query(pool: &str) -> ModelChoiceQuery {
+    ModelChoiceQuery::Test {
+        harness: HARNESS.into(),
+        model: "my-model".into(),
+        pool: crate::protocol::CredentialRef::new(pool).unwrap(),
+    }
+}
+
+/// Opens the app page with one pending owner id, the pools main and spare, and the cursor
+/// on the id. Output: the shell.
+fn on_pending_id() -> Shell {
+    let mut shell = app_page(with_own(Origin::Pending));
+    shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main"), pool("spare")]);
+    press(&mut shell, &[Key::End]);
+    shell
+}
+
+fn rest(shell: &Shell) -> String {
+    shell
+        .ctx
+        .message()
+        .map(|message| message.rest.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn t_on_a_pending_id_asks_which_pool_runs_its_test_launch_and_enter_sends_it_there() {
+    let mut shell = on_pending_id();
+    let text = screen(&mut shell);
+    assert!(text.contains("t Test"), "{text}");
+    assert!(text.contains("t tests it on a pool you pick."), "{text}");
+    press(&mut shell, &[Key::Char('t')]);
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Which pool runs the test launch of my-model?"),
+        "{text}"
+    );
+    assert!(text.contains("main") && text.contains("spare"), "{text}");
+    assert_eq!(requests(&mut shell), vec![]);
+    press(&mut shell, &[Key::Down, Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![test_query("spare")]);
+    let text = screen(&mut shell);
+    assert!(
+        text.contains("Testing. This can take up to 2 minutes."),
+        "the row shows the test is running: {text}"
+    );
+}
+
+#[test]
+fn a_test_launch_answer_replaces_the_list_and_says_what_it_decided_in_the_desktop_s_words() {
+    let cases = [
+        (
+            Tested::Verified,
+            None,
+            Origin::Verified,
+            "my-model passed its test launch.",
+            "You can now choose it, tick it and launch it.",
+        ),
+        (
+            Tested::Failed,
+            None,
+            Origin::Failed,
+            "my-model failed its test launch.",
+            "The provider refused this model. It stays listed and can't be used.",
+        ),
+        (
+            Tested::Pending,
+            Some("No signed-in Claude Code account in this pool."),
+            Origin::Pending,
+            "my-model still waits for its test launch.",
+            "No signed-in Claude Code account in this pool.",
+        ),
+    ];
+    for (tested, reason, origin, lead_words, rest_words) in cases {
+        let mut shell = on_pending_id();
+        press(&mut shell, &[Key::Char('t'), Key::Enter]);
+        assert_eq!(requests(&mut shell), vec![test_query("main")]);
+        shell.arrive(arrival(
+            test_query("main"),
+            Ok(ModelChoiceReply::Tested(
+                tested,
+                reason.map(str::to_owned),
+                with_own(origin),
+            )),
+        ));
+        assert_eq!(lead(&shell), lead_words);
+        assert_eq!(rest(&shell), rest_words, "a pending reason shows as given");
+        let text = screen(&mut shell);
+        assert!(text.contains(origin_word(origin)), "{text}");
+        assert_eq!(
+            text.contains("t Test"),
+            tested == Tested::Pending,
+            "Test stays open while the id still waits: {text}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_test_launch_says_why_and_no_pool_yet_sends_nothing() {
+    let mut shell = on_pending_id();
+    press(&mut shell, &[Key::Char('t'), Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![test_query("main")]);
+    shell.arrive(arrival(test_query("main"), Err("model_choice_test_busy")));
+    assert_eq!(lead(&shell), "Could not test my-model.");
+    assert_eq!(
+        rest(&shell),
+        "A test launch for this harness is already running. Try again when it ends."
+    );
+    assert_eq!(
+        message("model_choice_pool_unknown"),
+        "That pool no longer exists, so nothing was tested. Pick another one."
+    );
+    assert_eq!(
+        message("model_choice_pool_needed"),
+        "Pick a pool with at least one account to run the test launch."
+    );
+
+    let mut empty = on_pending_id();
+    empty.ctx.store.pools = crate::tui::ctx::Load::Ready(Vec::new());
+    press(&mut empty, &[Key::Char('t')]);
+    let text = screen(&mut empty);
+    assert!(
+        text.contains("No pool yet. Add one under Pools, then try again."),
+        "{text}"
+    );
+    press(&mut empty, &[Key::Enter]);
+    assert_eq!(requests(&mut empty), vec![]);
+}
+
+#[test]
+fn only_a_pending_id_offers_a_test_launch() {
+    for origin in [Origin::Verified, Origin::Failed] {
+        let mut shell = app_page(with_own(origin));
+        shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main")]);
+        press(&mut shell, &[Key::End]);
+        assert!(!screen(&mut shell).contains("t Test"));
+        press(&mut shell, &[Key::Char('t'), Key::Enter]);
+        assert_eq!(requests(&mut shell), vec![], "{origin:?}");
+        assert!(!screen(&mut shell).contains("Which pool runs"));
+    }
+}

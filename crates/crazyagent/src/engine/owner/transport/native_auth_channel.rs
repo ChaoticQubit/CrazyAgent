@@ -2665,10 +2665,10 @@ fallback_allowed = false
             Self::open_registered(catalog, action, false).await
         }
 
-        /// Opens a case like `open_with`; with `codex`, first registers a stand-in Codex
-        /// executable in the case folder, before sign-in freezes the registrations, so a
-        /// master launch gets past the harness lookup. The stand-in never runs. Inputs: the
-        /// catalog, the sign-in action and whether to register the stand-in. Output: the case.
+        /// Opens a case like `open_with`; with `codex`, first registers `TEST_LAUNCH_CODEX`
+        /// in the case folder, before sign-in freezes the registrations, so a master launch
+        /// gets past the harness lookup and a test launch runs it. Inputs: the catalog, the
+        /// sign-in action and whether to register the stand-in. Output: the case.
         async fn open_registered(catalog: &str, action: NativeAuthAction, codex: bool) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-auth-observe-")
@@ -2692,7 +2692,7 @@ fallback_allowed = false
             .unwrap();
             if codex {
                 let stand_in = root.path().join("codex");
-                std::fs::write(&stand_in, b"#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::write(&stand_in, TEST_LAUNCH_CODEX).unwrap();
                 std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o700))
                     .unwrap();
                 service.register_codex_executable(&stand_in).unwrap();
@@ -3775,6 +3775,127 @@ fallback_allowed = false
             assert!(!chosen.contains(&pair("model-a")), "{chosen:?}");
             drop(profile);
             case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// The stand-in Codex of the case folder (DEC-150 M-6). Any call but `exec` exits at
+    /// once. `exec` writes an answer where `-o` names for the model `good-model`, prints the
+    /// provider's refusal code and fails for `bad-model`, and fails silently for any other.
+    const TEST_LAUNCH_CODEX: &str = r#"#!/bin/sh
+[ "$1" = exec ] || exit 0
+out=
+model=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift ;;
+    -m) model=$2; shift ;;
+  esac
+  shift
+done
+case "$model" in
+  good-model) printf 'OK\n' > "$out"; exit 0 ;;
+  bad-model) printf '%s\n' '{"type":"error","message":"model_not_found"}'; exit 1 ;;
+esac
+exit 1
+"#;
+
+    /// The origin of one id in a harness's section. Inputs: the section and the id.
+    /// Output: its origin, or none when the section does not list it.
+    fn origin_of(
+        models: &crate::model_choice::Models,
+        id: &str,
+    ) -> Option<crate::model_choice::Origin> {
+        models
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == id)
+            .map(|candidate| candidate.origin)
+    }
+
+    /// Adds one owner id to Codex and runs its test launch on pool-a through the real owner
+    /// socket and `test_launch::run` (DEC-150 M-6), the pool's account signed in first, or
+    /// still signing in. Inputs: the id and whether the sign-in completes. Output: what the
+    /// test launch decided, its pending reason and the Codex section after it.
+    async fn test_launch_on_pool(
+        model: &str,
+        signed_in: bool,
+    ) -> (
+        crate::model_choice::test_launch::Tested,
+        Option<String>,
+        crate::model_choice::Models,
+    ) {
+        let mut case = Case::open_registered(
+            MASTER_CATALOG,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            },
+            true,
+        )
+        .await;
+        if signed_in {
+            long_lived_codex_auth(&case.guard.as_ref().unwrap().profile_path().unwrap());
+            case.complete_sign_in().await;
+        }
+        let (added, models) = case.client.model_choice_add("codex", model).await.unwrap();
+        assert_eq!(added, crate::engine::owner::ModelAdded::Pending);
+        assert_eq!(
+            origin_of(&models, model),
+            Some(crate::model_choice::Origin::Pending)
+        );
+        let tested = case
+            .client
+            .model_choice_test("codex", model, CredentialRef::new("pool-a").unwrap())
+            .await
+            .unwrap();
+        case.close().await;
+        tested
+    }
+
+    /// DEC-150 M-6, verified: a test launch on a signed-in pool whose Codex answers on the
+    /// owner's id verifies it, so the id can be chosen.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_test_launch_the_harness_answers_on_verifies_the_owner_s_id() {
+        use crate::model_choice::{Origin, test_launch::Tested};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (tested, reason, models) = test_launch_on_pool("good-model", true).await;
+            assert_eq!((tested, reason), (Tested::Verified, None));
+            assert_eq!(origin_of(&models, "good-model"), Some(Origin::Verified));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// DEC-150 M-6, failed: a test launch whose Codex prints the provider's refusal code
+    /// fails the owner's id, which stays listed and can't be used.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_test_launch_the_provider_refuses_fails_the_owner_s_id() {
+        use crate::model_choice::{Origin, test_launch::Tested};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (tested, reason, models) = test_launch_on_pool("bad-model", true).await;
+            assert_eq!((tested, reason), (Tested::Failed, None));
+            assert_eq!(origin_of(&models, "bad-model"), Some(Origin::Failed));
+        })
+        .await
+        .unwrap();
+    }
+
+    /// DEC-150 M-6, pending: a test launch on a pool whose account has not signed in runs
+    /// nothing, and the id keeps waiting with the reason the clients show as given.
+    #[tokio::test]
+    async fn a_test_launch_on_a_pool_without_a_signed_in_account_leaves_the_id_pending_with_why() {
+        use crate::model_choice::{Origin, test_launch::Tested};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let (tested, reason, models) = test_launch_on_pool("good-model", false).await;
+            assert_eq!(tested, Tested::Pending);
+            assert_eq!(
+                reason.as_deref(),
+                Some("No signed-in Codex account in this pool.")
+            );
+            assert_eq!(origin_of(&models, "good-model"), Some(Origin::Pending));
         })
         .await
         .unwrap();
