@@ -47,6 +47,7 @@ CLEAR = b"\x15"
 GO_TO = b"\x0b"
 UP = b"\x1b[A"
 DOWN = b"\x1b[B"
+RIGHT = b"\x1b[C"
 SHIFT_LEFT = b"\x1b[1;2D"
 SHIFT_RIGHT = b"\x1b[1;2C"
 QUIT = b"\x11"
@@ -354,7 +355,11 @@ def setup(term, root):
         way = "Go to Home"
     else:
         term.key(ENTER)
-        way = "Continue"
+        term.wait("[> Add account ]   [ Skip for now ]", 30)
+        term.key(RIGHT)
+        term.wait("[ Add account ]   [> Skip for now ]", 10)
+        term.key(ENTER)
+        way = "Continue, then Skip for now on the Accounts step,"
     term.wait("Get set up", 30)
     assert not (root / "setup").exists(), "first-run Setup installed something"
     step("first-run Setup checked this computer; %s went Home without installing" % way)

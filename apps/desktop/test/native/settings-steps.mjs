@@ -172,10 +172,10 @@ export async function menu(label, item) {
   await click(`//*[@role="menuitem"][normalize-space(.)=${literal(item)}]`);
 }
 
-/** Goes through first run the way an owner does: saves the profile, continues past the
- * projects folder, skips tool setup (nothing is installed) and picks Add account, which
- * opens Settings, Accounts with the Add account dialog. Input: the owner's name. */
-export async function finishWelcome(name) {
+/** Goes through first run the way an owner does up to its last page: saves the profile,
+ * continues past the projects folder and skips tool setup (nothing is installed), then waits
+ * for the Accounts step. Input: the owner's name. */
+export async function reachAccountsStep(name) {
   await until(() => shown("#profile-name"), 60000, "first-run Welcome page did not appear");
   assert.deepEqual(await texts("h1"), ["Tell CrazyAgent about you"]);
   await type("#profile-name", name);
@@ -188,9 +188,33 @@ export async function finishWelcome(name) {
   await until(async () => await shown("button=Skip for now") || await shown("button=Continue"), 30000, "the tools step offered no way on");
   await click(await shown("button=Skip for now") ? "button=Skip for now" : "button=Continue");
   await until(() => says("h1", "Add an account"), 15000, "the accounts step did not open");
+}
+
+/** Goes through first run the way an owner does and picks Add account on its last page, which
+ * opens Settings, Accounts with the Add account dialog. Input: the owner's name. */
+export async function finishWelcome(name) {
+  await reachAccountsStep(name);
+  await addAccountFromFirstRun();
+}
+
+/** Picks Add account on the first-run Accounts step and waits for Settings, Accounts with the
+ * Add account dialog. Input: none. Output: none; fails when the dialog does not open. */
+export async function addAccountFromFirstRun() {
   await click("button=Add account");
   await until(async () => /^#\/settings\/accounts/.test(await browser.execute(() => location.hash)) &&
     await says("dialog[open] h2", "Add an account"), 15000, "Add account did not open in Settings, Accounts");
+}
+
+/** Reads whether the engine holds the Learn CrazyAgent guide as skipped, through the desktop
+ * owner fixture, independently of the window. Output: true when the owner skipped the guide. */
+export async function observeLearningSkipped() {
+  const result = await execute(process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE, ["observe-learning"],
+    { timeout: 10000, killSignal: "SIGKILL", maxBuffer: OBSERVATION_BYTES_MAX * 2 });
+  assert.equal(result.stderr, "", "the learning observation ran without diagnostics");
+  assert(Buffer.byteLength(result.stdout) <= OBSERVATION_BYTES_MAX, "the learning observation stays bounded");
+  const { skipped } = JSON.parse(result.stdout);
+  assert.equal(typeof skipped, "boolean", "the engine said whether the guide is skipped");
+  return skipped;
 }
 
 /** Reads what the engine itself holds for model access through the desktop owner fixture,

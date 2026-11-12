@@ -226,8 +226,6 @@ export function classifyFailure(error: unknown): Failure {
   return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
 }
 
-/** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.
- * Inputs: the command and its arguments. Output: the value, not ready, or a plain error. */
 let selection: Promise<unknown> = Promise.resolve();
 
 /** Runs one read-then-use of the bridge's model-access selection after every earlier one has
@@ -240,6 +238,8 @@ export function oneSelection<T>(pair: () => Promise<T>): Promise<T> {
   return run;
 }
 
+/** Calls one Tauri command, retrying only the bridge's pre-action "busy" refusal.
+ * Inputs: the command and its arguments. Output: the value, not ready, or a plain error. */
 export async function call<T>(command: string, args?: InvokeArgs): Promise<Result<T>> {
   try {
     return { kind: "ok", value: await bridgeCall<T>(command, args) };
