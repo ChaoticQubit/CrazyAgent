@@ -625,6 +625,47 @@ fn every_loopback_plugin_port_is_listed_for_the_sandbox_and_an_unsafe_folder_fai
 }
 
 #[test]
+fn a_port_zero_plugin_and_files_past_the_cap_are_refused_while_the_ports_still_list() {
+    let case = case();
+    drop_in(
+        &case,
+        "zero.yaml",
+        &NEAR
+            .replace("name: near", "name: zero")
+            .replace("127.0.0.1:9000", "127.0.0.1:0"),
+    );
+    let listing = list(&case.db, &case.root).unwrap();
+    match &plugin(&listing, "zero").status {
+        PluginStatus::Refused { problem } => assert_eq!(problem.code, "app_plugin_port_invalid"),
+        other => panic!("expected a refused plugin, got {other:?}"),
+    }
+    assert_eq!(loopback_ports(&case.root).unwrap(), [11434]);
+    let cap = crate::app_plugins::USER_PLUGINS_MAX;
+    for index in 0..=cap {
+        let name = format!("p{index:03}");
+        drop_in(
+            &case,
+            &format!("{name}.yaml"),
+            &NEAR
+                .replace("name: near", &format!("name: {name}"))
+                .replace(":9000", &format!(":{}", 20_000 + index)),
+        );
+    }
+    let ports = loopback_ports(&case.root).unwrap();
+    assert_eq!(ports.len(), cap + 1);
+    assert!(ports.contains(&(20_000 + cap as u16 - 1)));
+    assert!(!ports.contains(&(20_000 + cap as u16)));
+    assert_eq!(
+        code(ready(&case.db, &case.root, &format!("p{cap:03}"))),
+        "app_plugin_refused"
+    );
+    assert_eq!(
+        code(ready(&case.db, &case.root, "p000")),
+        "app_plugin_needs_review"
+    );
+}
+
+#[test]
 fn removing_the_chosen_plugin_turns_search_back_to_full_text() {
     let case = case();
     add(&case.db, &case.root, NEAR, &sha(NEAR), false, 1).unwrap();

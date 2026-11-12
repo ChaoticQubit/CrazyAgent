@@ -1119,6 +1119,21 @@ mod tests {
     }
 
     #[test]
+    fn plugin_ports_are_kept_free_beside_a_full_set_of_owner_ports() {
+        let (_temp, sandbox) = project(SandboxNetwork::Open);
+        let owner_max = crate::sandbox::KEPT_PORTS_MAX as u16;
+        let plugin_max = crate::sandbox::APP_PLUGIN_PORTS_MAX as u16;
+        let owner: Vec<u16> = (2_000..2_000 + owner_max).collect();
+        let mut sandbox = sandbox.keep_ports(&owner).unwrap();
+        sandbox.plugin_ports = (3_000..3_000 + plugin_max).collect();
+        let kept = kept_free(&sandbox);
+        for port in [2_000, 2_000 + owner_max - 1, 3_000, 3_000 + plugin_max - 1] {
+            assert!(kept.contains(&port), "{port}");
+        }
+        assert!(kept.len() <= KEEP_FREE_MAX);
+    }
+
+    #[test]
     fn an_open_network_is_refused_when_linux_could_hand_out_a_kept_port() {
         let (_temp, sandbox) = project(SandboxNetwork::Open);
         let usual = PICKED_PORTS_START..=60_999;
