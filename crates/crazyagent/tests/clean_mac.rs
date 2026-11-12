@@ -30,6 +30,7 @@ const GATE_DIR_VARIABLE: &str = "CRAZYAGENT_CLEAN_MAC_DIR";
 const HOST_TMUX: [&str; 2] = ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux"];
 const REFUSED: &str = "gate refused";
 const RESTARTS_ONLY: &str = "had to start";
+const READY_LINE: &[u8] = b"ready\n";
 const READY_TIME: Duration = Duration::from_secs(30);
 const SETTLE_TIME: Duration = Duration::from_secs(30);
 const LIVE_TIME: Duration = Duration::from_secs(90);
@@ -372,18 +373,17 @@ impl Mac {
             .stdout(stdout)
             .stderr(stderr);
         self.engine = Some(crazyagent::spawn_gate::spawn(&mut command).unwrap());
-        let socket = self.root.join(crazyagent::paths::SOCKET_NAME);
         let start = Instant::now();
-        while !crazyagent::service::answering(&socket) {
+        while fs::read(self.kept.join("engine-stdout.log")).unwrap() != READY_LINE {
             if let Some(status) = self.engine.as_mut().unwrap().try_wait().unwrap() {
                 panic!(
-                    "the engine exited ({status}) before it answered; see {}",
+                    "the engine exited ({status}) before it was ready; see {}",
                     self.kept.display()
                 );
             }
             assert!(
                 start.elapsed() < READY_TIME,
-                "the engine did not answer within 30 s; see {}",
+                "the engine was not ready within 30 s; see {}",
                 self.kept.display()
             );
             std::thread::sleep(Duration::from_millis(50));
