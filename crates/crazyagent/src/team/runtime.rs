@@ -391,6 +391,15 @@ enum Busy {
     Message(i64),
 }
 
+/// Where a task's agent starts (DEC-150): on an account with the model it runs, none for
+/// the account's own, nowhere yet, or nowhere because the owner's fallback rule stops a
+/// model no pool account can run, with the reason the task fails with.
+enum Placed {
+    Run(TeamAccount, Option<String>),
+    Wait,
+    Stop(String),
+}
+
 struct Worker {
     project: ProjectId,
     role: AgentRole,
@@ -2473,12 +2482,12 @@ impl TeamRuntime {
     }
 
     /// Picks the account a task's agent starts on and the model it runs (DEC-150): an account
-    /// that can run the model wanted; when none can, any account on its own model, telling
-    /// the owner and the master once (`model_pick::fell_back`). A pick that finds an account
-    /// for the model clears a told fallback. Takes the live access, the project, the harness,
-    /// the paused accounts, the model wanted, none for any account's own, and the task.
-    /// Returns the account and the model it runs, none while no account can take the agent
-    /// yet, or a SQLite failure.
+    /// that can run the model wanted; when none can, the owner's fallback rule decides: any
+    /// account on its own model, telling the owner and the master once
+    /// (`model_pick::fell_back`) or no one, or no start, with the reason. A pick that finds
+    /// an account for the model clears a told fallback. Takes the live access, the project,
+    /// the harness, the paused accounts, the model wanted, none for any account's own, and
+    /// the task. Returns where the agent starts, or a store or SQLite failure.
     fn account_with_model(
         &mut self,
         access: &ModelAccess,
@@ -2487,38 +2496,69 @@ impl TeamRuntime {
         paused: &BTreeSet<CredentialRef>,
         wanted: Option<String>,
         task: i64,
-    ) -> Result<Option<(TeamAccount, Option<String>)>, EngineError> {
+    ) -> Result<Placed, EngineError> {
         let Some(wanted) = wanted else {
             let account = self.account_for(access, project, harness, paused, None);
-            return Ok(account.ok().flatten().map(|account| (account, None)));
+            return Ok(match account {
+                Ok(Some(account)) => Placed::Run(account, None),
+                Ok(None) | Err(_) => Placed::Wait,
+            });
         };
         match self.account_for(access, project, harness, paused, Some(&wanted)) {
             Ok(Some(account)) => {
                 super::model_pick::ran(&self.connection, project, harness, &wanted)?;
                 assert!(super::model_pick::can_run(&account.reach, Some(&wanted)));
-                Ok(Some((account, Some(wanted))))
+                Ok(Placed::Run(account, Some(wanted)))
             }
-            Ok(None) => Ok(None),
+            Ok(None) => Ok(Placed::Wait),
             Err(_) => {
                 let Ok(Some(account)) = self.account_for(access, project, harness, paused, None)
                 else {
-                    return Ok(None);
+                    return Ok(Placed::Wait);
                 };
+                let shown = bound_text(harness, 64);
+                if !self.fallback_allowed(project, harness, &wanted, Some(task))? {
+                    return Ok(Placed::Stop(format!(
+                        "No account in this project's pool can run {wanted} for {shown} agents, and the owner's fallback setting stops the task instead of running another model. Pick another model or leave model out."
+                    )));
+                }
+                Ok(Placed::Run(account, None))
+            }
+        }
+    }
+
+    /// Applies the owner's fallback rule once no pool account can run a chosen model
+    /// (DEC-150 Q2): Notice tells the owner and the master once, Silent tells no one, and
+    /// both let the start run on an account's own model; Stop lets nothing start. Takes the
+    /// project, the harness, the model, and the task, none for the master. Returns whether
+    /// the start may run on another model, or a store or SQLite failure.
+    fn fallback_allowed(
+        &mut self,
+        project: &ProjectId,
+        harness: &str,
+        model: &str,
+        task: Option<i64>,
+    ) -> Result<bool, EngineError> {
+        match crate::model_choice::rules::rules(&self.connection)?.fallback {
+            crate::model_choice::rules::FallbackRule::Stop => Ok(false),
+            crate::model_choice::rules::FallbackRule::Silent => Ok(true),
+            crate::model_choice::rules::FallbackRule::Notice => {
                 let tx = self
                     .connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(error)?;
-                super::model_pick::fell_back(&tx, project, harness, &wanted, Some(task), now_ms())?;
+                super::model_pick::fell_back(&tx, project, harness, model, task, now_ms())?;
                 tx.commit().map_err(error)?;
-                Ok(Some((account, None)))
+                Ok(true)
             }
         }
     }
 
     /// Picks the account a project's master starts on (DEC-150): with a master model set
-    /// for its harness, an account that can run it; when none can, the account any start
-    /// would get, on its own model, telling the owner and the master once. The model itself
-    /// is read again at launch (`model_pick::start_model`). Takes the live access, the
+    /// for its harness, an account that can run it; when none can, the owner's fallback
+    /// rule decides between the account any start would get, on its own model, told once
+    /// or silently, and no start with the reason. The model itself is read again at launch
+    /// (`model_pick::start_model`). Takes the live access, the
     /// project, the master harness and the paused accounts. Returns the account, none while
     /// no account can take it yet, the plain reason no account can, or a store or SQLite
     /// failure.
@@ -2548,13 +2588,13 @@ impl TeamRuntime {
             return Ok(Ok(found));
         }
         let picked = self.account_for(access, project, harness, paused, None);
-        if let Ok(Some(_)) = &picked {
-            let tx = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(error)?;
-            super::model_pick::fell_back(&tx, project, harness, &wanted, None, now_ms())?;
-            tx.commit().map_err(error)?;
+        if let Ok(Some(_)) = &picked
+            && !self.fallback_allowed(project, harness, &wanted, None)?
+        {
+            let shown = bound_text(harness, 64);
+            return Ok(Err(format!(
+                "no account in this project's pool can run {wanted} for the {shown} master, and the owner's fallback setting stops it instead of running another model"
+            )));
         }
         Ok(picked)
     }
@@ -4244,16 +4284,20 @@ impl TeamRuntime {
                         continue;
                     }
                     let own = super::model_pick::agent_model(&self.connection, pinned)?;
-                    let Some((account, run)) = self.account_with_model(
+                    let (account, run) = match self.account_with_model(
                         access,
                         project,
                         &harness,
                         paused,
                         own.clone(),
                         task,
-                    )?
-                    else {
-                        continue;
+                    )? {
+                        Placed::Run(account, run) => (account, run),
+                        Placed::Wait => continue,
+                        Placed::Stop(reason) => {
+                            self.fail_task(task, &reason)?;
+                            continue;
+                        }
                     };
                     if run != own {
                         super::model_pick::record_agent(
@@ -4289,16 +4333,20 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    let Some((account, run)) = self.account_with_model(
+                    let (account, run) = match self.account_with_model(
                         access,
                         project,
                         &harness,
                         paused,
                         wanted.clone(),
                         task,
-                    )?
-                    else {
-                        continue;
+                    )? {
+                        Placed::Run(account, run) => (account, run),
+                        Placed::Wait => continue,
+                        Placed::Stop(reason) => {
+                            self.fail_task(task, &reason)?;
+                            continue;
+                        }
                     };
                     self.naming = Some(task);
                     self.run_model = run;

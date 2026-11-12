@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
+pub mod rules;
 pub mod store;
 #[cfg(all(test, unix))]
 mod tests;

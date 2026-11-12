@@ -1,3 +1,4 @@
+use super::rules::PickRule;
 use super::{
     CUSTOM_MAX, Candidate, Models, NOT_SUPPORTED, Origin, Row, Slot, VALUE_JSON_MAX, Written,
     assert_catalog, fallback, harness_id, item, layered, model_valid, supported, unavailable,
@@ -30,11 +31,13 @@ CREATE TABLE IF NOT EXISTS model_custom (
 ) WITHOUT ROWID;";
 
 /// What a spawn's model pick does: run on the model named, none for the account's own,
-/// refuse a pick outside the allowed list with that list and the default, or refuse any
-/// pick on a harness whose model CrazyAgent does not choose.
+/// run on the default instead because the owner's pick rule overrules every pick, refuse
+/// a pick outside the models the rule allows with those models and the default, or
+/// refuse any pick on a harness whose model CrazyAgent does not choose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pick {
     Run(Option<String>),
+    Overruled(Option<String>),
     Refused {
         allowed: Vec<String>,
         default: Option<String>,
@@ -138,12 +141,14 @@ pub fn launch_model(
     Ok(value.as_str().map(str::to_owned))
 }
 
-/// Checks the model the master or a lead picked for a new agent: no pick runs the
-/// project's agent default; a pick runs when it is that default or on the allowed list,
-/// the project's when set, else the app's; anything else is refused with the list. A pick
-/// on a harness whose model CrazyAgent does not choose is refused. Inputs: the engine
-/// database, the agent's harness, its model catalog, the project and the pick. Output: the
-/// answer, or `model_choice_unavailable`.
+/// Checks the model the master or a lead picked for a new agent under the owner's pick
+/// rule (DEC-150 Q2): no pick runs the project's agent default, and so does a pick equal
+/// to it. Strict runs a pick on the allowed list, the project's when set, else the app's;
+/// Hint runs any model the harness offers; Default overrules every other pick with the
+/// default. Anything else is refused with the models the rule allows. A pick on a harness
+/// whose model CrazyAgent does not choose is refused. Inputs: the engine database, the
+/// agent's harness, its model catalog, the project and the pick. Output: the answer, or
+/// `model_choice_unavailable`.
 pub fn pick(
     db: &Connection,
     harness: &str,
@@ -174,14 +179,25 @@ pub fn pick(
         })
         .unwrap_or_default();
     assert!(allowed.iter().all(|id| usable.contains(id)));
-    Ok(match picked {
-        None => Pick::Run(default),
-        Some(model)
-            if default.as_deref() == Some(model) || allowed.iter().any(|id| id == model) =>
-        {
+    let rule = super::rules::rules(tx)?.pick;
+    let offered = picked.is_some_and(|model| usable.iter().any(|id| id == model));
+    let allowed: Vec<String> = match rule {
+        PickRule::Strict => allowed,
+        PickRule::Hint => usable.into_iter().take(super::ALLOWED_MAX).collect(),
+        PickRule::Default => Vec::new(),
+    };
+    let model = match picked {
+        None => return Ok(Pick::Run(default)),
+        Some(model) if default.as_deref() == Some(model) => return Ok(Pick::Run(default)),
+        Some(model) => model,
+    };
+    Ok(match rule {
+        PickRule::Default => Pick::Overruled(default),
+        PickRule::Strict if allowed.iter().any(|id| id == model) => {
             Pick::Run(Some(model.to_owned()))
         }
-        Some(_) => Pick::Refused { allowed, default },
+        PickRule::Hint if offered => Pick::Run(Some(model.to_owned())),
+        PickRule::Strict | PickRule::Hint => Pick::Refused { allowed, default },
     })
 }
 

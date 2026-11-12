@@ -11,13 +11,13 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_task_models (
     reason TEXT NOT NULL
 );";
 
-/// Checks the model a spawn picked for a new task against the owner's choices for its
-/// harness (DEC-150) and pins an allowed pick with its reason to the task, in the caller's
-/// transaction, so a refusal rolls the task back. No pick pins nothing: the task runs the
-/// default its start reads. Rows of tasks the project no longer keeps are dropped. Takes
-/// the transaction, the project, the task, its harness and the pick. Returns the text the
-/// reply adds after the harness, " on <model>" for a pinned pick, or the refusal sentence,
-/// or a SQLite failure.
+/// Checks the model a spawn picked for a new task against the owner's choices and pick
+/// rule for its harness (DEC-150) and pins an allowed pick with its reason to the task, in
+/// the caller's transaction, so a refusal rolls the task back. No pick, or one the rule
+/// overrules, pins nothing: the task runs the default its start reads. Rows of tasks the
+/// project no longer keeps are dropped. Takes the transaction, the project, the task, its
+/// harness and the pick. Returns the text the reply adds after the harness, " on <model>"
+/// for a pinned pick, or the refusal sentence, or a SQLite failure.
 pub(crate) fn pin(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -31,6 +31,15 @@ pub(crate) fn pin(
     let shown = super::bound_text(harness, 64);
     let model = match store::pick(tx, harness, &catalog, project, picked)? {
         Pick::Run(model) => model,
+        Pick::Overruled(default) => {
+            let on = match default {
+                Some(default) => format!("the default model {default}"),
+                None => "the account's own model".to_owned(),
+            };
+            return Ok(Ok(format!(
+                " on {on}: the owner runs every agent on the default"
+            )));
+        }
         Pick::Unsupported => {
             return Ok(Err(format!(
                 "CrazyAgent does not choose the model of a {shown} agent; leave model out (model_not_supported)."

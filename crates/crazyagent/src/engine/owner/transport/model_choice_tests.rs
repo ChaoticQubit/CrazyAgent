@@ -229,3 +229,57 @@ fn every_code_the_store_returns_is_a_protocol_code() {
     let reply: Reply = serde_json::from_slice(&refused[4..]).unwrap();
     assert!(matches!(reply, Reply::Rejected { code } if code == "model_choice_unavailable"));
 }
+
+#[test]
+fn the_owner_reads_and_sets_the_pick_and_fallback_rules() {
+    use crate::model_choice::rules::{FallbackRule, PickRule, Rules};
+    let (_tmp, root) = engine();
+    let read = |root: &Path| -> Rules {
+        match send(root, json!({"model_choice": {"kind": "rules"}})).unwrap() {
+            Reply::Rules { rules } => rules,
+            other => panic!("not rules: {other:?}"),
+        }
+    };
+    let first = read(&root);
+    assert_eq!(
+        (first.pick, first.fallback),
+        (PickRule::Strict, FallbackRule::Notice)
+    );
+    let set = |root: &Path, rule: Value, version: u64| {
+        send(
+            root,
+            json!({"model_choice": {"kind": "set_rule", "rule": rule, "version": version}}),
+        )
+        .unwrap()
+    };
+    let Reply::RuleSaved { rules: saved } = set(
+        &root,
+        json!({"rule": "fallback", "value": "stop"}),
+        first.fallback_version,
+    ) else {
+        panic!("the fallback rule was not saved");
+    };
+    assert_eq!(
+        (saved.pick, saved.fallback),
+        (PickRule::Strict, FallbackRule::Stop)
+    );
+    let Reply::RuleStale { rules: current } = set(
+        &root,
+        json!({"rule": "fallback", "value": "silent"}),
+        first.fallback_version,
+    ) else {
+        panic!("a stale rule set was saved");
+    };
+    assert_eq!(current, saved);
+    assert_eq!(read(&root), saved);
+    for bad in [
+        json!({"model_choice": {"kind": "set_rule", "rule": {"rule": "pick", "value": "loose"}, "version": 0}}),
+        json!({"model_choice": {"kind": "set_rule", "rule": {"rule": "speed", "value": "fast"}, "version": 0}}),
+        json!({"model_choice": {"kind": "rules", "extra": 1}}),
+    ] {
+        assert_eq!(
+            send(&root, bad).unwrap_err().0,
+            "model_choice_request_invalid"
+        );
+    }
+}
