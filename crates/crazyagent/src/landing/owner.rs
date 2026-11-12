@@ -5,7 +5,7 @@ use super::git::{Repo, Writes, failure};
 use super::store::{self, Intent, Record};
 use super::{
     AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
-    MESSAGE_BYTES_MAX, TargetBranches,
+    LandingResult, MESSAGE_BYTES_MAX, OwnerDirty, TargetBranches,
 };
 use crate::activity::{ActivityKind, ENGINE_ACTOR, OWNER_ACTOR};
 use crate::agent_git::Layout;
@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
+/// The most bytes the owner's index entries of the chosen staged paths may print.
+const STAGED_LISTING_BYTES_MAX: usize = 128 * 1024;
 const IDENTITY_BYTES_MAX: usize = 256;
 const MAIN_PLACES_MAX: usize = 512;
 const JUDGED_MAX: usize = 256;
@@ -678,44 +680,365 @@ fn land_on_problem(db: &Connection, project: &ProjectId, error: &EngineError) ->
     }
 }
 
-/// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
-/// file where the squash would write. A submodule counts by the commit it records, so no
-/// git runs inside it under config the engine did not write. Inputs: the checkout, its
-/// root, the tip and the squash tree. Output: Ok when Accept can write without touching
-/// the owner's work.
+/// Refuses an owner checkout whose own work an Accept would touch, as [`dirty_paths`]
+/// finds it. Inputs: the checkout, its root, the tip and the squash tree. Output: Ok when
+/// Accept can write without touching the owner's work, else `changes_owner_dirty`.
 fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result<(), EngineError> {
-    if !owner.test(&["diff-index", "--cached", "--quiet", tip, "--"])?
-        || !owner.test(&[
+    let dirty = dirty_paths(owner, repository, tip, tree)?;
+    if dirty.files.is_empty() && dirty.untracked.is_empty() {
+        return Ok(());
+    }
+    Err(failure("changes_owner_dirty"))
+}
+
+/// The names one git listing prints, NUL separated. Inputs: the checkout and the arguments.
+/// Output: the names, sorted.
+fn listed_names(owner: &Repo, args: &[&str]) -> Result<BTreeSet<String>, EngineError> {
+    let listing = owner.run(args)?;
+    let mut names = BTreeSet::new();
+    for name in listing
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+    {
+        let name = std::str::from_utf8(name).map_err(|_| failure("changes_git_unsupported"))?;
+        names.insert(name.to_owned());
+    }
+    Ok(names)
+}
+
+/// The paths staged in the owner's index against the tip, renames split into a delete and
+/// an add. Inputs: the checkout and the tip. Output: the paths, sorted.
+fn staged_paths(owner: &Repo, tip: &str) -> Result<BTreeSet<String>, EngineError> {
+    listed_names(
+        owner,
+        &[
+            "diff-index",
+            "--cached",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            tip,
+            "--",
+        ],
+    )
+}
+
+/// The owner's files in an Accept's way (F21): in `files` every path staged against the tip
+/// and every unstaged edit to a file the squash changes, in `untracked` every untracked or
+/// ignored file where the squash adds one; submodules count by their recorded commit.
+/// Inputs: the checkout, its root, the tip and the squash tree. Output: both lists, sorted.
+fn dirty_paths(
+    owner: &Repo,
+    repository: &Path,
+    tip: &str,
+    tree: &str,
+) -> Result<OwnerDirty, EngineError> {
+    let staged = staged_paths(owner, tip)?;
+    let mut tracked = staged.clone();
+    let unstaged = listed_names(
+        owner,
+        &[
             "diff",
             "--no-ext-diff",
             "--no-textconv",
             "--ignore-submodules=all",
-            "--quiet",
+            "--name-only",
+            "-z",
+            "--no-renames",
             "--",
-        ])?
-    {
-        return Err(failure("changes_owner_dirty"));
+        ],
+    )?;
+    if !unstaged.is_empty() {
+        let changed = listed_names(
+            owner,
+            &[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--name-only",
+                "--no-renames",
+                tip,
+                tree,
+            ],
+        )?;
+        tracked.extend(unstaged.into_iter().filter(|path| changed.contains(path)));
     }
-    let added = owner.run(&[
-        "diff-tree",
-        "-r",
-        "-z",
-        "--name-only",
-        "--diff-filter=A",
-        tip,
-        tree,
-    ])?;
-    for path in added
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-    {
-        let path = std::str::from_utf8(path).map_err(|_| failure("changes_git_unsupported"))?;
-        match std::fs::symlink_metadata(repository.join(path)) {
+    let added = listed_names(
+        owner,
+        &[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            "--diff-filter=A",
+            tip,
+            tree,
+        ],
+    )?;
+    let mut untracked = BTreeSet::new();
+    for path in added {
+        if staged.contains(&path) {
+            continue;
+        }
+        match std::fs::symlink_metadata(repository.join(&path)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => return Err(failure("changes_owner_dirty")),
+            _ => {
+                untracked.insert(path);
+            }
         }
     }
-    Ok(())
+    assert!(untracked.iter().all(|path| !tracked.contains(path)));
+    Ok(OwnerDirty {
+        files: tracked.into_iter().collect(),
+        untracked: untracked.into_iter().collect(),
+    })
+}
+
+/// What an Accept onto a target would find in the owner's checkout (F21), its squash worked
+/// out as [`accept_held`] does, under the caller's repository hold. Inputs: the store, the
+/// settled change set and the target branch, None for the Land on branch. Output: None when
+/// no checkout is written or it would conflict, else the ref, its tip and [`dirty_paths`].
+fn blocking(
+    db: &Connection,
+    record: &Record,
+    target: Option<&str>,
+) -> Result<Option<(String, String, OwnerDirty)>, EngineError> {
+    if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict)
+        || record.intent.is_some()
+    {
+        return Err(failure("changes_stale"));
+    }
+    flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
+    let repository = record.repository.as_path();
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(repository, &git_dir, Some(repository))?;
+    let named = match target {
+        Some(target) => Some(target.to_owned()),
+        None => land_on(db, &owner, &record.project)?.map(|(branch, _)| branch),
+    };
+    let (reference, tip, target) = landing_target(db, &owner, repository, named.as_deref())?;
+    if !matches!(target, Target::Checkout) {
+        return Ok(None);
+    }
+    verify_objects(repository, &[&record.head, &tip], &[&record.base])?;
+    let from = measured_from(db, &owner, record, &tip)?;
+    let paths = merge_paths(&owner, &from, &tip, &record.head)?;
+    if uses_configured_commands(&owner, &paths, &[&from, &tip, &record.head])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    let (tree, conflicts) = merge(&owner, &from, &tip, &record.head)?;
+    if !conflicts.is_empty() {
+        return Ok(None);
+    }
+    let dirty = dirty_paths(&owner, repository, &tip, &tree)?;
+    let all = || dirty.files.iter().chain(&dirty.untracked);
+    if all().count() > super::DIRTY_FILES_MAX
+        || all().any(|file| file.len() > super::DIRTY_PATH_BYTES_MAX)
+    {
+        return Err(failure("changes_too_large"));
+    }
+    Ok(Some((reference, tip, dirty)))
+}
+
+/// Lists the owner's files that keep a change set's Accept from landing (F21), read under
+/// the repository's hold. Inputs: the store, the change set and the target branch, None for
+/// the Land on branch. Output: the tracked files commit-first may take and the untracked
+/// ones the owner moves or deletes, both empty when none blocks.
+pub(super) fn owner_dirty(
+    db: &Connection,
+    id: &ChangeSetId,
+    target: Option<&str>,
+) -> Result<OwnerDirty, EngineError> {
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let _held = flow::hold_unmoved(db, &repository)?;
+    let record = settled(db, id)?;
+    Ok(blocking(db, &record, target)?
+        .map(|(_, _, dirty)| dirty)
+        .unwrap_or_default())
+}
+
+/// The owner's index entries of staged paths, as `ls-files -s -z` prints them, each with
+/// stage 0; a staged path with no entry is a staged deletion. Inputs: the checkout and the
+/// paths. Output: the entries' records and the deleted paths, or `changes_git_unsupported`
+/// for an unmerged entry.
+fn staged_entries(owner: &Repo, paths: &[&str]) -> Result<(Vec<u8>, Vec<String>), EngineError> {
+    assert!(paths.len() <= super::DIRTY_FILES_MAX);
+    if paths.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut arguments = vec!["ls-files", "-s", "-z", "--"];
+    arguments.extend_from_slice(paths);
+    let listed = owner.exec(
+        &arguments,
+        None,
+        &[("GIT_LITERAL_PATHSPECS", "1")],
+        STAGED_LISTING_BYTES_MAX,
+    )?;
+    if listed.code != 0 || listed.overflow {
+        return Err(failure("changes_git_failed"));
+    }
+    let mut records = Vec::new();
+    let mut found = BTreeSet::new();
+    for record in listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let text = std::str::from_utf8(record).map_err(|_| failure("changes_git_unsupported"))?;
+        let Some((head, path)) = text.split_once('\t') else {
+            return Err(failure("changes_git_failed"));
+        };
+        if !paths.contains(&path) {
+            continue;
+        }
+        if !head.ends_with(" 0") || !found.insert(path.to_owned()) {
+            return Err(failure("changes_git_unsupported"));
+        }
+        records.extend_from_slice(record);
+        records.push(0);
+    }
+    let deleted = paths
+        .iter()
+        .filter(|path| !found.contains(**path))
+        .map(|path| (*path).to_owned())
+        .collect();
+    Ok((records, deleted))
+}
+
+/// Commits only the tracked files [`blocking`] finds now (F21) and nothing else: a staged path
+/// as the owner staged it, a staged deletion as a deletion, an unstaged one from the working
+/// copy; untracked or ignored files are refused. Inputs: the store, the owner's home, the set,
+/// the files, the message and the target, None for the Land on branch. Output: the commit
+/// and branch, or `changes_owner_untracked`, `changes_stale` or another code.
+pub(super) fn commit_owner_files(
+    db: &Connection,
+    home: &Path,
+    id: &ChangeSetId,
+    files: &[String],
+    message: &str,
+    target: Option<&str>,
+) -> Result<(String, String), EngineError> {
+    let message = edited(message)?;
+    if files.is_empty() || files.len() > super::DIRTY_FILES_MAX {
+        return Err(failure("changes_request_invalid"));
+    }
+    store::initialize(db)?;
+    let repository = store::load(db, id)?.repository;
+    let _held = flow::hold_unmoved(db, &repository)?;
+    let record = settled(db, id)?;
+    let Some((reference, tip, blocked)) = blocking(db, &record, target)? else {
+        return Err(failure("changes_stale"));
+    };
+    let mut chosen: Vec<&str> = files.iter().map(String::as_str).collect();
+    chosen.sort_unstable();
+    chosen.dedup();
+    if chosen
+        .iter()
+        .any(|file| blocked.untracked.iter().any(|path| path == file))
+    {
+        return Err(failure("changes_owner_untracked"));
+    }
+    if chosen
+        .iter()
+        .any(|file| !blocked.files.iter().any(|path| path == file))
+    {
+        return Err(failure("changes_stale"));
+    }
+    for file in &chosen {
+        if file.starts_with(':')
+            || std::fs::symlink_metadata(repository.join(file)).is_ok_and(|meta| meta.is_dir())
+        {
+            return Err(failure("changes_git_unsupported"));
+        }
+    }
+    let git_dir = repository.join(".git");
+    let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
+    let named: Vec<String> = chosen.iter().map(|file| (*file).to_owned()).collect();
+    if uses_configured_commands(&owner, &named, &[&tip])? {
+        return Err(failure("changes_git_unsupported"));
+    }
+    let staged = staged_paths(&owner, &tip)?;
+    let (from_index, from_copy): (Vec<&str>, Vec<&str>) = chosen
+        .iter()
+        .copied()
+        .partition(|file| staged.contains(*file));
+    let (entries, deleted) = staged_entries(&owner, &from_index)?;
+    let folder = git_dir.join(format!(
+        "crazyagent-commit-first-{}",
+        &crate::engine::owner::random_id()?[..24]
+    ));
+    std::fs::create_dir(&folder).map_err(|_| failure("changes_git_failed"))?;
+    let tree = Repo::open(&repository, &git_dir, Some(&repository)).and_then(|repo| {
+        let repo = repo.private_index(&folder.join("index"));
+        repo.run(&["read-tree", &tip])?;
+        if !entries.is_empty()
+            && repo
+                .exec(
+                    &["update-index", "-z", "--index-info"],
+                    Some(entries.as_slice()),
+                    &[],
+                    4096,
+                )?
+                .code
+                != 0
+        {
+            return Err(failure("changes_git_failed"));
+        }
+        if !deleted.is_empty() {
+            let mut arguments = vec!["update-index", "--force-remove", "--"];
+            arguments.extend(deleted.iter().map(String::as_str));
+            repo.run(&arguments)?;
+        }
+        if !from_copy.is_empty() {
+            let mut arguments = vec!["update-index", "--remove", "--"];
+            arguments.extend_from_slice(&from_copy);
+            repo.run(&arguments)?;
+        }
+        super::git::object_id(&repo.run(&["write-tree"])?)
+    });
+    let _ = std::fs::remove_dir_all(&folder);
+    let tree = tree?;
+    if tree == owner.tree_of(&tip)? {
+        return Err(failure("changes_stale"));
+    }
+    let identity = owner_identity(&repository, home)?;
+    let identity = (identity.0.as_str(), identity.1.as_str());
+    let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
+    if !from_copy.is_empty() {
+        let mut arguments = vec!["update-index", "--remove", "--"];
+        arguments.extend_from_slice(&from_copy);
+        if owner.exec(&arguments, None, &[], 4096)?.code != 0 {
+            return Err(failure("changes_git_busy"));
+        }
+    }
+    let env = [
+        ("GIT_COMMITTER_NAME", identity.0),
+        ("GIT_COMMITTER_EMAIL", identity.1),
+    ];
+    let moved = owner.exec(
+        &[
+            "update-ref",
+            "-m",
+            "CrazyAgent: commit the owner's files before an accept",
+            &reference,
+            &commit,
+            &tip,
+        ],
+        None,
+        &env,
+        256,
+    )?;
+    if moved.code != 0 {
+        return Err(failure("changes_branch_moved"));
+    }
+    let branch = reference
+        .strip_prefix("refs/heads/")
+        .unwrap_or(&reference)
+        .to_owned();
+    assert!(!branch.is_empty());
+    Ok((commit, branch))
 }
 
 /// Commits the deletion of files the owner's checkout no longer has, and nothing else, as
@@ -867,6 +1190,7 @@ fn finish(
     by: By<'_>,
 ) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
+    record.landing_result = LandingResult::Landed;
     record.accepted_in = match by {
         By::Owner(place) => place,
         By::Named(_) | By::Master => None,
@@ -911,10 +1235,11 @@ fn finish(
     }
 }
 
-/// Drops a landed change set's pending ref, forgets the owner edits settled on it and
-/// points its agent's worktree at the landed commit when the worktree holds nothing newer
-/// than the set. Inputs: the store, the landed set and its landed commit. Output: Ok once
-/// done.
+/// Drops a landed change set's pending ref, forgets the owner edits settled on it, points
+/// its agent's worktree at the landed commit when the worktree holds nothing newer than the
+/// set, and moves the project's other resting agents onto the Land on tip (DEC-147.6). The
+/// caller holds the repository's hold. Inputs: the store, the landed set and its landed
+/// commit. Output: Ok once done.
 fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     flow::set_engine_ref(
         &shared(&record.repository)?,
@@ -933,6 +1258,7 @@ fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engine
             crate::protocol::plain_code(&error.0)
         ),
     }
+    super::ancestry::move_resting(db, &record.project, &record.repository, &record.worktree);
     Ok(())
 }
 
@@ -1214,6 +1540,33 @@ pub(super) fn accept_to(
     let repository = store::load(db, id)?.repository;
     let _held = flow::hold_unmoved(db, &repository)?;
     accept_held(db, home, id, expected_head, edited, target, by, stopped)
+        .inspect_err(|problem| note_refused(db, id, problem))
+}
+
+/// The codes an Accept answers without having tried to land: a set that moved on or is
+/// gone, a store that cannot be read, or a message the owner must fix first.
+const NOT_TRIED: [&str; 4] = [
+    "changes_stale",
+    "changes_not_found",
+    "changes_unavailable",
+    "changes_message_invalid",
+];
+
+/// Keeps that an Accept was refused before anything landed as the set's landing result,
+/// apart from how its agent's turn went (F23); a refusal that tried nothing leaves it, and a
+/// store failure is logged by its plain code. Inputs: the store, the change set and the
+/// refusal. Output: none.
+fn note_refused(db: &Connection, id: &ChangeSetId, problem: &EngineError) {
+    let code = crate::protocol::plain_code(&problem.0);
+    if NOT_TRIED.contains(&code) {
+        return;
+    }
+    if let Err(error) = store::set_landing_result(db, id, LandingResult::Refused) {
+        eprintln!(
+            "landing_result_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// The body of [`accept_to`], for a caller that already holds [`hold`] on the repository.
@@ -1260,6 +1613,7 @@ fn accept_held(
     if !conflicts.is_empty() {
         if let Some(by) = by.named() {
             record.state = ChangeState::Conflict;
+            record.landing_result = LandingResult::Conflict;
             record.conflicts = conflicts.clone();
             record.updated_ms = flow::now_ms()?;
             store::save(db, &record)?;
@@ -1291,7 +1645,19 @@ fn accept_held(
     let identity = owner_identity(&repository, home)?;
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
-    let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
+    let second = super::ancestry::merge_parent(
+        db,
+        &owner,
+        &repository,
+        &record.project,
+        &tip,
+        &record.head,
+        identity,
+    )?;
+    let parents: Vec<&str> = std::iter::once(tip.as_str())
+        .chain(second.as_deref())
+        .collect();
+    let commit = owner.commit_tree(&tree, &parents, &format!("{message}\n"), identity)?;
     verify_objects(&repository, &[&commit], &[&tip, &record.head, &record.base])?;
     record.intent = Some(Intent::Land {
         reference: reference.clone(),
@@ -2075,11 +2441,11 @@ pub(super) fn measured_base(
 
 /// The tip a change set is measured against, the branch it lands on (DEC-107): its lead's
 /// branch for a lead's worker while the owner's Lands setting is Lead, else the project's
-/// Land on branch (DEC-111 Q1). A lead tip that cannot be read, also for a lead whose worktree is
-/// gone, is logged by its plain code and gives None, never the owner's branch, which that
-/// worker does not land on. Inputs: the store, the owner repository opened for object
-/// work, its root and the change set's project and agent. Output: the tip, None while it
-/// cannot be read.
+/// Land on branch (DEC-111 Q1), also for a worker whose lead's worktree is no longer
+/// recorded (F24). A lead tip that cannot be read is logged once per engine run by its plain
+/// code and gives None, never the owner's branch, which that worker does not land on.
+/// Inputs: the store, the owner repository opened for object work, its root and the change
+/// set's project and agent. Output: the tip, None while it cannot be read.
 pub(super) fn landing_tip(
     db: &Connection,
     owner: &Repo,
@@ -2091,10 +2457,10 @@ pub(super) fn landing_tip(
         Ok(Some(tip)) => Some(tip),
         Ok(None) => land_on_tip(db, owner, repository, project),
         Err(error) => {
-            eprintln!(
+            super::log_once(&format!(
                 "landing_lead_tip_failed cause={}",
                 crate::protocol::plain_code(&error.0)
-            );
+            ));
             None
         }
     }
@@ -2437,10 +2803,10 @@ enum Against {
 /// the store and the open change sets. Output: what each set is judged against, in order.
 fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
     let unread = |error: EngineError| {
-        eprintln!(
+        super::log_once(&format!(
             "landing_lead_tip_failed cause={}",
             crate::protocol::plain_code(&error.0)
-        );
+        ));
     };
     let mut leads: BTreeMap<(String, i64), Option<String>> = BTreeMap::new();
     let mut found = Vec::with_capacity(records.len());
@@ -2471,7 +2837,8 @@ fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
 /// of every project, one repository at a time under its hold, reading each owner tip once,
 /// each lead's tip once before the hold, and checking every open head with one git run,
 /// after landing lead workers' sets their lead's landed set holds (DEC-107).
-/// A change set that cannot be judged now is logged by its plain code and left as it was.
+/// A change set that cannot be judged now is logged by its plain code and left as it was,
+/// and the sets of a project the engine no longer has are left alone, logged once (F24).
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.
 pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
@@ -2484,6 +2851,13 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
             .push(record);
     }
     for ((repository, project), records) in by_repository {
+        if !store::project_kept(db, &project).unwrap_or(true) {
+            super::log_once(&format!(
+                "landing_observe_skipped project={} cause=project_removed",
+                project.as_str()
+            ));
+            continue;
+        }
         let tips = against(db, &records);
         let ids: Vec<ChangeSetId> = records.iter().map(|record| record.id.clone()).collect();
         let heads: Vec<&str> = records.iter().map(|record| record.head.as_str()).collect();

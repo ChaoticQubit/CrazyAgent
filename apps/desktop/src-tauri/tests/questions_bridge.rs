@@ -13,10 +13,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-const COMMANDS: [&str; 4] = [
+const COMMANDS: [&str; 5] = [
     "desktop_questions",
     "desktop_answer_question",
     "desktop_dismiss_question",
+    "desktop_dismiss_questions",
     "desktop_question_counts",
 ];
 
@@ -94,6 +95,10 @@ fn the_window_passes_only_ids_versions_and_the_choice() {
     assert_eq!(
         parameters("desktop_dismiss_question"),
         [&window[..], &["id: u64,", "version: u64,"]].concat()
+    );
+    assert_eq!(
+        parameters("desktop_dismiss_questions"),
+        [&window[..], &["items: Vec<(u64, u64)>,"]].concat()
     );
 }
 
@@ -229,6 +234,51 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
         .find(|item| item.id == open.id)
         .unwrap();
     assert_eq!(dismissed.status, "dismissed");
+    assert_eq!(dismissed.closed_by, None);
+    assert!(bridge.question_counts()?.await?.is_empty());
+
+    let db = crazyagent::questions::open(root)?;
+    let mut raised = Vec::new();
+    for question in ["Add a print view?", "Add tags?"] {
+        raised.push(crazyagent::questions::raise(
+            &db,
+            &project,
+            &EngineSource::Mapping,
+            &Ask {
+                question: question.into(),
+                kind: crazyagent::questions::QuestionKind::Text,
+                options: vec![],
+                recommended: None,
+                context: None,
+            },
+        )?);
+    }
+    drop(db);
+    for items in [
+        Vec::new(),
+        vec![(raised[0], 0), (raised[0], 0)],
+        (1..=crazyagent::questions::LISTED_MAX as u64 + 1)
+            .map(|id| (id, 0))
+            .collect(),
+    ] {
+        assert_eq!(
+            bridge
+                .dismiss_questions(items)
+                .err()
+                .map(|error| error.code),
+            Some("questions_bulk_invalid")
+        );
+    }
+    let outcome = bridge
+        .dismiss_questions(vec![
+            (raised[0], 0),
+            (raised[1], 0),
+            (open.id, open.version),
+        ])?
+        .await?;
+    assert_eq!(outcome.settled, raised);
+    assert_eq!(outcome.stale, [open.id]);
+    assert!(outcome.refused.is_empty());
     assert!(bridge.question_counts()?.await?.is_empty());
     Ok(())
 }

@@ -378,6 +378,10 @@ fn the_prompt_carries_the_brief_and_bounded_research_without_links() {
     )));
     assert!(!text.contains("OUTSIDE-TEXT"));
     assert!(!text.contains("Competitor research"));
+    let plain = text
+        .find("- Write each question and each option in plain words the owner understands without reading the code: no file names, no code names and no jargon. Say in the question what the choice changes for the project.\n")
+        .expect("the planning prompt asks for plain-language questions (F14)");
+    assert!(plain < text.find("\nReply format:").unwrap());
     assert!(text.contains(
         "# Roadmap\n(one ## heading per version)\n# Release process\n# Open questions\n"
     ));

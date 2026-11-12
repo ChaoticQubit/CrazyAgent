@@ -2509,6 +2509,7 @@ const REMOVED_WITH_PROJECT: [&str; 47] = [
     "team_wall",
     "team_catch_up_main",
     "team_reuse_idle",
+    "team_landing_mode",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",

@@ -417,7 +417,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "cleanup_settings" | "quit_settings" | "master_step_settings" | "master_time_settings" | "master_frame_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "project_delete" | "project_move_home" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -840,6 +840,8 @@ export type MasterLands = "merges" | "waits";
 export type CatchUpMain = "on" | "off";
 /** Whether an idle agent of the same lead may take a project's next task, or each new task starts a new agent. */
 export type ReuseIdle = "on" | "off";
+/** How an accepted change set lands on the owner's branch: one squash commit, or a merge commit keeping every agent commit. */
+export type LandingMode = "squash" | "merge";
 
 /** A harness kind the coordination settings are kept for, by its catalog id. */
 export type CoordHarness = "claude-code" | "codex" | "rcli";
@@ -976,6 +978,7 @@ export interface TeamStatus {
   master_live_terminal?: boolean;
   catch_up_main?: CatchUpMain;
   reuse_idle?: ReuseIdle;
+  landing_mode?: LandingMode;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   message_settings?: MessageSettings;

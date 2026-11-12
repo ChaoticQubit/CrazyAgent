@@ -21,9 +21,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
-    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
-    TeamStatus, TeamTask,
+    CoordinationView, DelegationPath, LandingMode, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle,
+    SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent,
+    TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
@@ -183,11 +183,12 @@ pub(in crate::tui) enum CoordRow {
     Counted,
     Skills(SkillRole),
     ReuseIdle,
+    LandingMode,
     HeavyLane,
     Resources,
 }
 
-const COORD_ROWS: [CoordRow; 19] = [
+const COORD_ROWS: [CoordRow; 20] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -205,6 +206,7 @@ const COORD_ROWS: [CoordRow; 19] = [
     CoordRow::Skills(SkillRole::Lead),
     CoordRow::Skills(SkillRole::Worker),
     CoordRow::ReuseIdle,
+    CoordRow::LandingMode,
     CoordRow::HeavyLane,
     CoordRow::Resources,
 ];
@@ -2014,7 +2016,8 @@ impl TeamView {
         })
     }
 
-    /// Flips "Ask me before merging into the master's branch" between Off and On.
+    /// Flips "Master accepts change sets" between Itself and Only when I click or say accept
+    /// all (DEC-147.7).
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn ask_before_merge(&mut self) -> TeamReply {
         if self.status.is_some() && self.still_saving() {
@@ -2027,9 +2030,9 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+                "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
             } else {
-                "The master now merges a finished harness without asking."
+                "The master now accepts change sets itself."
             }
             .to_owned(),
         );
@@ -2545,6 +2548,24 @@ impl TeamView {
                 };
                 (TeamAction::ReuseIdle { project_id, mode }, done.to_owned())
             }
+            CoordRow::LandingMode => {
+                let mode = match self.status.as_ref().map(|status| status.landing_mode) {
+                    Some(LandingMode::Merge) => LandingMode::Squash,
+                    Some(LandingMode::Squash) | None => LandingMode::Merge,
+                };
+                let done = match mode {
+                    LandingMode::Merge => {
+                        "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history."
+                    }
+                    LandingMode::Squash => {
+                        "Landing is Squash: each accepted change set lands as one commit."
+                    }
+                };
+                (
+                    TeamAction::LandingMode { project_id, mode },
+                    done.to_owned(),
+                )
+            }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
                 let done = format!(
@@ -2857,6 +2878,15 @@ impl TeamView {
                     match self.status.as_ref().map(|status| status.reuse_idle) {
                         Some(ReuseIdle::On) => "On",
                         Some(ReuseIdle::Off) | None => "Off",
+                    }
+                    .to_owned(),
+                    "",
+                ),
+                CoordRow::LandingMode => (
+                    "Landing".to_owned(),
+                    match self.status.as_ref().map(|status| status.landing_mode) {
+                        Some(LandingMode::Merge) => "Merge commit",
+                        Some(LandingMode::Squash) | None => "Squash",
                     }
                     .to_owned(),
                     "",
@@ -3197,7 +3227,7 @@ impl TeamView {
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3326,8 +3356,13 @@ impl TeamView {
                     .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
-                "Ask before merge",
-                if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+                "Master accepts change sets",
+                if status.ask_before_merge {
+                    "Only when I click or say accept all"
+                } else {
+                    "Itself"
+                }
+                .to_owned(),
             ),
         ];
         let master_lands = status.master_lands.map(|lands| {
@@ -3718,7 +3753,7 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("L", "Land on"),
-            ("g", "Ask before merge"),
+            ("g", "Master accepts change sets"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
             ("I", "Stop the master when idle after"),

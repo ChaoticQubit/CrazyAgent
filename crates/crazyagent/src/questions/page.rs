@@ -1,5 +1,5 @@
 use super::{
-    AnsweredBy, COLUMNS, COMMENT_LABEL, PENDING_PER_PROJECT_MAX, Question, QuestionKind,
+    AnsweredBy, COLUMNS, COMMENT_LABEL, ClosedBy, PENDING_PER_PROJECT_MAX, Question, QuestionKind,
     QuestionStatus, STORED_BYTES_MAX, asker_label, ensure, immediate, is_terminal, item, select,
     unavailable,
 };
@@ -191,6 +191,24 @@ fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
         fenced(page, context);
     }
     let terminal = is_terminal(&question.asker);
+    if question.status != QuestionStatus::Pending
+        && let Some(closer) = question.closed_by
+    {
+        match (closer, &question.answer) {
+            (ClosedBy::Master, _) => page.push_str("\nWithdrawn by the master.\n"),
+            (ClosedBy::Replaced, _) => page.push_str("\nAsked again as a choice question.\n"),
+            (ClosedBy::Relay, Some(answer)) => {
+                page.push_str(
+                    "\nAnswered by the owner in the master's terminal. The master reports:\n\n",
+                );
+                fenced(page, answer);
+            }
+            (ClosedBy::Relay, None) => {
+                page.push_str("\nAnswered by the owner in the master's terminal.\n");
+            }
+        }
+        return;
+    }
     match (question.status, question.answered_by) {
         (QuestionStatus::Pending, _) if terminal => {
             page.push_str("\nWaiting for your answer in that agent's terminal.\n");

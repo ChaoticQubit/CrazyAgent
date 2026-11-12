@@ -169,6 +169,7 @@ fn team() -> TeamStatus {
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
         reuse_idle: crate::team::ReuseIdle::Off,
+        landing_mode: crate::team::LandingMode::Squash,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -2577,7 +2578,7 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(!view.typing());
     assert!(view.branch_edit.is_none());
-    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
 }
 
 #[test]
@@ -2691,8 +2692,8 @@ fn g_turns_ask_before_merge_on_and_off() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(view.help().contains(&("g", "Ask before merge")));
-    assert!(shows(&view, "Ask before merge  Off"));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
+    assert!(shows(&view, "Master accepts change sets  Itself"));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2705,13 +2706,16 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+            "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
         ))
     );
     let mut asking = team();
     asking.ask_before_merge = true;
     reread(&mut view, asking, NOW + 10);
-    assert!(shows(&view, "Ask before merge  On"));
+    assert!(shows(
+        &view,
+        "Master accepts change sets  Only when I click or say accept all"
+    ));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2723,9 +2727,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     applied(&mut view, reply);
     assert_eq!(
         view.notice,
-        Some(Notice::plain(
-            "The master now merges a finished harness without asking."
-        ))
+        Some(Notice::plain("The master now accepts change sets itself."))
     );
 }
 
@@ -3050,6 +3052,58 @@ fn reuse_idle_agents_shows_off_by_default_and_space_flips_it() {
             })
         );
         stored.reuse_idle = mode;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(done))
+        );
+        assert!(row(&view).contains(words), "{}", row(&view));
+    }
+}
+
+/// The Coordination screen's last row shows the stored Landing choice, Squash by default,
+/// and Space flips it to Merge commit and back: each press sends the setting's own change
+/// and the row shows the choice (DEC-147.6).
+#[test]
+fn landing_shows_squash_by_default_and_space_flips_it_to_merge_commit() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(crate::team::coordination(&connection, &project()).unwrap());
+    stored.landing_mode = crate::team::landing_mode(&connection, &project()).unwrap();
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    for _ in 0..17 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 17);
+    let row = |view: &TeamView| find(&frame(view, 120, 40), "Landing").to_owned();
+    assert!(row(&view).contains("Squash"), "{}", row(&view));
+    let mut at = NOW;
+    for (mode, words, done) in [
+        (
+            crate::team::LandingMode::Merge,
+            "Merge commit",
+            "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history.",
+        ),
+        (
+            crate::team::LandingMode::Squash,
+            "Squash",
+            "Landing is Squash: each accepted change set lands as one commit.",
+        ),
+    ] {
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::LandingMode {
+                project_id: project(),
+                mode,
+            })
+        );
+        stored.landing_mode = mode;
         at += 60_000;
         assert_eq!(
             settled(&mut view, reply, &stored, at),
@@ -4469,7 +4523,7 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("p", "Stop teammate"),
         ("z", "Stop agent"),
         ("m", "Master's branch"),
-        ("g", "Ask before merge"),
+        ("g", "Master accepts change sets"),
         ("T", "Token budget"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");

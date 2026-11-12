@@ -1,7 +1,9 @@
 use crazyagent::adapters::LINE_BYTES_MAX;
 use crazyagent::adapters::codex::{
-    ApprovalKind, CodexProtocol, Event, FRAME_BYTES_MAX, ProtocolError, State, TurnStatus, WireId,
+    ApprovalKind, CodexProtocol, DEVELOPER_INSTRUCTIONS_BYTES_MAX, Event, FRAME_BYTES_MAX,
+    ProtocolError, State, TurnStatus, WireId,
 };
+use crazyagent::master_frame_limit::{BYTES_MAX, FrameSize};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -24,7 +26,10 @@ fn reply(protocol: &mut CodexProtocol, id: i64, result: Value) -> Vec<Event> {
 }
 
 fn initialized() -> CodexProtocol {
-    let mut protocol = CodexProtocol::new();
+    initialized_from(CodexProtocol::new())
+}
+
+fn initialized_from(mut protocol: CodexProtocol) -> CodexProtocol {
     assert_eq!(request(&protocol.initialize().unwrap())["id"], 1);
     assert_eq!(
         reply(
@@ -65,7 +70,10 @@ fn thread_result() -> Value {
 }
 
 fn idle() -> CodexProtocol {
-    let mut protocol = initialized();
+    idle_from(initialized())
+}
+
+fn idle_from(mut protocol: CodexProtocol) -> CodexProtocol {
     let outgoing = request(&protocol.start_thread(Path::new("/unit/worktree")).unwrap());
     assert_eq!(outgoing["id"], 2);
     assert_eq!(
@@ -1067,4 +1075,68 @@ fn a_codex_turn_counts_one_step_per_model_round_that_started_a_tool() {
     );
     assert_eq!(protocol.state(), State::Active);
     assert_eq!(protocol.steps(), 0);
+}
+
+#[test]
+fn a_master_frame_limit_lets_each_option_carry_a_turn_up_to_its_bytes() {
+    assert_eq!(CodexProtocol::new().frame_limit(), FRAME_BYTES_MAX);
+    for limit in FrameSize::ALL {
+        let bytes = limit.bytes();
+        let mut protocol = idle_from(initialized_from(
+            CodexProtocol::new().with_frame_limit(bytes),
+        ));
+        assert_eq!(protocol.frame_limit(), bytes);
+        assert_eq!(
+            protocol.start_turn(&"\"".repeat(bytes / 2)),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(
+            protocol.start_turn(&"x".repeat(bytes + 1)),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(protocol.state(), State::Idle);
+        let text = "x".repeat(bytes - 1024);
+        let frame = protocol.start_turn(&text).unwrap();
+        assert!(frame.len() <= bytes, "{}", frame.len());
+        assert!(frame.len() > bytes - 1024, "{}", frame.len());
+        assert_eq!(request(&frame)["params"]["input"][0]["text"], json!(text));
+        assert_eq!(protocol.state(), State::TurnStarting);
+    }
+}
+
+#[test]
+fn a_master_frame_limit_past_the_wire_size_starts_a_thread_whose_instructions_escape_past_it() {
+    let instructions = "\"".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
+    let cwd = Path::new("/unit/worktree");
+    let mut protocol = initialized();
+    assert_eq!(
+        protocol.start_instructed_thread(cwd, &instructions),
+        Err(ProtocolError::FrameTooLarge)
+    );
+    assert_eq!(protocol.state(), State::Ready);
+    for limit in [FrameSize::Kib256, FrameSize::Mib1] {
+        let mut protocol = initialized_from(CodexProtocol::new().with_frame_limit(limit.bytes()));
+        let frame = protocol
+            .start_instructed_thread(cwd, &instructions)
+            .unwrap();
+        assert!(frame.len() > FRAME_BYTES_MAX, "{}", frame.len());
+        assert!(frame.len() <= limit.bytes(), "{}", frame.len());
+        assert_eq!(
+            request(&frame)["params"]["developerInstructions"],
+            json!(instructions)
+        );
+        assert_eq!(protocol.state(), State::ThreadStarting);
+    }
+}
+
+#[test]
+#[should_panic]
+fn a_codex_frame_limit_below_the_wire_size_is_refused() {
+    let _ = CodexProtocol::new().with_frame_limit(FRAME_BYTES_MAX - 1);
+}
+
+#[test]
+#[should_panic]
+fn a_codex_frame_limit_past_the_ceiling_is_refused() {
+    let _ = CodexProtocol::new().with_frame_limit(BYTES_MAX + 1);
 }

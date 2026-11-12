@@ -769,6 +769,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         mode: ReuseIdle,
     },
+    LandingMode {
+        project_id: ProjectId,
+        mode: LandingMode,
+    },
     NewFolderLimit {
         project_id: ProjectId,
         files: u32,
@@ -1043,6 +1047,7 @@ impl TeamAction {
             | Self::TerminalsPerWindow { .. }
             | Self::CatchUpMain { .. }
             | Self::ReuseIdle { .. }
+            | Self::LandingMode { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -1076,6 +1081,7 @@ impl TeamAction {
             | Self::MasterLiveTerminal { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
             | Self::ReuseIdle { project_id, .. }
+            | Self::LandingMode { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::TerminalsPerWindow { project_id, .. }
             | Self::MessageSettings { project_id, .. }
@@ -1606,6 +1612,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_reuse_idle (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('on','off'))
+            );
+            CREATE TABLE IF NOT EXISTS team_landing_mode (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('squash','merge'))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -2649,6 +2659,10 @@ fn perform(
             set_reuse_idle(tx, project, *mode)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::LandingMode { mode, .. } => {
+            set_landing_mode(tx, project, *mode)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::NewFolderLimit { files, .. } => {
             tx.execute(
                 "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
@@ -3309,6 +3323,8 @@ pub struct TeamStatus {
     pub catch_up_main: CatchUpMain,
     #[serde(default)]
     pub reuse_idle: ReuseIdle,
+    #[serde(default)]
+    pub landing_mode: LandingMode,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
     #[serde(default)]
@@ -3867,8 +3883,59 @@ pub fn background_at_end(
     }
 }
 
-/// Tells whether the owner asked to approve each merge of a finished harness into the
-/// Master's branch, so the master's merge leaves it as a pending Accept instead; off by
+/// The most owner messages one "accept all" check reads, newest first (DEC-147.7).
+const ACCEPT_ALL_READ_MAX: i64 = 32;
+
+/// Tells whether the owner sent "accept all" to the team in the app at or after a time
+/// (DEC-147.7): an owner-authored team message whose whole text, trimmed and in any case, is
+/// those two words with at most a closing full stop or exclamation mark. A master or engine
+/// message never counts. Takes a connection, the project and the time in milliseconds.
+/// Returns the answer, or any SQLite failure.
+pub fn owner_said_accept_all(
+    connection: &Connection,
+    project: &ProjectId,
+    since_ms: i64,
+) -> Result<bool, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT text FROM team_messages WHERE project=?1 AND author=?2 AND created_ms>=?3
+             ORDER BY id DESC LIMIT ?4",
+        )
+        .map_err(error)?;
+    let texts = statement
+        .query_map(
+            params![
+                project.as_str(),
+                MessageAuthor::Owner.name(),
+                since_ms,
+                ACCEPT_ALL_READ_MAX
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(error)?;
+    for text in texts {
+        if says_accept_all(&text.map_err(error)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Tells whether one owner message is "accept all" and nothing else, so "don't accept all"
+/// or a longer sentence never grants a merge. Takes the text. Returns the answer.
+fn says_accept_all(text: &str) -> bool {
+    let text = text.trim().trim_end_matches(['.', '!']).trim_end();
+    let mut words = text.split_whitespace();
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some(first), Some(second), None)
+            if first.eq_ignore_ascii_case("accept") && second.eq_ignore_ascii_case("all")
+    )
+}
+
+/// Tells whether the owner's "Master accepts change sets" setting is Only when I click or say
+/// accept all (DEC-147.7), so the master's merge of a finished harness leaves it as a pending
+/// Accept unless the owner said accept all since the set last changed; off, Itself, by
 /// default. Takes a connection and the project. Returns the setting.
 pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     let ask: Option<bool> = connection
@@ -4253,6 +4320,83 @@ pub fn set_reuse_idle(
     connection
         .execute(
             "INSERT INTO team_reuse_idle(project,mode) VALUES (?1,?2)
+             ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+            params![project.as_str(), value.name()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The owner's "Landing" setting (DEC-147.6): `Squash`, the default, lands each accepted
+/// change set as one commit whose only parent is the branch tip; `Merge` lands the same
+/// files as a merge commit whose second parent is the set's head, so every agent commit
+/// stays in the branch's history and agents keep their ancestry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingMode {
+    #[default]
+    Squash,
+    Merge,
+}
+
+impl LandingMode {
+    /// The stored name of the setting. Output: `squash` or `merge`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Squash => "squash",
+            Self::Merge => "merge",
+        }
+    }
+
+    /// Reads a stored setting name. Input: the name. Output: the setting, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Squash, Self::Merge]
+            .into_iter()
+            .find(|value| value.name() == name)
+    }
+}
+
+/// Reads a project's "Landing" setting: `Squash` when no choice is saved and for a store
+/// that keeps no team tables. Takes a connection and the project. Returns the setting, or
+/// `team_landing_mode_invalid` for a stored name it does not know.
+pub fn landing_mode(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<LandingMode, EngineError> {
+    let kept: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_landing_mode')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !kept {
+        return Ok(LandingMode::default());
+    }
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_landing_mode WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode {
+        None => Ok(LandingMode::default()),
+        Some(mode) => LandingMode::named(&mode).ok_or_else(|| failure("team_landing_mode_invalid")),
+    }
+}
+
+/// Saves a project's "Landing" setting, replacing an earlier choice. Takes a connection,
+/// the project and the setting. Returns done.
+pub fn set_landing_mode(
+    connection: &Connection,
+    project: &ProjectId,
+    value: LandingMode,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT INTO team_landing_mode(project,mode) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
             params![project.as_str(), value.name()],
         )
@@ -5136,6 +5280,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         master_live_terminal: master::live_terminal(connection, project)?,
         catch_up_main: catch_up_main(connection, project)?,
         reuse_idle: reuse_idle(connection, project)?,
+        landing_mode: landing_mode(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,

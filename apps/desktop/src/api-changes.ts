@@ -4,6 +4,7 @@ import { failureCopy } from "./api-projects";
 
 export type ChangeState = "pending" | "conflict" | "updating" | "accepted" | "discarded";
 export type TurnOutcome = "succeeded" | "failed" | "cancelled";
+export type LandingResult = "none" | "landed" | "conflict" | "refused";
 
 export interface ChangeSet {
   id: string;
@@ -25,6 +26,7 @@ export interface ChangeSet {
   outside: boolean;
   regenerated: string[];
   number?: number | null;
+  landing_result?: LandingResult;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -56,7 +58,8 @@ export interface ChangesRefusal {
 const CONFLICT_SHOWN = 5;
 
 const REFUSALS: Record<string, string> = {
-  changes_owner_dirty: "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again.",
+  changes_owner_dirty: "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again.",
+  changes_owner_untracked: "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again.",
   changes_detached_head: "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again.",
   changes_git_busy: "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.",
   changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
@@ -65,6 +68,7 @@ const REFUSALS: Record<string, string> = {
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
   changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
+  changes_merge_unsafe: "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
   changes_restore_expired: "These changes can no longer be restored. Discarded changes are kept for 7 days.",
@@ -150,6 +154,27 @@ export function acceptChange(id: string, expectedHead: string, message: string, 
  * branches, the checked-out one and the Land on branch. */
 export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> {
   return call<TargetBranches>("desktop_change_branches", { id });
+}
+
+/** The project folder files in an Accept's way: tracked ones the owner may commit first, and
+ * untracked or ignored ones where the changes add a file, which are never committed. */
+export interface OwnerDirty {
+  files: string[];
+  untracked: string[];
+}
+
+/** Lists the files in the project folder that keep a change set's Accept from landing, for
+ * the "commit these files first" box. Inputs: the id and the target branch, null for the
+ * Land on branch. Output: the tracked and untracked files, both empty when none does. */
+export function loadOwnerDirty(id: string, target: string | null = null): Promise<Result<OwnerDirty>> {
+  return call<OwnerDirty>("desktop_change_owner_dirty", { id, target });
+}
+
+/** Commits only those project folder files, with the owner's message, so the next Accept can
+ * land. Inputs: the id, the files, the message and the target branch, null for the Land on
+ * branch. Output: the new commit and its branch. */
+export function commitOwnerFiles(id: string, files: string[], message: string, target: string | null = null): Promise<Result<[string, string]>> {
+  return call<[string, string]>("desktop_commit_owner_files", { id, files, message, target });
 }
 
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the

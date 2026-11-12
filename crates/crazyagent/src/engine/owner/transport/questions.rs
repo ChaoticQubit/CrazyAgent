@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::encode_frame;
-use crate::questions::{self, Answer, Page, Settlement};
+use crate::questions::{self, Answer, BulkDismissal, Page, Settlement};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 16 * 1024;
@@ -8,6 +8,8 @@ pub(super) const QUESTIONS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const _: () = assert!(2 * questions::ANSWER_BYTES_MAX + 1024 <= REQUEST_BYTES_MAX);
 const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
+const _: () = assert!(questions::LISTED_MAX * 48 + 64 <= REQUEST_BYTES_MAX);
+const _: () = assert!(questions::LISTED_MAX * 96 + 128 <= crate::protocol::FRAME_BYTES_MAX);
 const _: () = assert!(
     questions::COUNTED_PROJECTS_MAX as usize * 160 + 64 <= crate::protocol::FRAME_BYTES_MAX
 );
@@ -29,6 +31,7 @@ pub const QUESTIONS_CODES: &[&str] = &[
     "questions_answer_invalid",
     "questions_ask_invalid",
     "questions_asker_full",
+    "questions_bulk_invalid",
     "questions_delivery_full",
     "questions_full",
     "questions_in_terminal",
@@ -37,9 +40,12 @@ pub const QUESTIONS_CODES: &[&str] = &[
     "questions_notes_invalid",
     "questions_option_invalid",
     "questions_outcome_unknown",
+    "questions_owner_not_typed",
     "questions_owner_turn_invalid",
+    "questions_owner_turn_used",
     "questions_page_unavailable",
     "questions_project_missing",
+    "questions_replace_invalid",
     "questions_reply_bounds",
     "questions_request_bounds",
     "questions_request_invalid",
@@ -68,6 +74,9 @@ enum Action {
         id: u64,
         version: u64,
     },
+    DismissMany {
+        items: Vec<(u64, u64)>,
+    },
     Counts {},
 }
 
@@ -82,6 +91,7 @@ struct Envelope {
 enum Reply {
     Page { page: Page },
     Settled { settlement: Settlement },
+    Dismissed { outcome: BulkDismissal },
     Counts { counts: Vec<(ProjectId, u32)> },
     Rejected { code: String },
 }
@@ -152,6 +162,22 @@ impl OwnerClient {
             .await?
         {
             Reply::Settled { settlement } => Ok(settlement),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Dismisses up to `LISTED_MAX` owner questions at once (F12), each naming the version the
+    /// owner read and each in its own step, so one that cannot be dismissed stops only itself.
+    /// Input: each question's id and version. Output: what happened to each.
+    pub async fn questions_dismiss_many(
+        &self,
+        items: Vec<(u64, u64)>,
+    ) -> Result<BulkDismissal, EngineError> {
+        match self
+            .questions_exchange(Action::DismissMany { items })
+            .await?
+        {
+            Reply::Dismissed { outcome } => Ok(outcome),
             _ => Err(unknown()),
         }
     }
@@ -290,6 +316,9 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
             settlement(questions::answer(&db, id, version, &answer)?)
         }
         Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),
+        Action::DismissMany { items } => Ok(Reply::Dismissed {
+            outcome: questions::dismiss_many(&db, &items)?,
+        }),
         Action::Counts {} => Ok(Reply::Counts {
             counts: questions::count_pending(&db)?,
         }),

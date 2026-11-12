@@ -8680,6 +8680,274 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     host.close(&[]).unwrap();
 }
 
+/// Runs git in a folder for a test and returns its trimmed stdout, empty when git fails.
+/// Takes the folder and git's arguments.
+#[cfg(target_os = "macos")]
+fn git_text(folder: &Path, args: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/git")
+            .args(args)
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    if !output.status.success() {
+        return String::new();
+    }
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Retires a stopped sub-agent the way cleanup leaves it while its record still waits:
+/// its worktree, git folder, own branch, landing base and agent branch record are gone,
+/// and its `team_worktrees` row has moved to `team_retiring`. Takes the fixture and the
+/// agent. Returns the worktree path it had.
+#[cfg(target_os = "macos")]
+fn retire_like_cleanup(fixture: &Fixture, agent: i64) -> PathBuf {
+    let (repository, worktree, git_dir): (String, String, String) = fixture
+        .connection
+        .query_row(
+            "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let place = PathBuf::from(&worktree);
+    let branch = git_text(&place, &["symbolic-ref", "-q", "--short", "HEAD"]);
+    std::fs::remove_dir_all(&place).unwrap();
+    if !Path::new(&git_dir).starts_with(&place) {
+        std::fs::remove_dir_all(&git_dir).unwrap();
+        if !branch.is_empty() {
+            git_text(Path::new(&repository), &["branch", "-D", &branch]);
+            assert_eq!(
+                git_text(
+                    Path::new(&repository),
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "-q",
+                        &format!("refs/heads/{branch}")
+                    ]
+                ),
+                "",
+                "the retired agent's own branch is gone"
+            );
+        }
+    }
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    landing
+        .execute("DELETE FROM landing_bases WHERE worktree=?1", [&worktree])
+        .unwrap();
+    landing
+        .execute(
+            "DELETE FROM landing_agent_branches WHERE worktree=?1",
+            [&worktree],
+        )
+        .unwrap();
+    crate::team::cleanup::initialize(&fixture.connection).unwrap();
+    assert_eq!(
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_retiring(agent,project,repository,worktree,git_dir,since_ms)
+                 SELECT agent,project,repository,worktree,git_dir,?2 FROM team_worktrees WHERE agent=?1",
+                params![agent, now_ms()],
+            )
+            .unwrap(),
+        1
+    );
+    fixture
+        .connection
+        .execute("DELETE FROM team_worktrees WHERE agent=?1", [agent])
+        .unwrap();
+    place
+}
+
+/// F10: a task pinned to a sub-agent that cleanup then retired is never failed. While its
+/// old record still waits in `team_retiring`, left behind or not, the task stays queued and
+/// nothing starts; once
+/// the record is gone the agent starts again under the same id and name in a new worktree
+/// on the current tip, with a fresh conversation, and gets the task.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_for_a_retired_sub_agent_waits_while_it_retires_then_starts_it_fresh_under_its_name() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    idle_stop(&fixture, WAKE_IDLE);
+    delegate_page(&fixture);
+    fixture.until(
+        &mut team,
+        "the sub-agent finishes, keeps its conversation and stops",
+        |f| {
+            subs(f).first().is_some_and(|id| {
+                f.agent_status(*id).0 == AgentStatus::Stopped
+                    && agent_conversation(f, *id).is_some()
+            })
+        },
+    );
+    let member = subs(&fixture)[0];
+    let (conversation, _) = agent_conversation(&fixture, member).unwrap();
+    let persona = names::name(&fixture.connection, member)
+        .unwrap()
+        .unwrap()
+        .persona;
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    assert_eq!(masters(&fixture.connection), [master]);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    assert!(!wake_call(&fixture, &mailbox, 1, &persona, "Add a footer to page.md.").1);
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT task FROM team_task_pins WHERE agent=?1",
+            [member],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let place = retire_like_cleanup(&fixture, member);
+    let status = |f: &Fixture| -> String {
+        f.connection
+            .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        status(&fixture),
+        "queued",
+        "the task waits while the agent retires"
+    );
+    assert_eq!(fixture.agent_status(member).0, AgentStatus::Stopped);
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing started yet");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_retiring SET leftover=1 WHERE agent=?1",
+            [member],
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        status(&fixture),
+        "queued",
+        "a record left behind holds the task too, since its removal deletes what is at the path"
+    );
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing started yet");
+
+    fixture
+        .connection
+        .execute("DELETE FROM team_retiring WHERE agent=?1", [member])
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the retired sub-agent starts again with the task",
+        |f| {
+            launches(f, member).len() == 2 && pasted(f, member).contains("Add a footer to page.md.")
+        },
+    );
+    assert_ne!(status(&fixture), "failed");
+    assert!(
+        !launches(&fixture, member)[1].contains("resume"),
+        "a fresh conversation: {:?}",
+        launches(&fixture, member)
+    );
+    assert!(
+        !launches(&fixture, member)[1].contains(&conversation),
+        "{:?}",
+        launches(&fixture, member)
+    );
+    assert_eq!(
+        subs(&fixture),
+        vec![member],
+        "no other sub-agent was started"
+    );
+    assert_eq!(
+        names::name(&fixture.connection, member)
+            .unwrap()
+            .unwrap()
+            .persona,
+        persona,
+        "the same name"
+    );
+    let (worktree, repository): (String, String) = fixture
+        .connection
+        .query_row(
+            "SELECT worktree,repository FROM team_worktrees WHERE agent=?1",
+            [member],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(&worktree),
+        place,
+        "a new worktree at the agent's own path"
+    );
+    assert!(place.is_dir());
+    let tip = git_text(Path::new(&repository), &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_text(&place, &["rev-parse", "HEAD"]),
+        tip,
+        "the new worktree starts on the current tip"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// F10: whoever sent a task that started a retired sub-agent fresh is told once, its lead
+/// when it has one, so it briefs the agent again; with no lead and no live master no one is
+/// told, and an agent is never told about itself.
+#[test]
+fn a_fresh_start_of_a_retired_agent_is_told_to_the_task_s_lead() {
+    let fixture = Fixture::new(2);
+    let team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let member = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let notes = |to: i64| -> Vec<String> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT body FROM coord_messages WHERE project=?1 AND to_agent=?2 AND kind='note' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map(params![PROJECT, to], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    team.tell_restarted(&project, None, member).unwrap();
+    team.tell_restarted(&project, Some(member), member).unwrap();
+    assert!(
+        notes(member).is_empty(),
+        "no lead, no live master, never itself"
+    );
+    team.tell_restarted(&project, Some(lead), member).unwrap();
+    let name = names::name(&fixture.connection, member).unwrap();
+    assert_eq!(
+        notes(lead),
+        vec![super::restarted_note(&names::label(
+            AgentRole::Sub,
+            member,
+            name.as_ref()
+        ))]
+    );
+    assert!(notes(lead)[0].contains("brief it again in full"));
+}
+
 /// Starts the runtime on a one-agent keyless endpoint team with Codex messages set to
 /// Native only, hands it a task and waits until its tools-off sub-agent finished and
 /// stopped. Takes the fixture and the host. Returns the runtime and the sub-agent.
@@ -20868,7 +21136,12 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
         assert_eq!(args[1], runtime.mailbox(id).to_str().unwrap());
         let mut off: Vec<&str> = args[2..].iter().map(String::as_str).collect();
         off.sort_unstable();
-        let mut wanted = vec![tool::REMEMBER_TOOL, tool::RECORD_TOOL];
+        let mut wanted = vec![
+            tool::REMEMBER_TOOL,
+            tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
+            tool::DISCARD_TOOL,
+        ];
         if !leads {
             wanted.extend(tool::LEAD_TOOLS);
         }
@@ -20890,6 +21163,10 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
                 "{name}: {told}"
             );
         }
+        assert!(
+            !told.contains(&format!("\n- {}: ", tool::DISCARD_TOOL)),
+            "{told}"
+        );
         drop(installed);
     }
 

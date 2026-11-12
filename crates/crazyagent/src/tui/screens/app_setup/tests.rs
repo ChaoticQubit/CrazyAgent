@@ -1,6 +1,7 @@
 use super::*;
 use crate::cleanup_settings::{CleanupMode, CleanupSettings};
 use crate::github::GitHubMethod;
+use crate::master_frame_limit::{FrameSize, MasterFrameSettings};
 use crate::master_step_limit::{MasterStepSettings, StepLimit};
 use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
@@ -182,7 +183,8 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
             AppSetupJob::Cleanup,
             AppSetupJob::Quit,
             AppSetupJob::MasterSteps,
-            AppSetupJob::MasterTime
+            AppSetupJob::MasterTime,
+            AppSetupJob::MasterFrames
         ]
     ));
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
@@ -199,6 +201,8 @@ fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell 
     shell.arrive(event(AppSetupEvent::MasterSteps(Ok(steps))));
     let time = MasterTimeSettings::default();
     shell.arrive(event(AppSetupEvent::MasterTime(Ok(time))));
+    let frames = MasterFrameSettings::default();
+    shell.arrive(event(AppSetupEvent::MasterFrames(Ok(frames))));
     shell
 }
 
@@ -1631,6 +1635,141 @@ fn the_master_time_limit_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
         let mut shell = settings(width, height);
         shell.key(Key::Char('t'));
         let (first, last) = ("Master time limit:", "Codex and rcli.");
+        ask_in_body(&mut shell, width, height, first, last);
+    }
+}
+
+fn frames_chosen(shell: &mut Shell) -> FrameSize {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetMasterFrames { settings, .. }] = sent.as_slice() else {
+        panic!(
+            "one master frame size change required, got {} jobs",
+            sent.len()
+        )
+    };
+    settings.limit
+}
+
+#[test]
+fn settings_show_a_64_kib_master_frame_by_default_with_the_three_options() {
+    let mut shell = settings(200, 80);
+    let rows = render(&mut shell, 200, 80);
+    assert!(find(&rows, "Master frame  ").contains("64 KiB"));
+    let shown = flat(&rows);
+    assert!(
+        shown.contains("One message was larger than the master frame size limit."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("or at 1 MiB shorten the message or the instructions"),
+        "{shown}"
+    );
+    assert!(rows.last().unwrap().contains("z Master frame size"));
+    shell.key(Key::Char('z'));
+    let rows = render(&mut shell, 200, 80);
+    find(
+        &rows,
+        "the largest one message the engine sends a project's master",
+    );
+    find(&rows, "> 64 KiB");
+    find(
+        &rows,
+        "The engine's own message size; enough for most turns.",
+    );
+    find(&rows, "  256 KiB");
+    find(&rows, "Room for long instructions and large pasted text.");
+    find(&rows, "  1 MiB");
+    find(
+        &rows,
+        "The largest; for a turn that still stops at 256 KiB.",
+    );
+    let shown = flat(&rows);
+    assert!(
+        shown.contains("The limit covers Claude and Codex masters;"),
+        "{shown}"
+    );
+    assert!(shown.contains("rcli keeps 64 KiB."), "{shown}");
+    assert!(rows.last().unwrap().contains("Enter Save"));
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the stored setting saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn each_master_frame_size_is_saved_when_picked_and_shown_once_stored() {
+    let mut shell = settings(200, 80);
+    let picks = [
+        (FrameSize::Kib256, Key::Down, 1, "256 KiB"),
+        (FrameSize::Mib1, Key::Down, 1, "1 MiB"),
+        (FrameSize::Kib64, Key::Up, 2, "64 KiB"),
+    ];
+    assert_eq!(picks.len(), FrameSize::ALL.len());
+    for (limit, key, presses, title) in picks {
+        shell.key(Key::Char('z'));
+        for _ in 0..presses {
+            shell.key(key.clone());
+        }
+        find(&render(&mut shell, 200, 80), &format!("> {title}"));
+        shell.key(Key::Enter);
+        assert_eq!(frames_chosen(&mut shell), limit);
+        shell.arrive(event(AppSetupEvent::MasterFramesSet(Ok(()))));
+        assert_eq!(lead(&shell), format!("Master frame size limit: {title}."));
+        assert!(
+            jobs(&mut shell)
+                .iter()
+                .any(|job| matches!(job, AppSetupJob::MasterFrames)),
+            "the saved size is read back"
+        );
+        let stored = MasterFrameSettings { limit };
+        shell.arrive(event(AppSetupEvent::MasterFrames(Ok(stored))));
+        assert!(find(&render(&mut shell, 200, 80), "Master frame  ").contains(title));
+    }
+}
+
+#[test]
+fn esc_and_a_refused_save_leave_the_master_frame_size_as_it_was() {
+    let mut shell = settings(200, 80);
+    shell.key(Key::Char('z'));
+    shell.key(Key::Down);
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
+    shell.key(Key::Char('z'));
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    assert_eq!(frames_chosen(&mut shell), FrameSize::Kib256);
+    shell.arrive(event(AppSetupEvent::MasterFramesSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Master frame size limit: 256 KiB.");
+    assert!(!lead(&shell).is_empty());
+    assert!(find(&render(&mut shell, 200, 80), "Master frame  ").contains("64 KiB"));
+}
+
+#[test]
+fn a_stored_master_frame_size_this_version_does_not_know_is_not_offered() {
+    let mut shell = settings(200, 80);
+    shell.arrive(event(AppSetupEvent::MasterFrames(Err(
+        "master_frame_settings_invalid".into(),
+    ))));
+    let rows = render(&mut shell, 200, 80);
+    let row = find(&rows, "Master frame  ");
+    assert!(row.contains("Failed to read it."), "{row}");
+    assert!(row.contains("not one this version knows"), "{row}");
+    shell.key(Key::Char('z'));
+    assert!(jobs(&mut shell).is_empty());
+    assert_eq!(
+        lead(&shell),
+        "The master frame size limit is not known yet."
+    );
+}
+
+#[test]
+fn the_master_frame_size_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
+    for (width, height) in ASK_SIZES {
+        let mut shell = settings(width, height);
+        shell.key(Key::Char('z'));
+        let (first, last) = ("Master frame size limit:", "rcli keeps 64 KiB.");
         ask_in_body(&mut shell, width, height, first, last);
     }
 }

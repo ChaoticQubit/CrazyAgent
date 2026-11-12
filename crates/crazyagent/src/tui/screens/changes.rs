@@ -7,7 +7,7 @@ use super::project_time::duration;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
-    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches, TurnOutcome,
+    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
@@ -1225,18 +1225,11 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
             look.muted,
         ));
     }
-    match set.last_outcome {
-        TurnOutcome::Failed => notes.push((
-            "The agent's last turn failed. These are the changes it made before it stopped."
-                .to_owned(),
-            look.warning,
-        )),
-        TurnOutcome::Cancelled => notes.push((
-            "The agent's last turn was stopped. These are the changes it made before it stopped."
-                .to_owned(),
-            look.warning,
-        )),
-        TurnOutcome::Succeeded => {}
+    if let Some(line) = crate::landing::turn_line(set) {
+        notes.push((line.to_owned(), look.warning));
+    }
+    if let Some(line) = crate::landing::landing_line(set) {
+        notes.push((line.to_owned(), look.warning));
     }
     match set.state {
         ChangeState::Conflict if !set.conflicts.is_empty() => {
@@ -1531,7 +1524,10 @@ fn done(view: &ChangesView) -> Notice {
 pub(in crate::tui) fn refusal(code: &str) -> String {
     match code {
         "changes_owner_dirty" => {
-            "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again."
+            "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again."
+        }
+        "changes_owner_untracked" => {
+            "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again."
         }
         "changes_detached_head" => {
             "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again."
@@ -1556,6 +1552,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
+        }
+        "changes_merge_unsafe" => {
+            "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again."
         }
         "changes_restore_expired" => {
             "These changes can no longer be restored. Discarded changes are kept for 7 days."
