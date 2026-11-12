@@ -260,7 +260,7 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
     rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
-    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", ...PER_HARNESS_ROWS] },
+    rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Landing", "Finished agents", "Terminal display", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
     rows: ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget"] },
 ];
