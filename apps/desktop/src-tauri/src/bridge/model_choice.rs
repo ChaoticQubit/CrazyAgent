@@ -3,7 +3,7 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{MODEL_CHOICE_PROTOCOL_CODES, ModelAdded, OwnerClient};
 use crazyagent::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
 use crazyagent::model_choice::{
-    ALLOWED_MAX, CATALOG_MODELS_MAX, CUSTOM_MAX, MODEL_BYTES_MAX, Models, Slot,
+    ALLOWED_MAX, CATALOG_MODELS_MAX, CUSTOM_MAX, MODEL_BYTES_MAX, Models, NativeModel, Slot,
     UNQUALIFIED_REASON_BYTES_MAX, Written, shipped,
 };
 use crazyagent::protocol::ProjectId;
@@ -75,16 +75,16 @@ fn window_id(id: &Value) -> bool {
 
 /// A slot value as the window sends it, bounded before the engine checks it against the
 /// harness: one model id of at most `MODEL_BYTES_MAX` bytes for the master and agent slots,
-/// a list of at most `ALLOWED_MAX` such ids for the allowed slot. Clearing a slot is a reset,
-/// never a null. Inputs: the slot and the value. Output: the value, or
-/// `model_choice_value_invalid`.
+/// a list of at most `ALLOWED_MAX` such ids for the allowed slot, and `follow` or `harness`
+/// for the Native sub-agent model. Clearing a slot is a reset, never a null. Inputs: the slot
+/// and the value. Output: the value, or `model_choice_value_invalid`.
 pub fn window_value(slot: Slot, value: Value) -> Result<Value, BridgeError> {
     let fits = match slot {
         Slot::Master | Slot::Agent => window_id(&value),
         Slot::Allowed => value
             .as_array()
             .is_some_and(|ids| ids.len() <= ALLOWED_MAX && ids.iter().all(window_id)),
-        Slot::Native => false,
+        Slot::Native => NativeModel::from_value(&value).is_some(),
     };
     if fits {
         Ok(value)
