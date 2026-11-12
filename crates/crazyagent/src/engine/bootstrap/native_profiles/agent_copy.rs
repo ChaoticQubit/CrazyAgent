@@ -112,13 +112,16 @@ pub(crate) struct AgentCredential {
 
 /// The keychain a Claude Code agent's own home holds, the default and only one there, and
 /// the item Claude Code would file the agent's copy under in it (DEC-146). Each handoff
-/// starts the agent on a newly created keychain, and the engine deletes that item whenever
-/// the keeper replaces the copy or the copy is removed, so the harness reads the copy the
-/// engine wrote, never a stale one. Codex keeps its sign-in only in its file.
+/// starts the agent on a newly created keychain under a new name, and the engine deletes
+/// that item from exactly that keychain whenever the keeper replaces the copy or the copy
+/// is removed, so the harness reads the copy the engine wrote, never a stale one, and an
+/// earlier copy never reaches a later handoff's keychain. Codex keeps its sign-in only in
+/// its file.
 #[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub(super) struct AgentKeychain {
     home: PathBuf,
+    keychain: PathBuf,
     service: String,
 }
 
@@ -130,12 +133,12 @@ pub(super) enum AgentKeychain {}
 #[cfg(target_os = "macos")]
 impl AgentKeychain {
     /// Gives a Claude Code agent's home a newly created, empty-password, unlocked keychain
-    /// that never locks itself, in place of any an earlier launch left, as that home's
-    /// default and only search-list keychain, so the harness stores its sign-in there
-    /// instead of asking macOS to create a login keychain. Every call names the keychain or
-    /// runs with `HOME` set to the agent home, so the owner's keychain settings are
-    /// untouched. Input: the agent home. Output: the keychain, or
-    /// `native_profile_agent_keychain_unavailable`.
+    /// that never locks itself as that home's default and only search-list keychain, and
+    /// only then deletes any an earlier launch left, so the harness, even one still running
+    /// there, stores its sign-in there instead of asking macOS to create a login keychain.
+    /// Every call names the keychain or runs with `HOME` set to the agent home, so the
+    /// owner's keychain settings are untouched. Input: the agent home. Output: the
+    /// keychain, or `native_profile_agent_keychain_unavailable`.
     fn prepare(home: &Path) -> Result<Self, EngineError> {
         let text = home
             .to_str()
@@ -143,18 +146,23 @@ impl AgentKeychain {
             .ok_or_else(keychain_unavailable)?;
         let keychain = crate::engine::keychain::fresh_profile_keychain(home)
             .map_err(|_| keychain_unavailable())?;
-        assert_eq!(keychain, home.join("Library/Keychains/login.keychain-db"));
+        assert_eq!(
+            keychain.parent(),
+            Some(home.join("Library/Keychains").as_path())
+        );
         Ok(Self {
             home: home.to_path_buf(),
+            keychain,
             service: claude_service(text),
         })
     }
 
-    /// Deletes the item Claude Code filed the agent's copy under from the agent's keychain,
-    /// naming that keychain and following no link to it. Input: the keychain. Output: done,
-    /// or `native_profile_agent_keychain_unavailable`.
+    /// Deletes the item Claude Code filed the agent's copy under from the keychain this
+    /// handoff created, naming that keychain and following no link to it; one a later
+    /// handoff already replaced is fine. Input: the keychain. Output: done, or
+    /// `native_profile_agent_keychain_unavailable`.
     pub(super) fn forget(&self) -> Result<(), EngineError> {
-        crate::engine::keychain::forget_record(&self.home, &self.service)
+        crate::engine::keychain::forget_record(&self.home, &self.keychain, &self.service)
             .map_err(|_| keychain_unavailable())
     }
 }

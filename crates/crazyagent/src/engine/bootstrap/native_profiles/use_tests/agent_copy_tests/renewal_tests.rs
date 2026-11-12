@@ -146,7 +146,7 @@ fn the_keeper_clears_a_stale_agent_keychain_record_when_it_replaces_a_claude_cop
         .unwrap();
     let path = agent.join(".credentials.json");
     assert_eq!(read_json(&path)["claudeAiOauth"]["expiresAt"], lapsing);
-    let stale = TestKeychain::adopt(&agent, agent.join("Library/Keychains/login.keychain-db"));
+    let stale = TestKeychain::adopt(&agent, only_keychain(&agent));
     let agent_record = agent_service(&agent);
     stale.add(CLAUDE_ACCOUNT, &agent_record, "stale");
     let renewed = (now() + 3 * 86_400) * 1000;

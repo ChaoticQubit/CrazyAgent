@@ -699,8 +699,7 @@ fn a_claude_handoff_gives_the_agent_home_its_own_keychain_and_clears_a_stale_rec
     let copy = guard
         .hand_to_agent(&agent, TURN, &no_harness(&case))
         .unwrap();
-    let path = agent.join("Library/Keychains/login.keychain-db");
-    assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+    let path = only_keychain(&agent);
     let stale = TestKeychain::adopt(&agent, path.clone());
     let text = path.to_str().unwrap();
     assert!(stale.setting("default-keychain").contains(text));
@@ -720,13 +719,38 @@ fn a_claude_handoff_gives_the_agent_home_its_own_keychain_and_clears_a_stale_rec
     let copy = guard
         .hand_to_agent(&agent, TURN, &no_harness(&case))
         .unwrap();
+    let fresh = only_keychain(&agent);
+    assert_ne!(fresh, path);
     assert!(
-        !stale.holds(&service),
-        "a new copy left the stale record ahead of it"
+        !path.exists(),
+        "a new copy left the earlier keychain and its stale record"
     );
+    let current = TestKeychain::adopt(&agent, fresh.clone());
+    assert!(!current.holds(&service));
+    let fresh_text = fresh.to_str().unwrap();
+    assert!(current.setting("default-keychain").contains(fresh_text));
+    assert!(!current.setting("list-keychains").contains(text));
     assert!(agent.join(".credentials.json").is_file());
-    assert!(stale.setting("default-keychain").contains(text));
+    current.add(CLAUDE_ACCOUNT, &service, "stale");
     drop(copy);
+    assert!(
+        !current.holds(&service),
+        "a dropped copy left its keychain record"
+    );
+}
+
+/// The one keychain file in an agent home's keychain folder, a regular file. Input: the
+/// agent home. Output: its path.
+#[cfg(target_os = "macos")]
+fn only_keychain(agent: &Path) -> std::path::PathBuf {
+    let found: Vec<std::path::PathBuf> = std::fs::read_dir(agent.join("Library/Keychains"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_str().unwrap().ends_with(".keychain-db"))
+        .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(std::fs::symlink_metadata(&found[0]).unwrap().is_file());
+    found.into_iter().next().unwrap()
 }
 
 #[cfg(target_os = "macos")]

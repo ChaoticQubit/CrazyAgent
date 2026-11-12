@@ -196,13 +196,17 @@ impl Drop for TestKeychain {
             served.remove(namespace);
         }
         drop(served);
-        let path = self.text().to_owned();
-        let deleted = self.run(&["delete-keychain", &path], None);
+        if std::fs::symlink_metadata(&self.path).is_ok() {
+            let path = self.text().to_owned();
+            let deleted = self.run(&["delete-keychain", &path], None);
+            if !std::thread::panicking() {
+                assert!(
+                    deleted.status.success(),
+                    "the test keychain was not deleted"
+                );
+            }
+        }
         if !std::thread::panicking() {
-            assert!(
-                deleted.status.success(),
-                "the test keychain was not deleted"
-            );
             assert!(!self.path.exists());
         }
     }
