@@ -49,6 +49,7 @@ const SHIPPED: &[(&str, &str)] = &[
         include_str!("../assets/model-catalogs/claude-code.json"),
     ),
     ("codex", include_str!("../assets/model-catalogs/codex.json")),
+    ("rcli", include_str!("../assets/model-catalogs/rcli.json")),
 ];
 const CATALOG_JSON_MAX: usize = 64 * 1024;
 const LONG_CONTEXT_SUFFIX: &str = "[1m]";
@@ -200,8 +201,12 @@ pub const RCLI_PROVIDERS: &[&str] = &["anthropic", "openai", "openrouter"];
 /// the harness name and the model id. Output: the provider, none for an id the catalog
 /// does not list or a harness whose catalog names no providers.
 pub fn catalog_provider(harness: &str, model: &str) -> Option<&'static str> {
-    let _ = (harness, model);
-    None
+    let catalog = shipped(harness)?;
+    let named = catalog.providers.get(model)?;
+    RCLI_PROVIDERS
+        .iter()
+        .copied()
+        .find(|provider| *provider == named.as_str())
 }
 
 /// Tells whether one RCLI account can run a master model (DEC-150 M-5, leader 17:09): its
@@ -209,8 +214,20 @@ pub fn catalog_provider(harness: &str, model: &str) -> Option<&'static str> {
 /// lists for its provider. Inputs: the model id and the account connection. Output: the
 /// answer.
 pub fn rcli_serves(model: &str, connection: &crate::config::ModelConnection) -> bool {
-    let _ = (model, connection);
-    false
+    use crate::accounts::Provider;
+    assert_eq!(connection.harness.as_str(), "rcli");
+    if connection.model.id == model {
+        return true;
+    }
+    let served = match crate::accounts::provider_of(connection) {
+        Provider::AnthropicApi => "anthropic",
+        Provider::OpenaiApi => "openai",
+        Provider::Openrouter => "openrouter",
+        Provider::Chatgpt | Provider::Claude | Provider::OpenaiCompatible | Provider::Local => {
+            return false;
+        }
+    };
+    catalog_provider("rcli", model) == Some(served)
 }
 
 /// Lists the model ids a harness's shipped catalog offers, the candidates the store checks
@@ -264,17 +281,19 @@ pub fn shipped(name: &str) -> Option<ModelCatalog> {
     catalog
 }
 
-/// Reads one model catalog and checks it against the contract: a harness CrazyAgent starts
-/// agents on, 1 to `VERSIONS_MAX` exact versions, 1 to `SOURCES_MAX` https sources and 1
-/// to `CATALOG_MODELS_MAX` distinct ids valid for the harness. Input: the JSON bytes.
-/// Output: the catalog, or none when it breaks the contract.
+/// Reads one model catalog and checks it against the contract: a harness CrazyAgent chooses
+/// a model for in some slot, 1 to `VERSIONS_MAX` exact versions, 1 to `SOURCES_MAX` https
+/// sources, 1 to `CATALOG_MODELS_MAX` distinct ids valid for the harness, and for RCLI alone
+/// one `RCLI_PROVIDERS` entry for exactly every id. Input: the JSON bytes. Output: the
+/// catalog, or none when it breaks the contract.
 pub(crate) fn parse_catalog(bytes: &[u8]) -> Option<ModelCatalog> {
     if bytes.len() > CATALOG_JSON_MAX {
         return None;
     }
     let catalog: ModelCatalog = serde_json::from_slice(bytes).ok()?;
     let harness = catalog.harness.as_str();
-    let known = harness_id(harness) == Some(harness) && supported(harness, Slot::Agent);
+    let known = harness_id(harness) == Some(harness)
+        && Slot::ALL.iter().any(|slot| supported(harness, *slot));
     let mut versions_seen = BTreeSet::new();
     let versions = (1..=VERSIONS_MAX).contains(&catalog.qualified_versions.len())
         && catalog.qualified_versions.iter().all(|version| {
@@ -293,7 +312,19 @@ pub(crate) fn parse_catalog(bytes: &[u8]) -> Option<ModelCatalog> {
             .models
             .iter()
             .all(|id| model_valid(harness, id) && models_seen.insert(id.as_str()));
-    (known && versions && sources && models).then_some(catalog)
+    let providers = match harness {
+        "rcli" => {
+            catalog.providers.len() == catalog.models.len()
+                && catalog.models.iter().all(|id| {
+                    catalog
+                        .providers
+                        .get(id)
+                        .is_some_and(|provider| RCLI_PROVIDERS.contains(&provider.as_str()))
+                })
+        }
+        _ => catalog.providers.is_empty(),
+    };
+    (known && versions && sources && models && providers).then_some(catalog)
 }
 
 /// Names the catalog harness id of a harness name or alias, such as `claude` for
@@ -303,11 +334,12 @@ pub fn harness_id(name: &str) -> Option<&'static str> {
 }
 
 /// Tells whether CrazyAgent chooses this harness's model in one slot: the master runs on
-/// Claude Code and Codex with a chosen model, and team agents start only on those two.
-/// Inputs: the catalog harness id and the slot. Output: the answer.
+/// Claude Code, Codex and RCLI with a chosen model, and team agents start only on the
+/// harnesses the team launches. Inputs: the catalog harness id and the slot. Output: the
+/// answer.
 pub fn supported(harness: &str, slot: Slot) -> bool {
     match slot {
-        Slot::Master => matches!(harness, "claude-code" | "codex"),
+        Slot::Master => matches!(harness, "claude-code" | "codex" | "rcli"),
         Slot::Agent | Slot::Allowed => crate::team::launch_harness(harness).is_some(),
     }
 }

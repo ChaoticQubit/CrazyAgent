@@ -1,0 +1,55 @@
+{
+  "harness": "rcli",
+  "qualified_versions": [
+    "3.0.4"
+  ],
+  "sources": [
+    "https://platform.claude.com/docs/en/about-claude/models/overview",
+    "https://developers.openai.com/api/docs/models",
+    "https://openrouter.ai/api/v1/models"
+  ],
+  "models": [
+    "claude-fable-5-2",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6.1-terra",
+    "gpt-6-luna",
+    "anthropic/claude-fable-5.2",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-sonnet-5.5",
+    "anthropic/claude-haiku-5.5",
+    "anthropic/claude-fable-5.1",
+    "anthropic/claude-fable-5",
+    "openai/gpt-6.1-sol",
+    "openai/gpt-6-astra",
+    "openai/gpt-6.1-terra",
+    "openai/gpt-6-luna"
+  ],
+  "providers": {
+    "claude-fable-5-2": "anthropic",
+    "claude-opus-5-5": "anthropic",
+    "claude-sonnet-5-5": "anthropic",
+    "claude-haiku-5-5": "anthropic",
+    "claude-fable-5-1": "anthropic",
+    "claude-fable-5": "anthropic",
+    "gpt-6.1-sol": "openai",
+    "gpt-6-astra": "openai",
+    "gpt-6.1-terra": "openai",
+    "gpt-6-luna": "openai",
+    "anthropic/claude-fable-5.2": "openrouter",
+    "anthropic/claude-opus-5.5": "openrouter",
+    "anthropic/claude-sonnet-5.5": "openrouter",
+    "anthropic/claude-haiku-5.5": "openrouter",
+    "anthropic/claude-fable-5.1": "openrouter",
+    "anthropic/claude-fable-5": "openrouter",
+    "openai/gpt-6.1-sol": "openrouter",
+    "openai/gpt-6-astra": "openrouter",
+    "openai/gpt-6.1-terra": "openrouter",
+    "openai/gpt-6-luna": "openrouter"
+  }
+}
