@@ -2358,17 +2358,21 @@ async fn a_removed_project_forgets_the_memories_its_agents_saved() {
         .unwrap();
     }
     drop(db);
-    let ids = "SELECT group_concat(id, ',') FROM (SELECT id FROM memory_library ORDER BY id)";
-    let listed = |engine: &Engine| -> String {
+    let listed = |engine: &Engine| -> Vec<String> {
         let db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
         db.busy_timeout(ENGINE_WAIT).unwrap();
-        db.query_row(ids, [], |row| row.get(0)).unwrap()
+        db.prepare("SELECT id FROM memory_library ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
     };
-    assert_eq!(listed(&engine), "agent-a,agent-g,note-a");
+    assert_eq!(listed(&engine), ["agent-a", "agent-g", "note-a"]);
 
     let removed = owner.remove_project(project, 2).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
-    assert_eq!(listed(&engine), "agent-g,note-a");
+    assert_eq!(listed(&engine), ["agent-g", "note-a"]);
     engine.stop().await;
 }
 
