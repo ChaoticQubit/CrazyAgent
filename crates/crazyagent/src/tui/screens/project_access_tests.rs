@@ -54,6 +54,8 @@ fn view() -> PolicyView {
         tool_cache: Default::default(),
         tool_caches: Vec::new(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        local_folders: Vec::new(),
         version: 0,
     }
 }

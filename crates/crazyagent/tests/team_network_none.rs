@@ -122,6 +122,7 @@ async fn under_no_network_an_agent_reaches_no_other_host_through_or_around_its_m
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
     };
     let set = owner
         .set_project_agent_policy(project.clone(), saved.version, policy, 2)

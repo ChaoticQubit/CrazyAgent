@@ -1,3 +1,4 @@
+use super::shared_folders::SharedFolders;
 use super::toolchains::{ToolHomes, Toolchain};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_agent_policy (
     body TEXT NOT NULL
 )";
 
-const BODY_BYTES_MAX: usize = 4096;
+const BODY_BYTES_MAX: usize = 16 * 1024;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_UNAVAILABLE: &str =
@@ -279,7 +280,9 @@ pub struct ToolchainChoice {
 /// and whether git in the IDE runs the project's own hooks in the Project section (Off
 /// unless the owner turned it on; a policy saved before the setting existed reads Off), what
 /// the IDE may do to agent files (Allow all changes when none was saved) and who shares the
-/// agents' tool cache (T8; a policy saved before that setting reads Shared).
+/// agents' tool cache (T8; a policy saved before that setting reads Shared), and which of
+/// the project folder's local folders agents see and how (DEC-147.9; a policy saved before
+/// that setting reads All and Read-only).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -293,15 +296,19 @@ pub struct AgentPolicy {
     pub tool_cache: ToolCacheScope,
     #[serde(default)]
     pub ide_agent_files: IdeAgentFiles,
+    #[serde(default)]
+    pub shared_folders: SharedFolders,
 }
 
 impl AgentPolicy {
-    /// Checks a policy a client sent: each toolchain at most once. Takes the policy.
-    /// Returns a plain refusal code.
+    /// Checks a policy a client sent: each toolchain at most once and a shared folders
+    /// choice in shape ([`SharedFolders::validate`]). Takes the policy. Returns a plain
+    /// refusal code.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.toolchains.len() > Toolchain::ALL.len() {
             return Err("agent_policy_invalid");
         }
+        self.shared_folders.validate()?;
         for (index, choice) in self.toolchains.iter().enumerate() {
             if self.toolchains[..index]
                 .iter()
@@ -344,6 +351,7 @@ impl AgentPolicy {
             network: self.network,
             tool_cache: self.tool_cache,
             ide_agent_files: self.ide_agent_files,
+            shared_folders: self.shared_folders.clone(),
         };
         assert!(pinned.validate().is_ok());
         pinned
@@ -351,8 +359,9 @@ impl AgentPolicy {
 
     /// What a client shows: the level, every level with its availability, each toolchain
     /// family the owner has installed, the project uses or the owner chose, the IDE hooks
-    /// and agent files choices, the tool cache choice with every choice, and the policy's
-    /// version, which a save names. Inputs: the project folder, the
+    /// and agent files choices, the tool cache choice with every choice, the shared folders
+    /// choice with the top-level folders it can pick, and the policy's version, which a save
+    /// names. Inputs: the project folder, the
     /// owner's tool homes and the version. Output: the view.
     pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
         let allowed = self.allowed(project);
@@ -391,6 +400,8 @@ impl AgentPolicy {
                 })
                 .collect(),
             ide_agent_files: self.ide_agent_files,
+            shared_folders: self.shared_folders.clone(),
+            local_folders: super::shared_folders::local_folders(project),
         }
     }
 
@@ -498,6 +509,10 @@ pub struct PolicyView {
     #[serde(default)]
     pub tool_caches: Vec<ToolCacheView>,
     pub ide_agent_files: IdeAgentFiles,
+    #[serde(default)]
+    pub shared_folders: SharedFolders,
+    #[serde(default)]
+    pub local_folders: Vec<String>,
 }
 
 /// One tool cache choice with the name shown to the owner (T8).
@@ -751,6 +766,7 @@ mod tests {
             ide_git_hooks: false,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
             network: AgentNetwork::default(),
         };
         let sandboxed = chose(AgentAccess::Sandboxed, &[]);
@@ -862,6 +878,7 @@ mod tests {
             ide_git_hooks: true,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            shared_folders: Default::default(),
         };
         save(&connection, "p", &policy).unwrap();
         assert_eq!(load(&connection, "p").unwrap(), policy);

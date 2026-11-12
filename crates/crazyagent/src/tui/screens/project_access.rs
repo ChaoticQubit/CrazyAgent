@@ -151,6 +151,7 @@ impl AccessEdit {
             ide_git_hooks: self.ide_git_hooks,
             tool_cache: self.view.tool_cache,
             ide_agent_files: self.ide_agent_files,
+            shared_folders: Default::default(),
         };
         assert!(policy.validate().is_ok());
         policy
