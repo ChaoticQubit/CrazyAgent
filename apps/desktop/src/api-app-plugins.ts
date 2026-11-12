@@ -130,6 +130,20 @@ export function httpOption(option: SearchOption): boolean {
   return option.runs.kind === "http";
 }
 
+/** How often, in milliseconds, Search reads again while something on it moves. */
+export const SEARCH_POLL_MS = 2000;
+
+/** Whether the Search page has something moving to read again for: a model download that
+ * runs, or a usable chosen plugin that has not embedded everything yet. Input: the page read.
+ * Output: true while either moves. */
+export function searchPolling(view: SearchView): boolean {
+  if (view.model.state === "downloading") return true;
+  const choice = view.choice;
+  if (choice.kind !== "plugin") return false;
+  const chosen = view.options.find((option) => option.name === choice.name);
+  return chosen !== undefined && chosen.usable && view.progress.embedded < view.progress.total;
+}
+
 /** A size in whole decimal megabytes. Input: bytes. Output: such as "126 MB". */
 export function megabytes(bytes: number): string {
   return `${Math.round(bytes / MB)} MB`;

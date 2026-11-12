@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { type Result } from "../../api";
 import {
-  SEARCH_STALE, appPluginRefusal, cancelSearchModel, choiceValue, deleteSearchModel, downloadSearchModel, hostOf, httpOption, loadSearch, megabytes, problemText,
-  saveSearch, searchChoice, type ModelState, type SearchChoice, type SearchOption, type SearchSave, type SearchView,
+  SEARCH_POLL_MS, SEARCH_STALE, appPluginRefusal, cancelSearchModel, choiceValue, deleteSearchModel, downloadSearchModel, hostOf, httpOption, loadSearch, megabytes, problemText,
+  saveSearch, searchChoice, searchPolling, type ModelState, type SearchChoice, type SearchOption, type SearchSave, type SearchView,
 } from "../../api-app-plugins";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, Notice, RadioCard, SettingLine, SettingSection, Skeleton } from "../../ui";
@@ -146,6 +146,12 @@ export function SearchSettings() {
   const [dialog, setDialog] = useState<SearchDialog>({ kind: "none" });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const polling = search.kind === "ok" && searchPolling(search.value);
+  useEffect(() => {
+    if (!polling) return;
+    const timer = window.setInterval(reload, SEARCH_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [polling]);
 
   async function attempt<T>(work: () => Promise<Result<T>>): Promise<T | undefined> {
     setBusy(true);
