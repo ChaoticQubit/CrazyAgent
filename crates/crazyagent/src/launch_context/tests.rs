@@ -4326,7 +4326,9 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
             .args(["--skip-git-repo-check", "-C"])
             .arg(&work)
             .args(turn)
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         let output = crate::spawn_gate::output(&mut command).unwrap();
         let shown = format!(
             "{}{}",
