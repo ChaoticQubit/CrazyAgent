@@ -5055,3 +5055,45 @@ fn x_ends_and_k_keeps_the_oldest_hold_and_each_hold_has_a_row() {
         })
     );
 }
+
+/// At 80 by 24 the team view keeps its plan line beside every setting (backlog
+/// BL-TUI-8024-PLANLINE): Left running after a stop took the plan line's row there, so the
+/// settings pack tighter and "Codex leads." shows with all of them.
+#[test]
+fn the_team_view_at_80_by_24_keeps_the_plan_line_and_every_setting() {
+    let view = loaded();
+    let rows = frame(&view, 80, 24);
+    let shown = rows.join("\n");
+    assert!(
+        rows.iter().any(|row| row.contains("Codex leads.")),
+        "{shown}"
+    );
+    for label in [
+        "Keep warm",
+        "Task",
+        "Session",
+        "Idle stop",
+        "On harness switch",
+        "Sub-agent depth",
+        "Worker lands",
+        "Agent branches",
+        "Max harnesses",
+        "Max teammates",
+        "Sub-agent rounds",
+        "Master run time",
+        "Spread accounts",
+        "Token budget",
+        "Master's branch",
+        "Land on",
+        "Master accepts change sets",
+        "Re-ask empty reply",
+        "End a turn after done",
+        "New folder limit",
+        "Master idle stop",
+        "Terminals per window",
+        "Background commands",
+        "Left running",
+    ] {
+        assert!(shown.contains(&format!("{label}  ")), "{label}:\n{shown}");
+    }
+}
