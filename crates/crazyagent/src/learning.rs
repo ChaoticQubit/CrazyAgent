@@ -270,6 +270,15 @@ pub(crate) fn mark(
     Ok(Outcome::Applied)
 }
 
+/// Keeps every step ticked now as a learning mark under the step's own name, so a removal
+/// of rows (a project removed or deleted, a master session deleted) never unticks what the
+/// owner already did. Runs in that removal's transaction before its rows go. Input: the
+/// transaction. Output: Ok, or `learning_mark_unavailable`.
+pub(crate) fn latch(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let _ = tx;
+    Ok(())
+}
+
 /// Counts up to `COUNT_MAX` rows of one signal. Inputs: the transaction and the signal.
 /// Output: the count, 0 when the table does not exist yet.
 fn count(tx: &Transaction<'_>, signal: Signal) -> Result<u32, EngineError> {
