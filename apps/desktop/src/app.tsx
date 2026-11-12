@@ -4,7 +4,7 @@ import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, 
 import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
-import { noticeWatch } from "./notify";
+import { engineLostStep, noticeWatch, reportNotice, type EngineWatch } from "./notify";
 import { NoticeBell } from "./screens/notifications/panel";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
@@ -25,6 +25,7 @@ import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type 
 import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, formatRoute, isUserMenuTab, navigate, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
 import { GoToLayer } from "./ui/go-to";
+import type { EngineState } from "./ui/shell";
 
 /** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
  * size and the time, never paths, accounts or secrets. Inputs: the window size and the time.
@@ -300,6 +301,17 @@ export function ideFocusRoute(focus: IdeFocus): Route {
   return { name: "project", id: focus.project, tab: "ide" };
 }
 
+/** Reports to the notification store when the engine went down after it ran and runs
+ * again, once per loss and never on the first connect. Input: the engine state. */
+function useEngineLostReport(engine: EngineState) {
+  const watch = useRef<EngineWatch>({ ran: false, lost: false });
+  useEffect(() => {
+    const step = engineLostStep(watch.current, engine);
+    watch.current = step.watch;
+    if (step.report) void reportNotice({ kind: "engine_lost" });
+  }, [engine]);
+}
+
 /** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
  * second it takes the waiting focus, if any, and opens that project's IDE tab; the engine
  * raises the window. The desktop asks the engine only while an IDE webview is loaded, since
@@ -337,8 +349,8 @@ export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnde
 }
 
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch, the new free reset notice and the TUI's "open in IDE"
- * focus. */
+ * notification and macOS banner watch, the engine lost report, the new free reset notice
+ * and the TUI's "open in IDE" focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
@@ -346,6 +358,7 @@ export function App() {
   under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();
   useUpdateWatch(session.showToast);
+  useEngineLostReport(session.engine);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");

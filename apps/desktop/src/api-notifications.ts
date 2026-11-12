@@ -139,7 +139,10 @@ export type NoticeAction =
   | { folds: { folds: NoticeFold[]; change: FoldChange } }
   | { read_all: { project_id: string | null } }
   | { save_settings: { settings: NoticeSettings } }
-  | { report: { report: { kind: "app_update_ready"; version: string } | { kind: "engine_lost" } } };
+  | { report: { report: NoticeReport } };
+
+/** An event only a client sees, the engine's `NoticeReport`. */
+export type NoticeReport = { kind: "app_update_ready"; version: string } | { kind: "engine_lost" };
 
 export const PAGE_MAX = 50;
 export const BADGE_MAX = 99;

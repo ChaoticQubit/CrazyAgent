@@ -1,7 +1,8 @@
 import { call } from "./api";
 import type { Result } from "./api";
-import { PAGE_MAX, loadNotifications, routeOf, sendNotice, type NoticeAction, type NoticePage, type NoticeQuery, type NoticeTarget } from "./api-notifications";
+import { PAGE_MAX, loadNotifications, routeOf, sendNotice, type NoticeAction, type NoticePage, type NoticeQuery, type NoticeReport, type NoticeTarget } from "./api-notifications";
 import { goTo, highlight } from "./screens/notifications/panel";
+import type { EngineState } from "./ui/shell";
 
 export type SystemNotifications = "available" | "unavailable";
 
@@ -9,6 +10,13 @@ export type SystemNotifications = "available" | "unavailable";
 export interface Clicked {
   id: number;
   target: NoticeTarget;
+}
+
+/** What the engine lost watch knows: whether the engine ran since the app opened, and
+ * whether it was lost since it last ran. */
+export interface EngineWatch {
+  ran: boolean;
+  lost: boolean;
 }
 
 export const NOTIFY_PER_READ_MAX = 3;
@@ -113,6 +121,25 @@ export function notifyNotice(id: number): Promise<Result<void>> {
  * page, or null when no click waits. */
 export function takeNotificationTarget(): Promise<Result<Clicked | null>> {
   return call<Clicked | null>("desktop_notification_target", {});
+}
+
+/** Steps the engine lost watch on a new engine state: the engine is lost only when it goes
+ * down after it ran, and the report goes once, when it runs again, never on the first
+ * connect; another engine version or a connect in progress changes nothing. Inputs: the
+ * watch and the state. Output: the watch now and whether to report. */
+export function engineLostStep(watch: EngineWatch, state: EngineState): { watch: EngineWatch; report: boolean } {
+  assert(watch.ran || !watch.lost, "an engine that never ran was never lost");
+  if (state === "running") return { watch: { ran: true, lost: false }, report: watch.lost };
+  if (state === "down") return { watch: { ran: watch.ran, lost: watch.ran }, report: false };
+  return { watch, report: false };
+}
+
+/** Reports an event only the app sees to the store as an Info item; the engine keeps one
+ * item per update version and at most one engine lost a minute. Input: the report. Output:
+ * ok once it stands, else the refusal; a refused report is not sent again until the next
+ * update check or loss. */
+export function reportNotice(report: NoticeReport): Promise<Result<void>> {
+  return sendNotice({ report: { report } });
 }
 
 /** Watches the notification store for banners, one read per look: while the window is in
