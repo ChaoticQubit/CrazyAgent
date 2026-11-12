@@ -1043,17 +1043,14 @@ impl ResearchRunner {
                 }
                 Err(Unstopped::Left(left)) => {
                     let code = left.code();
-                    let mut credential = credential;
-                    if let Some(credential) = credential.as_mut() {
-                        credential.stop_renewing();
-                    }
+                    drop(credential);
                     let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
                     let by = leftovers::HoldBy {
                         project: Some(job.project.clone()),
                         who: format!("research job {}", job.id),
                     };
                     let mode = jobs.leftover_mode(&job.project);
-                    left.hold(account, (credential, lease), by, mode);
+                    left.hold(account, lease, by, mode);
                     return Err(RunError::Uncertain(code));
                 }
             }

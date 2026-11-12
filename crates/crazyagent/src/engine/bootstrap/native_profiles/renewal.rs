@@ -1,4 +1,4 @@
-use super::agent_copy::{Harness, Record, account_record, place};
+use super::agent_copy::{Harness, Placed, Record, account_record, place};
 use super::{HeldLock, Manifest, NativeProfileUse, failure, take_lock};
 use crate::adapters::claude::{REFRESH_WINDOW, RENEWAL_TURN};
 use crate::adapters::codex::CodexProtocol;
@@ -402,20 +402,27 @@ pub(super) struct Keeper {
 }
 
 impl Keeper {
-    /// Starts the keeper. Inputs: the renewal, the agent home, the copy's file name and
-    /// its expiry. Output: the running keeper, or unavailable when no thread starts.
+    /// Starts the keeper. Inputs: the renewal, the agent home, the copy's file name, the
+    /// slot its placed identity is recorded in and its expiry. Output: the running keeper,
+    /// or unavailable when no thread starts.
     pub(super) fn start(
         renewal: Renewal,
         agent: File,
         name: &'static str,
+        placed: Placed,
         expires: Duration,
     ) -> Result<Self, EngineError> {
         let (stop, stopped) = channel();
         let open = Arc::new(Mutex::new(true));
         let gate = Arc::clone(&open);
+        let copy = KeptCopy {
+            agent,
+            name,
+            placed,
+        };
         std::thread::Builder::new()
             .name("credential-keeper".into())
-            .spawn(move || keep(&renewal, &agent, name, expires, &stopped, &gate))
+            .spawn(move || keep(&renewal, &copy, expires, &stopped, &gate))
             .map_err(|_| failure("native_profile_credential_unavailable"))?;
         Ok(Self {
             stop: Some(stop),
@@ -440,13 +447,20 @@ fn idle(stopped: &Receiver<()>, wait: Duration) -> bool {
     matches!(stopped.recv_timeout(wait), Err(RecvTimeoutError::Timeout))
 }
 
-/// The keeper's loop. Inputs: the renewal, the agent home, the copy's name, its expiry,
-/// the stop channel and the gate a copy is written under. Output: none; it returns when
+/// The copy a keeper renews: the agent home, the copy's name and the slot that records the
+/// device and inode of the file last placed there.
+struct KeptCopy {
+    agent: File,
+    name: &'static str,
+    placed: Placed,
+}
+
+/// The keeper's loop. Inputs: the renewal, the copy, its expiry, the stop channel and the
+/// gate a copy is written and its identity recorded under. Output: none; it returns when
 /// stopped.
 fn keep(
     renewal: &Renewal,
-    agent: &File,
-    name: &'static str,
+    copy: &KeptCopy,
     mut expires: Duration,
     stopped: &Receiver<()>,
     gate: &Mutex<bool>,
@@ -465,7 +479,8 @@ fn keep(
             if !*open {
                 return;
             }
-            if place(agent, name, &record.copy).is_ok() {
+            if let Ok(placed) = place(&copy.agent, copy.name, &record.copy) {
+                *copy.placed.lock().unwrap_or_else(PoisonError::into_inner) = placed;
                 expires = record.expires;
                 continue;
             }

@@ -88,12 +88,6 @@ impl AgentCredential {
     pub(crate) fn retain(self) {
         match self {}
     }
-
-    /// Matches the Unix keeper stop for a copy a Full access agent's processes may read.
-    /// No value is ever made, so this never runs.
-    pub(crate) fn stop_renewing(&mut self) {
-        match *self {}
-    }
 }
 
 impl Drop for AgentCredential {

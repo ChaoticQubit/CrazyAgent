@@ -203,7 +203,7 @@ pub struct HeldView {
 }
 
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
-/// still runs, what the stop holds, such as the agent's credential copy and lease, until the
+/// still runs, what the stop holds, such as the agent's account lease, until the
 /// hold ends or the owner keeps the processes running, who left it, the names it shows, where
 /// it stands and when it began.
 struct Held {
@@ -289,7 +289,7 @@ pub fn end_held(key: u64, project: &str) -> bool {
 }
 
 /// Lets one hold of a project keep its processes running, the owner's Keep: the account and
-/// what the stop held for it, such as the credential copy and lease, are let go at once, and
+/// what the stop held for it, such as the account lease, are let go at once, and
 /// the processes stay listed until they end. Inputs: the hold's key and the project it must
 /// belong to. Output: whether it is now kept.
 pub fn keep_held(key: u64, project: &str) -> bool {
@@ -562,7 +562,7 @@ impl Leftovers {
         self.0.names_now()
     }
 
-    /// Keeps `kept`, such as the agent's credential copy and account lease, listed under
+    /// Keeps `kept`, such as the agent's account lease, listed under
     /// `account` with this report and `by`, until a watcher pass shows no process of the agent
     /// running, both the table and the token's processes read, or the owner signs the account
     /// out ([`release`]), then drops it; the engine's exit ends the hold too. A pass that

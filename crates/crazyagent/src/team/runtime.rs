@@ -10125,9 +10125,10 @@ type Held = (AgentCredential, NativeProfileUse);
 /// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
 /// copy and lease; a stop no warden confirmed keeps both for the engine's life; a stop at
 /// Full access, or of a pane run without the keeper, that left processes running, or could
-/// not list them, hands them to a hold that follows them by the project's leftover setting
-/// (see [`crate::harnesses::leftovers::Leftovers::hold`]), with the copy's keeper stopped so
-/// no renewed token reaches it. Inputs: the stop's outcome, what the harness held, if
+/// not list them, removes the credential copy at once, so they never read it or a later
+/// start's renewed copy through it, and hands them to a hold that keeps the lease and follows
+/// them by the project's leftover setting (see
+/// [`crate::harnesses::leftovers::Leftovers::hold`]). Inputs: the stop's outcome, what the harness held, if
 /// anything, and who stopped. Output: none for a clean stop, or the plain problem, naming
 /// what still runs and what the setting does with it.
 fn settle_stop(
@@ -10154,9 +10155,9 @@ fn settle_stop(
             let mode = crate::harnesses::leftovers::mode_of(by.project.as_deref());
             let problem = with_code(&left.told(mode), Some(left.code()));
             let (account, kept) = match held {
-                Some((mut credential, profile)) => {
-                    credential.stop_renewing();
-                    (Some(profile.account().clone()), Some((credential, profile)))
+                Some((credential, profile)) => {
+                    drop(credential);
+                    (Some(profile.account().clone()), Some(profile))
                 }
                 None => (None, None),
             };
