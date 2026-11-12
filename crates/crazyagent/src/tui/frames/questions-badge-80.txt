@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
                                                                                 
- n New project  a Add project  Enter Open  s Settings       2 questions  ? Help 
+ p New project  a Add project  Enter Open  s Settings       2 questions  ? Help 

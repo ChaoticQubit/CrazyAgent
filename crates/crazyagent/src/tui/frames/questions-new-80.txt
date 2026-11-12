@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
  ! New question in Plant Shop. Answer it on the project's Questions tab.        
- n New project  a Add project  Enter Open  s Settings       3 questions  ? Help 
+ p New project  a Add project  Enter Open  s Settings       3 questions  ? Help 

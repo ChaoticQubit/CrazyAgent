@@ -1178,8 +1178,13 @@ fn the_recount_keys_work_only_while_it_is_offered() {
     answer.since_ms = asked_since(&mut ctx);
     page.apply(&Ok(Box::new(answer.clone())), &mut ctx);
     assert!(matches!(page.key(&Key::Char('n'), &mut ctx), Flow::Ignored));
+    assert!(!page.asking(), "no offer leaves n to the shell");
     answer.recount = Some(offer());
     page.apply(&Ok(Box::new(answer)), &mut ctx);
+    assert!(
+        page.asking(),
+        "the offer takes n as Use new (DEC-136a key n)"
+    );
     for (key, expected) in [('n', true), ('o', false)] {
         assert!(matches!(page.key(&Key::Char(key), &mut ctx), Flow::Handled));
         let Some(Request::Settings(job)) = ctx.next_request() else {

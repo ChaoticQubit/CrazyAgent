@@ -228,6 +228,12 @@ pub(in crate::tui) struct ProjectChanges {
 }
 
 impl ProjectChanges {
+    /// Says whether the accept or discard question is open, so n answers it (DEC-136a
+    /// key n). Input: none. Output: true while the question waits for y or n.
+    pub fn asking(&self) -> bool {
+        self.asking.is_some()
+    }
+
     /// Opens one project's Changes view with nothing read yet.
     /// Takes the project.
     /// Returns the view; reads start with `next_query`.

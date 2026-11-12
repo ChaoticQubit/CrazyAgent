@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
  ✓ Setup done. 2 accounts are ready for agents.                                 
- n New project  a Add project  Enter Open  s Settings  / Filter          ? Help 
+ p New project  a Add project  Enter Open  s Settings  / Filter          ? Help 

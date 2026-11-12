@@ -2,6 +2,7 @@ use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
 use super::client::learning::{LearningEvent, LearningQuery, LearningReply};
+use super::client::notifications::{NoticesEvent, NoticesQuery, NoticesReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use super::client::settings::{SettingsEvent, SettingsJob};
 use super::clock;
@@ -83,6 +84,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Place",
         place: Place::Usage,
     });
+    out.push(Target {
+        label: "Notifications".into(),
+        kind: "Place",
+        place: Place::Notifications,
+    });
     for section in SettingsSection::ALL {
         out.push(Target {
             label: format!("Settings / {}", section.label()),
@@ -104,6 +110,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         label: "Settings / Tickets".into(),
         kind: "Settings",
         place: Place::TicketSettings { project: None },
+    });
+    out.push(Target {
+        label: "Settings / Notifications".into(),
+        kind: "Settings",
+        place: Place::NotificationSettings,
     });
     for (label, place) in [
         ("New project", Place::NewProject),
@@ -297,6 +308,8 @@ impl Shell {
         if self.ctx.link == Link::Ready {
             self.ctx
                 .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+            self.ctx
+                .request(Request::Notices(Box::new(NoticesQuery::counts())));
         }
         let ctx = &mut self.ctx;
         self.stack
@@ -308,11 +321,10 @@ impl Shell {
         }
     }
 
-    /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
-    /// many change sets wait for the owner, in all and in the top screen's project, reads the
-    /// stored extras for the new free reset notice once a minute, then refreshes the top
-    /// screen.
-    /// Input: none. Output: none; requests are queued on the context.
+    /// Runs the periodic refresh the run loop makes every few seconds: asks how many change
+    /// sets wait for the owner, in all and in the top screen's project, reads the stored
+    /// extras for the free reset notice once a minute, then refreshes the top screen, which
+    /// reads the badge and header counts again. Input: none. Output: none; requests queue.
     pub fn tick(&mut self) {
         let project = self.top().project();
         self.ctx
@@ -486,6 +498,11 @@ impl Shell {
             Some(Global::Help) if !modal => {
                 self.overlay = Some(Overlay::Help);
                 return;
+            }
+            Some(Global::Notifications)
+                if !modal && self.go_to_allowed() && !self.top().asking() =>
+            {
+                return self.apply(Flow::Open(Place::Notifications));
             }
             Some(Global::PreviousSection | Global::NextSection) if !modal => {
                 let forward = global(&key, typing) == Some(Global::NextSection);
@@ -677,6 +694,11 @@ impl Shell {
                     self.questions(event);
                 }
                 if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::Notices(event) = event.as_ref()
+                {
+                    self.notices(event);
+                }
+                if let Arrival::Owner(event) = &arrival
                     && let OwnerEvent::Learning(event) = event.as_ref()
                 {
                     self.learning(event);
@@ -767,6 +789,24 @@ impl Shell {
         }
     }
 
+    /// Keeps the header's notification counts from every read over the whole store; a read
+    /// of one project leaves them, a failed read keeps the last counts, and a change that
+    /// took effect reads them again. Input: one notification reply. Output: none.
+    fn notices(&mut self, event: &NoticesEvent) {
+        match (&event.query, &event.result) {
+            (NoticesQuery::Page(query), Ok(NoticesReply::Page(page)))
+                if query.project_id.is_none() =>
+            {
+                self.ctx.store.notices = Some(page.counts);
+            }
+            (NoticesQuery::Act { .. }, Ok(_)) => {
+                self.ctx
+                    .request(Request::Notices(Box::new(NoticesQuery::counts())));
+            }
+            _ => {}
+        }
+    }
+
     /// The hints the help bar shows now: an overlay's, else the top screen's modal's, else
     /// the top screen's own. Input: none. Output: the hints in order.
     fn bar_hints(&self) -> Vec<Hint> {
@@ -809,6 +849,7 @@ impl Shell {
         let left = vec![
             styled("Everywhere", Role::Heading, theme),
             key("Ctrl-K", "Go to anything", 13),
+            key("n", "Notifications", 13),
             key("Esc", "Back or cancel", 13),
             key("Tab", "Next field or panel", 13),
             key("Shift-Tab", "Previous", 13),
@@ -973,6 +1014,7 @@ impl Shell {
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
+        let status = with_notices(self.ctx.store.notices.as_ref(), status, &theme);
         let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
@@ -1081,6 +1123,42 @@ fn waiting_text(
     }
 }
 
+/// The header's notification counts over every project (DEC-136a decision 10): unread
+/// items and pending Actions, each left out at zero. Input: the last counts read, none
+/// before the first read. Output: "N unread, M pending", or None when both are zero.
+fn notice_text(counts: Option<&crate::notifications::NoticeCounts>) -> Option<String> {
+    let counts = counts?;
+    let parts: Vec<String> = [(counts.unread, "unread"), (counts.pending, "pending")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, word)| format!("{count} {word}"))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The header status with the notification counts in front of it, in the warning color
+/// while an Action is pending. Inputs: the last counts read, the status so far and the
+/// theme. Output: the status line; no counts leave the status as it is.
+fn with_notices(
+    counts: Option<&crate::notifications::NoticeCounts>,
+    status: Line<'static>,
+    theme: &Theme,
+) -> Line<'static> {
+    let Some(text) = notice_text(counts) else {
+        return status;
+    };
+    let style = if counts.is_some_and(|counts| counts.pending > 0) {
+        theme.warning
+    } else {
+        theme.accent
+    };
+    let note = Line::from(Span::styled(text, style));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
+}
+
 /// Counts change sets in one sentence. Inputs: the count and where they wait.
 /// Output: "1 change set waits <place>" or "N change sets wait <place>"; None for zero.
 fn waiting_sets(count: u32, place: &str) -> Option<String> {
@@ -1094,8 +1172,10 @@ fn waiting_sets(count: u32, place: &str) -> Option<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::notifications::{NoticeCounts, NoticePage};
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
+    use crate::tui::client::notifications::{NoticesEvent, NoticesQuery, NoticesReply};
     use crate::tui::glyphs::UNICODE;
     use crate::tui::keys::{ShiftArrows, ShiftEnter};
     use crate::tui::seam::{Activity, ResearchCounts};
@@ -1142,6 +1222,149 @@ mod tests {
             .collect()
     }
 
+    fn notices(query: NoticesQuery, result: Result<NoticesReply, String>) -> Arrival {
+        Arrival::Owner(Box::new(OwnerEvent::Notices(Box::new(NoticesEvent {
+            query,
+            result,
+        }))))
+    }
+
+    fn page(unread: u32, pending: u32) -> Result<NoticesReply, String> {
+        Ok(NoticesReply::Page(NoticePage {
+            items: Vec::new(),
+            counts: NoticeCounts { unread, pending },
+            more: false,
+            newest: 0,
+        }))
+    }
+
+    fn header_line(shell: &mut Shell) -> String {
+        crate::tui::render_tests::render(shell, 160, 30)
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_header_notice_text_names_unread_and_pending_and_drops_zero_parts() {
+        let counts = |unread, pending| NoticeCounts { unread, pending };
+        assert_eq!(notice_text(None), None);
+        assert_eq!(notice_text(Some(&counts(0, 0))), None);
+        assert_eq!(
+            notice_text(Some(&counts(3, 0))).as_deref(),
+            Some("3 unread")
+        );
+        assert_eq!(
+            notice_text(Some(&counts(0, 1))).as_deref(),
+            Some("1 pending")
+        );
+        assert_eq!(
+            notice_text(Some(&counts(2, 5))).as_deref(),
+            Some("2 unread, 5 pending")
+        );
+    }
+
+    #[test]
+    fn the_header_shows_the_notification_counts_on_every_view() {
+        let project = ProjectId::new("project-tidepool").unwrap();
+        let places = [
+            Place::Home,
+            Place::Settings(SettingsSection::Profile),
+            Place::Project {
+                id: project.clone(),
+                name: "Tidepool".into(),
+                tab: ProjectTab::Overview,
+            },
+            Place::Team {
+                id: project,
+                name: "Tidepool".into(),
+            },
+        ];
+        for place in places {
+            let mut shell = at(place.clone(), ctx());
+            let before = header_line(&mut shell);
+            assert!(!before.contains("unread"), "{place:?}: {before}");
+            shell.arrive(notices(NoticesQuery::counts(), page(4, 2)));
+            let line = header_line(&mut shell);
+            assert!(line.contains("4 unread, 2 pending"), "{place:?}: {line}");
+            shell.arrive(notices(NoticesQuery::counts(), page(0, 0)));
+            let line = header_line(&mut shell);
+            assert!(!line.contains("unread"), "{place:?}: {line}");
+            assert!(!line.contains("pending"), "{place:?}: {line}");
+        }
+    }
+
+    fn notice_reads(shell: &mut Shell) -> Vec<NoticesQuery> {
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Notices(query) => Some(*query),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn show_and_every_tick_read_the_notification_counts_once() {
+        let mut ctx = ctx();
+        ctx.link = Link::Connecting;
+        let mut shell = Shell::new(ctx);
+        notice_reads(&mut shell);
+        shell.arrive(Arrival::Connected(None));
+        assert_eq!(
+            notice_reads(&mut shell),
+            vec![NoticesQuery::counts()],
+            "show reads the counts"
+        );
+        let mut shell = at(Place::Home, ctx());
+        notice_reads(&mut shell);
+        shell.tick();
+        shell.tick();
+        assert_eq!(
+            notice_reads(&mut shell),
+            vec![NoticesQuery::counts()],
+            "a tick reads the counts, and a read already queued is not queued twice"
+        );
+    }
+
+    #[test]
+    fn only_a_read_over_every_project_sets_the_header_counts_and_a_change_reads_them_again() {
+        let mut shell = at(Place::Home, ctx());
+        shell.arrive(notices(NoticesQuery::counts(), page(2, 1)));
+        assert_eq!(
+            shell.ctx.store.notices,
+            Some(NoticeCounts {
+                unread: 2,
+                pending: 1
+            })
+        );
+        let NoticesQuery::Page(mut scoped) = NoticesQuery::counts() else {
+            unreachable!("counts() is a page read")
+        };
+        scoped.project_id = Some(ProjectId::new("project-tidepool").unwrap());
+        shell.arrive(notices(NoticesQuery::Page(scoped), page(9, 9)));
+        let line = header_line(&mut shell);
+        assert!(line.contains("2 unread, 1 pending"), "{line}");
+        shell.arrive(notices(NoticesQuery::counts(), Err("owner_busy".into())));
+        let line = header_line(&mut shell);
+        assert!(
+            line.contains("2 unread, 1 pending"),
+            "a failed read keeps the last: {line}"
+        );
+        notice_reads(&mut shell);
+        shell.arrive(notices(
+            NoticesQuery::Act {
+                action: crate::notifications::NoticeAction::ReadAll { project_id: None },
+                generation: 7,
+            },
+            Ok(NoticesReply::Done),
+        ));
+        assert_eq!(
+            notice_reads(&mut shell),
+            vec![NoticesQuery::counts()],
+            "a change reads the counts again"
+        );
+    }
+
     #[test]
     fn go_to_ranks_prefix_then_contained_then_letters_in_order() {
         assert_eq!(rank("tide", "Tidepool"), Some(0));
@@ -1177,6 +1400,131 @@ mod tests {
         assert_eq!(shell.depth(), 2);
         assert_eq!(shell.place(), Some(Place::Settings(SettingsSection::Pools)));
         assert_eq!(shell.stack[0].place(), Some(Place::Home));
+    }
+
+    struct Asking {
+        open: bool,
+        took: std::rc::Rc<std::cell::RefCell<Vec<char>>>,
+    }
+
+    impl Screen for Asking {
+        fn crumbs(&self) -> Vec<String> {
+            vec!["Ask".into()]
+        }
+
+        fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+            Vec::new()
+        }
+
+        fn asking(&self) -> bool {
+            self.open
+        }
+
+        fn key(&mut self, key: &Key, _ctx: &mut Ctx) -> Flow {
+            match key {
+                Key::Char(letter) => {
+                    self.took.borrow_mut().push(*letter);
+                    Flow::Handled
+                }
+                _ => Flow::Ignored,
+            }
+        }
+
+        fn draw(&mut self, _frame: &mut Frame, _area: Rect, _ctx: &Ctx) -> Option<Position> {
+            None
+        }
+
+        fn place(&self) -> Option<Place> {
+            Some(Place::Usage)
+        }
+    }
+
+    #[test]
+    fn an_open_inline_ask_takes_n_before_the_global_key() {
+        let took = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let screen = Asking {
+            open: true,
+            took: took.clone(),
+        };
+        let mut shell = Shell::with(ctx(), Box::new(screen));
+        shell.key(Key::Char('n'));
+        assert_eq!(*took.borrow(), vec!['n'], "the open ask gets n as its No");
+        assert_eq!(shell.depth(), 1);
+        assert_eq!(shell.place(), Some(Place::Usage));
+
+        let screen = Asking {
+            open: false,
+            took: took.clone(),
+        };
+        took.borrow_mut().clear();
+        let mut shell = Shell::with(ctx(), Box::new(screen));
+        shell.key(Key::Char('n'));
+        assert!(took.borrow().is_empty(), "with no ask open n is global");
+        assert_eq!(shell.place(), Some(Place::Notifications));
+    }
+
+    #[test]
+    fn n_opens_the_notifications_list_over_any_view_once_and_esc_returns() {
+        for place in [Place::Home, Place::Usage] {
+            let mut shell = at(place.clone(), ctx());
+            let depth = shell.depth();
+            shell.key(Key::Char('n'));
+            assert_eq!(shell.place(), Some(Place::Notifications), "{place:?}");
+            assert_eq!(shell.depth(), depth + 1, "{place:?}");
+            shell.key(Key::Char('n'));
+            assert_eq!(
+                shell.depth(),
+                depth + 1,
+                "n on the list opens no second list"
+            );
+            shell.key(Key::Esc);
+            assert_eq!(shell.place(), Some(place.clone()), "Esc returns");
+        }
+    }
+
+    #[test]
+    fn n_types_into_a_focused_field_and_waits_for_an_open_overlay() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('/'));
+        shell.key(Key::Char('n'));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Home),
+            "n types into Home's filter"
+        );
+
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Ctrl('k'));
+        shell.key(Key::Char('n'));
+        assert!(matches!(shell.overlay, Some(Overlay::GoTo(_))));
+        assert_eq!(shell.place(), Some(Place::Home), "n types into Go to");
+
+        let mut shell = at(Place::Welcome, ctx());
+        shell.key(Key::Char('n'));
+        assert_eq!(
+            shell.place(),
+            Some(Place::Welcome),
+            "no list before first run ends"
+        );
+    }
+
+    #[test]
+    fn p_on_home_opens_new_project_now_that_n_opens_notifications() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('p'));
+        assert_eq!(shell.place(), Some(Place::NewProject));
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('n'));
+        assert_ne!(shell.place(), Some(Place::NewProject));
+    }
+
+    #[test]
+    fn the_keys_overlay_lists_n_for_notifications_everywhere() {
+        let mut shell = at(Place::Home, ctx());
+        shell.key(Key::Char('?'));
+        let shown = crate::tui::render_tests::render(&mut shell, 120, 40).join("\n");
+        assert!(shown.contains("Notifications"), "{shown}");
+        assert!(!shown.contains("n         New project"), "{shown}");
     }
 
     #[test]

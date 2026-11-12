@@ -64,6 +64,12 @@ pub(in crate::tui) struct ProjectQuestions {
 }
 
 impl ProjectQuestions {
+    /// Says whether the dismiss question is open, so n answers it (DEC-136a key n).
+    /// Input: none. Output: true while the question waits for y or n.
+    pub fn asking(&self) -> bool {
+        matches!(self.settling, Some(Settling::Dismiss { .. }))
+    }
+
     /// Opens one project's Questions tab with nothing read yet. Input: the project.
     pub(in crate::tui) fn new(project: ProjectId) -> Self {
         Self {

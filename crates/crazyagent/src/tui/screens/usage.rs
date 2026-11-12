@@ -925,6 +925,10 @@ impl Screen for UsagePage {
         hints
     }
 
+    fn asking(&self) -> bool {
+        self.offers_recount()
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == Key::Char('g') {
             self.scorecard = match self.scorecard.take() {

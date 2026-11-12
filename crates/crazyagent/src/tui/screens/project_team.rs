@@ -286,6 +286,20 @@ pub(in crate::tui) struct TeamView {
 }
 
 impl TeamView {
+    /// Says whether a stop or cancel question waits for y or n and gets the next key, so
+    /// n answers it (DEC-136a key n). Input: none. Output: true while it does.
+    pub fn asking(&self) -> bool {
+        let earlier = self.messages.is_some()
+            || self.draft.is_some()
+            || self.branch_edit.is_some()
+            || self.wake.is_some()
+            || self.coord.is_some()
+            || self.message_row.is_some()
+            || self.master_pick.is_some()
+            || self.alerts;
+        !earlier && (self.ask.is_some() || self.confirm.is_some())
+    }
+
     /// Opens the team of one project with nothing read yet.
     /// Takes the project.
     /// Returns the view; reads start with `next_query`.
@@ -773,7 +787,7 @@ impl TeamView {
                 self.open_coord();
                 TeamReply::Handled
             }
-            KeyCode::Char('n') => {
+            KeyCode::Char('+') => {
                 self.open_draft();
                 TeamReply::Handled
             }
@@ -3910,7 +3924,7 @@ impl TeamView {
         let mut help = vec![
             ("\u{2191}\u{2193}", "Move"),
             ("Tab", "Agents or tasks"),
-            ("n", "New task"),
+            ("+", "New task"),
             ("x", "Cancel task"),
             ("w", "Keep warm"),
             ("t", "Task limit"),

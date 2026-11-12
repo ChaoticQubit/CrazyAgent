@@ -11,13 +11,13 @@ const COLS = 160;
 const ROWS = 48;
 const WAIT_MS = 30000;
 const FRAME = /^[a-z0-9-]{1,96}$/;
-const KEY = /^[A-Za-z0-9\]-]{1,16}$/;
+const KEY = /^(?:[A-Za-z0-9\]-]{1,16}|\+)$/;
 const SHIFT_ENTER = "\u001b[13;2u";
 
 export const PLACES = ["project-master", "project-team"];
 
 /** The tmux send-keys arguments for one key as the TUI keymap names it: "Enter", "Down",
- * "Esc", a letter, "Ctrl-K", "Shift-Tab", "Shift-Left" or "Shift-Enter", which goes out as
+ * "Esc", a letter, "+", "Ctrl-K", "Shift-Tab", "Shift-Left" or "Shift-Enter", which goes out as
  * its CSI u sequence because a plain terminal sends Shift+Enter as Enter. Input: the name.
  * Output: the arguments after the target. */
 export function keyArgs(name) {

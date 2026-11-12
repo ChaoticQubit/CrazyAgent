@@ -27,8 +27,8 @@ export const checks = [
       await tui.waitFor("Sessions");
       const countOf = () => tui.pane().split("\n").filter((line) => /session/i.test(line)).length;
       const start = countOf();
-      await tui.key("n");
-      await tui.key("n");
+      await tui.key("+");
+      await tui.key("+");
       const afterNew = countOf();
       if (afterNew > start + 1) {
         throw new Error(`a second New session added another session: ${start} -> ${afterNew}`);

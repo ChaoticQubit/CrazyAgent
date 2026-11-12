@@ -1673,6 +1673,10 @@ impl Screen for ProjectPage {
             || (self.tickets_have_keys() && self.screen.tickets.editing())
     }
 
+    fn asking(&self) -> bool {
+        self.screen.asking()
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let before = self.screen.tab;
         if self.moved.is_some() {
@@ -1891,7 +1895,7 @@ impl Screen for ProjectPage {
             .sessions_key
             .take_if(|(project, _)| *project == self.screen.project)
         {
-            assert!(matches!(code, 'n' | 'l'));
+            assert!(matches!(code, '+' | 'l'));
             self.from_master = true;
             self.screen.open(Tab::Conversation);
             self.screen.typing = false;

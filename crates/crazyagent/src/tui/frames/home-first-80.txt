@@ -21,4 +21,4 @@
                                               │ Enter opens Settings            
                                               │                                 
                                                                                 
- Enter Add an account  n New project  a Add project  ↑↓ Move             ? Help 
+ Enter Add an account  p New project  a Add project  ↑↓ Move             ? Help 

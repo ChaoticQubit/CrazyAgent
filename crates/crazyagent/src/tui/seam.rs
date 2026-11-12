@@ -183,6 +183,7 @@ pub enum Request {
     Cleanup(Box<super::client::cleanup::CleanupQuery>),
     Reveal(Box<super::client::ide::RevealQuery>),
     Learning(Box<super::client::learning::LearningQuery>),
+    Notices(Box<super::client::notifications::NoticesQuery>),
     Reconnect,
 }
 
@@ -234,6 +235,7 @@ impl std::fmt::Debug for Request {
             Self::Cleanup(_) => "Cleanup",
             Self::Reveal(_) => "Reveal",
             Self::Learning(_) => "Learning",
+            Self::Notices(_) => "Notices",
             Self::Reconnect => "Reconnect",
         })
     }

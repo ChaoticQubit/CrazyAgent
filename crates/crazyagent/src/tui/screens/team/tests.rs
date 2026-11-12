@@ -2507,7 +2507,7 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<63}n New session",
+            "{:<63}+ New session",
             "Live master on. It starts when you open this view."
         ),
         "at 80 columns the state stays whole and l Sessions stays in the hints"
@@ -2587,7 +2587,7 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
         "Ctrl-] leaves the terminal open"
     );
     let rows = render(&mut shell);
-    for shown in ["n New session", "l Sessions", "Esc Back"] {
+    for shown in ["+ New session", "l Sessions", "Esc Back"] {
         assert!(rows[23].contains(shown), "{shown}: {}", rows[23]);
     }
     for gone in [
@@ -2631,7 +2631,7 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<63}n New session",
+            "{:<63}+ New session",
             "Live master on. It starts when you open this view."
         )
     );
@@ -2673,7 +2673,7 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!("{:<51}n New session  l Sessions", "Live master stopped.")
+        format!("{:<51}+ New session  l Sessions", "Live master stopped.")
     );
     assert!(
         rows[4].contains("The live master was turned off"),
@@ -2682,7 +2682,7 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     );
     let restart = rows[4..10].join("\n");
     assert!(
-        restart.contains("It starts again when you open this view again or press n for a new"),
+        restart.contains("It starts again when you open this view again or press + for a new"),
         "{restart}"
     );
     assert!(restart.contains("session."), "{restart}");
@@ -2725,7 +2725,7 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     assert_eq!(
         chars(&rows[2], 2, 98),
         format!(
-            "{:<71}n New session  l Sessions",
+            "{:<71}+ New session  l Sessions",
             "Live master on. It starts when you open this view."
         ),
         "a wide view shows both session keys"
@@ -2837,7 +2837,7 @@ fn keys_typed_after_the_master_terminal_closes_never_turn_the_live_master_off() 
     );
     let rows = render(&mut shell);
     assert!(rows[0].contains("Tidepool  /  Master"), "{}", rows[0]);
-    assert!(rows[2].contains("n New session"), "{}", rows[2]);
+    assert!(rows[2].contains("+ New session"), "{}", rows[2]);
     assert!(rows[23].contains("Ctrl-] Leave terminal"), "{}", rows[23]);
 
     shell.key(LEADER);
@@ -3623,7 +3623,7 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<63}n New session",
+            "{:<63}+ New session",
             "Live master on. Switched to Claude Code, carried over."
         )
     );
@@ -3643,7 +3643,7 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
     assert_eq!(
         chars(&rows[2], 2, 78),
         format!(
-            "{:<63}n New session",
+            "{:<63}+ New session",
             "Live master stopped. Switched to Claude Code, started fresh."
         )
     );
@@ -3660,7 +3660,7 @@ fn the_master_view_head_says_the_live_session_switched_harness() {
     let rows = render(&mut shell);
     assert_eq!(
         chars(&rows[2], 2, 78),
-        format!("{:<51}n New session  l Sessions", "Live master stopped.")
+        format!("{:<51}+ New session  l Sessions", "Live master stopped.")
     );
 }
 

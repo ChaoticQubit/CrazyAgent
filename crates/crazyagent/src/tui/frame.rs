@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn help_line_drops_trailing_hints_and_keeps_help() {
         let hints = [
-            hint("n", "New project"),
+            hint("p", "New project"),
             hint("Enter", "Open"),
             hint("s", "Settings"),
             hint("/", "Filter"),
@@ -626,12 +626,12 @@ mod tests {
         ];
         assert_eq!(
             plain(&footer(80, &hints, 0, &theme(), &UNICODE)),
-            " n New project  Enter Open  s Settings  / Filter  Ctrl-K Go to           ? Help "
+            " p New project  Enter Open  s Settings  / Filter  Ctrl-K Go to           ? Help "
         );
         assert_eq!(
             plain(&footer(120, &hints, 0, &theme(), &UNICODE)),
             format!(
-                " n New project   Enter Open   s Settings   / Filter   Ctrl-K Go to   Ctrl-Q Quit{}? Help ",
+                " p New project   Enter Open   s Settings   / Filter   Ctrl-K Go to   Ctrl-Q Quit{}? Help ",
                 " ".repeat(33)
             )
         );
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn a_wrapped_help_line_keeps_every_hint_and_stays_one_row_when_all_fit() {
         let hints = [
-            hint("n", "New project"),
+            hint("p", "New project"),
             hint("Enter", "Open"),
             hint("s", "Settings"),
             hint("/", "Filter"),
@@ -665,7 +665,7 @@ mod tests {
             wrapped(80, HINT_ROWS_MAX),
             [
                 format!(
-                    " n New project  Enter Open  s Settings  / Filter  Ctrl-K Go to{}",
+                    " p New project  Enter Open  s Settings  / Filter  Ctrl-K Go to{}",
                     " ".repeat(18)
                 ),
                 format!(" Ctrl-Q Quit{}? Help ", " ".repeat(61)),

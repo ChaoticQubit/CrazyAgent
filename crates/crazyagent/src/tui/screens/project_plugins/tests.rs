@@ -1021,6 +1021,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Notices(query) => connection.notices(*query).unwrap(),
                 Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
                 other => panic!("the project page never sends {other:?}"),
             }
@@ -1491,6 +1492,7 @@ async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Notices(query) => connection.notices(*query).unwrap(),
                 Request::Roadmap(query)
                     if matches!(
                         *query,

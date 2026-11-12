@@ -1896,6 +1896,13 @@ impl Screen for AddAccount {
         }
     }
 
+    fn asking(&self) -> bool {
+        match &self.stage {
+            Stage::SignIn(sign_in) => sign_in.problem.is_some() && sign_in.code.is_empty(),
+            _ => false,
+        }
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.stage {
             Stage::Provider { .. } => self.provider_key(key, ctx),

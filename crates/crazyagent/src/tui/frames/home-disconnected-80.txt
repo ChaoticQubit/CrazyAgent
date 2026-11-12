@@ -21,4 +21,4 @@
                                                                                 
                                                                                 
  ✗ Lost the connection to the engine. Retrying in 3 s. What you typed is kept.  
- n New project  a Add project  Enter Open  s Settings  / Filter          ? Help 
+ p New project  a Add project  Enter Open  s Settings  / Filter          ? Help 

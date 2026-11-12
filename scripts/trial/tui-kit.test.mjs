@@ -68,6 +68,7 @@ test("keyArgs names tmux keys and refuses a name that is not one; go refuses an 
   assert.deepEqual(keyArgs("Shift-Left"), ["S-Left"]);
   assert.deepEqual(keyArgs("Ctrl-T"), ["C-t"]);
   assert.deepEqual(keyArgs("y"), ["-l", "y"]);
+  assert.deepEqual(keyArgs("+"), ["-l", "+"]);
   assert.throws(() => keyArgs("Enter; kill-server"), /a key name looks like/);
   assert.throws(() => keyArgs(""), /a key name looks like/);
   await assert.rejects(startTui({ argv: ["crazyagent", "tui"], env: {}, evidence: tmpdir() }), /argv\[0\] must be an absolute path/);

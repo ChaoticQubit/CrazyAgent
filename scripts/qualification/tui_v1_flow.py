@@ -488,7 +488,7 @@ def pools(term):
 
 
 def new_project(term):
-    term.key(b"n")
+    term.key(b"p")
     term.wait("Tell agents what you are building.", 20)
     term.type(PROJECT)
     term.key(ENTER)

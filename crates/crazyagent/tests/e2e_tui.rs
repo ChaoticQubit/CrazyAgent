@@ -4,10 +4,16 @@ mod e2e_support;
 
 use crazyagent::engine::owner::{OwnerData, OwnerRead, OwnerResult};
 use crazyagent::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
+use crazyagent::notifications::{
+    Banners, Delivery, NoticeAction, NoticeKind, NoticeReport, NoticeSettings,
+};
 use crazyagent::protocol::ProjectId;
+use crazyagent::questions::{self, Ask, EngineSource, QuestionKind};
 use crazyagent::setup::{Dependency, DependencyState, PackState, SetupStatus};
 use crazyagent::terminal::tmux::installed;
-use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, repository, scratch, stop_tmux};
+use e2e_support::{
+    ENGINE, Engine, Owner, TMUX, hex, profile, repository, result, scratch, stop_tmux,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -154,12 +160,16 @@ fn on_team(screen: &str, project: &str) -> bool {
     screen.contains(&format!("/  {project}  /  Team")) && screen.contains("Master")
 }
 
-/// Whether the crumbs end on the project named exactly `project`, or go on to one of its
-/// tabs. Inputs: the screen and the project name. Output: true when the crumbs name it.
+/// Whether the crumbs end on the project named exactly `project`, go on to one of its
+/// tabs, or are followed by the header's right status, such as the notification counts,
+/// which sits at least three spaces after the last crumb. Inputs: the screen and the
+/// project name. Output: true when the crumbs name it.
 fn in_project(screen: &str, project: &str) -> bool {
     let crumbs = screen.lines().next().unwrap_or_default().trim_end();
     let place = format!("/  {project}");
-    crumbs.ends_with(&place) || crumbs.contains(&format!("{place}  /  "))
+    crumbs.ends_with(&place)
+        || crumbs.contains(&format!("{place}  /  "))
+        || crumbs.contains(&format!("{place}   "))
 }
 
 /// Whether Home's selection bar marks the card named exactly `project`: the bar, then the
@@ -1687,4 +1697,314 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
     }
     drop(pty);
     engine.stop();
+}
+
+const NOTICE_PROJECT: &str = "e2e-notice";
+
+/// The header row of a captured screen, where the notification counts show.
+/// Input: the screen. Output: its first line, empty for an empty capture.
+fn header_row(screen: &str) -> &str {
+    screen.lines().next().unwrap_or("")
+}
+
+/// Sends one change to the notification store as the owner, the way another client does
+/// while the TUI runs, and expects it applied. Inputs: the runtime, the engine and the
+/// change. Output: none; panics when the engine refuses it.
+fn notice_change(runtime: &tokio::runtime::Runtime, engine: &Engine, action: NoticeAction) {
+    runtime.block_on(async {
+        let mut owner = Owner::attach(engine).await;
+        let generation = owner.next();
+        let response = owner
+            .controller
+            .notification_action(action, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        assert_eq!(result(response), OwnerResult::Applied);
+    });
+}
+
+/// DEC-136a decision 10: the TUI header shows the notification store's unread and pending
+/// counts over every project and reads them again on each refresh. The project is set up
+/// with market research and no pool, so its research waits for a pool: that Action is the
+/// first unread and pending item. A reported app update adds one unread, an open question
+/// one unread and pending, and marking everything read from another client leaves the two
+/// pending Actions.
+#[test]
+fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
+    let mut engine = Engine::start("ca-e2e-notice-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-notice-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(NOTICE_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    pty.until(
+        "the header counts the research waiting for a pool",
+        |screen| header_row(screen).contains("1 unread, 1 pending"),
+    );
+
+    notice_change(
+        &runtime,
+        &engine,
+        NoticeAction::Report {
+            report: NoticeReport::AppUpdateReady {
+                version: "3.0.1".into(),
+            },
+        },
+    );
+    pty.until("the header counts the unread app update", |screen| {
+        header_row(screen).contains("2 unread, 1 pending")
+    });
+
+    let db = questions::open(engine.path()).unwrap();
+    questions::raise(
+        &db,
+        &ProjectId::new(NOTICE_PROJECT).unwrap(),
+        &EngineSource::Planning,
+        &Ask {
+            question: "Which page ships first?".into(),
+            kind: QuestionKind::Single,
+            options: vec!["Shop".into(), "Blog".into()],
+            recommended: Some("Shop".into()),
+            context: None,
+        },
+    )
+    .unwrap();
+    drop(db);
+    pty.until("the header counts the open question as pending", |screen| {
+        header_row(screen).contains("3 unread, 2 pending")
+    });
+
+    notice_change(
+        &runtime,
+        &engine,
+        NoticeAction::ReadAll { project_id: None },
+    );
+    pty.until("mark all read leaves the two pending Actions", |screen| {
+        let header = header_row(screen);
+        header.contains("2 pending") && !header.contains("unread")
+    });
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-136a key n: n on Home opens the notifications list over every project, Esc goes
+/// back, and Enter on the newest item, an open question, opens that project's Questions
+/// tab and marks the item read, so the header drops one unread and keeps it pending.
+#[test]
+fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_read() {
+    let mut engine = Engine::start("ca-e2e-notice-n-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-notice-n-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(NOTICE_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    pty.until("the research waiting for a pool is counted", |screen| {
+        header_row(screen).contains("1 unread, 1 pending")
+    });
+    let db = questions::open(engine.path()).unwrap();
+    questions::raise(
+        &db,
+        &ProjectId::new(NOTICE_PROJECT).unwrap(),
+        &EngineSource::Planning,
+        &Ask {
+            question: "Which page ships first?".into(),
+            kind: QuestionKind::Single,
+            options: vec!["Shop".into(), "Blog".into()],
+            recommended: Some("Shop".into()),
+            context: None,
+        },
+    )
+    .unwrap();
+    drop(db);
+    pty.until("the open question is counted", |screen| {
+        header_row(screen).contains("2 unread, 2 pending")
+    });
+
+    pty.keys(&["n"]);
+    pty.until("n opens the notifications list", |screen| {
+        header_row(screen).contains("Notifications")
+            && screen.contains("Which page ships first?")
+            && screen.contains("Waiting for a pool")
+    });
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to Home", |screen| at_home(screen, PROJECT));
+
+    pty.keys(&["n"]);
+    pty.until("the list opens again on the newest item", |screen| {
+        header_row(screen).contains("Notifications") && screen.contains("Which page ships first?")
+    });
+    pty.keys(&["Enter"]);
+    pty.until(
+        "Enter opens the question's project on Questions, read but still pending",
+        |screen| {
+            let header = header_row(screen);
+            header.contains(&format!("/  {PROJECT}  /  Questions"))
+                && header.contains("1 unread, 2 pending")
+                && screen.contains("Which page ships first?")
+        },
+    );
+    drop(pty);
+    engine.stop();
+}
+
+/// DEC-136a slice 3: saves `seed` as the stored notification settings, opens Settings /
+/// Notifications through Go to against that engine, sends `keys`, saves with Enter and
+/// reads back what the engine holds. Inputs: the settings stored first and the keys.
+/// Output: the settings after the save; panics when the page or the save never shows.
+fn notice_settings_after(seed: NoticeSettings, keys: &[&str]) -> NoticeSettings {
+    let mut engine = Engine::start("ca-e2e-notice-set-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-notice-set-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(NOTICE_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+    notice_change(
+        &runtime,
+        &engine,
+        NoticeAction::SaveSettings { settings: seed },
+    );
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    pty.keys(&["C-k"]);
+    pty.text("Settings / Notif");
+    pty.keys(&["Enter"]);
+    pty.until("Go to opens Settings / Notifications", |screen| {
+        header_row(screen).contains("Settings  /  Notifications")
+            && screen.contains("Action items")
+            && screen.contains("What reaches you, and how long finished items stay.")
+    });
+    pty.keys(keys);
+    pty.until("the pick waits for Enter", |screen| {
+        screen.contains("Save changes")
+    });
+    pty.keys(&["Enter"]);
+    pty.until("the save is confirmed", |screen| {
+        screen.contains("Notification settings saved.")
+    });
+    let settings = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let settings = owner.controller.notification_settings().await.unwrap();
+        owner.controller.detach();
+        settings
+    });
+    drop(pty);
+    engine.stop();
+    settings
+}
+
+/// The default settings with one kind's delivery changed. Inputs: the kind and the
+/// delivery. Output: the settings.
+fn notice_kind(kind: NoticeKind, delivery: Delivery) -> NoticeSettings {
+    let mut settings = NoticeSettings::default();
+    for item in &mut settings.kinds {
+        if item.kind == kind {
+            item.delivery = delivery;
+        }
+    }
+    settings
+}
+
+#[test]
+fn the_tui_saves_an_action_kind_as_bell_only() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["Right"]);
+    assert_eq!(saved, notice_kind(NoticeKind::Question, Delivery::BellOnly));
+}
+
+#[test]
+fn the_tui_saves_an_action_kind_back_to_on() {
+    let saved = notice_settings_after(
+        notice_kind(NoticeKind::Question, Delivery::BellOnly),
+        &["Right"],
+    );
+    assert_eq!(saved, NoticeSettings::default());
+}
+
+#[test]
+fn the_tui_saves_an_info_kind_as_off() {
+    let saved = notice_settings_after(
+        NoticeSettings::default(),
+        &["Down", "Down", "Down", "Down", "Down", "Right", "Right"],
+    );
+    assert_eq!(saved, notice_kind(NoticeKind::AgentFinished, Delivery::Off));
+}
+
+#[test]
+fn the_tui_saves_macos_notifications_off() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["End", "Up", "Right"]);
+    assert_eq!(saved.banners, Banners::Off);
+}
+
+#[test]
+fn the_tui_saves_macos_notifications_for_action_items_only() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["End", "Up", "Right", "Right"]);
+    assert_eq!(saved.banners, Banners::ActionOnly);
+}
+
+#[test]
+fn the_tui_saves_macos_notifications_for_all_items() {
+    let seed = NoticeSettings {
+        banners: Banners::Off,
+        ..NoticeSettings::default()
+    };
+    let saved = notice_settings_after(seed, &["End", "Up", "Right", "Right"]);
+    assert_eq!(saved.banners, Banners::All);
+}
+
+#[test]
+fn the_tui_saves_the_days_done_items_stay() {
+    let saved = notice_settings_after(NoticeSettings::default(), &["End", "4", "5"]);
+    assert_eq!(
+        saved,
+        NoticeSettings {
+            retention_days: 45,
+            ..NoticeSettings::default()
+        }
+    );
 }

@@ -375,6 +375,40 @@ async fn answer_sends_the_version_read() {
 }
 
 #[tokio::test]
+async fn the_dismiss_question_reports_asking_so_n_keeps_the_question() {
+    let mut engine = Engine::start().await;
+    let region = engine.ask(
+        "Which hosting region should the shop use?",
+        &["Europe", "North America"],
+        "Europe",
+    );
+    let mut screen = screen(&engine);
+    engine.pump(&mut screen, NOW).await.unwrap();
+    assert!(!screen.questions.asking() && !screen.asking());
+
+    assert!(screen.questions.key(key(KeyCode::Char('d'))));
+    assert!(screen.questions.asking());
+    assert!(screen.asking(), "the Questions tab reports its own ask");
+    screen.tab = Tab::Overview;
+    assert!(!screen.asking(), "an ask on a hidden tab answers nothing");
+    screen.tab = Tab::Questions;
+    assert!(screen.questions.key(key(KeyCode::Char('n'))));
+    assert!(!screen.questions.asking() && !screen.asking());
+    assert_eq!(engine.pump(&mut screen, NOW + 1).await, None, "n kept it");
+    assert_eq!(
+        engine.status(region).await,
+        (QuestionStatus::Pending, None, 0)
+    );
+
+    assert!(screen.questions.key(key(KeyCode::Char('a'))));
+    assert!(screen.questions.editing());
+    assert!(
+        !screen.questions.asking(),
+        "the answer box types n, so the shell never sees it"
+    );
+}
+
+#[tokio::test]
 async fn footer_badge_counts_pending_questions() {
     let engine = Engine::start().await;
     engine.ask(

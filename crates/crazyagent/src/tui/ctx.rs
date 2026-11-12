@@ -1,4 +1,5 @@
 use super::client::learning::LearningQuery;
+use super::client::notifications::NoticesQuery;
 use super::client::questions::QuestionsQuery;
 use super::frame::Message;
 use super::glyphs::Glyphs;
@@ -71,6 +72,7 @@ pub struct Store {
         Option<crate::protocol::ProjectId>,
         crate::landing::WaitingChanges,
     )>,
+    pub notices: Option<crate::notifications::NoticeCounts>,
 }
 
 impl Store {
@@ -98,7 +100,19 @@ impl Default for Store {
             projects_seen: None,
             questions: Load::Idle,
             waiting: None,
+            notices: None,
         }
+    }
+}
+
+/// Says whether a request is one of the shell's badge reads, which every refresh queues:
+/// the pending-questions count for the footer or the notification counts for the header.
+/// Input: the request. Output: true for either read.
+fn badge_read(request: &Request) -> bool {
+    match request {
+        Request::Questions(query) => **query == QuestionsQuery::Counts,
+        Request::Notices(query) => **query == NoticesQuery::counts(),
+        _ => false,
     }
 }
 
@@ -247,8 +261,12 @@ impl Ctx {
             queued.extend_from_slice(bytes);
             return Ok(());
         }
-        let counts = |queued: &Request| matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts);
-        if counts(&request) && self.requests.iter().any(counts) {
+        if badge_read(&request)
+            && self.requests.iter().any(|queued| {
+                badge_read(queued)
+                    && std::mem::discriminant(queued) == std::mem::discriminant(&request)
+            })
+        {
             return Ok(());
         }
         let read = matches!(
@@ -295,18 +313,17 @@ impl Ctx {
     }
 
     /// Takes the oldest queued request other than the shell's own: the pending-questions
-    /// count every refresh queues for the footer badge and the learning marks a page or a
-    /// terminal sets, so a test reads what a screen sent. Input: none. Output: that
-    /// request, if one waits; the shell's requests stay queued.
+    /// and notification counts every refresh queues for the footer badge and the header,
+    /// and the learning marks a page or a terminal sets, so a test reads what a screen
+    /// sent. Input: none. Output: that request, if one waits; the shell's stay queued.
     #[cfg(test)]
     pub fn next_screen_request(&mut self) -> Option<Request> {
         let index = self.requests.iter().position(|queued| match queued {
-            Request::Questions(query) => **query != QuestionsQuery::Counts,
             Request::Learning(query) => !matches!(
                 **query,
                 LearningQuery::Mark { step, .. } if step != MarkStep::Skipped
             ),
-            _ => true,
+            other => !badge_read(other),
         })?;
         self.requests.remove(index)
     }

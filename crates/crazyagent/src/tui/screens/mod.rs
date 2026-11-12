@@ -13,6 +13,7 @@ pub(in crate::tui) mod new_project;
 mod new_project_input;
 pub(in crate::tui) mod new_project_page;
 pub(in crate::tui) mod new_project_view;
+pub(in crate::tui) mod notifications;
 pub mod onboarding;
 pub(in crate::tui) mod planning_line;
 pub(in crate::tui) mod process;
@@ -239,6 +240,8 @@ pub enum Place {
     AddFolder,
     CloneRepo,
     Usage,
+    Notifications,
+    NotificationSettings,
     Demo,
     Onboarding {
         path: String,
@@ -338,6 +341,12 @@ pub trait Screen {
     fn raw(&self) -> bool {
         false
     }
+    /// True while an open question on the screen answers n: a y/n ask, a review decision,
+    /// a retry or recount offer. The shell then leaves n to the screen instead of opening
+    /// the notifications list (DEC-136a key n), so n is never lost as No. False by default.
+    fn asking(&self) -> bool {
+        false
+    }
 
     /// Handles one key the shell did not take as a global key.
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow;
@@ -418,6 +427,8 @@ pub trait Screen {
             | Place::AddFolder
             | Place::CloneRepo
             | Place::Usage
+            | Place::Notifications
+            | Place::NotificationSettings
             | Place::Demo => None,
         }
     }
@@ -478,6 +489,8 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
+        Place::Notifications => Box::new(notifications::Notifications::new()),
+        Place::NotificationSettings => Box::new(settings::notices::NotificationSettingsPage::new()),
         Place::CheckSettings { project } => {
             Box::new(settings::checks::CheckSettingsPage::new(match project {
                 None => process::Scope::App,

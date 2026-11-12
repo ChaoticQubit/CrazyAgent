@@ -46,12 +46,12 @@ pub(super) const NEW_SESSION_STARTING: &str = "A new session is already starting
 /// What the owner reads when New session is pressed while another master step, such as a
 /// sent message, a session switch or a stop, is still under way (P2 r1, TUIP2-L1).
 const LAST_STEP_UNDER_WAY: &str =
-    "Your last request is still being handled. Press n again when it is done.";
+    "Your last request is still being handled. Press + again when it is done.";
 
 /// Why a New session waiting for the current settings ended unsent when the engine
 /// connection changed while they were read.
 const RENEWAL_DROPPED: &str =
-    "The connection to the engine changed before the settings were read. Press n to try again.";
+    "The connection to the engine changed before the settings were read. Press + to try again.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
@@ -1197,7 +1197,7 @@ impl State {
                 self.notice =
                     format!("Metadata unavailable: {problem}; inspect Settings; Ctrl-R refreshes");
                 self.drop_renewal(format!(
-                    "The current settings could not be read ({problem}). Press n to try again."
+                    "The current settings could not be read ({problem}). Press + to try again."
                 ));
             }
         }

@@ -17,7 +17,7 @@
                        │ Ctrl-Q       Quit                                                      │                       
                        │                                                                        │                       
                        │ Text fields                         This screen                        │                       
-                       │ ←→           Move the cursor        n         New project              │                       
+                       │ ←→           Move the cursor        p         New project              │                       
                        │ Ctrl-A E     Start, end             a         Add project              │                       
                        │ Ctrl-W       Delete a word          s         Settings                 │                       
                        │ Ctrl-U       Clear the field        Enter     Open project             │                       

@@ -134,7 +134,7 @@ fn the_list_and_header_draw_every_session_at_80_and_120_columns() {
                 ("Enter", "Resume"),
                 ("m", "Messages"),
                 ("d", "Delete"),
-                ("n", "New session"),
+                ("+", "New session"),
                 ("Esc", "Back")
             ]
         );
@@ -158,26 +158,33 @@ fn the_list_and_header_draw_every_session_at_80_and_120_columns() {
     );
     assert_eq!(
         Sessions::conversation_help(),
-        vec![("n", "New session"), ("l", "Sessions")]
+        vec![("+", "New session"), ("l", "Sessions")]
     );
 }
 
 #[test]
-fn n_starts_a_new_session_and_asks_first_while_a_turn_runs() {
+fn plus_starts_a_new_session_and_asks_first_while_a_turn_runs() {
     let mut sessions = opened();
     sessions.key(press(KeyCode::Esc), true, false);
     assert!(!sessions.showing());
     assert_eq!(
         sessions.key(press(KeyCode::Char('n')), true, false),
+        SessionsReply::Ignored,
+        "n opens the notifications list, not a new session (DEC-136a key n)"
+    );
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('+')), true, false),
         SessionsReply::Act(SessionsAction::New {
             cancel_running: false
         })
     );
+    assert!(!sessions.asking());
     assert_eq!(
-        sessions.key(press(KeyCode::Char('n')), true, true),
+        sessions.key(press(KeyCode::Char('+')), true, true),
         SessionsReply::Handled
     );
     assert!(sessions.showing());
+    assert!(sessions.asking(), "the open question keeps n as its No");
     let (body, help) = sessions.view(76, 12, NOW, 0, &Look::plain()).unwrap();
     assert_eq!(
         texts(&body),
@@ -199,20 +206,21 @@ fn n_starts_a_new_session_and_asks_first_while_a_turn_runs() {
         })
     );
     assert!(!sessions.showing());
-    sessions.key(press(KeyCode::Char('n')), true, true);
+    sessions.key(press(KeyCode::Char('+')), true, true);
     assert_eq!(
         sessions.key(press(KeyCode::Char('n')), true, true),
         SessionsReply::Handled
     );
     assert!(!sessions.showing(), "n keeps the turn running");
+    assert!(!sessions.asking());
     assert_eq!(
-        sessions.key(press(KeyCode::Char('n')), false, false),
+        sessions.key(press(KeyCode::Char('+')), false, false),
         SessionsReply::Ignored,
         "not before the master is ready"
     );
     assert_eq!(
         sessions.key(
-            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('+'), KeyModifiers::CONTROL),
             true,
             false
         ),

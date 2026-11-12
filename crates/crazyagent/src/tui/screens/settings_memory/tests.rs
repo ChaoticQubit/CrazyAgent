@@ -432,8 +432,13 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
     );
     let (lines, _) = screen.body(76, &ctx);
     assert!(texts(&lines).iter().all(|line| line != "No memories yet."));
+    assert!(!screen.asking(), "the list leaves n to the shell");
 
     screen.key(&Key::Enter, &mut ctx);
+    assert!(
+        screen.asking(),
+        "an open suggestion takes n as Dismiss (DEC-136a key n)"
+    );
     screen.key(&Key::Char('n'), &mut ctx);
     assert!(matches!(
         job(&mut ctx),
