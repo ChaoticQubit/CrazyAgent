@@ -6,7 +6,10 @@ use crazyagent::notifications::{NoticeAction, NoticePage, NoticeQuery, NoticeSet
 /// exactly.
 const GENERATION_MAX: u64 = 9_007_199_254_740_991;
 
-fn read_failure(code: &str) -> BridgeError {
+/// Maps an engine refusal of a notification read: a refused query as itself, anything else
+/// as a failed owner read with the engine code behind it. Input: the engine code. Output:
+/// the bridge error.
+pub(crate) fn read_failure(code: &str) -> BridgeError {
     if code == "notification_query_invalid" {
         return failure("notification_query_invalid");
     }
