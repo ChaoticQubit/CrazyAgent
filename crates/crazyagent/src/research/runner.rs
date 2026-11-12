@@ -1636,21 +1636,20 @@ impl ResearchRunner {
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
             sandbox = sandbox.hide(sub)?;
         }
-        let secrets = match run.project {
+        let shared = match run.project {
             Some(project) => {
                 ResearchJobs::open(&self.database)?
                     .agent_policy(project)
                     .map_err(|_| RunError::Invalid("project agent policy unreadable".into()))?
                     .shared_folders
-                    .secrets
             }
-            None => Vec::new(),
+            None => crate::sandbox::shared_folders::SharedFolders::default(),
         };
-        let closed = crate::sandbox::shared_folders::SharedFolders {
-            secrets,
-            ..Default::default()
+        let read_only = crate::sandbox::shared_folders::SharedFolders {
+            access: crate::sandbox::shared_folders::SharedAccess::ReadOnly,
+            ..shared
         };
-        sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &closed)
+        sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &read_only)
             .map_err(|code| RunError::Invalid(code.into()))?;
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
@@ -4058,6 +4057,80 @@ mod tests {
             )),
             "{profile}"
         );
+    }
+
+    /// L4 r1 H1: a read-only run follows the project's shared folders choice too. Under
+    /// Chosen an untracked local folder not picked stays closed, and a saved Read-write never
+    /// opens the picked one for writes, since a read-only run only reads.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_keeps_the_folders_the_project_does_not_share_closed() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("README.md"), "readme\n").unwrap();
+        repository_git(&folder, &["init", "-q"]);
+        repository_git(&folder, &["add", "README.md"]);
+        repository_git(&folder, &["commit", "-q", "-m", "Start"]);
+        for name in ["notes", "drafts"] {
+            fs::create_dir(folder.join(name)).unwrap();
+            fs::write(folder.join(name).join("plan.txt"), "plan\n").unwrap();
+        }
+        let project = ProjectId::new("alpha").unwrap();
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        let policy = crate::sandbox::policy::AgentPolicy {
+            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+                scope: crate::sandbox::shared_folders::SharedScope::Chosen,
+                access: crate::sandbox::shared_folders::SharedAccess::ReadWrite,
+                chosen: vec!["notes".into()],
+                secrets: Vec::new(),
+            },
+            ..Default::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        drop(connection);
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-2",
+            agent: "overview",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-2.sb"))
+            .expect("the run installed its profile");
+        assert!(
+            profile.contains(&format!(
+                "(subpath \"{}\")",
+                folder.join("drafts").display()
+            )),
+            "{profile}"
+        );
+        let writes = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .and_then(|rest| rest.split(")\n").next())
+            .expect("the profile allows its own writes");
+        assert!(!writes.contains(&folder.display().to_string()), "{writes}");
     }
 
     fn host() -> HostStamp {
