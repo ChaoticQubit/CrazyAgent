@@ -269,6 +269,35 @@ fn the_folder_probes_run_again_only_after_a_failure_or_a_miss_backing_off_to_ten
 }
 
 #[test]
+fn an_explicit_retry_starts_a_folder_run_at_once_whatever_the_backoff_but_never_a_second_one() {
+    let first = Instant::now();
+    let found = PathBuf::from("/a/bin");
+    let mut probes = Probes::new();
+    assert!(probes.start(first, false));
+    assert!(!probes.start_now(), "one run at a time");
+    probes.finish(Vec::new(), false, first);
+    let mut at = first;
+    for _ in 0..8 {
+        at += BACKOFF_MAX;
+        assert!(probes.start(at, false));
+        probes.finish(Vec::new(), false, at);
+    }
+    assert!(
+        !probes.start(at + RETRY_AFTER, true),
+        "a miss waits out the long backoff"
+    );
+    assert!(probes.start_now(), "a user's retry runs at once");
+    assert!(!probes.start_now(), "and never twice at a time");
+    probes.finish(vec![found.clone()], true, at);
+    assert_eq!(probes.found, [found]);
+    assert_eq!(
+        probes.streak, 0,
+        "finding something new starts the backoff over"
+    );
+    assert!(probes.start(at + RETRY_AFTER, true));
+}
+
+#[test]
 fn steady_resolves_start_a_bounded_number_of_folder_runs_an_hour() {
     for complete in [false, true] {
         let first = Instant::now();
