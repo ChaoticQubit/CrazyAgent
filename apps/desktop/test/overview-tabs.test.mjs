@@ -128,7 +128,23 @@ test("Refresh is disabled while a run is going and when the tabs are off", () =>
 test("a failed run shows its plain reason and keeps the tab text", () => {
   const html = page({ selected: "features", overview: { ...withTab(base(), "features", "- Search\n"), failure: "The account is out of usage" } });
   assert.match(html, /Couldn&#x27;t refresh the tabs\. The account is out of usage/);
+  assert.match(html, /role="alert"[^>]*>Couldn&#x27;t refresh the tabs\. The account is out of usage/);
   assert.match(html, /Search/);
+});
+
+test("a run that waits for an account says why under a status, never as a failed refresh alert, while it is queued or running", () => {
+  const reason = "No account in this project's pool can run the refresh";
+  const waiting = { ...base(), stale: true, failure: reason };
+  for (const overview of [waiting, { ...waiting, stale: false, running: true }]) {
+    const html = page({ selected: "features", overview });
+    assert.doesNotMatch(html, /role="alert"/);
+    assert.doesNotMatch(html, /Couldn&#x27;t refresh the tabs/);
+    assert.match(html, /<p class="pj-muted" role="status">No account in this project&#x27;s pool can run the refresh<\/p>/);
+  }
+  const ended = page({ selected: "features", overview: { ...base(), failure: reason } });
+  assert.match(ended, /<p class="pj-error" role="alert">Couldn&#x27;t refresh the tabs\. No account in this project&#x27;s pool can run the refresh<\/p>/);
+  const off = page({ selected: "features", overview: { ...waiting, refresh: "off" } });
+  assert.match(off, /role="alert"[^>]*>Couldn&#x27;t refresh the tabs\./);
 });
 
 test("the strip says when the tabs were last checked and that a run is writing", () => {
