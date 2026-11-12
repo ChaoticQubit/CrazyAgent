@@ -33,6 +33,7 @@ pub mod ledger;
 pub mod master_session;
 pub mod master_sessions;
 pub mod memory;
+pub mod model_choice;
 pub mod model_gateway;
 pub mod onboarding;
 pub mod owner_profile;
