@@ -630,6 +630,7 @@ fn bundle(folder: &Path) -> PathBuf {
         "crazyagent",
         "crazyagent-rcli",
         "crazyagent-runner",
+        "crazyagent-tmux",
         "crazyagent-landlock",
     ] {
         write_mode(&folder.join(name), &format!("{name} bytes"), 0o755);
@@ -737,8 +738,10 @@ fn persistable_runs_an_engine_outside_the_mount_in_place_and_copies_one_from_the
             "crazyagent",
             "crazyagent-landlock",
             "crazyagent-rcli",
-            "crazyagent-runner"
-        ]
+            "crazyagent-runner",
+            "crazyagent-tmux"
+        ],
+        "the bundled tmux is copied beside the engine, which finds it there (DEC-157)"
     );
     for name in &names {
         assert_eq!(
