@@ -127,7 +127,7 @@ impl NeedsYou {
             matches!(&item.target, NoticeTarget::AccountSignIn { account } if self.accounts.contains(account))
         });
         let mut rows: Vec<Notice> = pooled.chain(own.iter()).cloned().collect();
-        rows.sort_by(|a, b| b.id.cmp(&a.id));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.id));
         rows.dedup_by_key(|row| row.id);
         assert!(rows.len() <= own.len() + self.sign_ins.len());
         rows
