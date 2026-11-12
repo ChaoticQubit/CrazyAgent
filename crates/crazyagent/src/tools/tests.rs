@@ -470,3 +470,54 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
         );
     }
 }
+
+/// R-M1: the engine's data folder holds the agents' HOMEs, worktrees and team state, which
+/// agents write. A PATH folder there is refused while the engine's own `setup/bin` is kept,
+/// and a file found in `setup/bin` whose real file sits in an agent's HOME is passed over.
+#[test]
+fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_kept() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let setup = root.join("setup/bin");
+    let agent = root.join("team/agents/agent-1/bin");
+    let path = std::env::join_paths([&agent, &setup]).unwrap();
+    let engine = Places::engine(Some(&root), None, Some(home.clone()), Some(&path));
+    assert!(engine.folders().contains(&setup), "{:?}", engine.folders());
+    assert!(!engine.folders().contains(&agent), "{:?}", engine.folders());
+
+    let planted = program(&agent.join("tmux"), NODE);
+    std::fs::create_dir_all(&setup).unwrap();
+    std::os::unix::fs::symlink(&planted, setup.join("tmux")).unwrap();
+    let places = Places::engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")));
+    assert!(
+        resolve("tmux", &places).map_or(true, |tmux| tmux.program != planted),
+        "a link into an agent's HOME is never used"
+    );
+    std::fs::remove_file(setup.join("tmux")).unwrap();
+    let own = program(&setup.join("tmux"), NODE);
+    assert_eq!(resolve("tmux", &places).unwrap().program, own);
+}
+
+/// R-M1: a PATH or probed folder in a temp folder, which agents with the temp folder grant
+/// and other users write, is refused.
+#[test]
+fn a_path_or_probed_folder_in_a_temp_folder_is_refused() {
+    let (_folder, home) = scratch();
+    let owner_temp = std::env::temp_dir().join("tools-planted/bin");
+    let shared = PathBuf::from("/private/tmp/tools-planted/bin");
+    let path = std::env::join_paths([&owner_temp, &shared]).unwrap();
+    let engine = Places::engine(None, None, Some(home.clone()), Some(&path));
+    assert!(
+        !engine.folders().contains(&owner_temp),
+        "{:?}",
+        engine.folders()
+    );
+    assert!(
+        !engine.folders().contains(&shared),
+        "{:?}",
+        engine.folders()
+    );
+    let probed = engine.with_probed(vec![owner_temp.clone(), shared.clone()]);
+    assert!(!probed.folders().contains(&owner_temp));
+    assert!(!probed.folders().contains(&shared));
+}
