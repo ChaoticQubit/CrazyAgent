@@ -259,6 +259,15 @@ function queued(overview: ProjectOverview): boolean {
   return overview.stale && !overview.running && overview.refresh !== "off" && !overview.needs_home;
 }
 
+/** The stored failure line: an alert only for a run that ended. While a run is queued or
+ * writing, as one waiting for an account is, the same reason shows under a status, since
+ * that refresh has not failed. Input: the overview. Output: the line, or null with none. */
+function failureLine(overview: ProjectOverview): ReactNode {
+  if (!overview.failure) return null;
+  if (overview.running || queued(overview)) return <p className="pj-muted" role="status">{displayText(overview.failure)}</p>;
+  return <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>;
+}
+
 /** What a generated tab with no text says, by what will write it. Input: the overview.
  * Output: the line. */
 function unwritten(overview: ProjectOverview): string {
@@ -757,7 +766,7 @@ export function OverviewTabs({ data, overview, problem, now, selected, onSelect,
         <button type="button" className="btn" disabled={off || asking} onClick={() => void refresh()}>Refresh</button>
       </div>
     </div>
-    {overview?.failure && <p className="pj-error" role="alert">Couldn't refresh the tabs. {displayText(overview.failure)}</p>}
+    {overview !== null && failureLine(overview)}
     <div className="pj-stack-s" id="ov-panel" role="tabpanel" aria-labelledby={`ov-tab-${selected}`}>
       {missing}
       {selected === "activity" && activity}
