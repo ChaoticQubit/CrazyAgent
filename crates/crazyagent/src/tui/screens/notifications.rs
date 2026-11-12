@@ -477,7 +477,7 @@ impl Screen for Notifications {
             Key::Char('d') => self.change(FoldChange::Delete, ctx),
             Key::Char('a') => {
                 let project_id = self.project.clone();
-                send(NoticeAction::ReadAll { project_id }, ctx);
+                self.changing = BTreeSet::from([send(NoticeAction::ReadAll { project_id }, ctx)]);
             }
             Key::Char('f') => self.walk_filter(true, ctx),
             Key::Char('p') => self.walk_project(true, ctx),
