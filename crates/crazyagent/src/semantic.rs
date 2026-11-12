@@ -133,8 +133,11 @@ const HTTP_WANTED_MAX: usize = 1_024;
 const LOCAL_RETRY_MS: i64 = 10 * 60 * 1000;
 
 /// The local runtime opened for one engine root with the stamp of the files it opened, or
-/// the time its last open or embed failed.
-type LocalSlot = Option<(PathBuf, Result<(Stamp, Arc<local::LocalModel>), i64>)>;
+/// the stamp of the files whose last open or embed failed and when.
+type LocalSlot = Option<(
+    PathBuf,
+    Result<(Stamp, Arc<local::LocalModel>), (Stamp, i64)>,
+)>;
 static LOCAL: Mutex<LocalSlot> = Mutex::new(None);
 
 /// The projects waiting for an HTTP plugin's turn, whether the embedding thread runs, and
@@ -218,24 +221,26 @@ fn opened_local(root: &Path) -> Option<Arc<local::LocalModel>> {
 }
 
 /// Opens `root`'s local runtime on the indexer thread, outside the lock, and at most once
-/// per [`LOCAL_RETRY_MS`] after a failure. Inputs: the engine root and the time. Output:
-/// the model, or none while it is missing or failing.
+/// per [`LOCAL_RETRY_MS`] after a failure of the same files; new files are tried at once.
+/// Inputs: the engine root and the time. Output: the model, or none while it is missing or
+/// failing.
 pub(crate) fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalModel>> {
-    {
+    let stamp = {
         let mut slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(model) = cached_local(&mut slot, root) {
             return Some(model);
         }
-        if let Some((at, Err(failed))) = slot.as_ref() {
-            if at == root && now_ms - failed < LOCAL_RETRY_MS {
+        let stamp = local_stamp(root)?;
+        if let Some((at, Err((failed_stamp, failed)))) = slot.as_ref() {
+            if at == root && *failed_stamp == stamp && now_ms - failed < LOCAL_RETRY_MS {
                 return None;
             }
         }
-    }
-    let stamp = local_stamp(root)?;
+        stamp
+    };
     let opened = local::LocalModel::open(root)
-        .map(|model| (stamp, Arc::new(model)))
-        .map_err(|_| now_ms);
+        .map(|model| (stamp.clone(), Arc::new(model)))
+        .map_err(|_| (stamp, now_ms));
     let model = opened.as_ref().ok().map(|(_, model)| Arc::clone(model));
     *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), opened));
     model
@@ -245,14 +250,23 @@ pub(crate) fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalMod
 /// HYB3-L1): its files are missing, its last open of these same files failed, or it is
 /// still loading. Input: the engine root. Output: the note.
 pub(crate) fn local_note(root: &Path) -> &'static str {
-    let _ = root;
-    unimplemented!("rv-code2 HYB3-L1")
+    let Some(stamp) = local_stamp(root) else {
+        return vectors::NOTE_MODEL_MISSING;
+    };
+    let slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
+    match slot.as_ref() {
+        Some((at, Err((failed, _)))) if at == root && *failed == stamp => {
+            vectors::NOTE_MODEL_FAILED
+        }
+        _ => vectors::NOTE_LOADING,
+    }
 }
 
 /// Marks `root`'s local runtime failed after an embed error, so it is opened again later.
 /// Inputs: the engine root and the time. Output: none.
 fn local_failed(root: &Path, now_ms: i64) {
-    *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), Err(now_ms)));
+    let failed = local_stamp(root).map(|stamp| (root.to_owned(), Err((stamp, now_ms))));
+    *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = failed;
 }
 
 /// Closes the cached local runtime, freeing its open file. Output: none.
@@ -454,7 +468,7 @@ pub fn hybrid(
     let vector = match &loaded.manifest.runs {
         Runs::Local { .. } => {
             let Some(model) = opened_local(root) else {
-                return words_only(Some(vectors::NOTE_LOADING));
+                return words_only(Some(local_note(root)));
             };
             let reply = model.embed(&[text.as_str()]).ok();
             match reply.and_then(|reply| vectors::one_vector(reply, plugin.dimensions)) {
