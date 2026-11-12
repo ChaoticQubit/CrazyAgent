@@ -114,7 +114,7 @@ export const SHARED_SECRETS_LINE = "Secret files stay closed to agents wherever 
 export const SHARED_SECRETS_HOW = "To let agents read one, add its path inside the project folder, one per line.";
 
 /** The line before the shared-back secrets the choice cannot reach, the engine's UNREACHABLE_SECRETS_LINE. */
-export const SHARED_SECRETS_UNREACHABLE = "Still closed, since this choice does not share their folder:";
+export const SHARED_SECRETS_UNREACHABLE = "Still closed unless git tracks them, since this choice does not share their folder:";
 
 /** What the Linux and Windows sandboxes can and can't do with this setting, the engine's OFF_MACOS_LINE. */
 export const SHARED_FOLDERS_OFF_MACOS = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";

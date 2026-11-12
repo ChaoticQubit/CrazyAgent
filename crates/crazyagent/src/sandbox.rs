@@ -1572,12 +1572,11 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Keeps every top-level entry of the project folder [`Self::keep_project_secrets`] named
-    /// closed the way [`Self::keep_out`] does, but the names in `open`, so a folder or file
-    /// the owner makes there after launch stays closed too (L4 r1 L1); the agent's own
-    /// writable roots below it stay open, never the folder itself. Input: at most
+    /// Keeps every top-level entry of the [`Self::keep_project_secrets`] folder closed as
+    /// [`Self::keep_out`] does but `open`, so one made after launch stays closed (L4 r1 L1);
+    /// own writable roots below it stay open, never the folder itself. Input: at most
     /// [`OPEN_TOPS_MAX`] names, each [`plain_top`]. Output: the narrowed sandbox, or `Invalid`
-    /// without that project folder, for a second call or for a name out of shape.
+    /// without that folder, for a second call or for a name out of shape.
     pub fn open_only_tops(mut self, open: &[String]) -> Result<Self, SandboxError> {
         if self.project_secrets.is_none() || self.open_tops.is_some() {
             return Err(invalid(

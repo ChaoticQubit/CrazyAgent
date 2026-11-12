@@ -514,6 +514,36 @@ fn a_launch_past_the_keep_out_bound_or_without_git_is_refused() {
     let outside = tempfile::tempdir().unwrap();
     let missing = outside.path().canonicalize().unwrap().join("gone");
     assert_eq!(plan(&missing, &none), Err(UNLISTED));
+    let loose = outside.path().canonicalize().unwrap().join("loose");
+    std::fs::create_dir_all(&loose).unwrap();
+    std::fs::write(loose.join("notes.txt"), "x").unwrap();
+    assert_eq!(plan(&loose, &none), Err(UNLISTED), "a folder outside git");
+}
+
+/// L4 r1 H1: a read-only run on an empty folder outside git, as instruction cleanup makes,
+/// plans under Chosen folders and None with no git: nothing to keep out, and only the
+/// engine's and picked names open, so anything made there later stays closed.
+#[test]
+fn an_empty_folder_plans_without_git_and_keeps_later_entries_closed() {
+    let outside = tempfile::tempdir().unwrap();
+    let empty = outside.path().canonicalize().unwrap();
+    let none = SharedFolders {
+        scope: SharedScope::None,
+        ..SharedFolders::default()
+    };
+    let planned = plan(&empty, &none).unwrap();
+    assert!(planned.kept_out.is_empty() && planned.writes.is_empty());
+    let open = planned.open_tops.unwrap();
+    assert!(
+        open.iter()
+            .all(|name| engine_names(&empty).contains(&name.as_str())),
+        "{open:?}"
+    );
+    let open = plan(&empty, &chosen(&["program"]))
+        .unwrap()
+        .open_tops
+        .unwrap();
+    assert!(open.iter().any(|name| name == "program"), "{open:?}");
 }
 
 /// A wider choice than All with Read-only is refused off macOS before any grant.

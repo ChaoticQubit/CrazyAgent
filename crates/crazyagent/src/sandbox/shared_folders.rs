@@ -38,7 +38,7 @@ pub const INVALID: &str = "agent_policy_invalid";
 /// The line before the shared-back secrets a choice cannot reach, the same in the desktop
 /// app (L4 r1 L3).
 pub const UNREACHABLE_SECRETS_LINE: &str =
-    "Still closed, since this choice does not share their folder:";
+    "Still closed unless git tracks them, since this choice does not share their folder:";
 
 /// What the owner sees about the Linux and Windows gap, the same in the desktop app.
 pub const OFF_MACOS_LINE: &str = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";
@@ -246,8 +246,9 @@ pub struct Plan {
 /// path git lists (outside `.git` and `.crazyagent`) whose top-level folder is not shared to
 /// keep out, and under Read-write every shared top-level folder git does not track at all to
 /// write. Chosen folders and None also keep open only [`open_tops`], so an entry made after
-/// launch stays closed. Takes the project folder, canonical, and the choice. Returns the
-/// plan, or [`UNLISTED`] when git cannot list the paths and [`TOO_MANY`] past the bounds.
+/// launch stays closed; an empty folder needs no git. Takes the project folder, canonical,
+/// and the choice. Returns the plan, or [`UNLISTED`] when git cannot list the paths and
+/// [`TOO_MANY`] past the bounds.
 pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
     assert!(shared.validate().is_ok());
     let revealed: Vec<PathBuf> = shared
@@ -268,7 +269,11 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         SharedScope::All => None,
         SharedScope::Chosen | SharedScope::None => Some(top_names(root)?),
     };
-    let listed = untracked(root).ok_or(UNLISTED)?;
+    let listed = if present.as_ref().is_some_and(Vec::is_empty) {
+        Vec::new()
+    } else {
+        untracked(root).ok_or(UNLISTED)?
+    };
     let engine = engine_names(root);
     let mut kept_out = Vec::new();
     let mut writes = Vec::new();
@@ -330,11 +335,10 @@ fn top_names(root: &Path) -> Result<Vec<String>, &'static str> {
     Ok(names)
 }
 
-/// The top-level names a Chosen folders or None launch keeps open in the project folder
-/// `root` (L4 r1 L1): the engine's, the picked ones and each present one git tracks
-/// something in. Every other entry stays closed, one made after launch included; an
-/// untracked file made later inside a tracked folder still reads. Takes the folder, the
-/// choice, the present names and git's untracked paths. Returns the names, sorted, each
+/// The top-level names a Chosen folders or None launch keeps open in `root` (L4 r1 L1): the
+/// engine's, the picked ones and each present one git tracks something in, so any other
+/// entry stays closed, one made later included. Takes the folder, the choice, the present
+/// names and git's untracked paths. Returns the names, sorted, each
 /// [`crate::sandbox::plain_top`].
 fn open_tops(
     root: &Path,

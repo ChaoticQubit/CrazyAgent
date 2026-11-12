@@ -4128,9 +4128,16 @@ mod tests {
         let writes = profile
             .split("(allow file-write*")
             .nth(1)
-            .and_then(|rest| rest.split(")\n").next())
+            .and_then(|rest| rest.split("))\n").next())
             .expect("the profile allows its own writes");
         assert!(!writes.contains(&folder.display().to_string()), "{writes}");
+        assert!(
+            !profile.contains(&format!(
+                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")",
+                folder.join("notes").display()
+            )),
+            "{profile}"
+        );
     }
 
     fn host() -> HostStamp {

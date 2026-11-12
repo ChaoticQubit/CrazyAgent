@@ -415,12 +415,32 @@ fn read_write_never_moves_a_folder_that_holds_a_secret_out_of_the_name_rule() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("SECRET_VALUE_4471"));
 }
 
-/// L4 r1 asked row: cloning a plain-named folder that holds a secret from the read project
-/// folder into the agent's own folder leaves no secret in the copy.
+/// L4 r1 asked row: clonefileat(2) of a plain-named folder that holds a secret into the
+/// agent's own folder is refused while a plain file clones, so the call itself works, and
+/// `cp -c -R` of that folder leaves no secret in its copy.
 #[test]
 fn cloning_a_plain_folder_that_holds_a_secret_copies_no_secret() {
     let case = case();
     let sandbox = sandbox(&case, &SharedFolders::default());
+    let clone = |from: &Path, to: &Path| {
+        run(
+            &case,
+            &sandbox,
+            &format!(
+                "/usr/bin/perl -e 'exit(syscall(462, -2, $ARGV[0], -2, $ARGV[1], 0) == 0 ? 0 : 1)' {} {}",
+                quoted(from),
+                quoted(to)
+            ),
+        )
+    };
+    let plain = case.own.join("data.csv");
+    let output = clone(&case.repository.join("program").join("data.csv"), &plain);
+    assert!(output.status.success(), "a plain file clones: {output:?}");
+    assert_eq!(fs::read_to_string(&plain).unwrap(), "a,b\n");
+    let whole = case.own.join("whole");
+    let output = clone(&case.repository.join("config"), &whole);
+    assert!(!output.status.success(), "the folder cloned");
+    assert!(!whole.exists());
     let copy = case.own.join("cfg");
     run(
         &case,
