@@ -3387,16 +3387,11 @@ impl TeamView {
         (lines, self.help(), cursor)
     }
 
-    /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
-    /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
-    /// harness change applies, Sub-agent depth,
-    /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
-    /// commands), each whole. A
-    /// setting that does not fit on the row starts the next one, right-aligned under the
-    /// first. Counts wider
-    /// than the content are cut with an ellipsis like any row. Inputs: the content width and
-    /// the look. Output: one row, or more when the settings wrap.
+    /// The Team rows: the agent counts, a stopped team and alerts, then every team setting whole,
+    /// right-aligned. Settings wrap in order, or by first fit (a later setting moves up to a row
+    /// with room) when that takes fewer rows, so a short window keeps the plan line. Counts wider
+    /// than the content are cut like any row. Inputs: the content width and the look. Output:
+    /// one row, or more when the settings wrap.
     fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
         let Some(status) = &self.status else {
             return vec![Row::of("Team", look.accent).pad(content)];
@@ -3576,32 +3571,24 @@ impl TeamView {
             ),
             setting("Left running", leftover_words(status.leftovers).to_owned()),
         ];
-        let mut rows = Vec::new();
-        let mut right = Row::default();
-        for item in settings
+        let items: Vec<Row> = settings
             .into_iter()
             .chain(live_terminal)
             .chain(middle)
             .chain(master_lands)
             .chain(later)
-        {
-            let used = match (left.width(), right.width()) {
-                (0, 0) => 0,
-                (0, taken) | (taken, 0) => taken + 2,
-                (lead, taken) => lead + 2 + taken + 2,
-            };
-            if used > 0 && used + item.width() > content {
-                rows.push(spread(content, left, right));
-                left = Row::default();
-                right = Row::default();
-            }
-            right = if right.width() == 0 {
-                item
-            } else {
-                right.push("  ", look.muted).cat(item)
-            };
-        }
-        rows.push(spread(content, left, right));
+            .collect();
+        let in_order = pack(&items, left.clone(), content, false, look.muted);
+        let first_fit = pack(&items, left, content, true, look.muted);
+        let packed = if first_fit.len() < in_order.len() {
+            first_fit
+        } else {
+            in_order
+        };
+        let mut rows: Vec<Row> = packed
+            .into_iter()
+            .map(|(lead, right)| spread(content, lead, right))
+            .collect();
         for hold in status.leftover_holds.iter().take(LEFTOVER_ROWS_MAX) {
             rows.push(
                 Row::of("Left running  ", look.warning)
@@ -4561,6 +4548,45 @@ fn heads(widths: &[usize], names: &[&str], look: &Look) -> Row {
         )
         .restyle(look.muted),
     )
+}
+
+/// Packs the team settings onto summary rows after the counts, each setting whole. In order,
+/// a setting that does not fit starts the next row; first fit puts each setting on the first
+/// row with room for it. Inputs: the settings, the counts, the content width, whether to use
+/// first fit, and the style of the gap between settings. Output: each row's counts part and
+/// settings part, the counts on the first row only.
+fn pack(
+    items: &[Row],
+    counts: Row,
+    content: usize,
+    first_fit: bool,
+    gap: Style,
+) -> Vec<(Row, Row)> {
+    let used = |(lead, right): &(Row, Row)| match (lead.width(), right.width()) {
+        (0, 0) => 0,
+        (0, taken) | (taken, 0) => taken + 2,
+        (lead, taken) => lead + 2 + taken + 2,
+    };
+    let mut rows = vec![(counts, Row::default())];
+    for item in items {
+        let fits = |row: &(Row, Row)| used(row) == 0 || used(row) + item.width() <= content;
+        let at = if first_fit {
+            rows.iter().position(fits)
+        } else {
+            rows.last().is_some_and(fits).then(|| rows.len() - 1)
+        };
+        let at = at.unwrap_or_else(|| {
+            rows.push((Row::default(), Row::default()));
+            rows.len() - 1
+        });
+        let right = std::mem::take(&mut rows[at].1);
+        rows[at].1 = if right.width() == 0 {
+            item.clone()
+        } else {
+            right.push("  ", gap).cat(item.clone())
+        };
+    }
+    rows
 }
 
 fn plan_line(status: &TeamStatus) -> String {
