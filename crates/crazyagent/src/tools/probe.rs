@@ -28,24 +28,25 @@ pub(crate) const BEGIN: &str = "CRAZYAGENT-PATH-BEGIN";
 /// The line the login shell prints after its PATH.
 pub(crate) const END: &str = "CRAZYAGENT-PATH-END";
 /// The most bytes of output a probed program may give.
-const OUTPUT_BYTES_MAX: u64 = 64 * 1024;
+const OUTPUT_BYTES_MAX: usize = 64 * 1024;
 /// The longest folder or program path the probes accept.
 const PATH_BYTES_MAX: usize = 1024;
 /// The most programs whose versions are cached; others stay unknown.
 const VERSIONS_MAX: usize = 64;
 /// How often a timed run checks whether its program exited.
 const POLL: Duration = Duration::from_millis(10);
-/// How long a timed run waits for the output once its program exited.
+/// How long a timed run waits for the rest of the output once its program exited, before
+/// it closes the read end that a process outside the group may still hold.
 const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 /// The only search path a probed program inherits.
 const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-/// How long a probe that failed, timed out or answered a resolve that missed waits before
-/// it runs again.
+/// The first wait before a folder run that failed, or a resolve that missed, runs the
+/// probes again; a version probe that gave none waits this long too.
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(30);
-/// How old the folders of a complete run get before they are probed again.
-pub(crate) const REFRESH_AGE: Duration = Duration::from_secs(300);
 /// The longest a folder run waits after runs that failed or found nothing new.
 pub(crate) const BACKOFF_MAX: Duration = Duration::from_secs(600);
+/// How often the folder wait doubles before [`BACKOFF_MAX`] caps it.
+const DOUBLINGS_MAX: u32 = 5;
 /// The perl program that starts the login shell in a new session with no terminal, so an
 /// interactive shell can never take over the terminal the engine was started from.
 const NEW_SESSION: &str = "POSIX::setsid() > 0 or exit 1; exec {$ARGV[0]} @ARGV or exit 1";
@@ -92,8 +93,8 @@ pub fn version(program: &Path) -> Option<String> {
 }
 
 /// Tells the probes a resolve found nothing, so the folders are probed again in the
-/// background once the last run is [`RETRY_AFTER`] old; a run already going is enough.
-/// Never blocks.
+/// background once the last run waited out its backoff ([`Probes::start`]); a run already
+/// going is enough. Never blocks.
 pub fn missed() {
     refreshed(true);
 }
@@ -116,12 +117,14 @@ pub(crate) struct Run {
     pub(crate) complete: bool,
 }
 
-/// The folder probes' cache: the folders found, whether a run is going and the last run.
+/// The folder probes' cache: the folders found, whether a run is going, the last run, and
+/// how many runs in a row failed or found nothing new, which sets the backoff.
 #[derive(Debug)]
 pub(crate) struct Probes {
     pub(crate) found: Vec<PathBuf>,
     pub(crate) running: bool,
     pub(crate) last: Option<Run>,
+    pub(crate) streak: u32,
 }
 
 impl Probes {
@@ -131,18 +134,20 @@ impl Probes {
             found: Vec::new(),
             running: false,
             last: None,
+            streak: 0,
         }
     }
 
-    /// Marks a run as going when one is due: none ran yet, or with no run going, the last
-    /// one failed or a resolve missed and it is [`RETRY_AFTER`] old, or it is
-    /// [`REFRESH_AGE`] old. Inputs: now and whether a resolve missed. Output: whether the
-    /// caller starts the run.
+    /// Marks a run as going when one is due: at first use, or with no run going, when the
+    /// last run failed or a resolve missed and the backoff passed: 30 s, then doubling for
+    /// each run in a row that failed or found nothing new, at most [`BACKOFF_MAX`]. A
+    /// complete run is never run again on its own. Inputs: now and whether a resolve
+    /// missed. Output: whether the caller starts the run.
     pub(crate) fn start(&mut self, now: Instant, missed: bool) -> bool {
+        let wait = backoff(self.streak);
         let due = !self.running
             && self.last.is_none_or(|last| {
-                let age = now.saturating_duration_since(last.finished);
-                age >= REFRESH_AGE || ((missed || !last.complete) && age >= RETRY_AFTER)
+                (missed || !last.complete) && now.saturating_duration_since(last.finished) >= wait
             });
         if due {
             self.running = true;
@@ -151,14 +156,17 @@ impl Probes {
     }
 
     /// Records a finished run: a complete one replaces the folders, a failed one adds its
-    /// folders before the ones found earlier, at most [`FOLDERS_MAX`]. Inputs: the folders
-    /// found, whether every probe answered and now.
+    /// folders before the ones found earlier, at most [`FOLDERS_MAX`]. The backoff starts
+    /// over after a complete run that is the first or found something new, and grows after
+    /// any other. Inputs: the folders found, whether every probe answered and now.
     pub(crate) fn finish(&mut self, found: Vec<PathBuf>, complete: bool, now: Instant) {
         assert!(self.running, "a run finishes only after it started");
         assert!(found.len() <= FOLDERS_MAX);
+        let earlier = std::mem::take(&mut self.found);
+        let progressed = complete && (self.last.is_none() || found != earlier);
         let mut folders = found;
         if !complete {
-            for folder in std::mem::take(&mut self.found) {
+            for folder in earlier {
                 if folders.len() == FOLDERS_MAX {
                     break;
                 }
@@ -174,7 +182,22 @@ impl Probes {
             finished: now,
             complete,
         });
+        self.streak = if progressed {
+            0
+        } else {
+            self.streak.saturating_add(1)
+        };
     }
+}
+
+/// The wait before a run after a failure or a miss: [`RETRY_AFTER`] for a streak of none
+/// or one, doubling with each further run in the streak, at most [`BACKOFF_MAX`].
+/// Input: the streak. Output: the wait.
+fn backoff(streak: u32) -> Duration {
+    let doublings = streak.saturating_sub(1).min(DOUBLINGS_MAX);
+    let wait = RETRY_AFTER.saturating_mul(1 << doublings).min(BACKOFF_MAX);
+    assert!((RETRY_AFTER..=BACKOFF_MAX).contains(&wait));
+    wait
 }
 
 /// A folder run going on its thread: dropped without [`Running::finish`], such as when the
@@ -188,21 +211,33 @@ impl<'cache> Running<'cache> {
     /// Takes charge of the run [`Probes::start`] marked as going. Input: the cache.
     /// Output: the guard.
     pub(crate) fn new(probes: &'cache Mutex<Probes>) -> Self {
-        let _ = probes;
-        unimplemented!("probe Running::new")
+        assert!(
+            lock(probes).running,
+            "a run is marked as going before its thread takes it"
+        );
+        Self {
+            probes,
+            finished: false,
+        }
     }
 
     /// Records the run's folders and whether every probe in it answered.
     /// Inputs: the folders and the answer.
-    pub(crate) fn finish(self, found: Vec<PathBuf>, complete: bool) {
-        let _ = (found, complete);
-        unimplemented!("probe Running::finish")
+    pub(crate) fn finish(mut self, found: Vec<PathBuf>, complete: bool) {
+        lock(self.probes).finish(found, complete, Instant::now());
+        self.finished = true;
     }
 }
 
 impl Drop for Running<'_> {
     fn drop(&mut self) {
-        let _ = (self.probes, self.finished);
+        if self.finished {
+            return;
+        }
+        let mut probes = lock(self.probes);
+        if probes.running {
+            probes.finish(Vec::new(), false, Instant::now());
+        }
     }
 }
 
@@ -276,8 +311,9 @@ fn start_folder_probe() -> bool {
         std::thread::Builder::new()
             .name("tools-probe".to_owned())
             .spawn(|| {
+                let running = Running::new(&FOLDERS);
                 let (found, complete) = probe_folders();
-                lock(&FOLDERS).finish(found, complete, Instant::now());
+                running.finish(found, complete);
             })
             .is_ok()
     }
@@ -358,31 +394,31 @@ pub(crate) fn run_timed(command: &mut Command, limit: Duration) -> Option<Vec<u8
 }
 
 /// Runs a command that leads its own process group, made so by the caller or by starting a
-/// new session itself, as [`run_timed`] runs it. Inputs: the command and the limit.
-/// Output: the standard output, or none.
+/// new session itself, as [`run_timed`] runs it. The output is read without a thread from a
+/// non-blocking read end, closed when the run ends: at most [`OUTPUT_GRACE`] after the
+/// program exits, even when a process outside the group still holds the write end.
+/// Inputs: the command and the limit. Output: the standard output, or none.
 #[cfg(unix)]
 fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
-    use std::io::Read;
     use std::process::Stdio;
-    use std::time::Instant;
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let deadline = Instant::now() + limit;
     let mut child = crate::spawn_gate::spawn(command).ok()?;
-    let stdout = child.stdout.take().expect("standard output is piped");
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let reading = std::thread::Builder::new()
-        .name("tools-probe-output".to_owned())
-        .spawn(move || {
-            let mut output = Vec::new();
-            let read = stdout.take(OUTPUT_BYTES_MAX).read_to_end(&mut output);
-            let _ = sender.send(read.map(|_| output));
-        });
+    let mut stdout = child.stdout.take().expect("standard output is piped");
+    let nonblocking = rustix::fs::fcntl_getfl(&stdout)
+        .and_then(|flags| rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK))
+        .is_ok();
+    let mut output = Vec::new();
     let status = loop {
+        if !nonblocking {
+            break None;
+        }
+        drained(&mut stdout, &mut output);
         match child.try_wait() {
-            Ok(None) if reading.is_ok() && Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             Ok(None) | Err(_) => break None,
             Ok(Some(status)) => break Some(status),
         }
@@ -396,12 +432,44 @@ fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
     if !status.success() {
         return None;
     }
-    let grace = deadline
-        .saturating_duration_since(Instant::now())
-        .max(OUTPUT_GRACE);
-    let output = receiver.recv_timeout(grace).ok()?.ok()?;
-    assert!(u64::try_from(output.len()).is_ok_and(|length| length <= OUTPUT_BYTES_MAX));
+    let grace = Instant::now() + OUTPUT_GRACE;
+    while drained(&mut stdout, &mut output) == Pipe::Open && Instant::now() < grace {
+        std::thread::sleep(POLL);
+    }
+    drop(stdout);
+    assert!(output.len() <= OUTPUT_BYTES_MAX);
     Some(output)
+}
+
+/// Whether a run's output may still give bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pipe {
+    Open,
+    Ended,
+}
+
+/// Reads what a run's non-blocking output holds now, at most [`OUTPUT_BYTES_MAX`] in all.
+/// Inputs: the read end and the bytes read so far. Output: whether more may come; a full
+/// buffer, the end or a read error ends it.
+#[cfg(unix)]
+fn drained(stdout: &mut std::process::ChildStdout, output: &mut Vec<u8>) -> Pipe {
+    use std::io::{ErrorKind, Read};
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let room = OUTPUT_BYTES_MAX
+            .saturating_sub(output.len())
+            .min(chunk.len());
+        if room == 0 {
+            return Pipe::Ended;
+        }
+        match stdout.read(&mut chunk[..room]) {
+            Ok(0) => return Pipe::Ended,
+            Ok(read) => output.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Pipe::Open,
+            Err(_) => return Pipe::Ended,
+        }
+    }
 }
 
 /// Kills every process left in a timed run's group; a group already gone is fine.
