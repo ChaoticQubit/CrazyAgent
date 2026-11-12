@@ -3662,6 +3662,33 @@ fallback_allowed = false
             .collect()
     }
 
+    /// Writes a synthetic Codex `auth.json` into a managed profile whose access token lapses
+    /// in eight hours, with placeholder values only, so a master turn reads a long-lived
+    /// sign-in. Input: the managed profile's folder. Output: none.
+    fn long_lived_codex_auth(managed: &std::path::Path) {
+        use base64::Engine as _;
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 8 * 3600;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json!({"exp": expires})).unwrap());
+        let record = json!({
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": format!("unit-header.{claims}.unit-identity-signature"),
+                "access_token": format!("unit-header.{claims}.unit-signature"),
+                "refresh_token": "unit-refresh-placeholder",
+                "account_id": "unit-account"
+            },
+            "last_refresh": "2026-11-12T00:00:00Z"
+        });
+        let path = managed.join("auth.json");
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     /// DEC-150 F7, the S9 row: a signed-in Codex master's launch runs the owner's master
     /// model, read by `master_settings` and swapped into the turn's connection by
     /// `prepare_master_host`, and the account's own model while no master model is set.
@@ -3694,6 +3721,7 @@ fallback_allowed = false
                 .acquire_master_profile(&prepared, &id("master-model-turn"))
                 .await
                 .unwrap();
+            long_lived_codex_auth(&profile.profile_path().unwrap());
 
             let (settings, model) = host.master_settings(&prepared).await.unwrap();
             assert_eq!(model, None, "no master model is set yet");
