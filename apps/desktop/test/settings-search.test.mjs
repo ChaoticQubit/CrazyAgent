@@ -66,10 +66,12 @@ test("Search (S5, S6): a model not downloaded shows its size and Download, and t
   const before = text(render({ search: { kind: "ok", value: view({ model: { state: "not_downloaded", size_bytes: SIZE } }) } }));
   assert.ok(before.includes("Not on this computer. A 126 MB download, once; it then works offline."));
   assert.ok(before.includes("Download"));
-  const asked = text(render({ search: { kind: "ok", value: view({ model: { state: "not_downloaded", size_bytes: SIZE } }) }, dialog: { kind: "download" } }));
+  const asked = text(render({ search: { kind: "ok", value: view({ model: { state: "not_downloaded", size_bytes: SIZE } }) }, dialog: { kind: "download", bytes: SIZE } }));
   assert.ok(asked.includes("Download the built-in model?"));
   assert.ok(asked.includes("126 MB, once. CrazyAgent checks it before use; search uses full text until it is ready."));
   assert.ok(asked.includes("Cancel"));
+  const held = text(render({ search: { kind: "ok", value: view({ model: { state: "not_downloaded", size_bytes: SIZE } }) }, dialog: { kind: "download", bytes: 2000000 } }));
+  assert.ok(held.includes("2 MB, once."), "the confirm names the bytes it sends as confirm_bytes, held from when it opened (PUD-M2)");
   assert.equal(api.megabytes(SIZE), "126 MB");
   assert.equal(api.megabytes(0), "0 MB");
 });
@@ -116,6 +118,20 @@ test("Search: each action is a direct bridge call that names the host the confir
   }
   const page = readFileSync(new URL("../src/screens/settings/search.tsx", import.meta.url), "utf8");
   assert.match(page, /saveSearch\(\{ kind: "plugin", name: option\.name \}, hostOf\(option\.runs\.url\), /u, "the confirmed host is the one the dialog named");
+});
+
+test("Search (PUD-M2): the download start carries confirm_bytes, the size its confirm named", () => {
+  const file = readFileSync(new URL("../src/api-app-plugins.ts", import.meta.url), "utf8");
+  assert.match(file, /export function downloadSearchModel\(confirmBytes: number\): Promise<Result<SearchView>> \{\n  return call<SearchView>\("desktop_search_model_download", \{ confirmBytes \}\);/u);
+  const page = readFileSync(new URL("../src/screens/settings/search.tsx", import.meta.url), "utf8");
+  assert.match(page, /setDialog\(\{ kind: "download", bytes: search\.value\.model\.size_bytes \}\)/u);
+  assert.match(page, /const bytes = dialog\.bytes;\n\s*void model\(\(\) => downloadSearchModel\(bytes\)\);/u);
+  const bridge = readFileSync(new URL("../src-tauri/src/bridge/app_plugins.rs", import.meta.url), "utf8");
+  assert.match(bridge, /pub fn search_model_download\(\s*&self,\s*confirm_bytes: u64,?\s*\) -> Result<Unlocked<SearchView>, BridgeError>/u);
+  assert.match(bridge, /\.search_model_download\(confirm_bytes\)/u);
+  const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.match(lib, /async fn desktop_search_model_download\(\s*webview: Webview,\s*state: State<'_, NativeState>,\s*confirm_bytes: u64,\s*\)/u);
+  assert.match(lib, /\.search_model_download\(confirm_bytes\)\?;/u);
 });
 
 test("Search (PUD-M1): the page reads again while the model downloads or a usable chosen plugin is still embedding, and stops once nothing moves", () => {
