@@ -35,7 +35,7 @@ test("every model choice code the engine can answer has its own sentence", () =>
   for (const code of [...codes, "model_choice_stale"]) {
     assert(client.MODEL_CHOICE_REFUSALS.includes(code), `${code} has a sentence`);
     const words = client.modelChoiceRefusal({ code });
-    assert.doesNotMatch(words, /model_choice_|owner_|versioned_|_/, `${code} reads as words`);
+    assert.doesNotMatch(words, /\b[a-z]+_[a-z_]+\b/, `${code} reads as words, not a code`);
     assert.doesNotMatch(words, /\u2014/, "no em dash");
   }
   assert.equal(client.modelChoiceRefusal({ code: "model_choice_stale" }), client.MODEL_STALE_LINE);
