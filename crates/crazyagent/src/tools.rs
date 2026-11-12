@@ -357,6 +357,7 @@ pub enum Reason {
     NotFound,
     NeedsInterpreter,
     WrongVersion,
+    Refused,
 }
 
 impl Reason {
@@ -366,23 +367,44 @@ impl Reason {
             Self::NotFound => "tool_not_found",
             Self::NeedsInterpreter => "tool_needs_interpreter",
             Self::WrongVersion => "tool_wrong_version",
+            Self::Refused => "tool_refused",
         }
     }
 }
 
+/// Why the resolver passed over a file it found: a part another user or group can change,
+/// named so the owner knows what to fix, a file agents can write, or a version-manager shim
+/// with no real install found behind it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    OthersCanChange(PathBuf),
+    AgentsCanWrite,
+    Shim,
+}
+
+/// A file the resolver found and passed over, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub file: PathBuf,
+    pub why: Refusal,
+}
+
 /// A tool that cannot run: which one, why, the interpreter it needs when that is what is
-/// missing, and the folders looked in, kept apart from the owner line so the line is fixed.
+/// missing, the folders looked in and the first file passed over when no usable one was
+/// found, kept apart from the owner line so the line is fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub tool: String,
     pub reason: Reason,
     pub needs: Option<String>,
     pub looked: Vec<PathBuf>,
+    pub refused: Option<Refused>,
 }
 
 impl Missing {
-    /// The one owner line for this tool and reason, with how to install what is missing;
-    /// the same tool and reason always give the same line. Output: the line.
+    /// The one owner line for this tool and reason, with how to install what is missing, or
+    /// for a file passed over, the file, why and what to change, never an install hint; the
+    /// same tool, reason and file always give the same line. Output: the line.
     pub fn line(&self) -> String {
         match (self.reason, self.tool.as_str(), self.needs.as_deref()) {
             (Reason::NotFound, "tmux", _) => TMUX_MISSING.to_owned(),
@@ -399,6 +421,12 @@ impl Missing {
             (Reason::WrongVersion, tool, _) => {
                 format!("{tool} is too old for CrazyAgent. Update it, then try again.")
             }
+            (Reason::Refused, tool, _) => match &self.refused {
+                Some(refused) => refused_line(tool, refused),
+                None => format!(
+                    "{tool} can't start: the file found for it is not used, since others can change it. Check who can write it, then try again."
+                ),
+            },
         }
     }
 }
@@ -427,6 +455,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         reason: Reason::NotFound,
         needs: None,
         looked: places.folders.clone(),
+        refused: None,
     };
     if !valid_name(name) {
         return Err(not_found());
@@ -461,6 +490,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
             reason: Reason::NotFound,
             needs: None,
             looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
+            refused: None,
         })?;
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
@@ -474,6 +504,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         reason: Reason::NeedsInterpreter,
         needs: Some(name.to_owned()),
         looked: places.folders.clone(),
+        refused: None,
     };
     let interpreter_name = shebang.interpreter_name();
     if depth == INTERPRETER_DEPTH_MAX {
@@ -664,6 +695,25 @@ fn version(name: &str) -> Option<(u64, u64, u64)> {
         .parse()
         .ok()?;
     Some((major, minor, patch))
+}
+
+/// The owner line for a file the resolver passed over: the file, why and what to change,
+/// never how to install the tool, which would only answer that it is installed already.
+/// Inputs: the tool and the file passed over. Output: the line.
+fn refused_line(tool: &str, refused: &Refused) -> String {
+    let file = refused.file.display();
+    match &refused.why {
+        Refusal::OthersCanChange(part) => format!(
+            "{tool} can't start: {file} is not used because another user or group can change {}. Make it writable only by you or an admin (for example chmod go-w), then try again.",
+            part.display()
+        ),
+        Refusal::AgentsCanWrite => format!(
+            "{tool} can't start: {file} is not used because agents can change it there (inside a project, a .crazyagent folder or the app's data). Use a copy outside your projects, then try again."
+        ),
+        Refusal::Shim => format!(
+            "{tool} can't start: {file} is a version manager shim with no install found behind it. Add a version with that version manager, then try again."
+        ),
+    }
 }
 
 /// The owner's next step to install a tool by name. Input: the program name. Output: the
