@@ -343,13 +343,21 @@ const PLAIN: &[(&str, &str)] = &[
         "review this plugin's trust screen before turning it on.",
     ),
     ("app_plugin_refused", "this plugin's file is refused; fix it first."),
+    ("app_plugin_off", "this plugin is turned off."),
+    (
+        "app_plugin_needs_key",
+        "this plugin needs a key: pick an account or enter a key for it.",
+    ),
     ("app_plugin_secret_not_declared", "this plugin does not declare that secret."),
     ("app_plugin_account_not_found", "that account no longer exists."),
     (
         "app_plugin_account_has_no_key",
         "that account has no saved API key to use.",
     ),
-    ("app_plugin_key_invalid", "enter the key on one line, up to 8192 characters."),
+    (
+        "app_plugin_key_invalid",
+        "enter the key on one line with no spaces, up to 1024 characters.",
+    ),
     (
         "app_plugin_key_store_unavailable",
         "the key could not be saved; nothing was changed.",
@@ -358,6 +366,32 @@ const PLAIN: &[(&str, &str)] = &[
     ("app_plugin_request_bounds", "the request is too large."),
     ("app_plugin_outcome_unknown", "the engine did not answer in time; check the list again."),
     ("app_plugins_unavailable", "the engine could not be reached."),
+    (
+        "search_confirm_required",
+        "choosing a plugin that sends data off this Mac needs a confirm naming its host.",
+    ),
+    (
+        "search_choice_unavailable",
+        "that plugin is off, not ready or not an embedding plugin.",
+    ),
+    ("search_model_missing", "the local model is not downloaded yet."),
+    ("search_model_downloading", "the local model is already downloading."),
+    (
+        "search_model_download_failed",
+        "the local model could not be downloaded; check the connection and try again.",
+    ),
+    (
+        "search_model_mismatch",
+        "the downloaded file is not the expected model, so it was deleted.",
+    ),
+    (
+        "search_model_cancelled",
+        "the download was cancelled.",
+    ),
+    (
+        "search_model_store_unavailable",
+        "the model folder could not be read or written.",
+    ),
 ];
 
 #[cfg(test)]
@@ -367,7 +401,10 @@ mod tests {
     #[test]
     fn every_problem_code_has_one_plain_sentence() {
         for (index, (code, plain)) in PLAIN.iter().enumerate() {
-            assert!(code.starts_with("app_plugin"), "{code}");
+            assert!(
+                code.starts_with("app_plugin") || code.starts_with("search_"),
+                "{code}"
+            );
             assert!(!plain.is_empty() && !plain.contains('\u{2014}'), "{code}");
             assert!(
                 PLAIN[index + 1..].iter().all(|(other, _)| other != code),

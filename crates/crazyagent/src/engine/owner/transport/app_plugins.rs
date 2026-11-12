@@ -506,10 +506,10 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
     match action {
         Action::List => listing(&db),
         Action::Preview { yaml } => Ok(Reply::Preview {
-            preview: Box::new(store::preview(&db, root, &yaml)?),
+            preview: Box::new(store::preview(root, &yaml)?),
         }),
         Action::Review { name } => Ok(Reply::Preview {
-            preview: Box::new(store::review(&db, root, &name)?),
+            preview: Box::new(store::review(root, &name)?),
         }),
         Action::Add {
             yaml,
@@ -520,7 +520,7 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             listing(&db)
         }
         Action::Trust { name, sha256 } => {
-            store::trust(&db, root, &name, &sha256, now)?;
+            store::trust_file(&db, root, &name, &sha256, now)?;
             listing(&db)
         }
         Action::SetEnabled { name, enabled } => {
@@ -566,15 +566,15 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             Err(current) => Ok(Reply::Stale { current }),
         },
         Action::DownloadModel => {
-            crate::semantic::model::start_download(root)?;
+            crate::semantic::local::start_download(root)?;
             search(&db)
         }
         Action::CancelDownload => {
-            crate::semantic::model::cancel_download(root);
+            crate::semantic::local::cancel_download(root);
             search(&db)
         }
         Action::DeleteModel => {
-            crate::semantic::model::delete(root)?;
+            crate::semantic::local::delete(root)?;
             search(&db)
         }
     }
