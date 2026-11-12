@@ -8,7 +8,7 @@ use std::path::{Component, Path, PathBuf};
 #[cfg(unix)]
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -39,44 +39,194 @@ const POLL: Duration = Duration::from_millis(10);
 const OUTPUT_GRACE: Duration = Duration::from_millis(500);
 /// The only search path a probed program inherits.
 const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+/// How long a probe that failed, timed out or answered a resolve that missed waits before
+/// it runs again.
+pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How old the folders of a complete run get before they are probed again.
+pub(crate) const REFRESH_AGE: Duration = Duration::from_secs(300);
 /// The perl program that starts the login shell in a new session with no terminal, so an
 /// interactive shell can never take over the terminal the engine was started from.
 const NEW_SESSION: &str = "POSIX::setsid() > 0 or exit 1; exec {$ARGV[0]} @ARGV or exit 1";
 
-/// The folders the background probes found: none before the first [`folders`] call starts
-/// them, empty while they run, then what they found.
-static FOLDERS: Mutex<Option<Vec<PathBuf>>> = Mutex::new(None);
-/// Each probed program's version, none while its probe runs or when it gave none.
-static VERSIONS: Mutex<BTreeMap<PathBuf, Option<String>>> = Mutex::new(BTreeMap::new());
+/// The folder probes' cache: what the runs found, whether one is going and the last run.
+static FOLDERS: Mutex<Probes> = Mutex::new(Probes::new());
+/// Each probed program's version, with the file identity it was read from.
+static VERSIONS: Mutex<BTreeMap<PathBuf, Known>> = Mutex::new(BTreeMap::new());
 
 /// The folders the background probes found: npm's global prefix `bin` of the npm the
 /// resolver finds and the login shell's PATH folders. Answers at once from what the probes
-/// cached, starting them in the background, and is empty until they finish.
-/// Output: the absolute folders.
+/// cached, empty until the first run finishes, and starts a background run when one is due
+/// ([`Probes::start`]). Output: the absolute folders.
 pub fn folders() -> Vec<PathBuf> {
-    let mut cached = lock(&FOLDERS);
-    if cached.is_none() {
-        *cached = Some(Vec::new());
-        start_folder_probe();
-    }
-    cached.clone().unwrap_or_default()
+    refreshed(false)
 }
 
-/// A program's version as it reports it, read once in the background with a time limit and
-/// cached. Input: the program's real file. Output: the version, or none while unknown,
-/// which never counts as missing.
+/// A program's version as it reports it, read in the background with a time limit and
+/// cached for its file's identity, so an update in place is read again, as is a probe that
+/// gave none once [`RETRY_AFTER`] passed. Input: the program's real file. Output: the
+/// version, or none while unknown, which never counts as missing.
 pub fn version(program: &Path) -> Option<String> {
     if !program.is_absolute() || program.as_os_str().len() > PATH_BYTES_MAX {
         return None;
     }
+    let identity = identity(program)?;
+    let now = Instant::now();
     let mut versions = lock(&VERSIONS);
-    if let Some(known) = versions.get(program) {
-        return known.clone();
+    let known = versions.get(program);
+    if !version_due(known, identity, now) {
+        return known.and_then(|known| known.version.clone());
     }
-    if versions.len() < VERSIONS_MAX && start_version_probe(program) {
-        versions.insert(program.to_path_buf(), None);
+    let room = known.is_some() || versions.len() < VERSIONS_MAX;
+    if room && start_version_probe(program, identity) {
+        let probing = Known {
+            identity,
+            version: None,
+            finished: None,
+        };
+        versions.insert(program.to_path_buf(), probing);
     }
     assert!(versions.len() <= VERSIONS_MAX);
+    None
+}
+
+/// Tells the probes a resolve found nothing, so the folders are probed again in the
+/// background once the last run is [`RETRY_AFTER`] old; a run already going is enough.
+/// Never blocks.
+pub fn missed() {
+    refreshed(true);
+}
+
+/// Starts a background folder run when one is due, recording a run that could not start as
+/// failed so it is retried. Input: whether a resolve missed. Output: the cached folders.
+fn refreshed(missed: bool) -> Vec<PathBuf> {
+    let now = Instant::now();
+    let mut probes = lock(&FOLDERS);
+    if probes.start(now, missed) && !start_folder_probe() {
+        probes.finish(Vec::new(), false, now);
+    }
+    probes.found.clone()
+}
+
+/// One finished folder probe run: when it ended and whether every probe in it answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Run {
+    pub(crate) finished: Instant,
+    pub(crate) complete: bool,
+}
+
+/// The folder probes' cache: the folders found, whether a run is going and the last run.
+#[derive(Debug)]
+pub(crate) struct Probes {
+    pub(crate) found: Vec<PathBuf>,
+    pub(crate) running: bool,
+    pub(crate) last: Option<Run>,
+}
+
+impl Probes {
+    /// An empty cache with no run yet. Output: the cache.
+    pub(crate) const fn new() -> Self {
+        Self {
+            found: Vec::new(),
+            running: false,
+            last: None,
+        }
+    }
+
+    /// Marks a run as going when one is due: none ran yet, or with no run going, the last
+    /// one failed or a resolve missed and it is [`RETRY_AFTER`] old, or it is
+    /// [`REFRESH_AGE`] old. Inputs: now and whether a resolve missed. Output: whether the
+    /// caller starts the run.
+    pub(crate) fn start(&mut self, now: Instant, missed: bool) -> bool {
+        let due = !self.running
+            && self.last.is_none_or(|last| {
+                let age = now.saturating_duration_since(last.finished);
+                age >= REFRESH_AGE || ((missed || !last.complete) && age >= RETRY_AFTER)
+            });
+        if due {
+            self.running = true;
+        }
+        due
+    }
+
+    /// Records a finished run: a complete one replaces the folders, a failed one adds its
+    /// folders before the ones found earlier, at most [`FOLDERS_MAX`]. Inputs: the folders
+    /// found, whether every probe answered and now.
+    pub(crate) fn finish(&mut self, found: Vec<PathBuf>, complete: bool, now: Instant) {
+        assert!(self.running, "a run finishes only after it started");
+        assert!(found.len() <= FOLDERS_MAX);
+        let mut folders = found;
+        if !complete {
+            for folder in std::mem::take(&mut self.found) {
+                if folders.len() == FOLDERS_MAX {
+                    break;
+                }
+                if !folders.contains(&folder) {
+                    folders.push(folder);
+                }
+            }
+        }
+        assert!(folders.len() <= FOLDERS_MAX);
+        self.found = folders;
+        self.running = false;
+        self.last = Some(Run {
+            finished: now,
+            complete,
+        });
+    }
+}
+
+/// What tells one program file from its update in place: its device, inode, size and
+/// modification time in seconds and nanoseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Identity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) size: u64,
+    pub(crate) modified: (i64, i64),
+}
+
+/// One program's cached version: the file it was read from, the version, and when its
+/// probe ended, none while it runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Known {
+    pub(crate) identity: Identity,
+    pub(crate) version: Option<String>,
+    pub(crate) finished: Option<Instant>,
+}
+
+/// Whether a program's version is probed now: never probed, its file changed, or with no
+/// probe going its last one gave none and is [`RETRY_AFTER`] old. Inputs: the cached
+/// entry, the file's identity now and now. Output: the answer.
+pub(crate) fn version_due(known: Option<&Known>, identity: Identity, now: Instant) -> bool {
+    let Some(known) = known else {
+        return true;
+    };
+    if known.identity != identity {
+        return true;
+    }
+    match (&known.version, known.finished) {
+        (None, Some(finished)) => now.saturating_duration_since(finished) >= RETRY_AFTER,
+        _ => false,
+    }
+}
+
+/// The identity of a program file, its links followed. Input: the file. Output: the
+/// identity, or none for anything but a readable plain file.
+#[cfg(unix)]
+fn identity(file: &Path) -> Option<Identity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(file).ok()?;
+    metadata.is_file().then(|| Identity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        modified: (metadata.mtime(), metadata.mtime_nsec()),
+    })
+}
+
+/// No identity where versions are not probed. Input unused. Output: none.
+#[cfg(not(unix))]
+fn identity(_file: &Path) -> Option<Identity> {
     None
 }
 
@@ -86,22 +236,30 @@ fn lock<T>(cache: &Mutex<T>) -> MutexGuard<'_, T> {
     cache.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Starts the folder probes on a background thread that caches what they find. Unit tests
-/// never start them, so a developer's own shell files are never run, and where Unix shells
-/// do not exist nothing is probed.
-fn start_folder_probe() {
+/// Starts one folder run on a background thread that records what it found. Unit tests
+/// never start one, so a developer's own shell files are never run, and where Unix shells
+/// do not exist nothing is probed. Output: whether the run started.
+fn start_folder_probe() -> bool {
     #[cfg(all(unix, not(test)))]
-    let _ = std::thread::Builder::new()
-        .name("tools-probe".to_owned())
-        .spawn(|| {
-            let found = probe_folders();
-            *lock(&FOLDERS) = Some(found);
-        });
+    {
+        std::thread::Builder::new()
+            .name("tools-probe".to_owned())
+            .spawn(|| {
+                let (found, complete) = probe_folders();
+                lock(&FOLDERS).finish(found, complete, Instant::now());
+            })
+            .is_ok()
+    }
+    #[cfg(not(all(unix, not(test))))]
+    {
+        false
+    }
 }
 
-/// Starts one program's version probe on a background thread that fills its cache entry.
-/// Input: the program. Output: whether the probe started.
-fn start_version_probe(program: &Path) -> bool {
+/// Starts one program's version probe on a background thread that fills its cache entry
+/// while the entry still names the same file identity. Inputs: the program and its
+/// identity. Output: whether the probe started.
+fn start_version_probe(program: &Path, identity: Identity) -> bool {
     #[cfg(unix)]
     {
         let program = program.to_path_buf();
@@ -109,25 +267,30 @@ fn start_version_probe(program: &Path) -> bool {
             .name("tools-version".to_owned())
             .spawn(move || {
                 let found = probe_version(&program, VERSION_LIMIT);
-                if let Some(entry) = lock(&VERSIONS).get_mut(&program) {
-                    *entry = found;
+                let mut versions = lock(&VERSIONS);
+                let entry = versions
+                    .get_mut(&program)
+                    .filter(|known| known.identity == identity);
+                if let Some(known) = entry {
+                    known.version = found;
+                    known.finished = Some(Instant::now());
                 }
             })
             .is_ok()
     }
     #[cfg(not(unix))]
     {
-        let _ = program;
+        let _ = (program, identity);
         false
     }
 }
 
 /// Runs both folder probes for this account: the login shell its account names, with this
-/// process's HOME, then the npm the engine's places find. Output: the probed folders, or
-/// none when the account or HOME is unknown.
+/// process's HOME, then the npm the engine's places find. Output: the probed folders, and
+/// whether both answered (false when the account or HOME is unknown).
 #[cfg(unix)]
 #[cfg_attr(test, allow(dead_code))]
-fn probe_folders() -> Vec<PathBuf> {
+fn probe_folders() -> (Vec<PathBuf>, bool) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| home.is_absolute());
@@ -135,19 +298,22 @@ fn probe_folders() -> Vec<PathBuf> {
         .ok()
         .flatten();
     let (Some(home), Some(account)) = (home, account) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
     let login = Some(account.shell.as_path())
         .filter(|shell| shell.is_absolute())
-        .and_then(|shell| login_path(shell, &home, &account.name, SHELL_LIMIT))
-        .map(|path| kept(&path, Some(&home)))
+        .and_then(|shell| login_path(shell, &home, &account.name, SHELL_LIMIT));
+    let login_folders = login
+        .as_deref()
+        .map(|path| kept(path, Some(&home)))
         .unwrap_or_default();
-    probed(
-        &login,
+    let (found, npm_answered) = probed(
+        &login_folders,
         super::Places::from_environment(None),
         &home,
         &account.name,
-    )
+    );
+    (found, login.is_some() && npm_answered)
 }
 
 /// Runs a command with no input, standard error dropped, its own process group and a time
@@ -359,18 +525,21 @@ pub(crate) fn npm_bin(
 /// The folders the probes add, in order: the `bin` folder of the global prefix of the npm
 /// the places find once the login folders are added, then the login folders, each kept as
 /// [`kept`] keeps them. Inputs: the kept login folders, the places, HOME and the user name.
-/// Output: the folders.
+/// Output: the folders, and false when a found npm failed to answer.
 #[cfg(unix)]
 pub(crate) fn probed(
     login: &[PathBuf],
     places: super::Places,
     home: &Path,
     user: &str,
-) -> Vec<PathBuf> {
-    let npm = super::resolve("npm", &places.with_probed(login.to_vec()))
-        .ok()
-        .and_then(|npm| npm_bin(&npm, home, user, NPM_LIMIT));
-    kept_folders(npm.into_iter().chain(login.iter().cloned()), Some(home))
+) -> (Vec<PathBuf>, bool) {
+    let npm = super::resolve("npm", &places.with_probed(login.to_vec())).ok();
+    let bin = npm
+        .as_ref()
+        .and_then(|npm| npm_bin(npm, home, user, NPM_LIMIT));
+    let answered = npm.is_none() || bin.is_some();
+    let found = kept_folders(bin.into_iter().chain(login.iter().cloned()), Some(home));
+    (found, answered)
 }
 
 /// A version from a version report such as `tmux 3.4` or `codex-cli v0.164.0`: the first
