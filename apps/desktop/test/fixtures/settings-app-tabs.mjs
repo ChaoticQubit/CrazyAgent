@@ -31,6 +31,25 @@ const PHASES = {
   installed: [...INSTALLING, { kind: "install_done", engineStarted: false }],
   failed: [{ kind: "check_started" }, { kind: "check_failed", code: "update_download_failed" }],
 };
+const TICKET_ROWS = [
+  ["close", ["agents", "evidence", "owner"], "evidence"],
+  ["create", ["direct", "triage", "owner_only"], "triage"],
+  ["agent_edit", ["any", "status_and_criteria", "none"], "status_and_criteria"],
+  ["cycle_days", [7, 14, 21, 28], 14],
+  ["rollover", ["auto", "ask", "off"], "auto"],
+  ["import", ["auto_once", "on_request"], "auto_once"],
+  ["manual_evidence", ["owner", "agents"], "owner"],
+  ["ci_evidence", ["engine", "owner", "agents"], "engine"],
+];
+
+/** The app's ticket settings page as the engine reads it, every key on its proposed default
+ * unless the scene sets one. Input: the scene. Output: the page. */
+function ticketPage(scene) {
+  return { project_id: null, version: 3, keys: TICKET_ROWS.map(([key, options, proposed]) => {
+    const here = scene.ticketsHere?.[key] ?? null;
+    return { key, options, proposed, custom: key === "cycle_days" ? { min: 1, max: 90 } : null, here, below: proposed, effective: here ?? proposed };
+  }) };
+}
 let root = null;
 
 /** Lets the engine's answers and the renders they cause land. Input: the wait in
@@ -72,6 +91,8 @@ function answer(scene, command, args) {
     case "desktop_engine_versions": return { engine: "0.2.0", app: "0.2.0", message: scene.engine === "differs" ? "The engine is on another version." : null };
     case "desktop_set_update_channel": throw FAILURE;
     case "desktop_link_cli": throw FAILURE;
+    case "desktop_ticket_settings": return read(scene.tickets, command, ticketPage(scene));
+    case "desktop_save_ticket_settings": throw FAILURE;
     default: throw `Command ${command} not found`;
   }
 }

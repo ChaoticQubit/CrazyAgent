@@ -324,7 +324,7 @@ test("Settings and the project show the ticket settings and the Roadmap tab", ()
   assert.equal(SETTINGS_TABS[SETTINGS_TABS.indexOf("process") + 1], "tickets");
   assert.equal(PROJECT_TABS[PROJECT_TABS.indexOf("tickets") + 1], "roadmap");
   const app = read("src/screens/settings/index.tsx");
-  assert.match(app, /\{ id: "tickets", label: "Tickets", icon: "[a-z-]+" \}/);
+  assert.match(app, /\{ id: "tickets", label: "Tickets" \}/);
   assert.match(app, /tab === "tickets" \? <TicketSettings \/>/);
   const project = read("src/screens/project/index.tsx");
   assert.match(project, /\{ id: "roadmap", label: "Roadmap", icon: "[a-z-]+" \}/);
