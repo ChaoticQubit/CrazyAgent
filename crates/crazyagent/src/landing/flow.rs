@@ -2166,7 +2166,7 @@ pub(super) fn record(
     }
     super::merges::refuse_outside_merges(db, workspace, &shared, &head)?;
     let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
-    let line = super::commit_subject(&turn.prompt_line, &roots);
+    let line = super::commit_subject(super::unprompted(&turn.prompt_line), &roots);
     let message = format!(
         "{}\n\nTurn {turn_id} ended: {}.\n",
         if line.is_empty() { "Agent turn" } else { &line },
@@ -2212,6 +2212,7 @@ pub(super) fn record(
             regenerated_head: None,
             regenerated_files: Vec::new(),
             accepted_in: None,
+            summary: String::new(),
             files: 0,
             added: 0,
             removed: 0,

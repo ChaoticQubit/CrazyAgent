@@ -433,6 +433,22 @@ pub(crate) fn hold_repositories(
 
 const SUBJECT_CHARS_MAX: usize = 48;
 const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
+/// The marks a pasted shell prompt or a list starts a line with, cut from a prompt line or a
+/// summary line before it names a change set (F22).
+#[cfg(unix)]
+const PROMPT_GLYPHS: [char; 13] = [
+    '\u{276F}', '\u{203A}', '\u{BB}', '\u{279C}', '\u{2192}', '\u{3BB}', '\u{2022}', '$', '%', '>',
+    '#', '*', '-',
+];
+/// The most leading words of prompt marks cut from one line.
+#[cfg(unix)]
+const PROMPT_WORDS_MAX: usize = 4;
+/// The most summary lines read for the one that names a change set.
+#[cfg(unix)]
+const SUMMARY_LINES_MAX: usize = 64;
+/// The most commit subjects a summarized message lists below its summary.
+#[cfg(unix)]
+const SUMMARY_LIST_LINES_MAX: usize = 512;
 
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
@@ -1800,6 +1816,88 @@ pub(crate) fn commit_subject(text: &str, roots: &[&Path]) -> String {
     }
     assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
     subject
+}
+
+/// A line without the shell prompt or list marks in front of it, such as "\u{276F} ", "$ "
+/// or "- " (F22): each leading word made only of `PROMPT_GLYPHS` is cut, at most
+/// `PROMPT_WORDS_MAX` of them. Input: the text. Output: the text from its first other word,
+/// empty when it holds nothing else.
+#[cfg(unix)]
+pub(crate) fn unprompted(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    for _ in 0..PROMPT_WORDS_MAX {
+        let word = rest.split(char::is_whitespace).next().unwrap_or_default();
+        if word.is_empty() || !word.chars().all(|c| PROMPT_GLYPHS.contains(&c)) {
+            break;
+        }
+        rest = rest[word.len()..].trim_start();
+    }
+    rest
+}
+
+/// The subject an agent's own summary of its turn gives a change set (F22): its first line
+/// of at least two words once prompt and list marks are cut, as `commit_subject` makes it,
+/// so a heading such as "Summary" or a bare "Done." names nothing. Inputs: the summary and
+/// the folders, innermost first. Output: the subject, empty when no line fits.
+#[cfg(unix)]
+pub(crate) fn summary_subject(summary: &str, roots: &[&Path]) -> String {
+    summary
+        .lines()
+        .take(SUMMARY_LINES_MAX)
+        .map(|line| commit_subject(unprompted(line), roots))
+        .find(|subject| subject.split(' ').filter(|word| !word.is_empty()).count() >= 2)
+        .unwrap_or_default()
+}
+
+/// The message a change set proposes once its agent said what it did (F22): that summary
+/// subject first, then every commit subject of `proposed` as a list below it, or `proposed`
+/// alone without a summary. Inputs: the stored summary subject and the message made from
+/// the agent's commits. Output: the message.
+#[cfg(unix)]
+pub(crate) fn summarized(summary: &str, proposed: &str) -> String {
+    if summary.is_empty() {
+        return proposed.to_owned();
+    }
+    let mut message = summary.to_owned();
+    let mut listed = false;
+    for line in proposed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(SUMMARY_LIST_LINES_MAX)
+    {
+        message.push_str(if listed { "\n" } else { "\n\n" });
+        listed = true;
+        if !line.starts_with("- ") {
+            message.push_str("- ");
+        }
+        message.push_str(line);
+    }
+    message
+}
+
+/// Keeps what an agent said it did as the subject its change set goes by (F22), cut and
+/// cleaned as `summary_subject` makes it; a summary with no fitting line clears an older
+/// one, so the set goes by its newest commit subject again. Inputs: the store, the
+/// workspace the turn ended in, the change set and the summary. Output: Ok once stored.
+pub fn record_summary(
+    db: &Connection,
+    workspace: &Workspace,
+    id: &ChangeSetId,
+    summary: &str,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    {
+        let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
+        let subject = summary_subject(summary, &roots);
+        assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
+        store::set_summary(db, id, &subject)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, workspace, id, summary);
+        Err(unavailable())
+    }
 }
 
 /// The message a change set goes by in Changes and in the project's activity, live or

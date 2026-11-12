@@ -40,7 +40,8 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     restored INTEGER NOT NULL DEFAULT 0 CHECK(restored IN (0,1)),
     regenerated_head TEXT,
     regenerated_files TEXT NOT NULL DEFAULT '[]',
-    accepted_in TEXT
+    accepted_in TEXT,
+    summary TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -69,8 +70,8 @@ const NUMBER_PASS_MAX: i64 = 10_000;
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
     restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on,\
-    restored,regenerated_head,regenerated_files,accepted_in";
-const ADDED_COLUMNS: [(&str, &str); 10] = [
+    restored,regenerated_head,regenerated_files,accepted_in,summary";
+const ADDED_COLUMNS: [(&str, &str); 11] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -96,6 +97,7 @@ const ADDED_COLUMNS: [(&str, &str); 10] = [
         "regenerated_files TEXT NOT NULL DEFAULT '[]'",
     ),
     ("accepted_in", "accepted_in TEXT"),
+    ("summary", "summary TEXT NOT NULL DEFAULT ''"),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
@@ -204,7 +206,8 @@ impl Earlier {
 /// set's own Accept committed `landed`, so an undo may revert it, on `landed_on`, the ref
 /// that Accept moved; `undone` is the commit that reverted it; `accepted_in` is where the
 /// owner pressed that Accept, None for anyone else's, one stored before places were kept, or
-/// a place a later build named, which this build reads as None and keeps as stored.
+/// a place a later build named, which this build reads as None and keeps as stored;
+/// `summary` is the subject the agent's own summary of its last turn gave, empty without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
     pub(super) id: ChangeSetId,
@@ -239,6 +242,7 @@ pub(super) struct Record {
     pub(super) regenerated_head: Option<String>,
     pub(super) regenerated_files: Vec<String>,
     pub(super) accepted_in: Option<crate::activity::AcceptPlace>,
+    pub(super) summary: String,
 }
 
 impl Record {
@@ -272,12 +276,14 @@ impl Record {
         }
     }
 
-    /// The commit message an Accept proposes: the one made from the agent's own commits,
-    /// else the prompt line, else a line naming the agent, with every character a reviewer
-    /// cannot see shown as an escape, so one stored before subjects were escaped is shown
-    /// and landed visibly too. Output: the message.
+    /// The commit message an Accept proposes: the agent's summary over its commit subjects
+    /// (F22), else the one made from the agent's own commits, else the prompt line, else a
+    /// line naming the agent, with every character a reviewer cannot see shown as an
+    /// escape, so one stored before subjects were escaped is shown and landed visibly too.
+    /// Output: the message.
     pub(super) fn message(&self) -> String {
-        super::change_set_message(&self.message, &self.prompt_line, &self.agent.label)
+        let message = super::summarized(&self.summary, &self.message);
+        super::change_set_message(&message, &self.prompt_line, &self.agent.label)
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -427,6 +433,7 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
         accepted_in: row
             .get::<_, Option<String>>(33)?
             .and_then(|name| crate::activity::AcceptPlace::parse(&name)),
+        summary: text(34)?,
     })
 }
 
@@ -472,7 +479,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -510,12 +517,30 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
             record.regenerated_head,
             regenerated_files,
             record.accepted_in.map(crate::activity::AcceptPlace::name),
+            record.summary,
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
         Some(rusqlite::ErrorCode::ConstraintViolation) => failure("changes_agent_has_pending"),
         _ => storage(error),
     })?;
+    Ok(())
+}
+
+/// Stores the subject an agent's summary gives a change set (F22), touching no other
+/// column, so a landing step running beside it keeps what it wrote. Inputs: the store, the
+/// change set and the subject, empty to clear it. Output: Ok once stored.
+pub(super) fn set_summary(
+    db: &Connection,
+    id: &ChangeSetId,
+    summary: &str,
+) -> Result<(), EngineError> {
+    initialize(db)?;
+    db.execute(
+        "UPDATE landing_change_sets SET summary=?2 WHERE id=?1",
+        params![id.as_str(), summary],
+    )
+    .map_err(storage)?;
     Ok(())
 }
 
