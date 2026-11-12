@@ -80,6 +80,15 @@ pub fn draw_page(
     cursor.map(|at| Position::new(area.x + 2 + at.x, area.y + 2 + at.y))
 }
 
+/// The first line a settings page draws so its focused part stays in view: the part's last
+/// line at the window's bottom when the page is taller than the window, never past the part's
+/// first line. Inputs: the focused part's first and last line and the rows shown. Output: the
+/// first line to draw.
+pub fn top_for(first: usize, last: usize, rows: usize) -> usize {
+    assert!(first <= last, "a focused part starts before it ends");
+    (last + 1).saturating_sub(rows).min(first)
+}
+
 /// The neighbouring Settings section as a replacement screen.
 /// Inputs: the current section, direction and context. Output: the flow.
 pub fn step(section: SettingsSection, forward: bool, ctx: &mut Ctx) -> Flow {

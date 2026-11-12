@@ -421,3 +421,21 @@ fn the_last_ticket_setting_s_choices_stay_in_view_at_80x24() {
         assert!(rows.contains(words), "{words}:\n{rows}");
     }
 }
+
+#[test]
+fn a_settings_page_keeps_its_focused_part_in_view() {
+    use crate::tui::screens::settings::top_for;
+    assert_eq!(top_for(3, 5, 10), 0);
+    assert_eq!(top_for(12, 18, 10), 9);
+    assert_eq!(
+        top_for(12, 30, 10),
+        12,
+        "a part taller than the window starts at its first line"
+    );
+}
+
+#[test]
+#[should_panic(expected = "a focused part starts before it ends")]
+fn a_focused_part_that_ends_before_it_starts_is_refused() {
+    crate::tui::screens::settings::top_for(4, 3, 10);
+}

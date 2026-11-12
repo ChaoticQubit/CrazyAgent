@@ -1751,3 +1751,29 @@ fn settings_checks_opens_from_go_to_with_the_desktop_words() {
     drop(pty);
     engine.stop();
 }
+
+/// DEC-155 step 3: Settings, Tickets opens from Go to on a real engine and reads as the
+/// desktop's: its purpose, the Ticket rules section with when a change applies, and its keys.
+#[test]
+fn settings_tickets_opens_from_go_to_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-tickets-");
+    go_to(&pty, "Settings / Tickets", "Settings / Tickets");
+    let screen = pty.until("Settings, Tickets reads its rules", |screen| {
+        screen.contains("Who closes tickets")
+    });
+    for words in [
+        "The ticket settings every project with tickets starts from",
+        "Ticket rules",
+        "Changes apply to the next ticket action. Tickets already closed stay closed.",
+        "Enter Change",
+        "Esc Back",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(
+        !screen.contains("Could not read the ticket settings"),
+        "{screen}"
+    );
+    drop(pty);
+    engine.stop();
+}

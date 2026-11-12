@@ -7,6 +7,7 @@ use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::process::Scope;
+use crate::tui::screens::settings::top_for;
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::tickets::sentence;
 use crate::tui::screens::{Flow, Place, Screen};
@@ -26,10 +27,22 @@ const DAYS_CHARS_MAX: usize = 2;
 const LABEL_CELLS: usize = 22;
 const NAME_CELLS: usize = 20;
 
+/// The page's words, the desktop's (Settings, Tickets and Project Settings, Tickets on
+/// feat/v3-screens): the title, the app page's purpose, the Ticket rules section with when a
+/// change applies and the project's line, and the line for a project without tickets. The app
+/// purpose names the Tickets tab, where a TUI project sets its own values.
+const TITLE: &str = "Tickets";
+const PURPOSE: &str = "The ticket settings every project with tickets starts from, until a project sets its own from its Tickets tab.";
+const RULES: &str = "Ticket rules";
+const EFFECT: &str = "Changes apply to the next ticket action. Tickets already closed stay closed.";
+const PROJECT_EFFECT: &str = "A value set here wins over the app value for this project only.";
+const NOT_ATTACHED: &str = "Tickets aren't set up for this project yet. Set them up on the Tickets tab, then its settings show here.";
+
 #[derive(Debug, PartialEq)]
 enum State {
     Loading,
     Failed(String),
+    NotAttached,
     Ready(TicketSettingsView),
 }
 
@@ -244,6 +257,9 @@ impl TicketSettingsPage {
                         "Could not read the ticket settings.",
                         &sentence(code),
                     )),
+                    Err(code) if code == "project_not_attached" => {
+                        self.state = State::NotAttached;
+                    }
                     Err(code) => self.state = State::Failed(sentence(code)),
                 }
             }
@@ -275,34 +291,42 @@ impl TicketSettingsPage {
         }
     }
 
-    /// The page's lines. Inputs: the content width and the context. Output: the lines and
-    /// the cursor of an open days field, relative to the first line.
-    fn body(&self, limit: usize, ctx: &Ctx) -> (Vec<Line<'static>>, Option<Position>) {
+    /// The page's lines. Inputs: the content width and the context. Output: the lines, the
+    /// cursor of an open days field relative to the first line, and the first and last line
+    /// of the part to keep in view: the selected setting through its choices or its line.
+    fn body(
+        &self,
+        limit: usize,
+        ctx: &Ctx,
+    ) -> (Vec<Line<'static>>, Option<Position>, (usize, usize)) {
         let theme = &ctx.theme;
         let glyphs = ctx.glyphs;
-        let (title, intro) = match &self.scope {
-            Scope::App => (
-                "Ticket settings".to_owned(),
-                "Every project with tickets follows these unless it sets its own.".to_owned(),
-            ),
-            Scope::Project { name, .. } => (
-                format!("Ticket settings for {name}"),
-                format!(
-                    "Only {name} follows the values set here; the rest follow Settings / Tickets."
-                ),
-            ),
-        };
-        let mut lines = vec![styled(title, Role::Accent, theme)];
-        lines.extend(
-            wrap(&intro, limit)
+        let muted = |text: &str| {
+            wrap(text, limit)
                 .into_iter()
-                .map(|part| styled(part, Role::Muted, theme)),
-        );
+                .map(|part| styled(part, Role::Muted, theme))
+                .collect::<Vec<_>>()
+        };
+        let mut lines = vec![styled(TITLE, Role::Heading, theme)];
+        let effect = match &self.scope {
+            Scope::App => {
+                lines.extend(muted(PURPOSE));
+                EFFECT.to_owned()
+            }
+            Scope::Project { .. } => format!("{EFFECT} {PROJECT_EFFECT}"),
+        };
+        lines.push(Line::default());
+        lines.push(styled(RULES, Role::Heading, theme));
+        lines.extend(muted(&effect));
         lines.push(Line::default());
         let view = match &self.state {
             State::Loading => {
                 lines.push(ctx.loading("Reading the ticket settings"));
-                return (lines, None);
+                return (lines, None, (0, 0));
+            }
+            State::NotAttached => {
+                lines.extend(muted(NOT_ATTACHED));
+                return (lines, None, (0, 0));
             }
             State::Failed(problem) => {
                 lines.extend(
@@ -314,7 +338,7 @@ impl TicketSettingsPage {
                     .map(|part| styled(part, Role::Error, theme)),
                 );
                 lines.push(styled("Press r to try again.", Role::Muted, theme));
-                return (lines, None);
+                return (lines, None, (0, 0));
             }
             State::Ready(view) => view,
         };
@@ -334,8 +358,12 @@ impl TicketSettingsPage {
                 theme.muted,
             ),
         ]));
+        let mut first = lines.len();
         for (index, choice) in view.choices.iter().enumerate() {
             let shown = self.value_text(view, choice, index);
+            if index == self.selected {
+                first = lines.len();
+            }
             lines.push(list_row(
                 cells(
                     &widths,
@@ -352,7 +380,8 @@ impl TicketSettingsPage {
         }
         lines.push(Line::default());
         let Some(choice) = view.choices.get(self.selected) else {
-            return (lines, None);
+            let last = lines.len() - 1;
+            return (lines, None, (first.min(last), last));
         };
         let mut cursor = None;
         match &self.choosing {
@@ -387,7 +416,9 @@ impl TicketSettingsPage {
                 );
             }
         }
-        (lines, cursor)
+        let last = lines.len() - 1;
+        assert!(first <= last);
+        (lines, cursor, (first, last))
     }
 
     fn value_text(
@@ -420,6 +451,10 @@ impl TicketSettingsPage {
 }
 
 impl Screen for TicketSettingsPage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.scope {
             Scope::App => vec!["Settings".into(), "Tickets".into()],
@@ -444,6 +479,7 @@ impl Screen for TicketSettingsPage {
         match &self.state {
             State::Loading => return vec![hint("Esc", "Back")],
             State::Failed(_) => return vec![hint("r", "Try again"), hint("Esc", "Back")],
+            State::NotAttached => return vec![hint("r", "Read again"), hint("Esc", "Back")],
             State::Ready(_) => {}
         }
         let mut hints = vec![hint("Enter", "Change")];
@@ -509,9 +545,15 @@ impl Screen for TicketSettingsPage {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = usize::from(area.width).saturating_sub(4).max(8);
-        let (content, cursor) = self.body(limit, ctx);
-        draw_lines(frame.buffer_mut(), area, &indent(content, 2));
-        cursor.map(|at| Position::new(area.x + 2 + at.x, area.y + at.y))
+        let (content, cursor, (first, last)) = self.body(limit, ctx);
+        let top = top_for(first, last, usize::from(area.height));
+        let shown: Vec<Line<'static>> = content.into_iter().skip(top).collect();
+        draw_lines(frame.buffer_mut(), area, &indent(shown, 2));
+        let top = u16::try_from(top).unwrap_or(u16::MAX);
+        cursor.and_then(|at| {
+            at.y.checked_sub(top)
+                .map(|y| Position::new(area.x + 2 + at.x, area.y + y))
+        })
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
