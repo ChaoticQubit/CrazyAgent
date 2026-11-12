@@ -105,6 +105,38 @@ pub(crate) fn pinned(db: &Connection, task: i64) -> Result<Option<ModelPick>, En
     .map_err(super::error)
 }
 
+/// Reads the models spawns pinned, with their reasons, for a project's tasks from `first` on
+/// (DEC-150 M-7), so the team status tells each task view which model was picked and why.
+/// Takes the database, the project and the lowest task id the status lists. Returns the
+/// picks by task, empty before the first pin, or a SQLite failure.
+pub(crate) fn pinned_from(
+    db: &Connection,
+    project: &ProjectId,
+    first: i64,
+) -> Result<std::collections::BTreeMap<i64, ModelPick>, EngineError> {
+    if !table(db, "team_task_models")? {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let mut statement = db
+        .prepare("SELECT task,model,reason FROM team_task_models WHERE project=?1 AND task>=?2")
+        .map_err(super::error)?;
+    let picks = statement
+        .query_map(params![project.as_str(), first], |row| {
+            Ok((
+                row.get(0)?,
+                ModelPick {
+                    model: row.get(1)?,
+                    reason: row.get(2)?,
+                },
+            ))
+        })
+        .map_err(super::error)?
+        .collect::<Result<std::collections::BTreeMap<i64, ModelPick>, _>>()
+        .map_err(super::error)?;
+    assert!(picks.keys().all(|task| *task >= first));
+    Ok(picks)
+}
+
 const RUN_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_agent_models (
     agent INTEGER PRIMARY KEY,
     project TEXT NOT NULL,

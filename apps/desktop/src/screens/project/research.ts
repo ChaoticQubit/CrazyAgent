@@ -236,7 +236,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
     summary: item.problem ?? (WAITING.includes(item.status) ? waitLine(item) : item.result !== null ? resultSummary(item.result) : ""),
-    pick: "",
+    pick: item.pick ? pickLine(item.pick) : "",
     result: item.result,
     elapsed: item.started_ms !== null ? elapsed((item.finished_ms ?? now) - item.started_ms) : "",
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
@@ -247,8 +247,28 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
 /** Says which model a task's spawn picked and why (DEC-150 M-7), the engine's team::pick_line
  * words. Input: the pick. Output: one line. */
 export function pickLine(pick: { model: string; reason: string }): string {
-  void pick;
-  return "";
+  const model = boundedLine(pick.model, PICK_MODEL_BYTES_MAX);
+  const reason = boundedLine(pick.reason, PICK_REASON_BYTES_MAX);
+  return reason === "" ? `Model: ${model}` : `Model: ${model}. Why: ${reason}`;
+}
+
+const PICK_MODEL_BYTES_MAX = 256;
+const PICK_REASON_BYTES_MAX = 240;
+const ENCODER = new TextEncoder();
+
+/** Joins text onto one line of words without control characters, cut to `max` UTF-8 bytes on a
+ * character boundary, as the engine's events::one_line does. Input: the text and the bound.
+ * Output: the line. */
+function boundedLine(text: string, max: number): string {
+  const joined = text.split(/\s+/u).map((word) => word.replace(/\p{Cc}/gu, "")).filter((word) => word !== "").join(" ");
+  let bytes = 0;
+  let kept = "";
+  for (const char of joined) {
+    bytes += ENCODER.encode(char).length;
+    if (bytes > max) break;
+    kept += char;
+  }
+  return kept;
 }
 
 /** Says why a waiting task waits (F11): the reason the engine stored, such as which cap, account

@@ -501,14 +501,14 @@ fn the_team_status_shows_each_task_s_picked_model_and_reason_and_none_for_the_de
     assert_eq!(picks, vec![(plain, None), (picked, Some(pick("gpt-a")))]);
     assert_eq!(
         crate::team::pick_line(&pick("gpt-a")),
-        "Picked model gpt-a: gpt-a fits"
+        "Model: gpt-a. Why: gpt-a fits"
     );
     assert_eq!(
         crate::team::pick_line(&ModelPick {
             model: "gpt-a".into(),
             reason: String::new(),
         }),
-        "Picked model gpt-a"
+        "Model: gpt-a"
     );
     let long = ModelPick {
         model: "gpt-a".into(),
@@ -517,7 +517,7 @@ fn the_team_status_shows_each_task_s_picked_model_and_reason_and_none_for_the_de
     let line = crate::team::pick_line(&long);
     assert!(!line.contains('\n'), "{line}");
     assert!(
-        line.len() <= "Picked model gpt-a: ".len() + crate::team::tool::MODEL_REASON_BYTES_MAX + 3,
+        line.len() <= "Model: gpt-a. Why: ".len() + crate::team::tool::MODEL_REASON_BYTES_MAX + 3,
         "{}",
         line.len()
     );

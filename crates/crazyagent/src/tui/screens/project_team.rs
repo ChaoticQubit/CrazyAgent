@@ -3782,6 +3782,14 @@ impl TeamView {
                 if task.attempts > 1 {
                     rows.push(entry("Tries", task.attempts.to_string()));
                 }
+                if let Some(pick) = &task.pick {
+                    rows.extend(
+                        wrap_words(&crate::team::pick_line(pick), content)
+                            .into_iter()
+                            .take(PANEL_TEXT_LINES)
+                            .map(|line| Row::of(line, look.muted)),
+                    );
+                }
                 if let Some(wait) = crate::team::wait_line(task.status, task.wait.as_deref()) {
                     rows.extend(
                         wrap_words(&wait, content)

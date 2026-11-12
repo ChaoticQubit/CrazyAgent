@@ -16,13 +16,13 @@ test("a task row says which model the master picked and why, in the engine's wor
     task(3, "running"),
   ] };
   const { tasks } = research.teamPanel(status, [], label, "all", 0);
-  assert.deepEqual(tasks.map((row) => row.pick), ["Picked model claude-opus-4-5: the charts need careful layout work", "", ""]);
-  assert.equal(research.pickLine({ model: "gpt-a", reason: "" }), "Picked model gpt-a");
+  assert.deepEqual(tasks.map((row) => row.pick), ["Model: claude-opus-4-5. Why: the charts need careful layout work", "", ""]);
+  assert.equal(research.pickLine({ model: "gpt-a", reason: "" }), "Model: gpt-a");
 });
 
 test("a pick reason reads as one bounded line without control characters (DEC-150 M-7)", () => {
   const line = research.pickLine({ model: "gpt-a", reason: `${"r".repeat(400)}\nsecond\tline` });
   assert.ok(!/[\u0000-\u001f\u007f]/u.test(line), line);
-  assert.ok(line.startsWith("Picked model gpt-a: rrr"), line);
-  assert.ok(line.length <= "Picked model gpt-a: ".length + 240, String(line.length));
+  assert.ok(line.startsWith("Model: gpt-a. Why: rrr"), line);
+  assert.ok(line.length <= "Model: gpt-a. Why: ".length + 240, String(line.length));
 });

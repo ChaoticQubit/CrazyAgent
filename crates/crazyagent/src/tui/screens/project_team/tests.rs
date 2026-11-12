@@ -552,7 +552,7 @@ fn the_task_panel_says_which_model_the_master_picked_and_why() {
     let line = crate::team::pick_line(&pick);
     assert_eq!(
         line,
-        "Picked model claude-opus-4-5: the charts need careful layout work"
+        "Model: claude-opus-4-5. Why: the charts need careful layout work"
     );
     assert!(find(&rows, "Task from the master").contains("running 6 min"));
     assert!(
@@ -563,7 +563,7 @@ fn the_task_panel_says_which_model_the_master_picked_and_why() {
     view.key(press(KeyCode::Down));
     let rows = frame(&view, 120, 36);
     assert!(
-        !rows.iter().any(|row| row.contains("Picked model")),
+        !rows.iter().any(|row| row.contains("Model: ")),
         "a task with no pick runs the default and says nothing: {}",
         rows.join("\n")
     );

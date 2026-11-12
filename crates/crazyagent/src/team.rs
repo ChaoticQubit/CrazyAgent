@@ -3103,8 +3103,13 @@ pub fn wait_line(status: TaskStatus, wait: Option<&str>) -> Option<String> {
 /// Says which model a task's spawn picked and why (DEC-150 M-7), the same words on desktop
 /// and TUI. Takes the pick. Returns one bounded line.
 pub fn pick_line(pick: &tool::ModelPick) -> String {
-    let _ = pick;
-    String::new()
+    let model = events::one_line(&pick.model, crate::model_choice::MODEL_BYTES_MAX);
+    let reason = events::one_line(&pick.reason, tool::MODEL_REASON_BYTES_MAX);
+    if reason.is_empty() {
+        format!("Model: {model}")
+    } else {
+        format!("Model: {model}. Why: {reason}")
+    }
 }
 
 /// The longest task title an owner action line quotes.
@@ -5471,11 +5476,17 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             STATUS_TASKS_MAX,
         ))
         .map_err(error)?;
-    let tasks = statement
+    let mut tasks = statement
         .query_map([project.as_str()], task_row)
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    if let Some(first) = tasks.first().map(|task| task.id) {
+        let mut picks = model_pick::pinned_from(connection, project, first)?;
+        for task in &mut tasks {
+            task.pick = picks.remove(&task.id);
+        }
+    }
     let mut statement = connection
         .prepare(&recent(
             "SELECT id,author,text,state,created_ms FROM team_messages WHERE project=?1",
