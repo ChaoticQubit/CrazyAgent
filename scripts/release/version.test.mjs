@@ -41,7 +41,7 @@ test("applying a version rewrites every manifest and lock entry and nothing else
     const changed = await applyVersion(root, version);
     assert.deepEqual(changed.sort(), [...FILES].sort());
     assert.equal(await workspaceVersion(root), version);
-    const expected = { "Cargo.toml": 1, "Cargo.lock": 3, "apps/desktop/package.json": 1, "apps/desktop/package-lock.json": 2, "apps/desktop/src-tauri/tauri.conf.json": 1 };
+    const expected = { "Cargo.toml": 1, "Cargo.lock": 6, "apps/desktop/package.json": 1, "apps/desktop/package-lock.json": 2, "apps/desktop/src-tauri/tauri.conf.json": 1 };
     for (const file of FILES) {
       const was = before[file].split("\n");
       const now = (await readFile(join(root, file), "utf8")).split("\n");
@@ -51,7 +51,7 @@ test("applying a version rewrites every manifest and lock entry and nothing else
       for (const [a, b] of changedLines) assert.equal(b, a.replace(old, version), file);
     }
     const lock = await readFile(join(root, "Cargo.lock"), "utf8");
-    for (const name of ["crazyagent", "crazyagent-desktop", "crazyagent-win-sandbox"]) {
+    for (const name of ["crazyagent", "crazyagent-desktop", "crazyagent-win-sandbox", "trackwright-core", "trackwright-mcp", "trackwright-cli"]) {
       assert.match(lock, new RegExp(`\\[\\[package\\]\\]\\nname = "${name}"\\nversion = "${version.replaceAll(".", "\\.")}"\\n`));
     }
     const pkg = JSON.parse(await readFile(join(root, "apps/desktop/package-lock.json"), "utf8"));
@@ -61,7 +61,7 @@ test("applying a version rewrites every manifest and lock entry and nothing else
     assert.equal(JSON.parse(await readFile(join(root, "apps/desktop/src-tauri/tauri.conf.json"), "utf8")).version, version);
     const metadata = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--locked", "--offline", "--manifest-path", join(root, "Cargo.toml")], { maxBuffer: 64 * 1024 * 1024 }).toString());
     const members = metadata.packages.filter((item) => metadata.workspace_members.includes(item.id));
-    assert.equal(members.length, 3);
+    assert.equal(members.length, 6);
     assert(members.every((item) => item.version === version));
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -88,7 +88,7 @@ test("a CRLF checkout, as on Windows, gets the same edits as LF and keeps CRLF; 
     const crlf = (text) => text.replaceAll("\n", "\r\n");
     const list = /^members = \[([^\]]*)\]$/m.exec(await readFile(join(root, "Cargo.toml"), "utf8"))[1];
     const manifests = [...list.matchAll(/"([^"]+)"/g)].map((match) => `${match[1]}/Cargo.toml`);
-    assert.equal(manifests.length, 3);
+    assert.equal(manifests.length, 6);
     const lf = {};
     for (const file of [...FILES, ...manifests]) {
       lf[file] = await readFile(join(root, file), "utf8");

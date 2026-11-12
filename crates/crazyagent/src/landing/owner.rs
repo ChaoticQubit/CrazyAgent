@@ -11,7 +11,7 @@ use crate::activity::{ActivityKind, ENGINE_ACTOR, OWNER_ACTOR};
 use crate::agent_git::Layout;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1235,11 +1235,11 @@ fn finish(
     }
 }
 
-/// Drops a landed change set's pending ref, forgets the owner edits settled on it, points
-/// its agent's worktree at the landed commit when the worktree holds nothing newer than the
-/// set, and moves the project's other resting agents onto the Land on tip (DEC-147.6). The
-/// caller holds the repository's hold. Inputs: the store, the landed set and its landed
-/// commit. Output: Ok once done.
+/// Drops a landed change set's pending ref, records the Accept for the scorecard with whether
+/// the owner edited it, forgets the owner edits settled on it, points its agent's worktree at
+/// the landed commit when the worktree holds nothing newer than the set, and moves the
+/// project's other resting agents onto the Land on tip (DEC-147.6). The caller holds the
+/// repository's hold. Inputs: the store, the landed set and its commit. Output: Ok once done.
 fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
     flow::set_engine_ref(
         &shared(&record.repository)?,
@@ -1247,6 +1247,10 @@ fn tidy(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engine
         &pending_ref(&record.id),
         None,
     )?;
+    let accepted = i64::try_from(record.updated_ms)
+        .map_err(|_| failure("changes_unavailable"))
+        .and_then(|at| crate::scorecard::accepted(db, &record.project, record.id.as_str(), at));
+    crate::scorecard::logged(crate::scorecard::Kind::Accept, accepted);
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)?;
@@ -1519,11 +1523,12 @@ pub(super) fn accept(
 /// Lands a change set as one squash commit on a target branch, the project's Land on
 /// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
 /// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
-/// for that agent's own branch. Anyone but the owner is refused with
+/// for that agent's own branch, once the accept gate admits it under the hold and again in
+/// one transaction with the branch move. Anyone but the owner is refused with
 /// [`super::WORKER_OPEN`] while a worker below the set's agent holds an open set, since only
 /// the owner's Accept may close that set with it (DEC-107). Inputs: as [`accept`], plus the
 /// target branch and who accepts, as the project's activity names them. Output: the landed
-/// commit and branch, or the conflicts.
+/// commit and branch, the conflicts, or the gate's refusal.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn accept_to(
     db: &Connection,
@@ -1594,6 +1599,7 @@ fn accept_held(
     if !matches!(by, By::Owner(_)) && super::subagent::has_open_worker(db, &record)? {
         return Err(failure(super::WORKER_OPEN));
     }
+    crate::checks::gate::admit(db, id, expected_head)?;
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
@@ -1688,22 +1694,33 @@ fn accept_held(
         ("GIT_COMMITTER_EMAIL", identity.1),
     ];
     let message = format!("CrazyAgent: accept {}", id.as_str());
-    let moved = match &target {
-        Target::Checkout | Target::Ref => {
-            owner
-                .exec(
-                    &["update-ref", "-m", &message, &reference, &commit, &tip],
-                    None,
-                    &env,
-                    256,
-                )?
-                .code
-                == 0
-        }
-        Target::Agent(agent) => agent
-            .move_head(Some(tip.as_str()), &commit, &message)
-            .is_ok(),
+    let admitting = Transaction::new_unchecked(db, TransactionBehavior::Immediate);
+    let refused = match &admitting {
+        Ok(_) => crate::checks::gate::admit(db, id, expected_head).err(),
+        Err(_) => Some(failure("changes_unavailable")),
     };
+    let moved = refused.is_none()
+        && match &target {
+            Target::Checkout | Target::Ref => {
+                owner
+                    .exec(
+                        &["update-ref", "-m", &message, &reference, &commit, &tip],
+                        None,
+                        &env,
+                        256,
+                    )?
+                    .code
+                    == 0
+            }
+            Target::Agent(agent) => agent
+                .move_head(Some(tip.as_str()), &commit, &message)
+                .is_ok(),
+        };
+    if let Ok(admitting) = admitting {
+        admitting
+            .commit()
+            .map_err(|_| failure("changes_unavailable"))?;
+    }
     if !moved {
         if let Some((checkout, _)) = &written
             && checkout.test(&["diff-index", "--cached", "--quiet", &commit, "--"])?
@@ -1712,7 +1729,7 @@ fn accept_held(
         }
         record.intent = None;
         store::save(db, &record)?;
-        return Err(failure("changes_branch_moved"));
+        return Err(refused.unwrap_or_else(|| failure("changes_branch_moved")));
     }
     if stopped(Step::BranchMoved) {
         return Err(failure("changes_git_failed"));

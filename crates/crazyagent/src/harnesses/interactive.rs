@@ -1,12 +1,13 @@
 #[cfg(unix)]
 use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CLAUDE_TOOLS_OFF,
-    CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
-    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_launch_settings, failure,
-    harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_ENGINE_KEYS, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP,
+    CLAUDE_TOOLS_OFF, CODEX_ENGINE_KEYS, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError,
+    LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
+    codex_launch_settings, failure, harness_id, key_file_text, validate,
 };
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
+use crate::harness_settings::{Apply, apply};
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
@@ -519,12 +520,12 @@ fn text(path: &Path) -> Result<String, LaunchError> {
         .ok_or_else(|| failure("launch_path_invalid"))
 }
 
-/// The settings a Codex terminal launch runs under. A repository that brings a `.codex`
-/// folder runs untrusted so Codex loads nothing from it, any other stays trusted so it
-/// never meets Codex's folder access screen; approval and sandbox come from these settings
-/// either way. The project's terminal display adds Codex's own switches for it last. Inputs:
-/// the request, the installed context, if any, the working folder, the key file and the
-/// display. Output: the arguments.
+/// The settings a Codex terminal launch runs under, the owner's Codex settings first. An
+/// untrusted project or a repository that brings a `.codex` folder runs untrusted so Codex
+/// loads nothing from it, any other stays trusted and never meets the folder access screen.
+/// The project's terminal display adds Codex's own switches last. Inputs: the request, the
+/// installed context, if any, the working folder, the key file and the display. Output: the
+/// arguments.
 fn codex(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -532,13 +533,25 @@ fn codex(
     key_file: Option<&str>,
     display: TerminalDisplay,
 ) -> Result<Vec<String>, LaunchError> {
-    let trust = super::codex_folder::terminal_entry(cwd)?;
-    let mut arguments = Vec::new();
-    for setting in codex_launch_settings(request, installed, key_file)
+    let trust = match request.trust {
+        crate::trust::Trust::Reviewed => super::codex_folder::terminal_entry(cwd)?,
+        crate::trust::Trust::Untrusted => super::codex_folder::untrusted(cwd)?,
+    };
+    let engine: Vec<String> = codex_launch_settings(request, installed, key_file)
         .into_iter()
         .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain(["check_for_update_on_startup=false".to_owned(), trust])
-    {
+        .collect();
+    let owner = installed.map_or_else(Vec::new, |installed| {
+        let set: Vec<String> = engine
+            .iter()
+            .cloned()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED.map(str::to_owned))
+            .collect();
+        apply::codex_lines(&set, &CODEX_ENGINE_KEYS, installed.harness_settings())
+    });
+    let mut arguments = Vec::new();
+    for setting in owner.into_iter().chain(engine) {
         arguments.push("-c".to_owned());
         arguments.push(setting);
     }
@@ -571,6 +584,14 @@ fn claude(
             .as_object_mut()
             .and_then(|fields| fields.remove("disableAllHooks"));
         assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
+    if let Some(installed) = installed {
+        settings = apply::json_settings(
+            &settings,
+            installed.harness_settings(),
+            Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        );
     }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),
@@ -701,6 +722,9 @@ fn plain(
         .iter()
         .find(|plain| plain.id == id)
         .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    if crate::trust::Enforcement::for_level(request.trust).repo_config_as_text {
+        return Err(failure(crate::trust::PLAIN_HARNESS_CODE));
+    }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
         return Err(failure("launch_account_unsupported"));
     }

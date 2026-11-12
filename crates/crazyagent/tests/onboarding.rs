@@ -876,6 +876,47 @@ async fn the_projects_home_shows_an_onboarding_project_as_setting_up_and_keeps_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_cloned_from_a_url_onboards_untrusted_and_a_found_one_stays_reviewed() {
+    let mut cloned = Bench::start(|repo| {
+        fs::write(
+            repo.join(".git").join(crazyagent::trust::CLONED_MARKER),
+            "cloned octo-cat/demo-app\n",
+        )
+        .unwrap();
+    })
+    .await;
+    cloned.use_repos_as_home().await;
+    let project = cloned.start_onboarding().await;
+    let trust = cloned.owner.project_trust(project.clone()).await.unwrap();
+    assert_eq!(
+        (trust.trust, trust.origin),
+        (
+            crazyagent::trust::Trust::Untrusted,
+            crazyagent::trust::Origin::Cloned
+        )
+    );
+    let access = cloned.owner.project_agent_policy(project).await.unwrap();
+    assert_eq!(
+        access.access,
+        crazyagent::sandbox::policy::AgentAccess::Sandboxed
+    );
+    cloned.stop().await;
+
+    let mut found = Bench::start(|_| {}).await;
+    found.use_repos_as_home().await;
+    let project = found.start_onboarding().await;
+    let trust = found.owner.project_trust(project).await.unwrap();
+    assert_eq!(
+        (trust.trust, trust.origin),
+        (
+            crazyagent::trust::Trust::Reviewed,
+            crazyagent::trust::Origin::Default
+        )
+    );
+    found.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plan_roadmap_now_waits_until_the_onboarding_setup_is_confirmed() {
     let mut bench = Bench::start(|_| {}).await;
     bench.use_repos_as_home().await;

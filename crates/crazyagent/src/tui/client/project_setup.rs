@@ -76,6 +76,9 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::RepositoryTrust { project } => SetupView::RepositoryTrust(Box::new(
+                controller.project_trust(project).await.map_err(problem)?,
+            )),
             SetupQuery::Item {
                 project,
                 path,
@@ -288,6 +291,22 @@ impl NativeOwner {
                     } => {
                         controller
                             .set_project_agent_policy(project_id, version, policy, generation)
+                            .await
+                    }
+                    SetupAction::SetRepositoryTrust {
+                        project_id,
+                        version,
+                        trust,
+                        confirm_raise,
+                    } => {
+                        controller
+                            .set_project_trust(
+                                project_id,
+                                version,
+                                trust,
+                                confirm_raise,
+                                generation,
+                            )
                             .await
                     }
                 }

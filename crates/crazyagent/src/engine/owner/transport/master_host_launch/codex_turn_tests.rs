@@ -155,6 +155,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let MasterTurnLaunch {
@@ -224,6 +225,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let MasterTurnLaunch {
@@ -703,4 +705,49 @@ fn the_delegate_engine_is_the_registered_executable_at_its_canonical_path() {
         delegate_engine(&registered).map_err(|error| error.0),
         Err("native_auth_host_executable_changed".to_owned())
     );
+}
+
+#[test]
+fn a_codex_master_home_gets_the_owner_settings_its_command_does_not_set() {
+    use crate::harness_settings::apply::Applied;
+    let temporary = tempfile::Builder::new()
+        .prefix("ca-codex-settings-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = temporary.path().canonicalize().unwrap();
+    let (home, worktree) = (base.join("home"), base.join("worktree"));
+    private_directory(&home);
+    private_directory(&worktree);
+    let codex = base.join("codex");
+    let catalog = crate::harness_settings::tests::fixture("codex");
+    let app: crate::harness_settings::Stored = [
+        ("hide_agent_reasoning".to_owned(), json!(true)),
+        ("model_reasoning_effort".to_owned(), json!("high")),
+        ("project_doc_max_bytes".to_owned(), json!(65536)),
+    ]
+    .into_iter()
+    .collect();
+    let owner = Applied::new(
+        &catalog,
+        crate::harness_settings::resolve(&catalog, Some("0.50.0"), &app, None),
+    );
+    let command = master_command(&codex, &home, &worktree, "unit-model", None).unwrap();
+    assert!(settings(&command).contains(&PROJECT_DOCS_OFF.to_owned()));
+    write_master_settings(&home, &command, &owner).unwrap();
+    let file = home.join("config.toml");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "hide_agent_reasoning=true\nmodel_reasoning_effort=\"high\"\n"
+    );
+    assert_eq!(std::fs::metadata(&file).unwrap().mode() & 0o7777, 0o600);
+    assert_eq!(
+        write_master_settings(&home, &command, &owner)
+            .unwrap_err()
+            .0,
+        "harness_settings_unavailable"
+    );
+    let other = base.join("other");
+    private_directory(&other);
+    write_master_settings(&other, &command, &Applied::default()).unwrap();
+    assert!(!other.join("config.toml").exists());
 }

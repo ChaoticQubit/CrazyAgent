@@ -1,0 +1,36 @@
+ TW-1  Open the standalone database                                                                                     
+ Feature  In progress  P1  agent:store  0.1 Core  Cycle 1                                                               
+                                                                                                                        
+ The core opens or creates its own SQLite file, 0600 inside a 0700 folder.                                              
+ A host migrates the same tables into its own database instead.                                                         
+                                                                                                                        
+ Criteria  1 of 2 met                                                                                                   
+   [x] The file is created 0600 in a 0700 folder                                                                met     
+       test  tests/store.rs::the_standalone_file_is_0600                                                    pass        
+   [ ] Reopening the file keeps every row                                                                       open    
+       manual  reopen check                                                                                 no evidence 
+                                                                                                                        
+ Links                                                                                                                  
+   branch      feat/v3a-at1-core                                                                              unknown   
+                                                                                                                        
+ History                                                                                                                
+   ticket.update     agent:store                                                                                        
+   link.add          owner                                                                                              
+   criterion.set     owner                                                                                              
+   evidence.record   owner                                                                                              
+   check.add         owner                                                                                              
+   check.add         owner                                                                                              
+   criterion.add     owner                                                                                              
+   criterion.add     owner                                                                                              
+   ticket.update     owner                                                                                              
+   ticket.create     owner                                                                                              
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        

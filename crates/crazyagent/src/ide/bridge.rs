@@ -18,7 +18,7 @@ use tokio::time::Instant;
 
 pub mod agents;
 pub mod memory;
-mod owner_edit;
+pub(crate) mod owner_edit;
 pub mod reveal;
 pub mod run_command;
 

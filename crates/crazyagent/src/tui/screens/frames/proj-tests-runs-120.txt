@@ -1,0 +1,36 @@
+ [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Tests
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ≟ Questions   ⧉ Context   ✓ Tests   ☰ Settings
+─────────────────────────────────────────────────────────────────────────────────━━━━━━━────────────────────────────────
+   Cases  [Runs]  Coverage
+   FM  Runs                                                                                    2 runs  every verdict
+
+     ID          Verdict       Passed      Title
+   > FM-R2       passed        1 of 1      lint
+     FM-R1       failed        2 of 3      unit
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Tab Page   Enter Open run   ↑↓ Move   f Verdict   r Read again   s Settings   Shift-←→ Tabs   Esc Home          ? Help

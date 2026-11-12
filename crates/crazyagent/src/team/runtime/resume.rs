@@ -11,7 +11,7 @@ use crate::recovery::{self, HeldItem, Interrupted, RunState};
 use crate::team::master::{self, InputRefused};
 use crate::team::{AgentRole, AgentStatus, launch_harness, names, now_ms};
 use crate::terminal::PANES_PER_PROJECT_MAX;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeSet;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -480,8 +480,11 @@ impl TeamRuntime {
         match busy {
             Busy::Task(task) => {
                 let now = now_ms();
-                let started = self
+                let taken = self
                     .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(error)?;
+                let started = taken
                     .execute(
                         "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL
                          WHERE id=?1 AND status='queued'",
@@ -489,6 +492,10 @@ impl TeamRuntime {
                     )
                     .map_err(error)?;
                 assert!(started <= 1);
+                if started == 1 {
+                    crate::tracker::hooks::task_taken(&taken, &run.project, task, run.agent, now)?;
+                }
+                taken.commit().map_err(error)?;
                 if started == 1 {
                     let project = &run.project;
                     let named = names::name(&self.connection, run.agent)?

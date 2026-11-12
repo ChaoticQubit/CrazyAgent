@@ -261,6 +261,21 @@ export interface PolicyView {
   version: number;
 }
 
+/** How far the owner trusts a project's repository content. */
+export type Trust = "reviewed" | "untrusted";
+
+/** The engine's view of a project's repository trust: the level and why it has it, every
+ * level, the rules Untrusted locks with their reasons, the gaps no level closes and the
+ * version a save names. */
+export interface TrustView {
+  trust: Trust;
+  origin: "default" | "cloned" | "owner";
+  levels: { trust: Trust; label: string; description: string }[];
+  rules: { id: string; text: string; reason: string }[];
+  gaps: { id: string; text: string; effect: string }[];
+  version: number;
+}
+
 export interface PoolChoice {
   pool: AccountPool;
   members: ModelConnection[];
@@ -717,6 +732,19 @@ export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
  * generation. Output: the receipt. */
 export function saveAgentPolicy(id: string, policy: AgentPolicy, version: number, generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_set_project_agent_policy", { id, version, policy, generation });
+}
+
+/** Reads this project's repository trust. Input: project id. Output: the engine's view. */
+export function loadTrust(id: string): Promise<Result<TrustView>> {
+  return call<TrustView>("desktop_project_trust", { id });
+}
+
+/** Sets this project's repository trust; a raise to Reviewed lands only with
+ * `confirmRaise`, and a level changed since the screen read it is `stale_revision`.
+ * Inputs: project id, the level, the confirm, the version the screen read and a
+ * generation. Output: the receipt. */
+export function saveTrust(id: string, trust: Trust, confirmRaise: boolean, version: number, generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_trust", { id, version, trust, confirmRaise, generation });
 }
 
 /** Deletes one document or research report from the project folder.

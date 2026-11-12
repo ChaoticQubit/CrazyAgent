@@ -297,7 +297,7 @@ test("a project's flag counts its pending questions once, with its other unseen 
 
 test("the Questions tab sits after Changes and the commands go through the bridge with only ids, version and the choice", async () => {
   const { TABS } = await import("../src/screens/project/index.tsx");
-  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "questions", "context", "process", "metrics", "settings"]);
+  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "metrics", "settings"]);
   const source = readFileSync(new URL("../src/api-questions.ts", import.meta.url), "utf8");
   assert.match(source, /call<void>\("desktop_answer_question", \{ id, version, picks: choice\.picks, comment: choice\.comment \}\)/);
   assert.match(source, /call<void>\("desktop_dismiss_question", \{ id, version \}\)/);

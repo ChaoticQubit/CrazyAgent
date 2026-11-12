@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  Harnesses  /  Codex                         
+────────────────────────────────────────────────────────────────────────────────
+  Accounts   Pools   Harnesses   Plugins and skills   Process   Memory   Profile
+─────────────────────━━━━━━━━━──────────────────────────────────────────────────
+  Codex settings                                       Codex 0.51.0, qualified  
+  Every project gets these unless the project changes them. A change applies    
+  the next time Codex starts.                                                   
+                                                                                
+    Setting                   Value                   From                      
+    Hide agent reasoning      Off                     Default                   
+    Reasoning effort          high                    App                       
+    Project doc limit         0                       ⊘ Locked                  
+    Status label              Empty                   Default                   
+  > Sandbox                   Not set                 ⊘ Locked                  
+    Approvals                 never                   ⊘ Locked                  
+                                                                                
+  Sandbox                                                         sandbox_mode  
+  Fixture: the sandbox the agent runs in.                                       
+  Locked: CrazyAgent runs every agent in its own sandbox.                       
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ ↑↓ Move  r Read again  Esc Back                                         ? Help 

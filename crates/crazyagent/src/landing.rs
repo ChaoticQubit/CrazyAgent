@@ -10,6 +10,8 @@ mod ancestry;
 #[cfg(unix)]
 mod clone;
 #[cfg(unix)]
+pub(crate) use clone::check_store;
+#[cfg(unix)]
 mod diff;
 pub(crate) mod evidence;
 #[cfg(unix)]
@@ -504,6 +506,22 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+/// Refuses engine git on an untrusted project's repository whose own config names a key the
+/// admission rules refuse, before a diff, Accept, Update, Discard or Restore runs git on it
+/// (threat model G-a); a reviewed project is unchanged. Inputs: the store and the change
+/// set. Output: Ok, or `repository_config_refused:<rule>` or `repository_trust_unreadable`.
+#[cfg(unix)]
+fn untrusted_config(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let record = store::load(db, id)?;
+    let trust = crate::trust::level(db, record.project.as_str())
+        .map_err(|_| git::failure("repository_trust_unreadable"))?;
+    match crate::trust::Enforcement::for_level(trust).repo_config_as_text {
+        true => crate::worktrees::refuse_repository_config(&record.repository),
+        false => Ok(()),
+    }
+}
+
 /// Records one action on a change set in its project's activity at the time the set last
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
@@ -660,8 +678,9 @@ fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind,
     }
 }
 
-/// Opens the change set store in the engine database, adding its table when missing.
-/// Input: the engine root holding `engine.db`. Output: the connection.
+/// Opens the change set store in the engine database, adding its table when missing, and
+/// the tracker's tables a change set write links and notifies through. Input: the engine
+/// root holding `engine.db`. Output: the connection.
 pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     if !runtime.is_absolute() {
         return Err(unavailable());
@@ -670,6 +689,8 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     db.busy_timeout(BUSY_WAIT).map_err(|_| unavailable())?;
     #[cfg(unix)]
     store::initialize(&db)?;
+    #[cfg(unix)]
+    crate::tracker::initialize(&db)?;
     Ok(db)
 }
 
@@ -1437,7 +1458,7 @@ pub fn diff(
 ) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
-        store::initialize(db)?;
+        untrusted_config(db, id)?;
         let record = store::load(db, id)?;
         if record.head != head {
             return Err(EngineError("changes_stale".into()));
@@ -1464,11 +1485,12 @@ pub fn diff(
 }
 
 /// Lands a change set as one squash commit on the owner's checked-out branch, authored
-/// with the owner's git identity. Inputs: the store, the owner's home folder (where git
-/// finds the owner's own user.name and user.email), the change set, the head the owner
-/// reviewed and the owner's edited message, None for the proposed one. Output: the
-/// landed commit and branch, or the conflicting files. `place` is where the owner pressed
-/// Accept, which the project's activity names.
+/// with the owner's git identity, once the accept gate (`checks::gate::admit`) lets it.
+/// Inputs: the store, the owner's home folder (where git finds the owner's own user.name
+/// and user.email), the change set, the head the owner reviewed and the owner's edited
+/// message, None for the proposed one. Output: the landed commit and branch, the
+/// conflicting files, or the gate's refusal. `place` is where the owner pressed Accept,
+/// which the project's activity names.
 pub fn accept(
     db: &Connection,
     owner_home: &Path,
@@ -1478,9 +1500,12 @@ pub fn accept(
     place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
-        false
-    });
+    {
+        untrusted_config(db, id)?;
+        owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
+            false
+        })
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message, place);
@@ -1488,13 +1513,42 @@ pub fn accept(
     }
 }
 
+/// Lands a change set as [`accept`] does with the proposed message, running `between`
+/// once its files are written and before its branch moves, where a test changes what the
+/// accept gate reads. Inputs: as [`accept`] without the message, plus `between`. Output:
+/// as [`accept`].
+#[cfg(all(test, unix))]
+pub(crate) fn accept_between(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    between: &dyn Fn(),
+) -> Result<AcceptOutcome, EngineError> {
+    owner::accept(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+        &|step| {
+            if step == owner::Step::FilesWritten {
+                between();
+            }
+            false
+        },
+    )
+}
+
 /// Lands a change set as one squash commit on a chosen local branch: the owner's
 /// checked-out branch through the owner's checkout as [`accept`] does, a branch checked
 /// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
-/// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
-/// the store, the owner's home folder, the change set, the head the owner reviewed, the
-/// edited message, None for the proposed one, the target branch and where the owner pressed
-/// Accept. Output: the landed commit and branch, or the conflicting files.
+/// own branch through that agent's worktree, which must hold nothing uncommitted, once the
+/// accept gate (`checks::gate::admit`) lets it. Inputs: the store, the owner's home folder,
+/// the change set, the head the owner reviewed, the edited message, None for the proposed
+/// one, the target branch and where the owner pressed Accept. Output: the landed commit
+/// and branch, the conflicting files, or the gate's refusal.
 pub fn accept_into(
     db: &Connection,
     owner_home: &Path,
@@ -1727,14 +1781,17 @@ pub fn discard_as(
     by: &str,
 ) -> Result<u64, EngineError> {
     #[cfg(unix)]
-    return flow::discard(
-        db,
-        id,
-        expected_head,
-        now_ms,
-        by == crate::activity::OWNER_ACTOR,
-    )
-    .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by));
+    {
+        untrusted_config(db, id)?;
+        flow::discard(
+            db,
+            id,
+            expected_head,
+            now_ms,
+            by == crate::activity::OWNER_ACTOR,
+        )
+        .inspect(|_| noted(db, id, crate::activity::ActivityKind::Discarded, by))
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms, by);
@@ -1747,14 +1804,17 @@ pub fn discard_as(
 /// pending.
 pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return flow::restore(db, id, now_ms).inspect(|()| {
-        noted(
-            db,
-            id,
-            crate::activity::ActivityKind::ChangesReady,
-            crate::activity::OWNER_ACTOR,
-        )
-    });
+    {
+        untrusted_config(db, id)?;
+        flow::restore(db, id, now_ms).inspect(|()| {
+            noted(
+                db,
+                id,
+                crate::activity::ActivityKind::ChangesReady,
+                crate::activity::OWNER_ACTOR,
+            )
+        })
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
@@ -1849,14 +1909,17 @@ pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::update(db, id).inspect(|()| {
-        noted(
-            db,
-            id,
-            crate::activity::ActivityKind::SentBack,
-            crate::activity::OWNER_ACTOR,
-        )
-    });
+    {
+        untrusted_config(db, id)?;
+        owner::update(db, id).inspect(|()| {
+            noted(
+                db,
+                id,
+                crate::activity::ActivityKind::SentBack,
+                crate::activity::OWNER_ACTOR,
+            )
+        })
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, id);

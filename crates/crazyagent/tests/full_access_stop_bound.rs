@@ -58,6 +58,7 @@ fn a_full_access_stop_whose_process_listing_cannot_start_ends_within_its_bound()
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     })
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);

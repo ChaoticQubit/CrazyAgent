@@ -39,14 +39,17 @@ pub const REPLY_TOO_LARGE: &str = "Agent output exceeded the limit";
 pub(crate) const AFTER_RESEARCH: &str = "(research_jobs.kind <> 'roadmap_planning' OR NOT EXISTS (SELECT 1 FROM research_jobs AS earlier WHERE earlier.project = research_jobs.project AND earlier.kind <> 'roadmap_planning' AND earlier.status IN ('queued','needs_pool','running')))";
 
 const QUESTION_CONTEXT: &str = "Raised by the roadmap planning job. The roadmap in context/roadmap.md lists it under Open questions. Your answer goes to the project's master once; the roadmap itself does not change.";
-const FULL: [&str; 2] = ["questions_full", "questions_asker_full"];
-const REFUSED: [&str; 2] = ["questions_ask_invalid", "questions_text_invalid"];
+/// The questions log's failures that mean no more questions fit, which stop raising.
+pub(crate) const FULL: [&str; 2] = ["questions_full", "questions_asker_full"];
+/// The questions log's refusals of one question's text, which skip that question.
+pub(crate) const REFUSED: [&str; 2] = ["questions_ask_invalid", "questions_text_invalid"];
 const ROADMAP_FILE: &str = "roadmap.md";
 const RELEASE_FILE: &str = "release-process.md";
 const ROADMAP_HEADING: &str = "# Roadmap";
 const RELEASE_HEADING: &str = "# Release process";
 const OPEN_HEADING: &str = "# Open questions";
-const OPEN_QUESTIONS_HEADING: &str = "## Open questions";
+/// The roadmap's heading over the open points the planning step raises as questions.
+pub(crate) const OPEN_QUESTIONS_HEADING: &str = "## Open questions";
 const QUESTION_FENCE: &str = "```";
 const ENGINE_SECTIONS: [&str; 4] = [
     "roadmap",

@@ -151,7 +151,8 @@ pub enum Asker {
 }
 
 /// The engine steps that raise their own questions, stored as `engine:mapping`,
-/// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning` and
+/// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning`,
+/// `engine:checks`, `engine:scorecard`, the go/no-go scorecard's daily question, and
 /// `engine:access:<request>` for an agent's access request (F08).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineSource {
@@ -159,6 +160,8 @@ pub enum EngineSource {
     Research(String),
     Landing(String),
     Planning,
+    Checks,
+    Scorecard,
     Access(String),
 }
 
@@ -345,6 +348,8 @@ impl EngineSource {
         match self {
             Self::Mapping => Some("engine:mapping".into()),
             Self::Planning => Some("engine:planning".into()),
+            Self::Checks => Some("engine:checks".into()),
+            Self::Scorecard => Some("engine:scorecard".into()),
             Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
             Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
             Self::Access(request) if named(request) => Some(format!("engine:access:{request}")),
@@ -493,6 +498,8 @@ pub fn asker_label(asker: &str) -> String {
         ("terminal", id) => format!("the terminal of agent {id}"),
         ("engine", "mapping") => "project mapping".into(),
         ("engine", "planning") => "roadmap planning".into(),
+        ("engine", "checks") => "check profiles".into(),
+        ("engine", "scorecard") => "the go/no-go scorecard".into(),
         ("engine", rest) => match rest.split_once(':') {
             Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
             Some(("landing", set)) => format!("landing change set {set}"),
@@ -518,9 +525,10 @@ pub fn open(root: &Path) -> Result<Connection, EngineError> {
 /// Logs a question a master or sub-agent asked through its ask tool, or a box a screen
 /// watch saw on an agent's terminal, notifies the owner and rewrites the project's
 /// questions page. A sub-agent's question is also told to the project's master, when its
-/// conversation has room. Inputs: the engine connection, the project, the asker and the
-/// ask. Output: the question id, or `questions_ask_invalid`, `questions_text_invalid`,
-/// `questions_asker_full`, `questions_full` or `questions_project_missing`.
+/// conversation has room, and linked to the tickets of the task it runs. Inputs: the
+/// engine connection, the project, the asker and the ask. Output: the question id, or
+/// `questions_ask_invalid`, `questions_text_invalid`, `questions_asker_full`,
+/// `questions_full`, `questions_project_missing` or `tracker_unavailable`.
 pub fn ask(
     db: &Connection,
     project: &ProjectId,
@@ -533,6 +541,7 @@ pub fn ask(
     let tx = immediate(db)?;
     let id = insert(&tx, project, &asker.name(), source, ask, false, None)?;
     if let Asker::Agent(agent) = asker {
+        crate::tracker::hooks::question_asked(&tx, project, *agent, id, now_ms())?;
         let text = format!(
             "Agent {agent} asked the owner question {id}, in its own words {}. The owner's answer comes to you too, and CrazyAgent types it into agent {agent}'s terminal.",
             quoted(&ask.question)
@@ -1476,6 +1485,14 @@ fn settle(
         )
         .map_err(unavailable)?;
     assert_eq!(changed, 1);
+    let counted = match status {
+        QuestionStatus::Answered => by != Some(AnsweredBy::Chat),
+        QuestionStatus::AnsweredInTerminal => true,
+        QuestionStatus::Pending | QuestionStatus::Dismissed => false,
+    };
+    if counted {
+        crate::scorecard::answered(tx, &project, &question.asker, question.id, answer, now);
+    }
     prune(tx, &project)?;
     Ok(Settlement::Settled)
 }
@@ -1590,6 +1607,7 @@ fn deliver(
             ),
             true,
         ),
+        ("engine", "scorecard") => return Ok(None),
         ("engine", _) => (
             MessageAuthor::Engine,
             told(

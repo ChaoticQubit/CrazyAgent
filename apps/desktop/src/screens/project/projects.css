@@ -108,6 +108,9 @@ textarea.pj-input { resize: vertical; line-height: 20px; }
 .pj-radio-card input { appearance: none; flex: none; width: 16px; height: 16px; margin: 3px 0 0; border: 1.5px solid var(--border-input); border-radius: 50%; background: var(--surface); }
 .pj-radio-card input:checked { border-color: var(--accent); background: radial-gradient(circle, var(--accent) 0 3.5px, var(--surface) 4px); }
 .pj-radio-body { display: grid; gap: 2px; }
+.pj-rules { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
+.pj-rules li { display: grid; gap: 2px; padding: 8px 12px; border-top: 1px solid var(--border); }
+.pj-rules li:first-child { border-top: 0; }
 .pj-team-master { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: end; }
 .pj-team-rows { display: grid; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); }
 .pj-team-row { display: grid; grid-template-columns: minmax(0, 1fr) 120px 110px 90px; gap: 12px; align-items: center; padding: 8px 12px; border-top: 1px solid var(--border); }

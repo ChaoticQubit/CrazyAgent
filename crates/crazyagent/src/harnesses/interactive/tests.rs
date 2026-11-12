@@ -61,6 +61,7 @@ impl Case {
     fn request(&self, harness: &str, account: AccountBinding, tools: bool) -> LaunchRequest {
         LaunchRequest {
             harness: harness.into(),
+            trust: crate::trust::Trust::Reviewed,
             executable: self.executable(harness, "#!/bin/sh\nexit 0\n"),
             working_dir: self.path().join("work"),
             account,
@@ -1111,6 +1112,108 @@ fn a_pane_gets_the_agent_short_temp_folder_and_the_toolchain_settings() {
         }
     }
     toolchains::remove_tmp(&case.home()).unwrap();
+}
+
+#[test]
+fn an_untrusted_codex_launch_writes_the_folder_untrusted_and_turns_project_docs_off() {
+    let case = Case::new();
+    for tools in [true, false] {
+        let mut request = case.request("codex", case.subscription(), tools);
+        request.trust = crate::trust::Trust::Untrusted;
+        let built = command(&request, None, &run(None)).unwrap();
+        let untrusted = format!(
+            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
+            built.cwd.display()
+        );
+        let settings: Vec<&[String]> = built.argv.windows(2).collect();
+        assert!(
+            settings.contains(&&strings(&["-c", &untrusted])[..]),
+            "tools {tools}: {:?}",
+            built.argv
+        );
+        assert!(settings.contains(&&strings(&["-c", "project_doc_max_bytes=0"])[..]));
+        assert!(
+            built
+                .argv
+                .iter()
+                .all(|argument| !argument.contains("trust_level=\"trusted\"")),
+            "an untrusted folder is never also trusted"
+        );
+
+        let reviewed = case.request("codex", case.subscription(), tools);
+        let built = command(&reviewed, None, &run(None)).unwrap();
+        assert!(built.argv.iter().all(
+            |argument| argument != "project_doc_max_bytes=0" && !argument.contains("untrusted")
+        ));
+    }
+}
+
+#[test]
+fn a_plain_harness_is_refused_for_an_untrusted_project_with_the_reason() {
+    let case = Case::new();
+    for plain in PLAIN {
+        let mut request = case.request(plain.id, case.subscription(), true);
+        request.trust = crate::trust::Trust::Untrusted;
+        assert_eq!(
+            command(&request, None, &run(None)).unwrap_err().0,
+            crate::trust::PLAIN_HARNESS_CODE,
+            "{}",
+            plain.id
+        );
+        let reviewed = case.request(plain.id, case.subscription(), true);
+        assert!(command(&reviewed, None, &run(None)).is_ok(), "{}", plain.id);
+    }
+    let mut codex = case.request("codex", case.subscription(), true);
+    codex.trust = crate::trust::Trust::Untrusted;
+    assert!(command(&codex, None, &run(None)).is_ok());
+}
+
+#[test]
+fn a_repository_mcp_json_never_reaches_an_untrusted_launch() {
+    let case = Case::new();
+    let server = "repository-server-7713";
+    std::fs::write(
+        case.path().join("work").join(".mcp.json"),
+        format!("{{\"mcpServers\":{{\"{server}\":{{\"command\":\"/bin/sh\"}}}}}}"),
+    )
+    .unwrap();
+    for tools in [true, false] {
+        for harness in ["claude-code", "codex"] {
+            let mut request = case.request(harness, case.subscription(), tools);
+            request.trust = crate::trust::Trust::Untrusted;
+            let interactive = command(&request, None, &run(None)).unwrap().argv;
+            let headless: Vec<String> = crate::harnesses::launch::command(&request)
+                .unwrap()
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect();
+            for argv in [&interactive, &headless] {
+                assert!(
+                    argv.iter()
+                        .all(|argument| !argument.contains(server)
+                            && !argument.contains(".mcp.json")),
+                    "{harness} tools {tools}: {argv:?}"
+                );
+                if harness == "claude-code" {
+                    assert!(
+                        argv.iter()
+                            .any(|argument| argument == "--strict-mcp-config")
+                    );
+                    assert!(
+                        argv.windows(2)
+                            .any(|pair| pair == ["--setting-sources", ""])
+                    );
+                    assert!(argv.windows(2).any(|pair| pair == CLAUDE_NO_MCP));
+                } else {
+                    assert!(argv.windows(2).any(|pair| pair == ["-c", "mcp_servers={}"]));
+                    assert!(
+                        argv.iter()
+                            .any(|argument| argument.contains("trust_level=\"untrusted\""))
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Builds the real project context `for_project` gives the case's project: an engine

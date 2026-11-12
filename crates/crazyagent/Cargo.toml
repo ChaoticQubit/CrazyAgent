@@ -28,6 +28,8 @@ vt100 = "=0.15.2"
 minisign-verify = "=0.3.0"
 base64 = "=0.22.1"
 semver = "=1.0.28"
+trackwright-core = { path = "../trackwright-core" }
+trackwright-cli = { path = "../trackwright-cli" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"

@@ -6,6 +6,7 @@ use crate::adapters::NativeHarness;
 #[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
+use crate::harness_settings::apply::Applied;
 #[cfg(unix)]
 use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
 use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
@@ -176,8 +177,9 @@ impl ClaudeHostLimits {
 
 /// Builds the tools-off Claude Code master command for one turn.
 /// Input: the registered executable, the leased project directory, the private profile
-/// home, the model and, when given, the engine's 0600 startup instruction file.
-/// Output: the command, or a plain refusal for an unsafe path, model or file.
+/// home, the model, when given the engine's 0600 startup instruction file, and the owner's
+/// Claude Code settings. Output: the command, or a plain refusal for an unsafe path, model
+/// or file.
 #[cfg(unix)]
 pub(in crate::engine) fn launch_command(
     executable: &Path,
@@ -185,6 +187,7 @@ pub(in crate::engine) fn launch_command(
     profile_home: &Path,
     model: &str,
     instructions: Option<&Path>,
+    settings: &Applied,
 ) -> Result<Command, EngineError> {
     command_for(
         executable,
@@ -193,6 +196,7 @@ pub(in crate::engine) fn launch_command(
         model,
         instructions,
         None,
+        settings,
     )
 }
 
@@ -209,6 +213,7 @@ pub(in crate::engine) fn tools_launch_command(
     model: &str,
     instructions: Option<&Path>,
     tools: MasterTools<'_>,
+    settings: &Applied,
 ) -> Result<Command, EngineError> {
     command_for(
         executable,
@@ -217,6 +222,45 @@ pub(in crate::engine) fn tools_launch_command(
         model,
         instructions,
         Some(tools),
+        settings,
+    )
+}
+
+/// Claude Code's `--settings` for a master turn: hooks off and no commit attribution, as
+/// for agents, merged over the owner's Claude Code settings. Input: the settings. Output:
+/// the JSON text.
+#[cfg(unix)]
+fn master_settings(settings: &Applied) -> String {
+    crate::harness_settings::apply::json_settings(
+        &master_engine_settings(),
+        settings,
+        crate::harness_settings::Apply::ClaudeSettings,
+        &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
+    )
+    .to_string()
+}
+
+#[cfg(unix)]
+fn master_engine_settings() -> serde_json::Value {
+    serde_json::json!({
+        "attribution": {"commit": "", "pr": ""},
+        "disableAllHooks": true,
+        "includeCoAuthoredBy": false,
+    })
+}
+
+/// Reads back the owner's settings a master command's `--settings` text carries, against
+/// the shipped Claude Code catalog. Input: the text. Output: the settings, or none for
+/// text the engine would not build.
+#[cfg(unix)]
+fn master_settings_of(text: &str) -> Option<Applied> {
+    let catalog = crate::harness_settings::catalog::builtin("claude-code").ok()?;
+    crate::harness_settings::apply::read_back(
+        catalog.as_ref(),
+        &master_engine_settings(),
+        crate::harness_settings::Apply::ClaudeSettings,
+        &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
+        text,
     )
 }
 
@@ -261,6 +305,7 @@ fn command_for(
     model: &str,
     instructions: Option<&Path>,
     tools: Option<MasterTools<'_>>,
+    settings: &Applied,
 ) -> Result<Command, EngineError> {
     let servers = match tools {
         Some(tools) => delegate_config(tools)?,
@@ -328,6 +373,7 @@ fn command_for(
             .args(CLAUDE_BUILT_IN_AGENTS),
         None => command.args(["--tools", "", "--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
     };
+    let settings = master_settings(settings);
     command.args([
         "--strict-mcp-config",
         MCP_CONFIG_FLAG,
@@ -335,7 +381,7 @@ fn command_for(
         "--setting-sources",
         "",
         "--settings",
-        "{\"disableAllHooks\":true}",
+        settings.as_str(),
         "--disable-slash-commands",
         "--no-session-persistence",
     ]);
@@ -372,6 +418,7 @@ pub(in crate::engine) fn launch_command(
     _profile_home: &Path,
     _model: &str,
     _instructions: Option<&Path>,
+    _settings: &Applied,
 ) -> Result<Command, EngineError> {
     Err(failure("claude_host_unavailable"))
 }
@@ -387,6 +434,7 @@ pub(in crate::engine) fn tools_launch_command(
     _model: &str,
     _instructions: Option<&Path>,
     _tools: MasterTools<'_>,
+    _settings: &Applied,
 ) -> Result<Command, EngineError> {
     Err(failure("claude_host_unavailable"))
 }
@@ -894,6 +942,13 @@ fn validate_command(
         )),
         None => None,
     };
+    let settings = args
+        .iter()
+        .position(|arg| *arg == OsStr::new("--settings"))
+        .and_then(|index| args.get(index + 1))
+        .and_then(|text| text.to_str())
+        .and_then(master_settings_of)
+        .ok_or(Fault::Host("claude_host_unapproved_command"))?;
     let tools = args.contains(&OsStr::new("--permission-mode"));
     let named = if tools {
         let named = args
@@ -929,6 +984,7 @@ fn validate_command(
                 mailbox,
                 off,
             }),
+        &settings,
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
     if tools {

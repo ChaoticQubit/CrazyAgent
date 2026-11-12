@@ -81,6 +81,18 @@ impl AgentAccess {
             None
         }
     }
+
+    /// Why this level cannot run agents of a project at `trust`, or None when it can: this
+    /// computer's reason first, then the trust level's ([`crate::trust::Enforcement`]), so
+    /// an untrusted project's Own branch or Full access is refused naming the trust level.
+    /// Input: the project's trust. Output: the owner's line.
+    pub fn unavailable_under(self, trust: crate::trust::Trust) -> Option<&'static str> {
+        self.unavailable().or_else(|| {
+            crate::trust::Enforcement::for_level(trust)
+                .refusal(self)
+                .map(|(line, _)| line)
+        })
+    }
 }
 
 /// How far one project's tools-on agents and the plugin "Check again" server may reach on
@@ -474,13 +486,18 @@ impl AgentPolicy {
         pinned
     }
 
-    /// What a client shows: the level, every level with its availability, each toolchain
-    /// family the owner has installed, the project uses or the owner chose, the IDE hooks
-    /// and agent files choices, the tool cache choice with every choice, the shared folders
-    /// choice with the top-level folders it can pick, and the policy's version, which a save
-    /// names. Inputs: the project folder, the
-    /// owner's tool homes and the version. Output: the view.
-    pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
+    /// What a client shows: every level with its availability under the project's trust,
+    /// the toolchain families installed, used or chosen, the IDE hooks (off when untrusted),
+    /// agent files, tool cache and shared folders choices with what each can pick, and the
+    /// version a save names. Inputs: the project folder, the owner's tool homes, the version
+    /// and the project's trust. Output: the view.
+    pub fn view(
+        &self,
+        project: &Path,
+        homes: &ToolHomes,
+        version: u64,
+        trust: crate::trust::Trust,
+    ) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
             .into_iter()
@@ -497,7 +514,14 @@ impl AgentPolicy {
         PolicyView {
             access: self.access,
             network: self.network,
-            levels: LevelView::all(),
+            levels: AgentAccess::ALL
+                .into_iter()
+                .map(|access| LevelView {
+                    access,
+                    label: access.label().to_owned(),
+                    unavailable: access.unavailable_under(trust).map(str::to_owned),
+                })
+                .collect(),
             networks: AgentNetwork::ALL
                 .into_iter()
                 .map(|network| NetworkView {
@@ -507,7 +531,7 @@ impl AgentPolicy {
                 .collect(),
             toolchains,
             version,
-            ide_git_hooks: self.ide_git_hooks,
+            ide_git_hooks: self.ide_git_hooks_under(trust),
             tool_cache: self.tool_cache,
             tool_caches: ToolCacheScope::ALL
                 .into_iter()
@@ -547,6 +571,13 @@ impl AgentPolicy {
             shared_folders: self.shared_folders.clone(),
             local_folders: super::shared_folders::local_folders(project),
         }
+    }
+
+    /// Whether git in the IDE runs the project's own hooks: the owner's switch for a
+    /// reviewed project, always off for an untrusted one. Input: the project's trust.
+    /// Output: the switch.
+    pub fn ide_git_hooks_under(&self, trust: crate::trust::Trust) -> bool {
+        self.ide_git_hooks && crate::trust::Enforcement::for_level(trust).ide_workspace_trust
     }
 
     /// Tells whether this saved policy gives a running agent more than it started with: a
@@ -926,7 +957,12 @@ mod tests {
         );
         let saved = serde_json::to_string(&own).unwrap();
         assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(
+            folder.path(),
+            &ToolHomes::at(folder.path()),
+            1,
+            crate::trust::Trust::Reviewed,
+        );
         assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
         let listed: Vec<(&str, &str)> = view
             .tool_caches
@@ -966,7 +1002,12 @@ mod tests {
         assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
         assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
         assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(
+            folder.path(),
+            &ToolHomes::at(folder.path()),
+            1,
+            crate::trust::Trust::Reviewed,
+        );
         let listed: Vec<(&str, &str)> = view
             .apply_choices
             .iter()
@@ -1305,6 +1346,7 @@ mod tests {
             Path::new("/nonexistent"),
             &ToolHomes::at(Path::new("/nonexistent")),
             0,
+            crate::trust::Trust::Reviewed,
         );
         assert!(view.ide_git_hooks);
         connection
@@ -1383,8 +1425,13 @@ mod tests {
             assert_eq!(read.ide_agent_files, choice);
             assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
             assert_eq!(
-                read.view(nowhere, &ToolHomes::at(nowhere), 0)
-                    .ide_agent_files,
+                read.view(
+                    nowhere,
+                    &ToolHomes::at(nowhere),
+                    0,
+                    crate::trust::Trust::Reviewed
+                )
+                .ide_agent_files,
                 choice
             );
         }

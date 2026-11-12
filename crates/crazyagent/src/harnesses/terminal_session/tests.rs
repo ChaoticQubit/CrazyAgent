@@ -140,6 +140,7 @@ mod own_turns {
             unconfined,
             git_identity: None,
             limits: LaunchLimits::default(),
+            trust: crate::trust::Trust::Reviewed,
         };
         let mut session =
             TerminalSession::start(host, AgentId::new(name).unwrap(), request, None).unwrap();

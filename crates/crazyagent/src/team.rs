@@ -2,6 +2,7 @@ use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::project_setup::{HarnessSlot, StoredSetup, TEAM_AGENTS_MAX, TeamPlan};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
+use crate::scorecard::Kind as Mark;
 use crate::storage::versioned::{self, STALE_CODE};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -2454,6 +2455,10 @@ fn perform(
                     if typed {
                         owner_turn(tx, project, message)?;
                     }
+                    let subject = message.to_string();
+                    let written =
+                        crate::scorecard::mark(tx, project, Mark::OwnerMessage, &subject, now);
+                    crate::scorecard::logged(Mark::OwnerMessage, written);
                     Outcome::Applied
                 }
                 Err(code) => rejected(code),
@@ -2800,6 +2805,9 @@ fn perform(
             owner_stop(tx, project, *agent, now)?;
             let text = format!("You stopped {}", audit_agent(tx, *agent));
             note_owner_action(tx, project, &text, now);
+            let subject = agent.to_string();
+            let written = crate::scorecard::mark(tx, project, Mark::OwnerStop, &subject, now);
+            crate::scorecard::logged(Mark::OwnerStop, written);
             Ok(Outcome::Applied)
         }
         TeamAction::MessageAgent { agent, text, .. } => {

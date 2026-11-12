@@ -261,6 +261,7 @@ fn fetch(
         return Err(failure("github_clone_failed"));
     }
     verify_config(git, &empty_home, &checkout.join(".git/config"), &remote)?;
+    crate::trust::mark_cloned(&checkout, name).map_err(|_| failure("github_clone_failed"))?;
     if std::fs::symlink_metadata(destination).is_ok() {
         return Err(failure("clone_destination_exists"));
     }

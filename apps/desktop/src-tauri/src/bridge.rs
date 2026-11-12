@@ -21,9 +21,11 @@ mod account_setup;
 mod accounts;
 mod agents;
 mod changes;
+pub mod checks;
 mod cleanup;
 mod coord;
 mod coord_questions;
+pub mod harness_settings;
 mod harnesses;
 pub mod ide;
 mod ide_extensions;
@@ -47,8 +49,11 @@ mod queue;
 mod recovery;
 mod roadmap;
 mod scheduling;
+pub mod scorecard;
 mod team;
 pub mod terminal;
+pub mod ticket_settings;
+pub mod tracker;
 /// The one-shot folder pick a WebDriver trial answers for the app's folder chooser (N-D6).
 /// Compiled only into native-webdriver builds, so the shipped app has no such seam.
 #[cfg(all(unix, feature = "native-webdriver"))]
@@ -685,6 +690,9 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectTrust { project_id, .. } => {
+                ("project_trust", Some(project_id.as_str().to_owned()), None)
+            }
             OwnerMutation::Team { action } => (
                 "team",
                 action.project().map(|project| project.as_str().to_owned()),

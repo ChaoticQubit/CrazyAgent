@@ -422,6 +422,21 @@ impl NativeBridge {
         bounded(policy)
     }
 
+    /// Reads a project's repository trust: its level and why it has it, every level, the
+    /// rules Untrusted locks and the gaps no level closes. Takes the project id. Returns the
+    /// engine's view.
+    pub async fn project_trust(
+        &mut self,
+        id: &str,
+    ) -> Result<crazyagent::trust::TrustView, BridgeError> {
+        let trust = self
+            .controller()?
+            .project_trust(project(id)?)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(trust)
+    }
+
     /// Lists a set-up project's files for the console's `@` completion: tracked and
     /// untracked, not ignored paths relative to its folder that contain the query. The
     /// listing runs on a copy of the controller without the bridge and leaves the bridge
@@ -526,6 +541,35 @@ impl NativeBridge {
                     project_id,
                     version,
                     policy,
+                },
+                generation,
+            )
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Sets a project's repository trust; a raise to Reviewed lands only with the owner's
+    /// confirm. Takes the project id, the version the screen showed, the level, the confirm
+    /// and the client generation. Returns the actual commit receipt; an unconfirmed raise is
+    /// `trust_raise_unconfirmed` and a level changed since the screen read it is
+    /// `stale_revision`.
+    pub async fn set_project_trust(
+        &mut self,
+        id: &str,
+        version: u64,
+        trust: crazyagent::trust::Trust,
+        confirm_raise: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .begin_mutation(
+                OwnerMutation::SetProjectTrust {
+                    project_id,
+                    version,
+                    trust,
+                    confirm_raise,
                 },
                 generation,
             )

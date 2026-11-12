@@ -599,7 +599,7 @@ impl AccessEdit {
     fn change(&mut self, forward: bool) {
         self.error = None;
         if self.cursor == 0 {
-            self.access = next_level(self.access, forward);
+            self.access = next_offered(&self.view, self.access, forward);
             return;
         }
         if self.cursor == self.allowed.len() + 1 {
@@ -698,6 +698,34 @@ pub(in crate::tui) fn next_level(current: AgentAccess, forward: bool) -> AgentAc
         })
         .map(|index| AgentAccess::ALL[index])
         .find(|candidate| candidate.unavailable().is_none())
+        .unwrap_or(current)
+}
+
+/// The next access level the project's view offers, cycling in either direction and
+/// skipping each level this computer or the project's repository trust refuses. Input: the
+/// view, the current level and the direction. Output: that level, or the current one when
+/// no other level is offered.
+fn next_offered(view: &PolicyView, current: AgentAccess, forward: bool) -> AgentAccess {
+    let offered = |access: AgentAccess| {
+        view.levels
+            .iter()
+            .any(|level| level.access == access && level.unavailable.is_none())
+    };
+    let at = AgentAccess::ALL
+        .iter()
+        .position(|access| *access == current)
+        .unwrap_or(0);
+    let count = AgentAccess::ALL.len();
+    (1..count)
+        .map(|step| {
+            if forward {
+                (at + step) % count
+            } else {
+                (at + count - step) % count
+            }
+        })
+        .map(|index| AgentAccess::ALL[index])
+        .find(|candidate| offered(*candidate))
         .unwrap_or(current)
 }
 

@@ -7,6 +7,7 @@ pub mod agent_git;
 pub mod agent_home;
 pub mod agents;
 pub mod assets;
+pub mod checks;
 pub mod cleanup_settings;
 pub mod client_controller;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod file_identity;
 #[cfg(unix)]
 pub mod file_lock;
 pub mod github;
+pub mod harness_settings;
 pub mod harnesses;
 /// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
 /// and environment.
@@ -67,6 +69,7 @@ pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
+pub mod scorecard;
 pub mod service;
 pub mod setup;
 pub mod skills;
@@ -80,6 +83,8 @@ pub mod spawn_gate;
 pub mod storage;
 pub mod team;
 pub mod terminal;
+pub mod tracker;
+pub mod trust;
 pub mod tui;
 /// `crazyagent update`: release channel, signed download, verification and executable swap.
 pub mod update;

@@ -33,4 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
- ↑↓ Move   r Check again   c Check for updates   u Update   Shift-←→ Sections   Esc Home                         ? Help 
+ ↑↓ Move   Enter Settings   r Check again   c Check for updates   u Update   Shift-←→ Sections   Esc Home        ? Help 

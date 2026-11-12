@@ -5958,6 +5958,46 @@ fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project()
     assert_eq!(case.owner_refs("refs/crazyagent"), case.base_ref_only());
 }
 
+#[test]
+fn engine_git_refuses_fsmonitor_hookspath_and_include_from_repository_config() {
+    for (key, value, rule) in [
+        ("core.fsmonitor", "/bin/sh", "core_fsmonitor"),
+        ("core.hooksPath", "/private/tmp/hooks", "core_hookspath"),
+        ("include.path", "/private/tmp/included", "include"),
+    ] {
+        let case = Case::new();
+        case.edit("a.txt", "plain text\n");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        case.owner(&["config", key, value]);
+        diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
+        crate::trust::save(
+            &case.db,
+            case.workspace.project.as_str(),
+            crate::trust::Trust::Untrusted,
+            crate::trust::Origin::Owner,
+        )
+        .unwrap();
+        let tip = case.tip();
+        let before = case.checkout();
+        let refused_code = refused(diff(&case.db, &id, &case.view(&id).head, 0));
+        assert_eq!(
+            refused_code,
+            format!("{}{rule}", crate::worktrees::CONFIG_REFUSED),
+            "{key}"
+        );
+        assert_eq!(refused(case.accept(&id)), refused_code, "{key}");
+        assert_eq!(refused(update(&case.db, &id)), refused_code, "{key}");
+        assert_eq!(
+            refused(discard(&case.db, &id, &case.view(&id).head, NOW_MS)),
+            refused_code,
+            "{key}"
+        );
+        assert_eq!(case.tip(), tip, "{key}: nothing landed");
+        assert_eq!(case.checkout(), before, "{key}: the checkout is untouched");
+        assert_eq!(case.view(&id).state, ChangeState::Pending, "{key}");
+    }
+}
+
 /// Engine git never opens an agent's own clone, whose config is the agent's: the engine
 /// refuses it as an agent worktree, and `Repo::open` stops on any git folder that is neither
 /// the owner checkout's nor a linked worktree's in its `.git/worktrees` (CC-N1).

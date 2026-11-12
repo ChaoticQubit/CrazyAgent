@@ -98,6 +98,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let request = LaunchRequest {
         harness: "claude-code".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable,
         working_dir: work,
         account: AccountBinding::ApiKey {
@@ -189,6 +190,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let request = LaunchRequest {
         harness: "claude-code".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable,
         working_dir: work,
         account: AccountBinding::ApiKey {
@@ -303,6 +305,7 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         sandbox_profile: profile,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     };
     let agent = AgentId::new(name).unwrap();
     let session = TerminalSession::start(host.clone(), agent.clone(), request, None).unwrap();
@@ -619,6 +622,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         unconfined: true,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     };
     let agent = AgentId::new("stand-in-3").unwrap();
     let session = TerminalSession::start(host.clone(), agent.clone(), request, None).unwrap();

@@ -1,0 +1,15 @@
+[package]
+name = "trackwright-mcp"
+description = "MCP stdio server over the trackwright operation catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite = { version = "=0.40.2", default-features = false }
+serde_json = "=1.0.154"
+trackwright-core = { path = "../trackwright-core" }
+
+[dev-dependencies]
+tempfile = "=3.27.0"

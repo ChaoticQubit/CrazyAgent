@@ -27,10 +27,13 @@ import { QuestionsTab } from "./questions";
 import { QuestionPopup, popupOn } from "./question-popup";
 import { shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
+import { RoadmapTab } from "./roadmap";
 import { routeSection, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
+import { TicketsTab } from "./tickets";
 import { TeamActivity } from "./team-activity";
+import { TestsTab } from "./tests";
 import { useTeam } from "./team";
 import { useStopAll } from "../team/controls";
 import "./projects.css";
@@ -40,7 +43,10 @@ export const TABS = [
   { id: "conversation", label: "Conversation", icon: "message-square" },
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
+  { id: "tests", label: "Tests", icon: "circle-check" },
   { id: "questions", label: "Questions", icon: "inbox" },
+  { id: "tickets", label: "Tickets", icon: "layout-template" },
+  { id: "roadmap", label: "Roadmap", icon: "trending-up" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "process", label: "Process", icon: "list-checks" },
   { id: "metrics", label: "Metrics", icon: "trending-up" },
@@ -288,7 +294,10 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} section={settingsSection} />}
       {active === "changes" && <ChangesTab data={data} />}
+      {active === "tests" && <TestsTab data={data} />}
       {active === "questions" && <QuestionsTab data={data} />}
+      {active === "tickets" && <TicketsTab data={data} />}
+      {active === "roadmap" && <RoadmapTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "metrics" && <MetricsView key={data.id} projectId={data.id} />}

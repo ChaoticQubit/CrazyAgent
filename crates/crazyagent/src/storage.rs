@@ -1119,6 +1119,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
+    crate::checks::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
     worker_dispatch::initialize(connection)?;
@@ -1127,7 +1128,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_sessions::initialize(connection)?;
     native_auth::initialize(connection)?;
     master_bootstrap::initialize(connection)?;
-    harness_groups::initialize(connection)
+    harness_groups::initialize(connection)?;
+    crate::tracker::initialize(connection)
 }
 
 fn finish_native_auth_without_host(
@@ -2720,6 +2722,8 @@ fn owner_read(
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                    crate::trust::level(&tx, project_id.as_str())
+                        .map_err(|_| error("repository_trust_unreadable"))?,
                 );
             policy.grant_log =
                 crate::sandbox::grants::history(&tx, project_id.as_str()).map_err(error)?;
@@ -2728,6 +2732,10 @@ fn owner_read(
                 policy,
             }
         }
+        OwnerRead::ProjectTrust { project_id } => OwnerData::ProjectTrust {
+            project_id: project_id.clone(),
+            trust: Box::new(crate::trust::view(&tx, project_id)?),
+        },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?

@@ -1,0 +1,1888 @@
+{
+  "harness": "codex",
+  "qualified_versions": [
+    "0.164.0"
+  ],
+  "sources": [
+    "https://developers.openai.com/codex/config-reference",
+    "https://developers.openai.com/codex/config-schema.json",
+    "https://github.com/openai/codex/blob/rust-v0.164.0/codex-rs/features/src/lib.rs"
+  ],
+  "keys": [
+    {
+      "key": "model",
+      "label": "Model",
+      "help": "Model to use (e.g., `gpt-6.1-sol`).",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "review_model",
+      "label": "Review model",
+      "help": "Optional model override used by `/review` (defaults to the current session model).",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_provider",
+      "label": "Model provider",
+      "help": "Provider id from `model_providers` (default: `openai`).",
+      "type": "string",
+      "default": "openai",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "openai_base_url",
+      "label": "OpenAI base URL",
+      "help": "Base URL override for the built-in `openai` model provider.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which endpoints an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_context_window",
+      "label": "Model context window",
+      "help": "Context window tokens available to the active model.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_auto_compact_token_limit",
+      "label": "Model auto compact token limit",
+      "help": "Token threshold that triggers automatic history compaction (unset uses model defaults).",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_auto_compact_token_limit_scope",
+      "label": "Model auto compact token limit scope",
+      "help": "Controls whether the auto-compaction threshold counts the full active context (`total`, the default) or only growth after the carried compaction-window prefix (`body_after_prefix`).",
+      "type": "enum",
+      "options": [
+        "total",
+        "body_after_prefix"
+      ],
+      "default": "total",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_post_turn_compact_threshold_percent",
+      "label": "Model post turn compact threshold percent",
+      "help": "Compact history after a final response when active context reaches this percentage of the usable context window. Omit or set to `0` to disable turn-end compaction. The usual auto-compaction limits still apply.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 100,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_catalog_json",
+      "label": "Model catalog JSON",
+      "help": "Optional path to a JSON model catalog loaded on startup. A selected `$CODEX_HOME/profile-name.config.toml` profile file can override this per profile.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "oss_provider",
+      "label": "OSS provider",
+      "help": "Default local provider used when running with `--oss` (defaults to prompting if unset).",
+      "type": "enum",
+      "options": [
+        "lmstudio",
+        "ollama"
+      ],
+      "default": "lmstudio",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "approval_policy",
+      "label": "Approval policy",
+      "help": "Controls when Codex pauses for approval before executing commands. You can also use `approval_policy = { granular = { ... } }` to allow or auto-reject specific prompt categories while keeping other prompts interactive. `untrusted` is unsupported, and `on-failure` is deprecated; use `on-request` for interactive runs or `never` for non-interactive runs.",
+      "type": "enum",
+      "options": [
+        "on-request",
+        "never"
+      ],
+      "default": "on-request",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides what an agent may run without asking.",
+        "engine_value": "never"
+      }
+    },
+    {
+      "key": "approvals_reviewer",
+      "label": "Approvals reviewer",
+      "help": "Who reviews eligible approval prompts under `on-request` or granular approval policies. Defaults to `user`; `auto_review` uses the reviewer subagent. This setting doesn't change sandboxing or review actions already allowed inside the sandbox.",
+      "type": "enum",
+      "options": [
+        "user",
+        "auto_review",
+        "guardian_subagent"
+      ],
+      "default": "user",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides what an agent may run without asking.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "auto_review.policy",
+      "label": "Auto review policy",
+      "help": "Local Markdown policy instructions for automatic review. Managed `guardian_policy_config` takes precedence. Blank values are ignored.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides what an agent may run without asking.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "auto_review.extra_policy",
+      "label": "Auto review extra policy",
+      "help": "Additional local Markdown policy for automatic review, included alongside the main policy. Managed `guardian_extra_policy` takes precedence. Blank values are ignored.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides what an agent may run without asking.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "allow_login_shell",
+      "label": "Allow login shell",
+      "help": "Allow shell-based tools to use login-shell semantics. Defaults to `true`; when `false`, `login = true` requests are rejected and omitted `login` defaults to non-login shells.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's environment.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "allow_symlinked_codex_home",
+      "label": "Allow symlinked Codex home",
+      "help": "On macOS, allow writable sandbox roots at or under `$CODEX_HOME` to follow symlinks. Codex reads this only from the execution host's `$CODEX_HOME/config.toml` at startup. Enabling it trusts targets outside that directory and targets that change between commands. It grants no additional writable roots. Defaults to `false`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox_mode",
+      "label": "Sandbox mode",
+      "help": "Sandbox policy for filesystem and network access during command execution.",
+      "type": "enum",
+      "options": [
+        "read-only",
+        "workspace-write",
+        "danger-full-access"
+      ],
+      "default": "read-only",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox_workspace_write.network_access",
+      "label": "Sandbox workspace write network access",
+      "help": "Allow outbound network access inside the workspace-write sandbox.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox_workspace_write.exclude_tmpdir_env_var",
+      "label": "Sandbox workspace write exclude tmpdir env var",
+      "help": "Exclude `$TMPDIR` from writable roots in workspace-write mode.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox_workspace_write.exclude_slash_tmp",
+      "label": "Sandbox workspace write exclude slash tmp",
+      "help": "Exclude `/tmp` from writable roots in workspace-write mode.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "windows.sandbox",
+      "label": "Windows sandbox",
+      "help": "Native Windows sandbox implementation. Explicit `mxc` selection fails when MXC is unavailable or prohibited by managed requirements. Use `features.prefer_mxc` with a legacy selection for automatic MXC selection with fallback.",
+      "type": "enum",
+      "options": [
+        "elevated",
+        "unelevated",
+        "mxc"
+      ],
+      "default": "elevated",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "browser_use.allow_history_access",
+      "label": "Browser use allow history access",
+      "help": "Set to `false` to restrict browser-history access. Managed requirements can enforce this restriction.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "computer_use.default_app_access",
+      "label": "Computer use default app access",
+      "help": "Fallback native-app access policy for Computer Use. App-specific entries can supply a policy; local configuration cannot relax managed restrictions.",
+      "type": "enum",
+      "options": [
+        "allow",
+        "deny"
+      ],
+      "default": "allow",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "check_for_update_on_startup",
+      "label": "Check for update on startup",
+      "help": "Check for Codex updates on startup (set to false only when updates are centrally managed).",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine runs the harness version it qualified.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "feedback.enabled",
+      "label": "Feedback enabled",
+      "help": "Enable feedback submission via `/feedback` across local clients (default: true).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "analytics.enabled",
+      "label": "Analytics enabled",
+      "help": "Enable or disable analytics for this machine or profile. Setting this to `false` disables the built-in Statsig metrics exporter. Explicit OTLP metrics exporters remain active. When unset, the client default applies.",
+      "type": "bool",
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "instructions",
+      "label": "Instructions",
+      "help": "Reserved for future use; prefer `model_instructions_file` or `AGENTS.md`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 1024,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent delivers the project's instructions itself.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "developer_instructions",
+      "label": "Developer instructions",
+      "help": "Additional developer instructions injected into the session (optional).",
+      "type": "string",
+      "default": "",
+      "max_bytes": 1024,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent delivers the project's instructions itself.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "log_dir",
+      "label": "Log dir",
+      "help": "Directory where Codex writes log files; defaults to `$CODEX_HOME/log`. Setting this explicitly also enables the opt-in plaintext TUI log, `codex-tui.log`, in that directory.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sqlite_home",
+      "label": "Sqlite home",
+      "help": "Directory where Codex stores the SQLite-backed state DB used by agent jobs and other resumable runtime state.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_instructions_file",
+      "label": "Model instructions file",
+      "help": "Replacement for built-in instructions instead of `AGENTS.md`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent delivers the project's instructions itself.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "personality",
+      "label": "Personality",
+      "help": "Deprecated compatibility setting. `friendly` and `pragmatic` no longer select a style. `none` omits the built-in Personality section from model instructions; explicit instruction overrides are unchanged.",
+      "type": "enum",
+      "options": [
+        "none",
+        "friendly",
+        "pragmatic"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "service_tier",
+      "label": "Service tier",
+      "help": "Preferred service tier for new turns. Use `fast` or another tier advertised by the active model; `fast` maps to the request value `priority`.",
+      "type": "enum",
+      "options": [
+        "default",
+        "priority",
+        "flex",
+        "fast"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "experimental_compact_prompt_file",
+      "label": "Experimental compact prompt file",
+      "help": "Load the compaction prompt override from a file (experimental).",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "skills.bundled.enabled",
+      "label": "Skills bundled enabled",
+      "help": "Load the system skills bundled with Codex. Defaults to `true`. Set to `false` in a trusted project configuration to disable bundled skills for that project.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "skills.include_instructions",
+      "label": "Skills include instructions",
+      "help": "Include the automatic skills instructions in the model context. Defaults to `true`.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "skills.max_context_tokens",
+      "label": "Skills max context tokens",
+      "help": "Token budget for the available-skills catalog. Defaults to 2% of the model's context window. Explicit values are capped at `10000` tokens.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 10000,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.apps",
+      "label": "Feature apps",
+      "help": "Enable app (connector) integrations (stable; on by default). App and connector traffic is not controlled by the sandboxed-command network proxy or its domain allowlist.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": false
+      }
+    },
+    {
+      "key": "features.hooks",
+      "label": "Feature hooks",
+      "help": "Enable lifecycle hooks loaded from `hooks.json` or inline `[hooks]` config. `features.codex_hooks` is a deprecated alias.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which hooks an agent runs.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.context_management.experimental_mode",
+      "label": "Feature context management experimental mode",
+      "help": "Experimental context-management setting. The feature is not currently available.",
+      "type": "bool",
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.rollout_budget.enabled",
+      "label": "Feature rollout budget enabled",
+      "help": "Enable rollout budget tracking. This feature is under development and off by default. When enabled, set both `limit_tokens` and `reminder_at_remaining_tokens`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.rollout_budget.limit_tokens",
+      "label": "Feature rollout budget limit tokens",
+      "help": "Positive token limit for rollout budget tracking. Required when rollout budget is enabled.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.memories",
+      "label": "Feature memories",
+      "help": "Enable Memories (off by default).",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "mcp_optional_startup_grace_ms",
+      "label": "MCP optional startup grace ms",
+      "help": "Shared wait for optional MCP servers when building the initial tool catalog. Defaults to `1000`. Set to `0` to wait for each server's `startup_timeout_sec` instead.",
+      "type": "integer",
+      "default": 1000,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "agents.enabled",
+      "label": "Agents enabled",
+      "help": "Enable or disable multi-agent tools (default: true).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agents.max_concurrent_threads_per_session",
+      "label": "Agents max concurrent threads per session",
+      "help": "Maximum number of spawned-agent threads that can be open concurrently, excluding the primary thread. When unset, Codex chooses the default.",
+      "type": "integer",
+      "default": 1,
+      "min": 1,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agents.max_threads",
+      "label": "Agents max threads",
+      "help": "Legacy alias for `agents.max_concurrent_threads_per_session`.",
+      "type": "integer",
+      "default": 0,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agents.default_subagent_model",
+      "label": "Agents default subagent model",
+      "help": "Default model for spawned agents. An explicit spawn model takes precedence.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agents.default_subagent_reasoning_effort",
+      "label": "Agents default subagent reasoning effort",
+      "help": "Default reasoning effort for spawned agents. An explicit spawn effort takes precedence.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agents.interrupt_message",
+      "label": "Agents interrupt message",
+      "help": "Record a model-visible message when an agent turn is interrupted (default: true).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "memories.version",
+      "label": "Memories version",
+      "help": "Select the local memory store. With memories enabled, Codex defaults to `v2` for a fresh home and `v1` if `$CODEX_HOME/memories/` exists. Explicitly setting `dual_write = false` keeps the default at `v1`.",
+      "type": "enum",
+      "options": [
+        "v1",
+        "v2"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.dual_write",
+      "label": "Memories dual write",
+      "help": "With `v1` selected, set to `true` to generate both stores while continuing to read `v1`. With `v2` selected, Codex writes only `v2`.",
+      "type": "bool",
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.generate_memories",
+      "label": "Memories generate memories",
+      "help": "When `false`, newly created threads are not stored as memory-generation inputs. Defaults to `true`.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.use_memories",
+      "label": "Memories use memories",
+      "help": "When `false`, Codex skips injecting existing memories into future sessions. Defaults to `true`.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.disable_on_external_context",
+      "label": "Memories disable on external context",
+      "help": "When `true`, threads that use external context such as MCP tool calls, web search, or tool search are kept out of memory generation. Defaults to `false`. Legacy alias: `memories.no_memories_if_mcp_or_web_search`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.max_raw_memories_for_consolidation",
+      "label": "Memories max raw memories for consolidation",
+      "help": "Maximum recent raw memories retained for global consolidation. Defaults to `256` and is capped at `4096`.",
+      "type": "integer",
+      "default": 256,
+      "min": 1,
+      "max": 4096,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.max_unused_days",
+      "label": "Memories max unused days",
+      "help": "Maximum days since a memory was last used before it becomes ineligible for consolidation. Defaults to `30` and is clamped to `0`-`365`.",
+      "type": "integer",
+      "default": 30,
+      "min": 0,
+      "max": 365,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.max_rollout_age_days",
+      "label": "Memories max rollout age days",
+      "help": "Maximum age of threads considered for memory generation. Defaults to `30` and is clamped to `0`-`90`.",
+      "type": "integer",
+      "default": 30,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.max_rollouts_per_startup",
+      "label": "Memories max rollouts per startup",
+      "help": "Maximum rollout candidates processed per startup pass. Defaults to `16` and is capped at `128`.",
+      "type": "integer",
+      "default": 16,
+      "min": 1,
+      "max": 128,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.min_rollout_idle_hours",
+      "label": "Memories min rollout idle hours",
+      "help": "Minimum idle time before a thread is considered for memory generation. Defaults to `6` and is clamped to `1`-`48`.",
+      "type": "integer",
+      "default": 6,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.min_rate_limit_remaining_percent",
+      "label": "Memories min rate limit remaining percent",
+      "help": "Minimum remaining percentage required in Codex rate-limit windows before memory generation starts. Defaults to `25` and is clamped to `0`-`100`.",
+      "type": "integer",
+      "default": 25,
+      "min": 0,
+      "max": 100,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.extract_model",
+      "label": "Memories extract model",
+      "help": "Optional model override for per-thread memory extraction.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "memories.consolidation_model",
+      "label": "Memories consolidation model",
+      "help": "Optional model override for global memory consolidation.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.prefer_mxc",
+      "label": "Feature prefer MXC",
+      "help": "Prefer MXC for local Windows execution when native capabilities and policy allow it; otherwise retain the configured legacy sandbox and setup. Disabled by default in the standalone CLI; the desktop app can enable it through rollout configuration. Command failures don't trigger fallback.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.unified_exec",
+      "label": "Feature unified exec",
+      "help": "Use resumable command execution (stable; enabled on all platforms). User opt-outs are ignored. Managed requirements can disable resumable processes and `write_stdin`, leaving one-shot `exec_command` available.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.view_image",
+      "label": "Feature view image",
+      "help": "Enable the built-in `view_image` tool for opening local images. Defaults to `true`.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.shell_snapshot",
+      "label": "Feature shell snapshot",
+      "help": "Snapshot shell environment to speed up repeated commands (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.multi_agent",
+      "label": "Feature multi agent",
+      "help": "Enable multi-agent collaboration tools (`spawn_agent`, `send_input`, `resume_agent`, `wait_agent`, and `close_agent`) (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": false
+      }
+    },
+    {
+      "key": "features.goals",
+      "label": "Feature goals",
+      "help": "Enable persisted goals and automatic continuation (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": false
+      }
+    },
+    {
+      "key": "goals.max_goal_token_budget",
+      "label": "Goals max goal token budget",
+      "help": "Set the default token budget for new goals and the largest budget a goal can request. Omit to leave goals without a configured limit.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.remote_plugin",
+      "label": "Feature remote plugin",
+      "help": "Enable the remote plugin catalog (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which MCP servers, plugins and connectors an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.network_proxy",
+      "label": "Feature network proxy",
+      "help": "Start the network proxy for sandboxed commands (experimental; off by default). Required to enforce permission-profile domain rules unless enabled administrator-managed `network_proxy` requirements start the proxy. Use a table when setting feature-level policy options such as `domains`. Does not filter web search, apps, MCP, or other hosted tools.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.web_search",
+      "label": "Feature web search",
+      "help": "Deprecated legacy toggle; prefer the top-level `web_search` setting.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.web_search_cached",
+      "label": "Feature web search cached",
+      "help": "Deprecated legacy toggle. When `web_search` is unset, true maps to `web_search = \"cached\"`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.web_search_request",
+      "label": "Feature web search request",
+      "help": "Deprecated legacy toggle. When `web_search` is unset, true maps to `web_search = \"live\"`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.shell_tool",
+      "label": "Feature shell tool",
+      "help": "Enable command execution tools (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.enable_request_compression",
+      "label": "Feature enable request compression",
+      "help": "Compress streaming request bodies with zstd when supported (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.skill_mcp_dependency_install",
+      "label": "Feature skill MCP dependency install",
+      "help": "Allow prompting and installing missing MCP dependencies for skills (stable; on by default).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which MCP servers, plugins and connectors an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.fast_mode",
+      "label": "Feature fast mode",
+      "help": "Enable Fast mode controls advertised by the active model (stable; on by default), independently of `features.ultrafast_mode`. Availability still depends on the model and account.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.ultrafast_mode",
+      "label": "Feature ultrafast mode",
+      "help": "Enable Ultrafast mode controls (stable; on by default), independently of `features.fast_mode`. Availability still depends on the model and account.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.prevent_idle_sleep",
+      "label": "Feature prevent idle sleep",
+      "help": "Prevent the machine from sleeping while a turn is actively running (experimental; off by default).",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "suppress_unstable_features_warning",
+      "label": "Suppress unstable features warning",
+      "help": "Suppress the warning that appears when under-development feature flags are enabled.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_providers.gcp.base_url",
+      "label": "Model providers GCP base URL",
+      "help": "Override the built-in Google Cloud Vertex AI endpoint. Otherwise, Codex builds it from the project ID and location.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which endpoints an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_providers.gcp.project_id",
+      "label": "Model providers GCP project ID",
+      "help": "Google Cloud project ID for the Vertex AI endpoint. Takes precedence over `GOOGLE_CLOUD_PROJECT`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_providers.gcp.location",
+      "label": "Model providers GCP location",
+      "help": "Google Cloud location for the Vertex AI endpoint. Takes precedence over `GOOGLE_CLOUD_LOCATION`. Defaults to `global`.",
+      "type": "string",
+      "default": "global",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which endpoints an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_providers.amazon-bedrock.aws.profile",
+      "label": "Model providers amazon bedrock AWS profile",
+      "help": "AWS profile name used by the built-in `amazon-bedrock` provider.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_providers.amazon-bedrock.aws.region",
+      "label": "Model providers amazon bedrock AWS region",
+      "help": "AWS region used by the built-in `amazon-bedrock` provider.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which endpoints an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model_reasoning_effort",
+      "label": "Model reasoning effort",
+      "help": "Reasoning effort advertised by the selected model, such as `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Available levels depend on the model and client.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "plan_mode_reasoning_effort",
+      "label": "Plan mode reasoning effort",
+      "help": "Plan-mode-specific reasoning override using a level supported by the selected model. When unset, Plan mode uses its built-in preset default.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_reasoning_summary",
+      "label": "Model reasoning summary",
+      "help": "Select reasoning summary detail or disable summaries entirely.",
+      "type": "enum",
+      "options": [
+        "auto",
+        "concise",
+        "detailed",
+        "none"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_verbosity",
+      "label": "Model verbosity",
+      "help": "Optional GPT-5 Responses API verbosity override; when unset, the selected model/preset default is used.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "shell_environment_policy.inherit",
+      "label": "Shell environment policy inherit",
+      "help": "Baseline environment inheritance when spawning subprocesses.",
+      "type": "enum",
+      "options": [
+        "core",
+        "all",
+        "none"
+      ],
+      "default": "core",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's environment.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "shell_environment_policy.ignore_default_excludes",
+      "label": "Shell environment policy ignore default excludes",
+      "help": "Keep variables containing KEY, SECRET, or TOKEN before other filters run (default: true). Set to false to apply automatic secret-name exclusions.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's environment.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "shell_environment_policy.experimental_use_profile",
+      "label": "Shell environment policy experimental use profile",
+      "help": "Use the user shell profile when spawning subprocesses.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's environment.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "project_doc_max_bytes",
+      "label": "Project doc max bytes",
+      "help": "Maximum bytes read from `AGENTS.md` when building project instructions.",
+      "type": "integer",
+      "default": 32768,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent delivers the project's instructions itself.",
+        "engine_value": 0
+      }
+    },
+    {
+      "key": "history.persistence",
+      "label": "History persistence",
+      "help": "Control whether Codex saves session transcripts to history.jsonl.",
+      "type": "enum",
+      "options": [
+        "save-all",
+        "none"
+      ],
+      "default": "save-all",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tool_output_token_limit",
+      "label": "Tool output token limit",
+      "help": "Token budget for storing individual tool/function outputs in history.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "thread_unload_delay_secs",
+      "label": "Thread unload delay secs",
+      "help": "Seconds the app server waits before unloading an inactive thread with no subscribers. Set to `0` to unload it as soon as it meets both conditions. Defaults to `60` seconds.",
+      "type": "integer",
+      "default": 60,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "background_terminal_max_timeout",
+      "label": "Background terminal max timeout",
+      "help": "Maximum poll window in milliseconds for empty `write_stdin` polls (background terminal polling). Default: `300000` (5 minutes). Replaces the older `background_terminal_timeout` key.",
+      "type": "integer",
+      "default": 300000,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "history.max_bytes",
+      "label": "History max bytes",
+      "help": "If set, caps the history file size in bytes by dropping oldest entries.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "file_opener",
+      "label": "File opener",
+      "help": "URI scheme used to open citations from Codex output (default: `vscode`).",
+      "type": "enum",
+      "options": [
+        "vscode",
+        "vscode-insiders",
+        "windsurf",
+        "cursor",
+        "none"
+      ],
+      "default": "vscode",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "otel.environment",
+      "label": "OpenTelemetry environment",
+      "help": "Environment tag applied to emitted OpenTelemetry events (default: `dev`).",
+      "type": "string",
+      "default": "dev",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.exporter",
+      "label": "OpenTelemetry exporter",
+      "help": "Select the OpenTelemetry exporter and provide any endpoint metadata.",
+      "type": "enum",
+      "options": [
+        "none",
+        "otlp-http",
+        "otlp-grpc"
+      ],
+      "default": "none",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.trace_exporter",
+      "label": "OpenTelemetry trace exporter",
+      "help": "Select the OpenTelemetry trace exporter and provide any endpoint metadata.",
+      "type": "enum",
+      "options": [
+        "none",
+        "otlp-http",
+        "otlp-grpc"
+      ],
+      "default": "none",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.metrics_exporter",
+      "label": "OpenTelemetry metrics exporter",
+      "help": "Select the OpenTelemetry metrics exporter. The default, `statsig`, follows `analytics.enabled`. Explicit OTLP exporters work independently of that setting. Set to `none` to disable metrics export.",
+      "type": "enum",
+      "options": [
+        "none",
+        "statsig",
+        "otlp-http",
+        "otlp-grpc"
+      ],
+      "default": "none",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.log_user_prompt",
+      "label": "OpenTelemetry log user prompt",
+      "help": "Opt in to exporting raw user prompts with OpenTelemetry logs.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.log_agent_responses",
+      "label": "OpenTelemetry log agent responses",
+      "help": "Export final response text from the main agent and spawned subagents to the configured OTLP log exporter. Defaults to `false`. Response text can contain sensitive data and is capped at 64 KiB per response.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.log_guardian_assessments",
+      "label": "OpenTelemetry log guardian assessments",
+      "help": "Export completed automatic approval reviews to the configured OTLP log exporter. Defaults to `false`. Review rationales can contain sensitive data and are capped at 64 KiB each.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otel.tool_result.max_bytes",
+      "label": "OpenTelemetry tool result max bytes",
+      "help": "Maximum number of UTF-8 bytes from each tool result to include in logs, before the truncation notice. Defaults to `2048`. This setting affects only logged output.",
+      "type": "integer",
+      "default": 2048,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "tui.notification_method",
+      "label": "TUI notification method",
+      "help": "Notification method for terminal notifications (default: auto).",
+      "type": "enum",
+      "options": [
+        "auto",
+        "osc9",
+        "bel"
+      ],
+      "default": "auto",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.notification_condition",
+      "label": "TUI notification condition",
+      "help": "Control whether TUI notifications fire only when the terminal is unfocused or regardless of focus. Defaults to `unfocused`.",
+      "type": "enum",
+      "options": [
+        "unfocused",
+        "always"
+      ],
+      "default": "unfocused",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.animations",
+      "label": "TUI animations",
+      "help": "Enable terminal animations (welcome screen, shimmer, spinner) (default: true).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.disable_paste_burst",
+      "label": "TUI disable paste burst",
+      "help": "Disable burst-paste detection in the TUI (default: false). Takes precedence over the legacy top-level `disable_paste_burst` setting.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.alternate_screen",
+      "label": "TUI alternate screen",
+      "help": "Control alternate screen usage for the TUI (default: auto; auto skips it in Zellij to preserve scrollback).",
+      "type": "enum",
+      "options": [
+        "auto",
+        "always",
+        "never"
+      ],
+      "default": "auto",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.resume_cwd",
+      "label": "TUI resume folder",
+      "help": "Working directory to use when resuming or forking a session. When unset, Codex asks you to choose if your current directory differs from the session's saved directory.",
+      "type": "enum",
+      "options": [
+        "current",
+        "session"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.vim_mode_default",
+      "label": "TUI vim mode default",
+      "help": "Start the composer in Vim normal mode instead of insert mode (default: false). You can still toggle it per session with `/vim`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.raw_output_mode",
+      "label": "TUI raw output mode",
+      "help": "Start the TUI in raw scrollback mode for copy-friendly terminal selection (default: false). You can toggle it with `/raw` or the default `alt-r` key binding.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.show_tooltips",
+      "label": "TUI show tooltips",
+      "help": "Show onboarding tooltips in the TUI welcome screen (default: true).",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.auto_recap",
+      "label": "TUI auto recap",
+      "help": "Generate automatic conversation recaps while the terminal is unfocused (default: true). Set to `false` to disable automatic recaps; `/recap` remains available.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.show_server_version_notice",
+      "label": "TUI show server version notice",
+      "help": "Show informational notices about connected app-server version differences (default: true). Does not hide compatibility errors or version status.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "hide_agent_reasoning",
+      "label": "Hide agent reasoning",
+      "help": "Suppress reasoning events in both the TUI and `codex exec` output.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "show_raw_agent_reasoning",
+      "label": "Show raw agent reasoning",
+      "help": "Surface raw reasoning content when the active model emits it.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disable_paste_burst",
+      "label": "Disable paste burst",
+      "help": "Legacy fallback for `tui.disable_paste_burst`. Prefer the setting under `[tui]`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "chatgpt_base_url",
+      "label": "ChatGPT base URL",
+      "help": "Override the base URL used during the ChatGPT login flow.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which endpoints an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "cli_auth_credentials_store",
+      "label": "CLI auth credentials store",
+      "help": "Control where the CLI stores cached credentials.",
+      "type": "enum",
+      "options": [
+        "file",
+        "keyring",
+        "auto",
+        "ephemeral"
+      ],
+      "default": "file",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": "file"
+      }
+    },
+    {
+      "key": "mcp_oauth_credentials_store",
+      "label": "MCP OAuth credentials store",
+      "help": "Preferred store for MCP OAuth credentials.",
+      "type": "enum",
+      "options": [
+        "auto",
+        "file",
+        "keyring"
+      ],
+      "default": "auto",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "mcp_oauth_callback_port",
+      "label": "MCP OAuth callback port",
+      "help": "Optional global fixed port for the local HTTP callback server used during MCP OAuth login. A server-specific `oauth.callback_port` takes precedence. When neither is set, Codex binds to an ephemeral port chosen by the OS.",
+      "type": "integer",
+      "default": 0,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "mcp_oauth_callback_url",
+      "label": "MCP OAuth callback URL",
+      "help": "Optional base callback URL for MCP OAuth login, such as a devbox ingress URL. Newly added pre-registered clients use this URL unchanged when the authorization server supports issuer identification; existing clients without a saved callback append a server-specific callback ID. Without issuer support, any pre-registered MCP server whose configured callback lacks the required ID falls back to this URL with the ID appended. Callback URL ports don't select the listener port.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "experimental_use_unified_exec_tool",
+      "label": "Experimental use unified exec tool",
+      "help": "Legacy name for enabling unified exec; prefer `[features].unified_exec` or `codex --enable unified_exec`.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "web_search",
+      "label": "Web search",
+      "help": "Web search mode (default: `\"cached\"`; cached uses an OpenAI-maintained index without external web access; indexed permits external access only when gated by the search index; if you use `--yolo` or another full access sandbox setting, it defaults to `\"live\"`). Use `\"live\"` for unrestricted live retrieval, or `\"disabled\"` to remove the tool.",
+      "type": "enum",
+      "options": [
+        "disabled",
+        "cached",
+        "indexed",
+        "live"
+      ],
+      "default": "disabled",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "default_permissions",
+      "label": "Default permissions",
+      "help": "Name of the default permissions profile to apply to sandboxed tool calls. Built-ins are `:read-only`, `:workspace`, and `:danger-full-access`; custom profile names require matching `[permissions.]` tables. Don't combine with `sandbox_mode` or `[sandbox_workspace_write]`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "notice.hide_full_access_warning",
+      "label": "Notice hide full access warning",
+      "help": "Track acknowledgement of the full access warning prompt.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "notice.hide_world_writable_warning",
+      "label": "Notice hide world writable warning",
+      "help": "Track acknowledgement of the Windows world-writable directories warning.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "notice.hide_rate_limit_model_nudge",
+      "label": "Notice hide rate limit model nudge",
+      "help": "Track opt-out of the rate limit model switch reminder.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "notice.hide_gpt5_1_migration_prompt",
+      "label": "Notice hide GPT-5 1 migration prompt",
+      "help": "Track acknowledgement of the GPT-5.1 migration prompt.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "forced_login_method",
+      "label": "Forced login method",
+      "help": "Restrict Codex to a specific authentication method.",
+      "type": "enum",
+      "options": [
+        "chatgpt",
+        "api"
+      ],
+      "default": "chatgpt",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "forced_chatgpt_workspace_id",
+      "label": "Forced ChatGPT workspace ID",
+      "help": "Limit ChatGPT logins to a specific workspace identifier.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.code_mode",
+      "label": "Feature code mode",
+      "help": "Turns on code mode, an experimental tool that runs model-written programs.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.plugins",
+      "label": "Feature plugins",
+      "help": "Turns on plugins and the tools they bring.",
+      "type": "bool",
+      "default": true,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which MCP servers, plugins and connectors an agent reaches.",
+        "engine_value": false
+      }
+    },
+    {
+      "key": "features.apply_patch_freeform",
+      "label": "Feature apply patch freeform",
+      "help": "Offers the free-form apply_patch tool for file edits.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "features.multi_agent_v2",
+      "label": "Feature multi agent v2",
+      "help": "Turns on the second sub-agent tool set.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "tools.experimental_request_user_input.enabled",
+      "label": "Tools experimental request user input enabled",
+      "help": "Lets the agent stop a turn to ask the user a question.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    }
+  ]
+}

@@ -4129,6 +4129,7 @@ fn delegate_refuses_past_sub_agent_depth() {
                     harness: None,
                     role: None,
                     mode: None,
+                    ticket: None,
                 },
             )
             .unwrap()
@@ -4375,6 +4376,7 @@ fn delegate(task: &str) -> Call {
         harness: None,
         role: None,
         mode: None,
+        ticket: None,
     }
 }
 
@@ -5835,6 +5837,7 @@ fn a_live_master_remembers_and_recalls_memories_quoted_with_who_saved_them() {
     let listed_on: Vec<&str> = tool::TEAM_TOOLS
         .into_iter()
         .chain(tool::QUESTION_TOOLS)
+        .chain(tool::CHECKS_TOOLS)
         .collect();
     assert_eq!(listed, listed_on);
     let saved = "Saved to memory. recall finds it now, and agents started from now on get it.";
@@ -6526,7 +6529,7 @@ fn recall_of_notes_full_of_line_feeds_fits_the_reply_without_a_panic() {
         let saved = memory_answer(
             &mut fixture.connection,
             &project,
-            "Dummy agent",
+            (None, "Dummy agent"),
             Call::Remember {
                 text: format!("{n}{}z", "\n".repeat(1990)),
                 scope: tool::MemoryReach::Project,
@@ -6537,7 +6540,7 @@ fn recall_of_notes_full_of_line_feeds_fits_the_reply_without_a_panic() {
     let (text, failed) = memory_answer(
         &mut fixture.connection,
         &project,
-        "Dummy agent",
+        (None, "Dummy agent"),
         Call::Recall {
             query: String::new(),
         },
@@ -6579,7 +6582,7 @@ fn recall_keeps_a_note_that_fits_exactly_and_says_so_when_one_byte_more_is_left_
             let saved = memory_answer(
                 &mut fixture.connection,
                 &project,
-                "Dummy agent",
+                (None, "Dummy agent"),
                 Call::Remember {
                     text: note,
                     scope: tool::MemoryReach::Project,
@@ -6590,7 +6593,7 @@ fn recall_keeps_a_note_that_fits_exactly_and_says_so_when_one_byte_more_is_left_
         let (text, failed) = memory_answer(
             &mut fixture.connection,
             &project,
-            "Dummy agent",
+            (None, "Dummy agent"),
             Call::Recall {
                 query: String::new(),
             },

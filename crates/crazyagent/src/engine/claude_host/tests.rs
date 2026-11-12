@@ -43,6 +43,7 @@ impl Directories {
             &self.home,
             model,
             None,
+            &crate::harness_settings::apply::Applied::default(),
         )
     }
 }
@@ -159,7 +160,8 @@ fn claude_launch_rejects_relative_paths_and_shared_profile_home() {
             &directories.project,
             &directories.home,
             "claude-sonnet-4-6",
-            None
+            None,
+            &crate::harness_settings::apply::Applied::default()
         )
         .is_err()
     );
@@ -169,7 +171,8 @@ fn claude_launch_rejects_relative_paths_and_shared_profile_home() {
             Path::new("project"),
             &directories.home,
             "claude-sonnet-4-6",
-            None
+            None,
+            &crate::harness_settings::apply::Applied::default()
         )
         .is_err()
     );
@@ -179,7 +182,8 @@ fn claude_launch_rejects_relative_paths_and_shared_profile_home() {
             &directories.project,
             Path::new("home"),
             "claude-sonnet-4-6",
-            None
+            None,
+            &crate::harness_settings::apply::Applied::default()
         )
         .is_err()
     );
@@ -198,7 +202,8 @@ fn claude_launch_rejects_symlinked_profile_and_missing_project() {
             &directories.project,
             &alias,
             "claude-sonnet-4-6",
-            None
+            None,
+            &crate::harness_settings::apply::Applied::default()
         )
         .is_err()
     );
@@ -222,6 +227,7 @@ fn claude_launch_appends_only_a_private_engine_instruction_file() {
             &directories.home,
             "native-default",
             Some(path),
+            &crate::harness_settings::apply::Applied::default(),
         )
     };
 
@@ -370,6 +376,7 @@ fn a_real_tools_on_claude_master_keeps_its_default_tools_but_no_built_in_sub_age
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
         },
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     command
@@ -481,8 +488,15 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
         )
         .unwrap();
     let home = profile.profile_path().unwrap();
-    let command =
-        launch_command(&installed_claude(), &project, &home, "native-default", None).unwrap();
+    let command = launch_command(
+        &installed_claude(),
+        &project,
+        &home,
+        "native-default",
+        None,
+        &crate::harness_settings::apply::Applied::default(),
+    )
+    .unwrap();
     let tmp = root.path().join("agent-tmp");
     fs::create_dir(&tmp).unwrap();
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
@@ -593,8 +607,15 @@ async fn stand_in_master_framed(
     let profile = fixture.lease("claude-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", body);
-    let command =
-        launch_command(&harness, &fixture.project, &home, "native-default", None).unwrap();
+    let command = launch_command(
+        &harness,
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        &crate::harness_settings::apply::Applied::default(),
+    )
+    .unwrap();
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
     let sandbox = if unconfined {
         sandbox.unconfined()
@@ -1007,6 +1028,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
             },
+            &crate::harness_settings::apply::Applied::default(),
         )
     };
     let command = launch(engine, &drop).unwrap();
@@ -1050,7 +1072,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
             "--disable-slash-commands",
             "--no-session-persistence",
         ]
@@ -1094,7 +1116,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
             "--disable-slash-commands",
             "--no-session-persistence",
             "--max-turns",
@@ -1137,6 +1159,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         "native-default",
         None,
         tools,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let off = launch_command(
@@ -1145,6 +1168,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         &home,
         "native-default",
         None,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     assert_eq!(validate_command(&on, &profile, &home).ok(), Some(true));
@@ -1188,6 +1212,182 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
     }
 }
 
+#[test]
+fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
+    use crate::harness_settings::{apply::Applied, catalog, resolve, tests};
+    let shipped = catalog::builtin("claude-code").unwrap().unwrap();
+    let version = shipped.qualified_versions.first().map(String::as_str);
+    let settings = Applied::new(
+        &shipped,
+        resolve(&shipped, version, &Default::default(), None),
+    );
+    let directories = Directories::new();
+    let engine = Path::new("/approved/crazyagent");
+    let drop = directories
+        .root
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let off = launch_command(
+        Path::new("/approved/claude"),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        &settings,
+    )
+    .unwrap();
+    let on = tools_launch_command(
+        Path::new("/approved/claude"),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        MasterTools {
+            engine,
+            drop: &drop,
+            mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
+        },
+        &settings,
+    )
+    .unwrap();
+    for command in [off, on] {
+        let args = arguments(&command);
+        let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+        let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+        tests::assert_locked_in_shipped("claude-code", &tests::json_leaves(&document));
+        assert_eq!(master_settings_of(&args[at]), Some(settings.clone()));
+    }
+}
+
+#[test]
+fn a_claude_master_starts_with_auto_memory_off_unless_the_owner_turns_it_on() {
+    use crate::harness_settings::{Source, Stored, apply::Applied, catalog, resolve};
+    let shipped = catalog::builtin("claude-code").unwrap().unwrap();
+    let version = shipped.qualified_versions.first().map(String::as_str);
+    let directories = Directories::new();
+    let on: Stored = [("autoMemoryEnabled".to_owned(), serde_json::json!(true))].into();
+    for (app, expected, source) in [
+        (Stored::new(), false, Source::Default),
+        (on, true, Source::App),
+    ] {
+        let settings = Applied::new(&shipped, resolve(&shipped, version, &app, None));
+        let value = settings
+            .values()
+            .iter()
+            .find(|value| value.key == "autoMemoryEnabled")
+            .unwrap();
+        assert_eq!(value.source, source);
+        let command = launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &directories.home,
+            "native-default",
+            None,
+            &settings,
+        )
+        .unwrap();
+        let args = arguments(&command);
+        let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+        let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+        assert_eq!(document["autoMemoryEnabled"], serde_json::json!(expected));
+        assert_eq!(master_settings_of(&args[at]), Some(settings.clone()));
+    }
+    let unqualified = Applied::new(
+        &shipped,
+        resolve(&shipped, Some("2.1.0"), &Stored::new(), None),
+    );
+    let command = launch_command(
+        Path::new("/approved/claude"),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        &unqualified,
+    )
+    .unwrap();
+    let args = arguments(&command);
+    let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+    let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+    assert!(document.get("autoMemoryEnabled").is_none());
+    assert_eq!(master_settings_of(&args[at]), Some(unqualified.clone()));
+}
+
+#[test]
+fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
+    use crate::engine::master_host_fixture::MasterFixture;
+    use crate::harness_settings::apply::Applied;
+
+    let mut fixture = MasterFixture::new("claude");
+    let profile = fixture.lease("claude-settings-validate", 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let catalog = crate::harness_settings::tests::fixture("claude-code");
+    let app: crate::harness_settings::Stored =
+        [("cleanupPeriodDays".to_owned(), serde_json::json!(60))]
+            .into_iter()
+            .collect();
+    let owner = Applied::new(
+        &catalog,
+        crate::harness_settings::resolve(&catalog, Some("2.1.309"), &app, None),
+    );
+    let build = |settings: &Applied| {
+        launch_command(
+            Path::new("/approved/claude"),
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            settings,
+        )
+        .unwrap()
+    };
+    let owned = build(&owner);
+    let args = arguments(&owned);
+    let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&args[at]).unwrap(),
+        serde_json::json!({
+            "attribution": {"commit": "", "pr": ""},
+            "cleanupPeriodDays": 60,
+            "disableAllHooks": true,
+            "includeCoAuthoredBy": false,
+        })
+    );
+    assert_eq!(args.len(), arguments(&build(&Applied::default())).len());
+    let allowed = crate::harness_settings::catalog::builtin("claude-code")
+        .unwrap()
+        .and_then(|shipped| shipped.key("cleanupPeriodDays").cloned())
+        .is_some_and(|key| key.locked.is_none());
+    let verified = validate_command(&owned, &profile, &home);
+    assert_eq!(verified.is_ok(), allowed, "{verified:?}");
+    if !allowed {
+        assert!(matches!(
+            verified,
+            Err(Fault::Host("claude_host_unapproved_command"))
+        ));
+    }
+    let mut hooked = args.clone();
+    hooked[at] = serde_json::json!({
+        "attribution": {"commit": "", "pr": ""},
+        "disableAllHooks": true,
+        "hooks": {"Stop": []},
+        "includeCoAuthoredBy": false,
+    })
+    .to_string();
+    let mut forged = std::process::Command::new(owned.get_program());
+    forged
+        .args(hooked)
+        .current_dir(owned.get_current_dir().unwrap())
+        .env_clear();
+    for (key, value) in owned.get_envs() {
+        forged.env(key, value.unwrap());
+    }
+    assert!(matches!(
+        validate_command(&forged, &profile, &home),
+        Err(Fault::Host("claude_host_unapproved_command"))
+    ));
+}
+
 /// Each master step limit the owner can pick ends the engine's tools-on command with
 /// `--max-turns` and its steps, and the host runs it; No limit adds nothing. A step count
 /// the owner cannot pick, the flag twice, the flag with no count and a limit on a
@@ -1216,6 +1416,7 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
             "native-default",
             None,
             tools,
+            &crate::harness_settings::apply::Applied::default(),
         )
         .unwrap()
     };
@@ -1265,6 +1466,7 @@ fn the_host_runs_a_tools_on_master_under_each_step_limit_the_owner_can_pick() {
         &home,
         "native-default",
         None,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     limit_steps(&mut off, StepLimit::Steps50);
@@ -1296,6 +1498,7 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
         },
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
@@ -1386,9 +1589,17 @@ async fn held_turn(
                 mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
                 off: &[],
             },
+            &crate::harness_settings::apply::Applied::default(),
         )
     } else {
-        launch_command(&harness, &fixture.project, &home, "native-default", None)
+        launch_command(
+            &harness,
+            &fixture.project,
+            &home,
+            "native-default",
+            None,
+            &crate::harness_settings::apply::Applied::default(),
+        )
     }
     .unwrap();
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
@@ -1722,6 +1933,7 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
             mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
             off: &[],
         },
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
@@ -1953,8 +2165,15 @@ async fn a_claude_master_turn_reads_a_tool_result_past_a_mebibyte_within_its_all
     let profile = fixture.lease("claude-large-result", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", LARGE_RESULT_HARNESS);
-    let command =
-        launch_command(&harness, &fixture.project, &home, "native-default", None).unwrap();
+    let command = launch_command(
+        &harness,
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        &crate::harness_settings::apply::Applied::default(),
+    )
+    .unwrap();
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
     let mut claude = ClaudeHost::spawn(
         command,

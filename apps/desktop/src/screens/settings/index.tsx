@@ -2,6 +2,7 @@ import { useLayoutEffect, type ReactNode } from "react";
 import { PageHeader, formatRoute } from "../../ui";
 import { SETTINGS_TABS, isUserMenuTab, type ListedSettingsTab, type SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
+import { ChecksSettings } from "./checks";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
@@ -13,6 +14,7 @@ import { QuittingSettings } from "./quitting";
 import { ProcessSettings } from "../process";
 import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
+import { TicketSettings } from "./tickets";
 import "../project/projects.css";
 import "./settings.css";
 
@@ -27,7 +29,8 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
   ] },
   { title: "Agents", items: [
     { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
-    { id: "process", label: "Process" }, { id: "pack", label: "Pack" }, { id: "memory", label: "Memory" },
+    { id: "process", label: "Process" }, { id: "tickets", label: "Tickets" }, { id: "pack", label: "Pack" },
+    { id: "checks", label: "Checks" }, { id: "memory", label: "Memory" },
     { id: "finished", label: "Finished agents" }, { id: "quit", label: "Quitting" },
     { id: "master", label: "Master" },
   ] },
@@ -74,15 +77,18 @@ export function SettingsFrame({ tab, children }: { tab: ListedSettingsTab; child
 
 /** Settings: the frame around the selected section's panel.
  * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
- * "sign_in" opens the sign-in of the given account) and the skill whose detail is open. */
-export function Settings({ tab, action, account, skill }: { tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
+ * "sign_in" opens the sign-in of the given account), the skill whose detail is open and the
+ * harness whose settings page is open. */
+export function Settings({ tab, action, account, skill, harness }: { tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string }) {
   return <SettingsFrame tab={tab}>
     {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
       : tab === "pools" ? <Pools creating={action === "new"} />
-      : tab === "harnesses" ? <Harnesses />
+      : tab === "harnesses" ? <Harnesses harness={harness} />
       : tab === "plugins" ? <PluginsAndSkills skill={skill} />
       : tab === "process" ? <ProcessSettings />
+      : tab === "tickets" ? <TicketSettings />
       : tab === "pack" ? <PackSettings />
+      : tab === "checks" ? <ChecksSettings />
       : tab === "sandbox" ? <SandboxSettingsTab />
       : tab === "memory" ? <MemorySettings />
       : tab === "finished" ? <FinishedAgentsSettings />

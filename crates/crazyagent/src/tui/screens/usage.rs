@@ -1,3 +1,4 @@
+use super::scorecard::ScorecardPanel;
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
@@ -722,7 +723,8 @@ pub fn summary(
     lines
 }
 
-/// Usage: a summary of the tokens agents used in a range and each account's limits.
+/// Usage: a summary of the tokens agents used in a range and each account's limits, and
+/// the go/no-go scorecard in its place while `g` shows it.
 /// Input: keys and the engine's usage report. Output: the summary page.
 pub struct UsagePage {
     range: UsageRange,
@@ -730,6 +732,7 @@ pub struct UsagePage {
     asked: Option<(UsageRange, Option<i64>)>,
     load: Load<()>,
     waiting: bool,
+    scorecard: Option<ScorecardPanel>,
 }
 
 impl Default for UsagePage {
@@ -747,6 +750,7 @@ impl UsagePage {
             asked: None,
             load: Load::Idle,
             waiting: false,
+            scorecard: None,
         }
     }
 
@@ -788,6 +792,9 @@ impl UsagePage {
     /// The page's lines. Inputs: the content width, now, the local offset in seconds and
     /// the context. Output: the lines.
     pub fn body(&self, limit: usize, now_ms: i64, offset: i64, ctx: &Ctx) -> Vec<Line<'static>> {
+        if let Some(panel) = &self.scorecard {
+            return panel.lines(limit, &Names::of(ctx).projects, now_ms, offset, ctx);
+        }
         let theme = &ctx.theme;
         let title = styled("Usage", Role::Accent, theme);
         match (&self.load, &self.report) {
@@ -863,6 +870,9 @@ impl Screen for UsagePage {
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+        if self.scorecard.is_some() {
+            return ScorecardPanel::hints();
+        }
         let mut hints = vec![
             hint("t", "Range"),
             hint("r", "Read again"),
@@ -872,11 +882,32 @@ impl Screen for UsagePage {
             hints.push(hint("m", "Dollars or tokens"));
         }
         hints.push(hint("p", "Prices on or off"));
+        hints.push(hint("g", "Scorecard"));
         hints.push(hint("Esc", "Back"));
         hints
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if *key == Key::Char('g') {
+            self.scorecard = match self.scorecard.take() {
+                Some(_) => None,
+                None => {
+                    let mut panel = ScorecardPanel::new();
+                    panel.reload(local_offset(), ctx);
+                    Some(panel)
+                }
+            };
+            return Flow::Handled;
+        }
+        if let Some(panel) = &mut self.scorecard {
+            let offset = local_offset();
+            let today =
+                crate::scorecard::day_label(now_ms(), i32::try_from(offset / 60).unwrap_or(0));
+            if panel.key(key, &today, offset, ctx) {
+                return Flow::Handled;
+            }
+            return Flow::Ignored;
+        }
         match key {
             Key::Char('t') => {
                 self.range = self.range.next();
@@ -913,6 +944,9 @@ impl Screen for UsagePage {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        if let (Some(panel), Some(event)) = (&mut self.scorecard, settings_event(arrival)) {
+            panel.arrive(event, local_offset(), ctx);
+        }
         match settings_event(arrival) {
             Some(SettingsEvent::Usage(result)) => self.apply(result, ctx),
             Some(SettingsEvent::UsageRefreshed(Ok(()))) => ctx.say(Message::success(
@@ -951,7 +985,7 @@ impl Screen for UsagePage {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.waiting
+        self.waiting || self.scorecard.as_ref().is_some_and(ScorecardPanel::busy)
     }
 
     fn place(&self) -> Option<Place> {

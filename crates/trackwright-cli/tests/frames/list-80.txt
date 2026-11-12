@@ -1,0 +1,24 @@
+ TW  Tickets                                                         7 tickets  
+                                                                                
+   ID    Title                                  Status      Pri Assignee        
+ > TW-1  Open the standalone database           In progress P1  agent:store     
+   TW-2  Ready queue orders by priority         Todo        P2                  
+   TW-3  Export escapes agent text              In review   P0  agent:export    
+   TW-4  Roadmap import reads RM-1 sections     Backlog     P3                  
+   TW-5  Schema v1 matches the catalog          Done        P2                  
+   TW-6  Board view moves a ticket between col… Todo        P1                  
+   TW-7  Claim races leave exactly one winner   Todo        P2                  
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                

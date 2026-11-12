@@ -1,11 +1,12 @@
 import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api";
-import type { Result } from "../../api";
+import type { HarnessEntry, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, loadTrust, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, saveTrust, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope, Trust, TrustView } from "../../api-projects";
 import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
 import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
+import { RAISE_WARNING, TRUST_STALE, TrustLevels, TrustRules, raises, trustLabel } from "./trust";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
 import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -23,7 +24,10 @@ import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
 import { SessionContext, useHeld, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
+import { HarnessPage } from "../settings/harness-page";
+import { ProjectChecks } from "../settings/checks";
 import { PluginsAndSkills } from "../settings/plugins";
+import { TicketSettingsPanel } from "../settings/tickets";
 import { TEAM_SETTINGS_STALE, changeNote, settingsVersion } from "../team/controls";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -37,9 +41,13 @@ const SECTIONS = [
   { id: "overview", label: "Overview" },
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
+  { id: "harnesses", label: "Harnesses" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "tickets", label: "Tickets" },
   { id: "access", label: "Agent access" },
+  { id: "trust", label: "Repository trust" },
   { id: "sandbox", label: "Sandbox" },
+  { id: "checks", label: "Checks" },
   { id: "messages", label: "Messages" },
   { id: "remove", label: "Remove project" },
 ] as const;
@@ -163,6 +171,30 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
     <div className="pj-summary"><span>Running sub-agents keep their current harness; changes apply to agents started after you save, and the master follows Apply a master harness change. Waiting research moves to the new team.</span>
       <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
     <ApplySwitch data={data} />
+  </div>;
+}
+
+/** The harnesses Project Settings offers overrides for: this Mac's Ready and Limited control
+ * harnesses, in catalog order. Input: the catalog. Output: the choices. */
+export function projectHarnesses(entries: readonly HarnessEntry[]): HarnessEntry[] {
+  return entries.filter((entry) => entry.status.kind !== "not_installed");
+}
+
+function HarnessesSection({ data }: { data: ProjectData }) {
+  const entries = projectHarnesses(valueOf(data.harnesses) ?? []);
+  const [chosen, setChosen] = useState<string | null>(null);
+  const current = entries.find((entry) => entry.id === chosen) ?? entries[0];
+  return <div className="pj-stack">
+    <h2>Harnesses</h2>
+    <p className="pj-secondary">A value set here applies to this project only and wins over the app value in Settings, Harnesses. Settings CrazyAgent enforces stay locked.</p>
+    {data.harnesses === undefined && <p className="pj-muted" role="status">Loading...</p>}
+    {data.harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build." />}
+    {data.harnesses?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.harnesses)}</p>}
+    {data.harnesses?.kind === "ok" && entries.length === 0 && <p className="pj-muted">No harness is installed on this Mac. Install one, then choose Check again in Settings, Harnesses.</p>}
+    {current && <>
+      <Select id="ps-harness" label="Harness" value={current.id} options={entries.map((entry) => ({ value: entry.id, label: entry.name }))} onValue={setChosen} />
+      <HarnessPage key={current.id} harness={current.id} projectId={data.id} />
+    </>}
   </div>;
 }
 
@@ -602,6 +634,72 @@ function AccessSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+function TrustSection({ data }: { data: ProjectData }) {
+  const [view, setView] = useState<TrustView | null>(null);
+  const [trust, setTrust] = useState<Trust>("reviewed");
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const notReady = "Not ready yet: repository trust isn't in this build.";
+  function seed(next: TrustView) {
+    setView(next);
+    setTrust(next.trust);
+  }
+  useEffect(() => {
+    let live = true;
+    void loadTrust(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") seed(result.value);
+      else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    });
+    return () => { live = false; };
+  }, [data.id]);
+
+  async function save(confirmRaise: boolean) {
+    if (!view) return;
+    setConfirming(false);
+    setBusy(true);
+    const result = await saveTrust(data.id, trust, confirmRaise, view.version, nextGeneration());
+    if (savedStale(result)) {
+      const fresh = await loadTrust(data.id);
+      setBusy(false);
+      if (fresh.kind !== "ok") return setNote("Repository trust changed since you opened it. Reopen this page to see it.");
+      seed(fresh.value);
+      return setNote(TRUST_STALE);
+    }
+    if (result.kind !== "ok") {
+      setBusy(false);
+      return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    }
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") {
+      setBusy(false);
+      return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
+    }
+    const fresh = await loadTrust(data.id);
+    setBusy(false);
+    if (fresh.kind === "ok") seed(fresh.value);
+    setNote("");
+    data.notify(`Repository trust saved: ${trustLabel(view, trust)}. Agents, checks and the IDE started from now on use it.`);
+  }
+
+  const changed = view !== null && trust !== view.trust;
+  return <div className="pj-stack">
+    <h2>Repository trust</h2>
+    <p className="pj-secondary">How far you trust this repository's code and files. Untrusted locks the rules below; no level closes the gaps.</p>
+    {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
+    {view && <TrustLevels name="ps-trust" view={view} value={trust} onChange={setTrust} />}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
+      onClick={() => view && raises(view.trust, trust) ? setConfirming(true) : void save(false)}>Save repository trust</Button></div>
+    {view && <TrustRules view={view} />}
+    <ConfirmDialog open={confirming} title="Raise this repository to Reviewed?" confirmLabel="Raise trust" cancelLabel="Keep Untrusted" pending={busy}
+      onCancel={() => setConfirming(false)} onConfirm={() => void save(true)}>
+      {RAISE_WARNING}
+    </ConfirmDialog>
+  </div>;
+}
+
 /** The Messages section: the six settings of the sub-agents' Messages timelines, each with every
  * choice and the proposed default named. A choice changes its one setting against what the
  * engine stores now; when another client changed the settings since this view was read, it
@@ -754,8 +852,9 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Overview, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages and Remove project. A setup
- * that belongs to another project counts as still loading, so no form seeds from it.
+/** Project Settings tab: General, Overview, Pool, Team, Harnesses, Plugins and skills, Tickets,
+ * Agent access, Repository trust, Sandbox, Checks, Messages and Remove project. A setup that
+ * belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
@@ -774,13 +873,21 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "overview" && <OverviewSection data={data} onMove={() => setActive("remove")} />}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
+      {active === "harnesses" && <HarnessesSection data={data} />}
       {active === "plugins" && <div className="pj-stack">
         <h2>Plugins and skills</h2>
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
       </div>}
+      {active === "tickets" && <div className="pj-stack">
+        <h2>Tickets</h2>
+        <p className="pj-secondary">Choose a value here to override the app's ticket settings for this project only.</p>
+        <TicketSettingsPanel projectId={data.id} />
+      </div>}
       {active === "access" && <AccessSection data={data} />}
+      {active === "trust" && <TrustSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
+      {active === "checks" && <ProjectChecks projectId={data.id} />}
       {active === "messages" && <MessagesSection data={data} />}
       {active === "remove" && <div className="pj-stack">
         {setup && <MoveHome data={data} setup={setup} />}

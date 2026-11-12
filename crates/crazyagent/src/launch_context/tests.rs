@@ -211,6 +211,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -264,6 +265,7 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
 
     let held = lock_only(&home, "codex").unwrap();
@@ -326,6 +328,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -345,6 +348,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crate::trust::Trust::Reviewed,
     };
     let refused = Session::start_with_context(request, context());
     assert_eq!(
@@ -381,6 +385,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -400,6 +405,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crate::trust::Trust::Reviewed,
     };
     let refused = Session::start_durable(request, None, &state);
     assert_eq!(
@@ -426,6 +432,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -553,6 +560,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -594,6 +602,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -671,6 +680,7 @@ fn an_immutable_planted_codex_system_skill_does_not_survive_a_relaunch() {
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            settings: Applied::default(),
         };
         let first = context.install("codex", &home, true).unwrap();
         drop(first);
@@ -732,6 +742,7 @@ fn a_parked_name_is_left_alone_and_a_home_denying_removals_still_loses_planted_s
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
     let first = context.install("codex", &home, true).unwrap();
     drop(first);
@@ -894,6 +905,7 @@ fn pinned_codex_system_skills_never_refuse_the_next_launches() {
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            settings: Applied::default(),
         };
         let system = home.join("skills").join(CODEX_SYSTEM_SKILLS);
         for launch in 1..=2 {
@@ -992,6 +1004,7 @@ fn a_planted_skills_link_is_moved_away_and_what_it_names_is_left_as_it_was() {
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
     agents.shell(&format!(
         "ln -s '{}' '{}'",
@@ -1065,6 +1078,7 @@ fn an_owner_file_linked_into_codex_skills_keeps_its_immutable_flag() {
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
 
     for launch in 1..=2 {
@@ -1118,6 +1132,7 @@ fn a_codex_install_moves_earlier_skills_out_of_a_home_that_denies_removals() {
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
+            settings: Applied::default(),
         };
 
         let launch = context.install("codex", &home, true);
@@ -1483,6 +1498,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
 
     agents.shell(&plant);
@@ -1644,6 +1660,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -1824,6 +1841,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
         mode: crate::instruction_files::Mode::Both,
+        trust: crate::trust::Trust::Reviewed,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let context = AgentContext {
@@ -1839,6 +1857,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -1936,6 +1955,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             native_team: None,
             native_threads: None,
             relay: None,
+            settings: Applied::default(),
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
@@ -2020,6 +2040,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -2035,6 +2056,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
         unconfined: false,
+        trust: crate::trust::Trust::Reviewed,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
     let named = LaunchError(
@@ -2144,6 +2166,7 @@ impl LeftPane {
             native_team: None,
             native_threads: None,
             relay: None,
+            settings: Applied::default(),
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             catch_up_main: true,
@@ -2159,6 +2182,7 @@ impl LeftPane {
             git_identity: None,
             limits: crate::harnesses::launch::LaunchLimits::default(),
             unconfined: false,
+            trust: crate::trust::Trust::Reviewed,
         };
         let tmux = crate::terminal::tmux::installed(&root)
             .expect("tmux must be installed on this machine");
@@ -2342,6 +2366,7 @@ fn the_restart_sentence_reaches_only_a_sub_agent_in_its_own_clone() {
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
     let restart = " After your change set is accepted, start your next work from main with git reset --keep crazyagent/main, unless you have newer commits.\n";
     let clone = fresh()
@@ -2388,6 +2413,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -2470,6 +2496,7 @@ fn context_with(
                 id: ProjectId::new("launch").unwrap(),
                 folder: Some(folder),
                 mode: crate::instruction_files::Mode::Both,
+                trust: crate::trust::Trust::Reviewed,
                 repeated: crate::agent_home::Repeated::LeaveOut,
             },
             hooks: Vec::new(),
@@ -2480,6 +2507,7 @@ fn context_with(
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -3353,6 +3381,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
                 id: ProjectId::new("hooked").unwrap(),
                 folder: Some(folder),
                 mode: crate::instruction_files::Mode::Both,
+                trust: crate::trust::Trust::Reviewed,
                 repeated: crate::agent_home::Repeated::LeaveOut,
             },
             hooks: vec![
@@ -3366,6 +3395,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -3585,6 +3615,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         native_team: None,
         native_threads: None,
         relay: None,
+        settings: Applied::default(),
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
@@ -4268,6 +4299,7 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
                 run_time: Duration::from_secs(180),
                 ..LaunchLimits::default()
             },
+            trust: crate::trust::Trust::Reviewed,
         },
         context,
     )
@@ -4434,6 +4466,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
                 folder: None,
                 mode: crate::instruction_files::Mode::Both,
                 repeated: crate::agent_home::Repeated::LeaveOut,
+                trust: crate::trust::Trust::Reviewed,
             },
             hooks: Vec::new(),
             agent: String::new(),
@@ -4446,6 +4479,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         catch_up_main: true,
+        settings: Applied::default(),
     };
     let base_url = format!("model_providers.stand.base_url=\"http://127.0.0.1:{port}/v1\"");
     let codex = |turn: &[&str]| -> String {

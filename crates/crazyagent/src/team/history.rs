@@ -183,9 +183,14 @@ pub fn serve_agent_calls(
             ) if caller != id => (TEAMMATE_REFUSED.to_owned(), true),
             (
                 Some(Ok(call @ (Call::Remember { .. } | Call::Recall { .. }))),
-                Some((_, label)),
+                Some((caller, label)),
                 Ok(false),
-            ) => match super::master::memory_answer(connection, project, &label, call) {
+            ) => match super::master::memory_answer(
+                connection,
+                project,
+                (Some(caller), &label),
+                call,
+            ) {
                 Some(Ok(answered)) => answered,
                 Some(Err(_)) | None => (MEMORY_UNREAD.to_owned(), true),
             },

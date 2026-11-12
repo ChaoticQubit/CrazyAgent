@@ -149,6 +149,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::ReadPaths { .. } => "read paths",
                         SetupQuery::HiddenPaths { .. } => "hidden paths",
                         SetupQuery::AgentPolicy { .. } => "agent policy",
+                        SetupQuery::RepositoryTrust { .. } => "repository trust",
                         SetupQuery::CoordQuestions { .. } => "coord questions",
                         SetupQuery::OpenLiveSession { .. } => "live session open",
                         SetupQuery::Overview { .. } => "overview",
@@ -5515,7 +5516,14 @@ async fn a_requested_memory_is_approved_from_the_project_context_tab_on_a_real_e
         )
         .unwrap();
         assert_eq!(
-            agent_remember(&mut db, &notes, "Ada (@lead-a)", false, "Ship on Fridays.").unwrap(),
+            agent_remember(
+                &mut db,
+                &notes,
+                (None, "Ada (@lead-a)"),
+                false,
+                "Ship on Fridays."
+            )
+            .unwrap(),
             Ok(AgentSaved {
                 waiting: true,
                 narrowed: false

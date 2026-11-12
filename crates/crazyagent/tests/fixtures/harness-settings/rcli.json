@@ -1,0 +1,32 @@
+{
+  "harness": "rcli",
+  "qualified_versions": ["0.9.0"],
+  "sources": ["https://example.invalid/fixture/rcli-config"],
+  "keys": [
+    {
+      "key": "theme",
+      "label": "Theme",
+      "help": "Fixture: the colours rcli draws with.",
+      "type": "enum",
+      "options": ["dark", "light"],
+      "default": "dark",
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model",
+      "label": "Model",
+      "help": "Fixture: the model rcli asks.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 128,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool.",
+        "engine_value": null
+      }
+    }
+  ]
+}

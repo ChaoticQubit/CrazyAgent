@@ -29,7 +29,7 @@ use std::fs::File;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -97,10 +97,39 @@ impl OwnerRuntimeHandle {
         allocate_master_capture(&self.authority.root)
     }
 
+    /// Reads the owner's harness settings one master turn applies on a blocking thread, so
+    /// the store read and a first version probe never hold the async runtime. Input: the
+    /// prepared turn. Output: the settings, none for an rcli master, or a
+    /// `HARNESS_SETTINGS_CODES` refusal.
+    pub(super) async fn master_settings(
+        &self,
+        prepared: &PreparedMasterTurn,
+    ) -> Result<crate::harness_settings::apply::Applied, EngineError> {
+        let (harness, executable) = match prepared.session.selection.backend {
+            MasterBackend::Codex => ("codex", self.registered_codex_executable()?),
+            MasterBackend::Claude => ("claude-code", self.registered_claude_executable()?),
+            MasterBackend::Rcli => return Ok(Default::default()),
+        };
+        let executable = executable.verified_path()?.to_path_buf();
+        let root = super::changes::engine_root(&self.authority)?;
+        let project = prepared.session.project_id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::harness_settings::apply::for_launch(
+                &crate::storage::versioned::open(&root)?,
+                harness,
+                &executable,
+                Some(&project),
+            )
+        })
+        .await
+        .map_err(|_| failure("harness_settings_unavailable"))?
+    }
+
     pub(super) fn prepare_master_host(
         &self,
         prepared: &PreparedMasterTurn,
         profile: &NativeProfileUse,
+        settings: crate::harness_settings::apply::Applied,
     ) -> Result<MasterHostLaunch, EngineError> {
         validate_master_binding(prepared)?;
         let binding = prepared.profile.binding();
@@ -133,6 +162,7 @@ impl OwnerRuntimeHandle {
             repository: &prepared.repository,
             worktree: &prepared.cwd,
             policy: &policy,
+            trust: prepared.agent_project.trust,
             hidden: &prepared.hidden_paths,
         };
         let engine = if prepared.tools {
@@ -145,6 +175,13 @@ impl OwnerRuntimeHandle {
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
+        let harness = if claude { "claude-code" } else { "codex" };
+        if settings
+            .harness()
+            .is_some_and(|resolved| resolved != harness)
+        {
+            return Err(failure("master_runtime_binding"));
+        }
         let process = match claude {
             true => fit_process(
                 &prepared.instructions,
@@ -164,6 +201,7 @@ impl OwnerRuntimeHandle {
                 delegate,
                 &prepared.tools_off,
                 prepared.steps,
+                &settings,
             )?
         } else {
             codex_master_turn(
@@ -189,6 +227,9 @@ impl OwnerRuntimeHandle {
         };
         crate::agent_home::prepare(&turn.home, harness, &prepared.agent_project, &process)
             .map_err(|problem| EngineError(problem.0))?;
+        if !claude {
+            write_master_settings(&turn.home, &turn.command, &settings)?;
+        }
         let MasterTurnLaunch {
             command,
             sandbox,
@@ -279,13 +320,15 @@ pub(super) fn master_prompt(instructions: &str, process: &str) -> String {
 }
 
 /// Where one master turn runs: the owner root, the turn's runtime reference from
-/// `allocate_master_capture`, and the project repository and leased worktree it works in.
+/// `allocate_master_capture`, the project repository and leased worktree it works in, the
+/// project's agent policy and its repository trust.
 pub(super) struct MasterTurnPlace<'a> {
     pub(super) root: &'a Root,
     pub(super) runtime_ref: &'a RequestId,
     pub(super) repository: &'a Path,
     pub(super) worktree: &'a Path,
     pub(super) policy: &'a AgentPolicy,
+    pub(super) trust: crate::trust::Trust,
     pub(super) hidden: &'a [PathBuf],
 }
 
@@ -311,7 +354,7 @@ pub(super) struct MasterTurnLaunch {
 /// switched off and the owner's master step limit, which only a tools-on command carries
 /// (OB-5b). Output: the launch parts with the copy, or the refusal of the part that failed,
 /// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
-/// minute after a renewal.
+/// minute after a renewal. The owner's Claude Code settings go into its `--settings`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
@@ -323,6 +366,7 @@ pub(super) fn claude_master_turn(
     engine: Option<&Path>,
     tools_off: &[String],
     steps: StepLimit,
+    settings: &crate::harness_settings::apply::Applied,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -335,6 +379,7 @@ pub(super) fn claude_master_turn(
                 &home,
                 &connection.model.id,
                 Some(instructions.as_path()),
+                settings,
             )?,
             master_sandbox(
                 place.root,
@@ -345,6 +390,7 @@ pub(super) fn claude_master_turn(
                 executable,
                 &connection.endpoint,
                 place.policy,
+                place.trust,
                 place.hidden,
             )?,
             None,
@@ -360,6 +406,7 @@ pub(super) fn claude_master_turn(
                 &connection.endpoint,
                 engine,
                 place.policy,
+                place.trust,
                 place.hidden,
             )?;
             let tmp = sandbox.sandbox().agent_tmp();
@@ -378,6 +425,7 @@ pub(super) fn claude_master_turn(
                     mailbox: &mailbox,
                     off: tools_off,
                 },
+                settings,
             )?;
             crate::engine::claude_host::limit_steps(&mut command, steps);
             (command, sandbox, Some(drop))
@@ -425,6 +473,7 @@ pub(super) fn codex_master_turn(
                 executable,
                 &connection.endpoint,
                 place.policy,
+                place.trust,
                 place.hidden,
             )?,
             home,
@@ -442,6 +491,7 @@ pub(super) fn codex_master_turn(
         &connection.endpoint,
         engine,
         place.policy,
+        place.trust,
         place.hidden,
     )?;
     let tmp = sandbox.sandbox().agent_tmp();
@@ -467,6 +517,55 @@ pub(super) fn codex_master_turn(
         credential,
         tool_record: Some(drop),
     })
+}
+
+/// Writes the owner's Codex settings into a master turn's home as a new 0600 `config.toml`,
+/// leaving out every key the turn's command sets with `-c`, which Codex reads over the
+/// file. Inputs: the turn home, the command and the settings. Output: Ok, or
+/// `harness_settings_unavailable` when the file cannot be made.
+#[cfg(unix)]
+fn write_master_settings(
+    home: &Path,
+    command: &Command,
+    settings: &crate::harness_settings::apply::Applied,
+) -> Result<(), EngineError> {
+    let args: Vec<&str> = command
+        .get_args()
+        .map(|arg| arg.to_str())
+        .collect::<Option<_>>()
+        .ok_or_else(|| failure("harness_settings_unavailable"))?;
+    let engine: Vec<String> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].to_owned())
+        .collect();
+    let Some(text) = crate::harness_settings::apply::codex_config(
+        &engine,
+        &crate::harnesses::launch::CODEX_ENGINE_KEYS,
+        settings,
+    ) else {
+        return Ok(());
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(home.join("config.toml"))
+        .map_err(|_| failure("harness_settings_unavailable"))?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("harness_settings_unavailable"))
+}
+
+/// Refuses the owner's Codex settings file where a master turn cannot run. Takes the home,
+/// command and settings, all unused. Returns `master_host_unavailable`.
+#[cfg(not(unix))]
+fn write_master_settings(
+    _home: &Path,
+    _command: &Command,
+    _settings: &crate::harness_settings::apply::Applied,
+) -> Result<(), EngineError> {
+    Err(failure("master_host_unavailable"))
 }
 
 /// Makes the mailbox of one master turn with its tools on, where its team server leaves the
@@ -896,6 +995,7 @@ pub(super) fn master_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     policy: &AgentPolicy,
+    trust: crate::trust::Trust,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
@@ -908,6 +1008,7 @@ pub(super) fn master_sandbox(
         endpoint,
         None,
         policy,
+        trust,
         hidden,
     )
 }
@@ -932,6 +1033,7 @@ pub(super) fn master_tools_sandbox(
     endpoint: &ModelEndpoint,
     engine: &Path,
     policy: &AgentPolicy,
+    trust: crate::trust::Trust,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
@@ -944,6 +1046,7 @@ pub(super) fn master_tools_sandbox(
         endpoint,
         Some(engine),
         policy,
+        trust,
         hidden,
     )
 }
@@ -960,10 +1063,15 @@ fn turn_sandbox(
     endpoint: &ModelEndpoint,
     engine: Option<&Path>,
     policy: &AgentPolicy,
+    trust: crate::trust::Trust,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     if policy.access.unavailable().is_some() {
         return Err(failure("agent_access_unavailable"));
+    }
+    let enforcement = crate::trust::Enforcement::for_level(trust);
+    if let Some((_, code)) = enforcement.refusal(policy.access) {
+        return Err(failure(code));
     }
     crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
@@ -1011,6 +1119,10 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
+    .and_then(|sandbox| match enforcement.repo_config_as_text {
+        true => sandbox.hide_repository_config(repository),
+        false => Ok(sandbox),
+    })
     .map_err(refused)?;
     #[cfg(target_os = "macos")]
     let sandbox = crate::sandbox::tool_cache::grant(
@@ -1097,6 +1209,7 @@ pub(super) fn master_sandbox(
     _executable: &Path,
     _endpoint: &ModelEndpoint,
     _policy: &AgentPolicy,
+    _trust: crate::trust::Trust,
     _hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
@@ -1117,6 +1230,7 @@ pub(super) fn master_tools_sandbox(
     _endpoint: &ModelEndpoint,
     _engine: &Path,
     _policy: &AgentPolicy,
+    _trust: crate::trust::Trust,
     _hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
@@ -1618,6 +1732,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .unwrap();
@@ -1691,6 +1806,7 @@ mod tests {
                 &executable,
                 &native,
                 &policy,
+                crate::trust::Trust::Reviewed,
                 &[],
             )
             .unwrap();
@@ -1744,6 +1860,7 @@ mod tests {
                     &executable,
                     &native,
                     &policy,
+                    crate::trust::Trust::Reviewed,
                     &[],
                 )
                 .err()
@@ -1762,6 +1879,7 @@ mod tests {
                 &executable,
                 &native,
                 &policy,
+                crate::trust::Trust::Reviewed,
                 &[],
             )
             .unwrap();
@@ -1802,6 +1920,7 @@ mod tests {
             &executable,
             &native,
             &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .unwrap();
@@ -1904,6 +2023,7 @@ mod tests {
             &home,
             ACCOUNT_DEFAULT_MODEL,
             None,
+            &crate::harness_settings::apply::Applied::default(),
         )
         .unwrap();
         let claude = sandbox.wrap(&claude).unwrap();
@@ -2001,6 +2121,7 @@ mod tests {
                 &executable,
                 &native,
                 &AgentPolicy::default(),
+                crate::trust::Trust::Reviewed,
                 &[],
             )
             .is_err()
@@ -2029,6 +2150,7 @@ mod tests {
                     &executable,
                     endpoint,
                     &AgentPolicy::default(),
+                    crate::trust::Trust::Reviewed,
                     &[],
                 )
                 .unwrap_err()
@@ -2055,6 +2177,7 @@ mod tests {
             &executable,
             &endpoint,
             &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .unwrap()
@@ -2099,6 +2222,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
             std::slice::from_ref(&hidden),
         )
         .unwrap();
@@ -2222,6 +2346,7 @@ mod tests {
                 &executable,
                 &ModelEndpoint::Native {},
                 &AgentPolicy::default(),
+                crate::trust::Trust::Reviewed,
                 std::slice::from_ref(&hidden),
             )
             .unwrap_err()
@@ -2321,6 +2446,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .unwrap();
@@ -2451,6 +2577,7 @@ mod tests {
             &ModelEndpoint::Native {},
             &engine,
             &none,
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .err()
@@ -2466,6 +2593,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &none,
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .map(|sandbox| sandbox.sandbox().profile());
@@ -2539,6 +2667,7 @@ mod tests {
             &ModelEndpoint::Native {},
             &engine,
             &AgentPolicy::default(),
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .unwrap();
@@ -2684,6 +2813,161 @@ mod tests {
         );
     }
 
+    /// One master turn's folders for the trust tests: the owner root, a repository with a
+    /// leased worktree under its agents folder, the account home and the harness install.
+    fn trust_turn(base: &Path) -> (Root, PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = Root::open(base).unwrap();
+        let repository = base.join("repository");
+        let worktree = repository
+            .join(".crazyagent")
+            .join("worktrees")
+            .join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("claude");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (root, repository, worktree, home, executable)
+    }
+
+    #[test]
+    fn an_untrusted_project_refuses_full_access_at_launch() {
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let (root, repository, worktree, home, executable) = trust_turn(&base);
+        for access in [AgentAccess::Full, AgentAccess::OwnBranch] {
+            let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+            let _folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+            let policy = AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            };
+            let refused = master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &policy,
+                crate::trust::Trust::Untrusted,
+                &[],
+            )
+            .unwrap_err();
+            assert_eq!(refused.0, crate::trust::ACCESS_CODE, "{access:?}");
+            assert!(
+                master_sandbox(
+                    &root,
+                    &runtime_ref,
+                    &repository,
+                    &worktree,
+                    &home,
+                    &executable,
+                    &ModelEndpoint::Native {},
+                    &policy,
+                    crate::trust::Trust::Reviewed,
+                    &[],
+                )
+                .is_ok(),
+                "{access:?} runs for a reviewed project"
+            );
+        }
+    }
+
+    #[test]
+    fn an_untrusted_launch_denies_the_harness_reads_of_repository_agent_config() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let (root, repository, worktree, home, executable) = trust_turn(&base);
+        let hostile = [
+            repository.join("CLAUDE.md"),
+            repository.join("AGENTS.md"),
+            repository.join(".mcp.json"),
+            repository.join(".claude").join("settings.json"),
+            repository.join(".codex").join("config.toml"),
+            worktree.join("CLAUDE.md"),
+            worktree.join("Claude.MD"),
+            worktree.join("docs").join("AGENTS.md"),
+            worktree.join("CLAUDE.local.md"),
+            worktree.join(".claude").join("commands").join("run.md"),
+            worktree.join(".mcp.json"),
+            worktree.join(".crazyagent").join("instructions.md"),
+            repository.join("AGENTS.override.md"),
+            worktree.join("src").join("AGENTS.override.md"),
+            repository
+                .join(".agents")
+                .join("skills")
+                .join("deploy")
+                .join("SKILL.md"),
+            worktree.join(".agents").join("skills").join("SKILL.md"),
+        ];
+        let plain = [
+            worktree.join("README.md"),
+            repository.join("src").join("main.rs"),
+        ];
+        for file in hostile.iter().chain(plain.iter()) {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "repository text\n").unwrap();
+        }
+        let read = |trust: crate::trust::Trust, file: &Path| {
+            let (runtime_ref, _, _capture) = allocate_master_capture(&root).unwrap();
+            let _folder = MasterRuntimeFolder::new(&root, &runtime_ref);
+            let sandbox = master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                trust,
+                &[],
+            )
+            .unwrap();
+            assert_eq!(
+                sandbox.sandbox().hides_repository_config(),
+                trust == crate::trust::Trust::Untrusted
+            );
+            let mut harness = Command::new("/bin/cat");
+            harness.arg(file).current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::spawn_gate::status(&mut child).unwrap().success()
+        };
+        for file in &hostile {
+            assert!(
+                !read(crate::trust::Trust::Untrusted, file),
+                "{} stays out of an untrusted launch",
+                file.display()
+            );
+            assert!(
+                read(crate::trust::Trust::Reviewed, file),
+                "{} reads in a reviewed launch",
+                file.display()
+            );
+        }
+        for file in &plain {
+            assert!(
+                read(crate::trust::Trust::Untrusted, file),
+                "{}",
+                file.display()
+            );
+        }
+        assert!(
+            !repository.join(".crazyagent").join("CLAUDE.md").exists(),
+            "the engine's own state folder is not repository text"
+        );
+    }
+
     #[test]
     fn capture_refuses_owner_root_permission_drift() {
         let temporary = private_root();
@@ -2691,6 +2975,50 @@ mod tests {
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(allocate_master_capture(&root).is_err());
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn every_key_a_codex_master_sets_is_locked_in_the_shipped_catalog() {
+        use crate::harness_settings::{apply::Applied, catalog, resolve, tests};
+        let shipped = catalog::builtin("codex").unwrap().unwrap();
+        let version = shipped.qualified_versions.first().map(String::as_str);
+        let settings = Applied::new(
+            &shipped,
+            resolve(&shipped, version, &Default::default(), None),
+        );
+        let temporary = private_root();
+        let engine = temporary.path().join("crazyagent");
+        let drop = temporary.path().join(crate::team::tool::DROP_FILE);
+        let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
+        let tools = crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &drop,
+            mailbox: &mailbox,
+            off: &[],
+        };
+        for (name, tools) in [("off", None), ("on", Some(tools))] {
+            let home = temporary.path().join(name);
+            std::fs::create_dir(&home).unwrap();
+            let command = master_command(
+                Path::new("/registered/codex"),
+                &home,
+                Path::new("/leased/worktree"),
+                "admitted-model",
+                tools,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            let lines = args
+                .windows(2)
+                .filter(|pair| pair[0] == "-c")
+                .map(|pair| pair[1]);
+            tests::assert_locked_in_shipped("codex", &tests::codex_settings(lines));
+            write_master_settings(&home, &command, &settings).unwrap();
+            assert!(!home.join("config.toml").exists());
+        }
     }
 }
 
@@ -2715,3 +3043,7 @@ mod claude_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/codex_turn_tests.rs"]
 mod codex_turn_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/untrusted_tests.rs"]
+mod untrusted_tests;

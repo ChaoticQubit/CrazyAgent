@@ -178,6 +178,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let MasterTurnLaunch {
@@ -196,6 +197,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         None,
         &[],
         StepLimit::Steps50,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let single: Vec<&str> = off_command
@@ -257,6 +259,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let host_limit = usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
@@ -270,6 +273,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         None,
         &[],
         StepLimit::NoLimit,
+        &crate::harness_settings::apply::Applied::default(),
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -293,6 +297,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let MasterTurnLaunch {
@@ -311,6 +316,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         Some(&engine),
         &[crate::team::tool::RECALL_TOOL.to_owned()],
         StepLimit::Steps100,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));

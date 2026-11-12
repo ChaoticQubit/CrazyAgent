@@ -426,16 +426,25 @@ async fn handle(
                     },
                 }
             }
-            Action::Stop { id } => Reply::Agent {
-                agent: agents.stop(&id).map_err(plain)?,
-            },
+            Action::Stop { id } => {
+                let agent = agents.stop(&id).map_err(plain)?;
+                let stopped = crate::scorecard::Kind::OwnerStop;
+                crate::scorecard::intervened(&root, &agent.project, stopped, &id);
+                Reply::Agent { agent }
+            }
             Action::Interrupt { id } => {
+                let project = agents.view(&id).map_err(plain)?.project;
                 agents.interrupt(&id).map_err(plain)?;
+                let interrupted = crate::scorecard::Kind::OwnerInterrupt;
+                crate::scorecard::intervened(&root, &project, interrupted, &id);
                 Reply::Done
             }
-            Action::Restart { id } => Reply::Agent {
-                agent: agents.restart(&id).map_err(plain)?,
-            },
+            Action::Restart { id } => {
+                let agent = agents.restart(&id).map_err(plain)?;
+                let restarted = crate::scorecard::Kind::OwnerRestart;
+                crate::scorecard::intervened(&root, &agent.project, restarted, &id);
+                Reply::Agent { agent }
+            }
             Action::Using { account, offset } => {
                 let offset = usize::from(offset);
                 let listed = agents.using(&account).map_err(plain)?;

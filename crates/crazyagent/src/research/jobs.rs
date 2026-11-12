@@ -551,6 +551,30 @@ impl ResearchJobs {
         crate::sandbox::extra_paths::load(&self.connection, project.as_str())
     }
 
+    /// Reads how far the owner trusts a project's repository, see [`crate::trust::level`].
+    /// Takes the project. Returns the level.
+    pub fn trust(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<crate::trust::Trust> {
+        crate::trust::level(&self.connection, project.as_str())
+    }
+
+    /// Reads the level a read-only run over `folder` works under, see
+    /// [`crate::trust::of_folder`]. Takes the project, if any, and the folder. Returns the
+    /// level.
+    pub(crate) fn folder_trust(
+        &self,
+        project: Option<&crate::protocol::ProjectId>,
+        folder: &std::path::Path,
+    ) -> rusqlite::Result<crate::trust::Trust> {
+        crate::trust::of_folder(
+            &self.connection,
+            project.map(crate::protocol::ProjectId::as_str),
+            folder,
+        )
+    }
+
     /// Reads the folders the owner keeps a project's agents out of, see
     /// [`crate::sandbox::hidden_paths::load`]. Takes the project. Returns the folders.
     pub fn hidden_paths(

@@ -154,6 +154,17 @@ test("every plain bridge command is routed with its own arguments and native one
   assert.ok([...planned.values()].filter((entry) => entry.route).length > 100, "the bridge serves the plain commands");
 });
 
+test("a pure bridge helper in a body is routed through the desktop crate and native bridge calls still skip", () => {
+  const planned = new Map(commands(lib).map((command) => [command.name, plan(command, impls)]));
+  assert.match(planned.get("desktop_tracker_op").route?.body ?? "", /^let call = if bridge::tracker::writes\(&op\) \{ lock\(state\)\.await\?\.tracker_op\(op, args\)\? \} else \{ read\(state\)\.await\?\.tracker_op\(op, args\)\? \}; call\.await$/, "tracker writes take the bridge alone, reads share it");
+  for (const native of ["desktop_pick_folder", "desktop_pick_documents", "desktop_import_instructions_file", "desktop_open_link", "desktop_system_notifications", "desktop_team_attention"]) {
+    assert.equal(planned.get(native).skip, "native-only body", `${native} calls a native bridge helper`);
+  }
+  const routes = render(lib, impls);
+  assert.match(routes, /"desktop_tracker_op" => \{[\s\S]*?async \{ let call = if crazyagent_desktop::bridge::tracker::writes\(&op\) \{/, "the helper is named through the desktop crate");
+  assert.doesNotMatch(routes, /(?<![\w:])bridge::/, "every bridge path in routes.rs names the desktop crate");
+});
+
 test("a route calls the method of the type its body names, by impl block, and refuses an ambiguous name", () => {
   const two = methods(TWO_IMPLS);
   assert.deepEqual(two.get("NativeBridge").get("project_files"), { async: false, pub: true, result: true });

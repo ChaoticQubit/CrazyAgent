@@ -21,7 +21,13 @@ pub use native_auth::{
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
+pub use transport::checks::{
+    CHECKS_CODES, CheckGapView, CheckGateView, CheckJobView, CheckRunView, ChecksReply,
+    ChecksRequest, ChecksSettingsView, GATE_GAPS_MAX, GATE_PATHS_SHOWN, RUNS_JOBS_MAX,
+    RUNS_LATEST_MAX,
+};
 pub use transport::cleanup::CLEANUP_CODES;
+pub use transport::harness_settings::HARNESS_SETTINGS_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
@@ -38,7 +44,12 @@ pub use transport::recovery::{
     RecoveryBanner, RunShown,
 };
 pub use transport::roadmap::ROADMAP_CODES;
+pub use transport::scorecard::{SCORECARD_CODES, Saved as ScorecardSaved};
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
+pub use transport::tracker::{
+    CustomBounds, SettingChoices, SettingsSaved, TRACKER_CODES, TRACKER_REPLY_BYTES_MAX,
+    TicketSettingsView, TrackedProject,
+};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
@@ -175,6 +186,12 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
+    },
+    SetProjectTrust {
+        project_id: ProjectId,
+        version: u64,
+        trust: crate::trust::Trust,
+        confirm_raise: bool,
     },
     Team {
         action: crate::team::TeamAction,
@@ -414,6 +431,21 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                     version: *version,
                     policy: policy.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectTrust {
+                project_id,
+                version,
+                trust,
+                confirm_raise,
+            } => {
+                let action = crate::project_setup::SetupAction::SetRepositoryTrust {
+                    project_id: project_id.clone(),
+                    version: *version,
+                    trust: *trust,
+                    confirm_raise: *confirm_raise,
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -758,6 +790,9 @@ pub enum OwnerRead {
     ProjectAgentPolicy {
         project_id: ProjectId,
     },
+    ProjectTrust {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -902,6 +937,7 @@ impl OwnerRead {
             | Self::ProjectReadPaths { .. }
             | Self::ProjectHiddenPaths { .. }
             | Self::ProjectAgentPolicy { .. }
+            | Self::ProjectTrust { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -1311,6 +1347,10 @@ pub enum OwnerData {
     ProjectAgentPolicy {
         project_id: ProjectId,
         policy: crate::sandbox::policy::PolicyView,
+    },
+    ProjectTrust {
+        project_id: ProjectId,
+        trust: Box<crate::trust::TrustView>,
     },
     ResearchJobs {
         project_id: ProjectId,

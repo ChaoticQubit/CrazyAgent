@@ -3484,7 +3484,11 @@ fallback_allowed = false
                 .acquire_master_profile(&prepared, &id("first-signed-in-turn"))
                 .await
                 .unwrap();
-            if let Err(error) = host.prepare_master_host(&prepared, &profile) {
+            if let Err(error) = host.prepare_master_host(
+                &prepared,
+                &profile,
+                crate::harness_settings::apply::Applied::default(),
+            ) {
                 assert_ne!(error.0, "master_runtime_binding");
             }
             drop(profile);
@@ -3522,7 +3526,13 @@ fallback_allowed = false
                 .acquire_master_profile(&prepared, &id("turn-after-rebind"))
                 .await
                 .unwrap();
-            let launch = host.prepare_master_host(&prepared, &profile).map(|_| ());
+            let launch = host
+                .prepare_master_host(
+                    &prepared,
+                    &profile,
+                    crate::harness_settings::apply::Applied::default(),
+                )
+                .map(|_| ());
             drop(profile);
             case.close().await;
             assert_eq!(

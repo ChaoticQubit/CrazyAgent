@@ -1939,7 +1939,7 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
         agent_remember(
             &mut db,
             &alpha,
-            " Ada (@lead-a) ",
+            (None, " Ada (@lead-a) "),
             false,
             "  Use cargo nextest.  "
         )
@@ -1989,7 +1989,7 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
         agent_remember(
             &mut db,
             &alpha,
-            "Master",
+            (None, "Master"),
             true,
             "Run make check before commits."
         )
@@ -2068,7 +2068,7 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
 fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
     let (_directory, mut db, config) = agent_library();
     let alpha = ProjectId::new("alpha").unwrap();
-    agent_remember(&mut db, &alpha, "Ada", false, "Keep tests real.")
+    agent_remember(&mut db, &alpha, (None, "Ada"), false, "Keep tests real.")
         .unwrap()
         .unwrap();
     for (project, agent, text, code) in [
@@ -2098,7 +2098,7 @@ fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
         ),
     ] {
         assert_eq!(
-            agent_remember(&mut db, project, agent, false, text).unwrap(),
+            agent_remember(&mut db, project, (None, agent), false, text).unwrap(),
             Err(code.to_owned()),
             "{text:?} by {agent:?}"
         );
@@ -2113,7 +2113,7 @@ fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
         ),
         Outcome::Applied
     );
-    agent_remember(&mut db, &alpha, "Bo", true, "Keep tests real.")
+    agent_remember(&mut db, &alpha, (None, "Bo"), true, "Keep tests real.")
         .unwrap()
         .unwrap();
     let count: i64 = db
@@ -2154,7 +2154,14 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
     assert_eq!(page_scope(&mut db), AgentScope::Project);
 
     assert_eq!(
-        agent_remember(&mut db, &alpha, "Master", true, "Gotcha in the parser.").unwrap(),
+        agent_remember(
+            &mut db,
+            &alpha,
+            (None, "Master"),
+            true,
+            "Gotcha in the parser."
+        )
+        .unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: true
@@ -2171,7 +2178,7 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
         "another project never reads it"
     );
     assert_eq!(
-        agent_remember(&mut db, &alpha, "Master", false, "Project fact.").unwrap(),
+        agent_remember(&mut db, &alpha, (None, "Master"), false, "Project fact.").unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: false
@@ -2191,7 +2198,7 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
     );
     assert_eq!(page_scope(&mut db), AgentScope::Agent);
     assert_eq!(
-        agent_remember(&mut db, &alpha, "Master", true, "Plain commits.").unwrap(),
+        agent_remember(&mut db, &alpha, (None, "Master"), true, "Plain commits.").unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: false
@@ -2304,7 +2311,7 @@ fn the_owner_moves_an_app_wide_agent_memory_into_one_project() {
         (&alpha, true, "Twice."),
         (&beta, false, "Twice."),
     ] {
-        agent_remember(&mut db, project, "Master", app, text)
+        agent_remember(&mut db, project, (None, "Master"), app, text)
             .unwrap()
             .unwrap();
     }
@@ -2382,7 +2389,7 @@ fn recall_answers_the_newest_memories_first_and_at_most_twelve() {
         agent_remember(
             &mut db,
             &alpha,
-            "Ada",
+            (None, "Ada"),
             index % 2 == 0,
             &format!("fact {index}"),
         )

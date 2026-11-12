@@ -2731,6 +2731,7 @@ async fn console_claude_master(
             mailbox: &mailbox,
             off: &[],
         },
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     crate::engine::claude_host::limit_steps(&mut command, prepared.steps);

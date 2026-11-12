@@ -12,11 +12,11 @@
     Done ch│   Tidepool / Changes                Project tab        │           
            │   Tidepool / Questions              Project tab        │           
   Work     │   Tidepool / Context                Project tab        │           
-    ◔ Marke│   Tidepool / Settings               Project tab        │           
-    ≷ Compe│                                                        │           
-    ▭ Front│ Projects, tabs, settings, actions. Enter goes there.   │           
-           └────────────────────────────────────────────────────────┘           
-  Team  Codex leads. Claude Code x2, Codex x1. Tools on.                        
+    ◔ Marke│   Tidepool / Tests                  Project tab        │           
+    ≷ Compe│   Tidepool / Settings               Project tab        │           
+    ▭ Front│                                                        │           
+           │ Projects, tabs, settings, actions. Enter goes there.   │           
+  Team  Cod└────────────────────────────────────────────────────────┘           
   Pool  Main  6 ready, 1 not signed in                                          
                                                                                 
                                                                                 

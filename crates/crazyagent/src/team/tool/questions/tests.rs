@@ -244,9 +244,18 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
 fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
     let sub_agent = super::super::MASTER_QUESTION_TOOLS.map(str::to_owned);
     let listed = super::super::team_tools(&sub_agent);
-    let tools = listed["tools"].as_array().unwrap();
-    assert!(tools.contains(&super::super::ask_tool()));
-    assert_eq!(tools.last(), Some(&super::super::request_access_tool()));
+    let tools: Vec<&Value> = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|tool| {
+            let name = tool["name"].as_str().unwrap();
+            !name.starts_with(super::super::tracker::TOOL_PREFIX)
+                && !super::super::CHECKS_TOOLS.contains(&name)
+        })
+        .collect();
+    assert!(tools.contains(&&super::super::ask_tool()));
+    assert_eq!(tools.last(), Some(&&super::super::request_access_tool()));
     assert!(tools.iter().all(|tool| tool["name"] != RECORD_TOOL));
     assert!(tools.iter().all(|tool| tool["name"] != WITHDRAW_TOOL));
     assert!(super::super::known_tools(&sub_agent));

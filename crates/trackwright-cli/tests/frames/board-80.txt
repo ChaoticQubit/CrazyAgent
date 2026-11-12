@@ -1,0 +1,24 @@
+ TW  Board                                                                      
+                                                                                
+ Todo (3)            In progress (1)     In review (1)       Done (1)           
+ ━━━━━━━━━━━━━━━━━━  ──────────────────  ──────────────────  ────────────────── 
+>TW-2  P2            TW-1  P1            TW-3  P0            TW-5  P2           
+ Ready queue order…  Open the standalo…  Export escapes ag…  Schema v1 matches… 
+                     agent:store         agent:export                           
+                                                                                
+ TW-6  P1                                                                       
+ Board view moves …                                                             
+                                                                                
+                                                                                
+ TW-7  P2                                                                       
+ Claim races leave…                                                             
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                

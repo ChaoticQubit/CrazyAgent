@@ -30,4 +30,5 @@ research_notes/
 reports/
 apps/desktop/src-tauri/binaries/
 !crates/crazyagent/assets/pack/**/*.md
+!crates/trackwright-core/docs/
 scripts/qualification/__pycache__/
