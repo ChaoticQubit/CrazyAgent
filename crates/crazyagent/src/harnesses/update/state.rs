@@ -598,8 +598,9 @@ impl Updates {
 
     /// Installs the queued harnesses one after another: each starts only once no update or
     /// install runs, a refusal or a wait past `wait_max` becomes that harness's last record,
-    /// and the rest still install. Inputs: what starts one install, the pause between looks
-    /// and the longest wait for the job slot. Output: none; returns once the last one started.
+    /// and the rest still install. It drains only the list queued when it began, so a list
+    /// queued after that belongs to its own drain. Inputs: what starts one install, the pause
+    /// between looks and the longest wait for the job slot. Output: none.
     pub fn drain(
         self: &Arc<Self>,
         mut start: impl FnMut(&'static str) -> Result<(), &'static str>,
@@ -608,7 +609,12 @@ impl Updates {
     ) {
         assert!(!pause.is_zero() && pause <= wait_max);
         let looks = wait_max.as_millis() / pause.as_millis().max(1);
-        while let Some(id) = self.next_queued() {
+        let taken = self.state().queued.len();
+        assert!(taken <= harnesses::specs().len());
+        for _ in 0..taken {
+            let Some(id) = self.next_queued() else {
+                break;
+            };
             let mut result = Err(BUSY);
             for _ in 0..=looks {
                 if self.idle() {
@@ -619,34 +625,37 @@ impl Updates {
                 }
                 std::thread::sleep(pause);
             }
-            if let Err(code) = result {
-                self.refused(id, code);
-            }
+            self.dequeue(id, result.err());
         }
     }
 
-    /// Takes the next harness off the install queue. Output: its catalog id, none when the
-    /// queue is empty.
+    /// The next harness on the install queue, left on it until its install started or was
+    /// refused, so a read never finds it neither queued nor running. Output: its catalog id,
+    /// none when the queue is empty.
     fn next_queued(&self) -> Option<&'static str> {
-        let mut state = self.state();
-        (!state.queued.is_empty()).then(|| state.queued.remove(0))
+        self.state().queued.first().copied()
     }
 
-    /// Records a queued install that never ran as that harness's last record. Inputs: the
-    /// catalog id and the refusal code.
-    fn refused(&self, id: &'static str, code: &'static str) {
+    /// Takes a harness off the front of the install queue once its install started, and in
+    /// the same step records a refusal as its last record. Inputs: the catalog id and the
+    /// refusal code, none when the install started.
+    fn dequeue(&self, id: &'static str, refusal: Option<&'static str>) {
         let mut state = self.state();
-        state.last.insert(
-            id,
-            LastUpdate {
-                ok: false,
-                code: Some(code.to_owned()),
-                output: String::new(),
-                from: None,
-                to: None,
-                ended_ms: now_ms(),
-            },
-        );
+        assert_eq!(state.queued.first().copied(), Some(id));
+        if let Some(code) = refusal {
+            state.last.insert(
+                id,
+                LastUpdate {
+                    ok: false,
+                    code: Some(code.to_owned()),
+                    output: String::new(),
+                    from: None,
+                    to: None,
+                    ended_ms: now_ms(),
+                },
+            );
+        }
+        state.queued.remove(0);
         assert!(state.last.len() <= harnesses::specs().len());
     }
 }
