@@ -40,10 +40,22 @@ export function runProjects(home) {
 }
 
 /** Removes the WebKit folder an earlier run left in the home before the app starts, so the
- * app's web storage starts empty as in a fresh home, where there is none to remove. The home's
- * keychain and every other folder stay. Input: the home. Output: nothing. */
+ * app's web storage starts empty as in a fresh home, where there is none to remove. Library
+ * must be a plain folder of the home itself, never a link, so the removal cannot reach a
+ * folder outside the home; a linked WebKit loses only its link. Input: the home. Output:
+ * nothing, or a thrown refusal before anything is removed. */
 export function clearWebStore(home) {
-  const store = join(home, "Library", "WebKit");
+  const library = join(home, "Library");
+  let info;
+  try {
+    info = lstatSync(library);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(`refusing to clear ${library}: not a plain folder`);
+  if (realpathSync(library) !== join(realpathSync(home), "Library")) throw new Error(`refusing to clear ${library}: it resolves outside the home`);
+  const store = join(library, "WebKit");
   rmSync(store, { recursive: true, force: true });
   assert.throws(() => lstatSync(store), { code: "ENOENT" }, "no web store is left for the run");
 }
