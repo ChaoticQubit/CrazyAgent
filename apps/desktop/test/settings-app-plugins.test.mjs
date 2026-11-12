@@ -154,10 +154,11 @@ test("App plugins: loading, not ready and a refused read each keep the title", (
   assert.ok(refused.includes("App plugins") && refused.includes("Try again"));
 });
 
-test("App plugins: every app_plugin code the engine can answer has its own sentence", () => {
+test("App plugins: every app_plugin and search code the engine can answer has its own sentence", () => {
   const engine = source("../../../crates/crazyagent/src/engine/owner/transport/app_plugins.rs");
   const block = engine.match(/pub const APP_PLUGINS_CODES: &\[&str\] = &\[([\s\S]*?)\];/u)?.[1] ?? "";
-  const codes = [...block.matchAll(/"(app_plugins?_[a-z_]+)"/gu)].map((match) => match[1]);
+  const codes = [...block.matchAll(/"((?:app_plugins?|search)_[a-z_]+)"/gu)].map((match) => match[1]);
+  for (const code of ["search_confirm_required", "search_model_confirm", "search_model_downloading", "search_choice_unavailable"]) assert.ok(codes.includes(code), `${code} is read from the engine`);
   assert.ok(codes.length >= 10, `the engine's codes were read: ${codes.length}`);
   for (const code of codes) assert.ok(Object.hasOwn(api.APP_PLUGIN_REFUSALS, code), `${code} has a sentence`);
   assert.match(api.appPluginRefusal({ code: "app_plugin_name_taken" }), /^[A-Z]/u);
