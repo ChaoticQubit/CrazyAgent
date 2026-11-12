@@ -100,7 +100,8 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
         Command::new(&words[0])
             .args(&words[1..])
             .env_clear()
-            .env("PATH", "/usr/bin:/bin"),
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(std::process::Stdio::piped()),
     )
     .unwrap();
     assert!(run.status.success());
