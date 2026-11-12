@@ -424,7 +424,8 @@ test("Notifications: a click on an agent waiting on the owner opens the Agents t
   const row = await page.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${PANEL} [data-notice]`)})].find((item) => item.textContent.includes("in its terminal."))?.dataset.notice ?? null`);
   assert.ok(row !== null, "the waiting agent has a row");
   await me.follow(`${PANEL} [data-notice="${row}"] .notice-open`);
-  await until("the Agents tab's questions drawer", `#/projects/${encodeURIComponent(projectId)}/agents?section=questions`, () => page.evaluate("location.hash"));
-  await until("the waiting agent highlighted", true, () => page.evaluate(`document.querySelector('[data-notice-anchor="agent-${agent}"].notice-highlight') !== null`));
+  await until("the Agents tab, its section taken into the drawer", `#/projects/${encodeURIComponent(projectId)}/agents`, () => page.evaluate("location.hash"));
+  await until("the questions drawer open", true, () => page.evaluate(`document.querySelector("dialog.drawer[open]") !== null`));
+  await until("the waiting agent highlighted in the drawer", true, () => page.evaluate(`document.querySelector('dialog.drawer[open] [data-notice-anchor="agent-${agent}"].notice-highlight') !== null`));
   await me.capture("notifications-agent-drawer");
 }));

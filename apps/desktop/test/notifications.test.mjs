@@ -103,6 +103,17 @@ test("the bell shows the unread and pending badges and names both for a screen r
   assert.doesNotMatch(quiet, /notice-badge/);
 });
 
+test("an open panel counts as an overlay, so the IDE webview steps aside until it closes", async () => {
+  const overlay = await import("../src/ui/overlay.tsx");
+  assert.equal(overlay.overlayShown(), false, "nothing covers the page before the bell opens");
+  const source = readFileSync(new URL("../src/screens/notifications/panel.tsx", import.meta.url), "utf8");
+  const bell = source.slice(source.indexOf("export function NoticeBell("), source.indexOf("export function ProjectNeedsYouView"));
+  assert.match(source, /import \{ cover \} from "\.\.\/\.\.\/ui\/overlay";/);
+  assert.match(bell, /useEffect\(\(\) => \(open \? cover\(\) : undefined\), \[open\]\);/, "the panel covers while open and releases on close, like a Drawer or Menu");
+  const ide = readFileSync(new URL("../src/screens/project/ide.tsx", import.meta.url), "utf8");
+  assert.match(ide, /const covered = useOverlayShown\(\);/, "the IDE tab hides its webview while anything covers the page");
+});
+
 test("the panel has the four filters, the project picker, Mark all read and one row per item with its project and page", () => {
   const markup = panelView(page([question(12), finished(11)]));
   const shown = text(markup);
