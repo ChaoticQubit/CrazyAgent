@@ -3513,6 +3513,100 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .reset_harness_setting(harness, project_id, key, version)?; call.await }.await;
             routed(result)
         }
+        "desktop_model_choice" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                project_id: Option<String>,
+            }
+            let Args { harness, project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.model_choice(harness, project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_set_model_choice" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                project_id: Option<String>,
+                slot: String,
+                value: serde_json::Value,
+                version: u64,
+            }
+            let Args { harness, project_id, slot, value, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .set_model_choice(harness, project_id, slot, value, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_reset_model_choice" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                project_id: Option<String>,
+                slot: String,
+                version: u64,
+            }
+            let Args { harness, project_id, slot, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .reset_model_choice(harness, project_id, slot, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_add_model" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                model: String,
+            }
+            let Args { harness, model } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.add_model(harness, model)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_remove_model" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                model: String,
+            }
+            let Args { harness, model } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.remove_model(harness, model)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_model_rules" => {
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.model_rules()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_set_model_rule" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                rule: String,
+                value: String,
+                version: u64,
+            }
+            let Args { rule, value, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .set_model_rule(rule, value, version)?; call.await }.await;
+            routed(result)
+        }
         "desktop_questions" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
