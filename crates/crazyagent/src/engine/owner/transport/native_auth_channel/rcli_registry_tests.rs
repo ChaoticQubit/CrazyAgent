@@ -507,7 +507,7 @@ async fn codex_installed_after_start_is_pinned_by_check_again_and_sign_in_become
         let path = std::env::join_paths([bin.clone()]).unwrap();
         host.authority.native_auth_host.lock().unwrap().frozen = true;
         assert_eq!(
-            host.registered_codex_executable().unwrap_err().0,
+            host.registered_codex_executable().err().unwrap().0,
             "native_auth_host_unavailable"
         );
         let missing = host
