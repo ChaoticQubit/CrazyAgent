@@ -423,6 +423,52 @@ fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
     assert!(trips(), "a hidden folder");
 }
 
+fn pending_demo_questions(db: &Connection) -> i64 {
+    db.query_row(
+        "SELECT COUNT(*) FROM questions_log WHERE project=?1 AND asker='engine:demo' AND status='pending'",
+        [PROJECT_ID],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn recording_the_demo_plants_its_question_in_the_same_transaction_and_a_question_that_cannot_be_planted_never_stops_the_demo()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let mut db = database(temp.path());
+    db.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
+        .unwrap();
+    let id = ProjectId::new(PROJECT_ID).unwrap();
+    let tx = db.transaction().unwrap();
+    record(&tx, &id, 1_000).unwrap();
+    assert_eq!(
+        pending_demo_questions(&tx),
+        1,
+        "the question is in the create's own transaction, so no stop after its commit can lose it"
+    );
+    tx.rollback().unwrap();
+    assert_eq!(
+        pending_demo_questions(&db),
+        0,
+        "a create that never commits plants nothing"
+    );
+    db.execute_batch(
+        "CREATE TRIGGER no_demo_question BEFORE INSERT ON questions_log
+         WHEN NEW.asker='engine:demo' BEGIN SELECT RAISE(ABORT,'blocked'); END;",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    record(&tx, &id, 2_000).unwrap();
+    assert_eq!(pending_demo_questions(&tx), 0);
+    tx.commit().unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(
+        exists(&tx).unwrap(),
+        "a question that cannot be planted never fails the demo, whose folder is already in place"
+    );
+}
+
 #[test]
 fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() {
     let temp = tempfile::tempdir().unwrap();
