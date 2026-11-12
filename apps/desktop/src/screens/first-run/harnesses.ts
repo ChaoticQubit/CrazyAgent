@@ -1,5 +1,6 @@
 import type { HarnessEntry } from "../../api";
 import type { DependencyState } from "../../engine-client";
+import { displayText } from "../conversation";
 import { updateCopy, type HarnessVersions } from "../../api-harness-updates";
 
 /** The Harnesses step's place in first run, in the same words as the TUI step: its label in the
@@ -51,9 +52,9 @@ export type HarnessRow =
 
 /** Where an offered harness stands, from the engine's catalog row, versions read and install
  * queue: RCLI always comes with the app; a running or queued install wins; a failed install of a
- * harness still missing, or a fresh install that ended well, shows its result; else installed,
- * the install line, or the plain reason it can't install. Inputs: the id, its catalog row, its
- * versions read (null while unread) and the queued ids. Output: the row. */
+ * harness still missing shows its result; a found harness the resolver can't run says what it
+ * needs; else a fresh install, installed, the install line, or why it can't install. Inputs: the
+ * id, its catalog row, its versions read (null while unread) and the queued ids. Output: the row. */
 export function harnessRow(id: string, entry: HarnessEntry | undefined, versions: HarnessVersions | null, queued: readonly string[]): HarnessRow {
   if (id === "rcli") return { kind: "bundled" };
   if (versions === null) return { kind: "reading" };
@@ -62,6 +63,7 @@ export function harnessRow(id: string, entry: HarnessEntry | undefined, versions
   const present = Boolean(entry?.executable);
   const ended = versions.last;
   if (ended && !ended.ok && !present) return { kind: "failed", reason: updateCopy(ended.code ?? "harness_install_failed") };
+  if (present && versions.needs) return { kind: "blocked", line: displayText(versions.needs.line) };
   if (ended && ended.ok && ended.from === null && present) return { kind: "done", version: ended.to };
   if (present) return { kind: "installed", version: versions.installed };
   if (versions.install !== null) return { kind: "offer", line: versions.install };
@@ -114,7 +116,7 @@ export function tickable(row: HarnessRow): boolean {
  * case its reason went away, or nothing. Input: the row. Output: the action or null. */
 export function retry(row: HarnessRow): "install" | "read" | null {
   if (row.kind === "failed") return "install";
-  if (row.kind === "refused") return "read";
+  if (row.kind === "refused" || row.kind === "blocked") return "read";
   return null;
 }
 
@@ -124,16 +126,16 @@ export function installable(picks: readonly string[]): string[] {
   return picks.filter((id) => id !== "rcli");
 }
 
-const ENDED = new Set<HarnessRow["kind"]>(["done", "failed", "installed"]);
+const ENDED = new Set<HarnessRow["kind"]>(["done", "failed", "installed", "blocked"]);
 
-/** How far the sent picks are: how many ended, how many failed and whether any still waits or
- * installs. Inputs: the sent ids and the rows by id. Output: the counts. */
+/** How far the sent picks are: how many ended, how many failed or can't run, and whether any
+ * still waits or installs. Inputs: the sent ids and the rows by id. Output: the counts. */
 export function progress(sent: readonly string[], rows: Readonly<Record<string, HarnessRow>>): { done: number; total: number; failed: number; running: boolean } {
   const kinds = sent.map((id) => rows[id]?.kind ?? "reading");
   return {
     done: kinds.filter((kind) => ENDED.has(kind)).length,
     total: sent.length,
-    failed: kinds.filter((kind) => kind === "failed").length,
+    failed: kinds.filter((kind) => kind === "failed" || kind === "blocked").length,
     running: kinds.some((kind) => !ENDED.has(kind)),
   };
 }
@@ -145,18 +147,27 @@ export function progressLine(counts: { done: number; total: number; failed: numb
   return `Installs finished: ${counts.done} of ${counts.total} done${failed}.`;
 }
 
+const NEEDS_NODE = "harness_install_needs_node";
+
 /** Where the step's one Node.js install stands while an offered harness needs Node, the TUI's
  * kinds: nothing to offer, the offer, the install running, or its failure with setup's reason. */
 export type NodeOffer = { kind: "none" } | { kind: "offer" } | { kind: "installing" } | { kind: "failed"; reason: string };
 
 /** Tells whether an offered harness needs Node.js: npm can't install it without Node, or the
  * resolver found it but it can't run without Node. Input: the versions read. Output: the answer. */
-export function nodeNeeded(_reads: readonly (HarnessVersions | null)[]): boolean {
-  return false;
+export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean {
+  return reads.some((read) => read !== null && (read.refusal === NEEDS_NODE || read.needs?.program === "node"));
 }
 
 /** What the step offers for Node.js, from whether a harness needs it and setup's Node row.
  * Inputs: the need and the Node row's state, null while unread. Output: the offer. */
-export function nodeOffer(_needed: boolean, _node: DependencyState | null): NodeOffer {
-  return { kind: "none" };
+export function nodeOffer(needed: boolean, node: DependencyState | null): NodeOffer {
+  if (!needed) return { kind: "none" };
+  switch (node?.state) {
+    case "installing": return { kind: "installing" };
+    case "failed": return { kind: "failed", reason: displayText(node.reason) };
+    case undefined:
+    case "missing": return { kind: "offer" };
+    default: return { kind: "none" };
+  }
 }

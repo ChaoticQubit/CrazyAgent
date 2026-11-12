@@ -1,9 +1,11 @@
+use super::app_setup::{setup_plain, setup_reason};
 use super::settings_accounts::{plain, send, settings_event};
 use super::settings_harnesses::plain_update;
 use super::{Flow, Place, Screen, open};
 use crate::harnesses::HarnessEntry;
 use crate::harnesses::update::HarnessVersions;
-use crate::setup::DependencyState;
+use crate::setup::{Dependency, DependencyState};
+use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, draw_lines, hint};
@@ -38,10 +40,12 @@ const NEXT: &str = "Continue";
 const INSTALL_NODE: &str = "Install Node.js";
 const INSTALLING_NODE: &str = "Installing Node.js.";
 const NO_TOOL: &str = "harness_install_no_tool";
+const NEEDS_NODE: &str = "harness_install_needs_node";
 const FAILED: &str = "harness_install_failed";
 const RCLI: &str = "rcli";
 const CATALOG: &str = "catalog";
 const QUEUE: &str = "queue";
+const SETUP: &str = "setup";
 
 /// The harnesses the step offers, in order: RCLI, which comes with CrazyAgent, then the ones
 /// CrazyAgent can launch, by catalog id and name, the same list as the desktop step.
@@ -89,7 +93,7 @@ impl Row {
     fn ended(&self) -> bool {
         matches!(
             self,
-            Self::Done { .. } | Self::Failed { .. } | Self::Installed { .. }
+            Self::Done { .. } | Self::Failed { .. } | Self::Installed { .. } | Self::Blocked { .. }
         )
     }
 
@@ -127,7 +131,10 @@ impl Row {
     }
 
     fn retry(&self) -> bool {
-        matches!(self, Self::Failed { .. } | Self::Refused { .. })
+        matches!(
+            self,
+            Self::Failed { .. } | Self::Refused { .. } | Self::Blocked { .. }
+        )
     }
 }
 
@@ -145,15 +152,36 @@ enum NodeOffer {
 /// What the step offers for Node.js, from whether an offered harness needs it and the Node
 /// row of setup. Inputs: the need and the Node row's state, none while unread.
 /// Output: the offer.
-fn node_offer(_needed: bool, _node: Option<&DependencyState>) -> NodeOffer {
-    NodeOffer::None
+fn node_offer(needed: bool, node: Option<&DependencyState>) -> NodeOffer {
+    if !needed {
+        return NodeOffer::None;
+    }
+    match node {
+        Some(DependencyState::Installing) => NodeOffer::Installing,
+        Some(DependencyState::Failed { reason }) => NodeOffer::Failed {
+            reason: reason.clone(),
+        },
+        None | Some(DependencyState::Missing) => NodeOffer::Offer,
+        Some(_) => NodeOffer::None,
+    }
 }
 
-/// Where an offered harness stands, from the engine's catalog row, versions read and install
-/// queue, in the desktop step's order: RCLI comes with the app; a running or queued install
-/// wins; a failed install of a harness still missing, or a fresh install that ended well,
-/// shows its result; else installed, the install line, or the reason it can't install.
-/// Inputs: the id, its catalog row, its versions (none while unread) and the queued ids.
+/// Tells whether an offered harness needs Node.js: npm can't install it without Node, or the
+/// resolver found it but it can't run without Node. Input: its versions read.
+/// Output: the answer.
+fn node_needed(versions: &HarnessVersions) -> bool {
+    versions.refusal.as_deref() == Some(NEEDS_NODE)
+        || versions
+            .needs
+            .as_ref()
+            .is_some_and(|needs| needs.program.as_deref() == Some("node"))
+}
+
+/// Where an offered harness stands, in the desktop step's order: RCLI comes with the app; a
+/// running or queued install wins; a found harness the resolver can't run says what it needs;
+/// a failed install of a missing harness or a fresh install shows its result; else installed,
+/// the install line, or why it can't install. Inputs: the id, its catalog row, its versions
+/// (none while unread) and the queued ids.
 fn harness_row(
     id: &str,
     entry: Option<&HarnessEntry>,
@@ -173,6 +201,11 @@ fn harness_row(
         return Row::Waiting;
     }
     let present = entry.is_some_and(|entry| entry.executable.is_some());
+    if let Some(needs) = versions.needs.as_ref().filter(|_| present) {
+        return Row::Blocked {
+            line: super::project_markdown::sanitize(&needs.line),
+        };
+    }
     match &versions.last {
         Some(last) if !last.ok && !present => {
             return Row::Failed {
@@ -241,9 +274,9 @@ enum Choice {
 
 /// First run's Harnesses step after Setup, in the desktop words: RCLI picked and locked,
 /// Codex and Claude Code to pick when the engine can install them, each row saying what
-/// installing runs or why it can't, r to try a failed or refused row again, and Install,
-/// Skip or Continue. Picks go to the engine's install queue, which keeps going after the step.
-/// Input: keys and the engine's reads. Output: the step.
+/// installing runs or why it can't, r to try a row again, n to install Node.js while a harness
+/// needs it, and Install, Skip or Continue. Picks go to the engine's install queue, which keeps
+/// going after the step. Input: keys and the engine's reads. Output: the step.
 pub struct HarnessSetup {
     entries: Vec<HarnessEntry>,
     versions: BTreeMap<&'static str, Result<HarnessVersions, String>>,
@@ -253,6 +286,8 @@ pub struct HarnessSetup {
     choice: Choice,
     asking: BTreeSet<&'static str>,
     sending: Option<Vec<String>>,
+    node: Option<DependencyState>,
+    sending_node: bool,
     started: bool,
     loaded: bool,
     reads: usize,
@@ -272,6 +307,8 @@ impl HarnessSetup {
             choice: Choice::Install,
             asking: BTreeSet::new(),
             sending: None,
+            node: None,
+            sending_node: false,
             started: false,
             loaded: false,
             reads: 0,
@@ -298,17 +335,27 @@ impl HarnessSetup {
             total: rows.len(),
             failed: rows
                 .iter()
-                .filter(|row| matches!(row, Row::Failed { .. }))
+                .filter(|row| matches!(row, Row::Failed { .. } | Row::Blocked { .. }))
                 .count(),
             running: rows.iter().any(|row| !row.ended()),
         }
+    }
+
+    fn node_offer(&self) -> NodeOffer {
+        let needed = self
+            .versions
+            .values()
+            .any(|read| read.as_ref().is_ok_and(node_needed));
+        node_offer(needed, self.node.as_ref())
     }
 
     fn pending(&self) -> bool {
         let moving = OFFERED
             .iter()
             .any(|(id, _)| matches!(self.row(id), Row::Waiting | Row::Installing));
-        moving || (self.started && self.progress().running)
+        moving
+            || (self.started && self.progress().running)
+            || self.node_offer() == NodeOffer::Installing
     }
 
     fn offer(&self) -> bool {
@@ -325,6 +372,8 @@ impl HarnessSetup {
         send(ctx, SettingsJob::HarnessList);
         self.asking.insert(QUEUE);
         send(ctx, SettingsJob::HarnessQueued);
+        self.asking.insert(SETUP);
+        send(ctx, SettingsJob::AppSetup(AppSetupJob::Status));
         for (id, _) in OFFERED.iter().filter(|(id, _)| *id != RCLI) {
             self.asking.insert(*id);
             send(
@@ -335,7 +384,7 @@ impl HarnessSetup {
                 },
             );
         }
-        assert!(self.asking.len() == OFFERED.len() + 1);
+        assert!(self.asking.len() == OFFERED.len() + 2);
     }
 
     fn install(&mut self, ids: Vec<String>, ctx: &mut Ctx) {
@@ -346,6 +395,26 @@ impl HarnessSetup {
         self.problem.clear();
         self.sending = Some(ids.clone());
         send(ctx, SettingsJob::HarnessInstallMany { ids });
+    }
+
+    fn install_node(&mut self, ctx: &mut Ctx) {
+        let wanted = matches!(
+            self.node_offer(),
+            NodeOffer::Offer | NodeOffer::Failed { .. }
+        );
+        if !wanted || self.sending_node || self.sending.is_some() {
+            return;
+        }
+        self.problem.clear();
+        self.sending_node = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::AppSetup(AppSetupJob::Install {
+                name: Dependency::Node,
+                generation,
+            }),
+        );
     }
 
     fn leave(ctx: &mut Ctx) -> Flow {
@@ -383,7 +452,7 @@ impl HarnessSetup {
                 }
                 self.install(vec![id.to_owned()], ctx);
             }
-            Row::Refused { .. } => {
+            Row::Refused { .. } | Row::Blocked { .. } => {
                 self.problem.clear();
                 self.read(ctx);
             }
@@ -419,6 +488,32 @@ impl HarnessSetup {
                 };
                 if self.asking.remove(offered) {
                     self.versions.insert(offered, result.clone());
+                }
+            }
+            SettingsEvent::AppSetup(AppSetupEvent::Status(result)) => {
+                if !self.asking.remove(SETUP) {
+                    return;
+                }
+                self.node = result.as_ref().ok().and_then(|status| {
+                    status
+                        .dependencies
+                        .iter()
+                        .find(|tool| tool.name == Dependency::Node)
+                        .map(|tool| tool.state.clone())
+                });
+            }
+            SettingsEvent::AppSetup(AppSetupEvent::Installed(result)) => {
+                if !self.sending_node {
+                    return;
+                }
+                self.sending_node = false;
+                match result {
+                    Ok(()) => {
+                        self.node = Some(DependencyState::Installing);
+                        self.reads = 0;
+                        self.read(ctx);
+                    }
+                    Err(code) => self.problem = setup_plain(code),
                 }
             }
             SettingsEvent::HarnessesQueued(ids, result) => {
@@ -459,7 +554,10 @@ impl HarnessSetup {
                 Span::raw("  "),
                 Span::styled(row.badge(), theme.muted),
             ]));
-            let role = if matches!(row, Row::Failed { .. } | Row::Refused { .. }) {
+            let role = if matches!(
+                row,
+                Row::Failed { .. } | Row::Refused { .. } | Row::Blocked { .. }
+            ) {
                 Role::Error
             } else {
                 Role::Muted
@@ -493,6 +591,15 @@ impl HarnessSetup {
                     .map(Line::raw),
             );
         }
+        match self.node_offer() {
+            NodeOffer::Installing => lines.push(Line::raw(INSTALLING_NODE)),
+            NodeOffer::Failed { reason } => lines.extend(
+                wrap(&setup_reason(&reason), limit)
+                    .into_iter()
+                    .map(|part| styled(part, Role::Error, theme)),
+            ),
+            NodeOffer::None | NodeOffer::Offer => {}
+        }
         if !self.problem.is_empty() {
             lines.extend(
                 wrap(&self.problem, limit)
@@ -502,6 +609,8 @@ impl HarnessSetup {
         }
         if self.sending.is_some() {
             lines.push(ctx.loading("Starting the installs"));
+        } else if self.sending_node {
+            lines.push(ctx.loading(INSTALL_NODE));
         } else if self.offer() {
             let focused = match self.choice {
                 Choice::Install => 0,
@@ -527,7 +636,7 @@ impl Screen for HarnessSetup {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        if self.sending.is_some() {
+        if self.sending.is_some() || self.sending_node {
             return vec![hint("Ctrl-Q", "Quit")];
         }
         let (id, _) = OFFERED[self.focus];
@@ -556,6 +665,12 @@ impl Screen for HarnessSetup {
         if row.retry() {
             hints.push(hint("r", TRY_AGAIN));
         }
+        if matches!(
+            self.node_offer(),
+            NodeOffer::Offer | NodeOffer::Failed { .. }
+        ) {
+            hints.push(hint("n", INSTALL_NODE));
+        }
         if self.offer() {
             hints.push(hint(
                 &format!("{}{}", ctx.glyphs.left, ctx.glyphs.right),
@@ -568,7 +683,7 @@ impl Screen for HarnessSetup {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
-        if self.sending.is_some() {
+        if self.sending.is_some() || self.sending_node {
             return Flow::Handled;
         }
         match key {
@@ -595,6 +710,10 @@ impl Screen for HarnessSetup {
                 self.try_again(ctx);
                 Flow::Handled
             }
+            Key::Char('n') => {
+                self.install_node(ctx);
+                Flow::Handled
+            }
             Key::Char('c') => Self::leave(ctx),
             Key::Enter => self.enter(ctx),
             Key::Esc => Flow::Handled,
@@ -606,7 +725,7 @@ impl Screen for HarnessSetup {
         if let Some(event) = settings_event(arrival) {
             self.arrived(event, ctx);
         }
-        assert!(self.asking.len() <= OFFERED.len() + 1);
+        assert!(self.asking.len() <= OFFERED.len() + 2);
         Flow::Handled
     }
 
@@ -638,7 +757,7 @@ impl Screen for HarnessSetup {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.sending.is_some()
+        self.sending.is_some() || self.sending_node
     }
 
     fn place(&self) -> Option<Place> {

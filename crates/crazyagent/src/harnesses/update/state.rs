@@ -1,10 +1,10 @@
 use super::run::run_raw;
 use super::{
-    BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessVersions, InstallFromApp,
-    LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots, START_FAILED,
-    UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide, install_command,
-    installed_version, latest, latest_from_pointer, lookup, method, pointer, run, shown,
-    update_command,
+    BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessNeeds, HarnessVersions,
+    InstallFromApp, LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots,
+    START_FAILED, UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide,
+    install_command, installed_version, latest, latest_from_pointer, lookup, method, pointer, run,
+    shown, update_command,
 };
 use crate::engine::EngineError;
 use crate::harnesses::{self, HarnessEntry};
@@ -254,6 +254,18 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
         }
         Err(code) => failed(code),
     }
+}
+
+/// What an installed harness lacks before it can run, read as a launch reads it: the program
+/// its first line asks for when the tool resolver finds none, with the resolver's owner line.
+/// Any other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
+/// and the resolver's places. Output: the need, or none.
+fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
+    let missing = crate::tools::resolve_entry(executable, places).err()?;
+    (missing.reason == crate::tools::Reason::NeedsInterpreter).then(|| HarnessNeeds {
+        line: missing.line(),
+        program: missing.needs,
+    })
 }
 
 /// The versions row of a harness that is not installed: the exact install line when the
@@ -573,7 +585,10 @@ impl Updates {
             return unknown;
         };
         let mut versions = match &entry.executable {
-            Some(executable) => self.present(spec, executable, roots, settings, look),
+            Some(executable) => HarnessVersions {
+                needs: needs(executable, &roots.places),
+                ..self.present(spec, executable, roots, settings, look)
+            },
             None => missing(spec.id, roots, settings),
         };
         let state = self.state();

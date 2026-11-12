@@ -1,28 +1,32 @@
 import { useEffect, useState } from "react";
 import { harnessCatalog, type Result } from "../../api";
 import { harnessVersions, installHarnesses, queuedHarnesses, updateCopy, UPDATE_POLL_MS, UPDATE_POLLS_MAX } from "../../api-harness-updates";
+import { installDependency, loadSetupStatus } from "../../api-intake";
 import { openLink } from "../../api-projects";
 import { Button, StatusBadge } from "../../ui";
-import { HARNESS_WORDS, OFFERED, harnessRow, installable, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow } from "./harnesses";
+import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
 import "../intake/intake.css";
 
 type Rows = Readonly<Record<string, HarnessRow>>;
 
 /** The Harnesses step as a view of its state: one row per offered harness with its tick, the
- * line saying what installing it runs or why it can't, Try again on a failed or refused row, the
- * progress line once installs start, and Install, Skip or Continue. Inputs: the rows by id, the
- * picked ids, flags, the last problem and the handlers. Output: the step. */
-export function HarnessesStepView({ rows, picks, started, busy, problem, onPick, onInstall, onRetry, onContinue, onGuide }: {
+ * line saying what installing it runs or why it can't, Try again on a failed, refused or unrunnable
+ * row, Install Node.js while a harness needs Node, the progress line once installs start, and
+ * Install, Skip or Continue. Inputs: the rows by id, picks, flags, the problem, the Node offer and
+ * the handlers. Output: the step. */
+export function HarnessesStepView({ rows, picks, started, busy, problem, node = { kind: "none" }, onPick, onInstall, onRetry, onContinue, onGuide, onInstallNode = () => undefined }: {
   rows: Rows;
   picks: readonly string[];
   started: boolean;
   busy: boolean;
   problem: string;
+  node?: NodeOffer;
   onPick: (id: string, on: boolean) => void;
   onInstall: () => void;
   onRetry: (id: string) => void;
   onContinue: () => void;
   onGuide?: (url: string) => void;
+  onInstallNode?: () => void;
 }) {
   const sending = installable(picks);
   const counts = progress(sending, rows);
@@ -41,13 +45,18 @@ export function HarnessesStepView({ rows, picks, started, busy, problem, onPick,
               onChange={(event) => onPick(id, event.target.checked)} />
             <span>{name}</span>
           </label>
-          <span className={`pj-small ${row.kind === "failed" || row.kind === "refused" ? "pj-error" : "pj-secondary"}`}>{rowLine(row)}</span>
+          <span className={`pj-small ${row.kind === "failed" || row.kind === "refused" || row.kind === "blocked" ? "pj-error" : "pj-secondary"}`}>{rowLine(row)}</span>
           {guide !== null && <span className="pj-small"><a href={guide} onClick={(event) => { event.preventDefault(); onGuide?.(guide); }}>{HARNESS_WORDS.guide}</a></span>}
           {again !== null && <span><Button aria-label={`${HARNESS_WORDS.tryAgain}: ${name}`} disabled={busy} onClick={() => onRetry(id)}>{HARNESS_WORDS.tryAgain}</Button></span>}
         </span>
         <StatusBadge word={badge.word} tone={badge.tone} />
       </li>;
     })}</ul>
+    {node.kind !== "none" && <span className="pj-row">
+      {node.kind === "installing" && <span className="pj-small pj-secondary" role="status">{HARNESS_WORDS.installingNode}</span>}
+      {node.kind === "failed" && <span className="pj-small pj-error">{node.reason}</span>}
+      {node.kind !== "installing" && <Button icon="wrench" disabled={busy} onClick={onInstallNode}>{HARNESS_WORDS.installNode}</Button>}
+    </span>}
     {started && counts.total > 0 && <p className="pj-secondary" role="status">{progressLine(counts)}</p>}
     {problem && <p className="pj-error" role="alert">{problem}</p>}
     <span className="pj-row">
@@ -59,11 +68,12 @@ export function HarnessesStepView({ rows, picks, started, busy, problem, onPick,
 }
 
 /** Reads every offered harness: the catalog row, the versions read and the install queue, so a
- * failed read becomes a refused row with Try again instead of a row that never loads.
- * Output: the rows by id and the problem line, empty when every read worked. */
-async function readRows(): Promise<{ rows: Record<string, HarnessRow>; problem: string }> {
+ * failed read becomes a refused row with Try again instead of a row that never loads, and setup's
+ * Node row for the Node.js offer. Output: the rows by id, the Node offer and the problem line,
+ * empty when every read worked. */
+async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: NodeOffer; problem: string }> {
   const ids = OFFERED.map(({ id }) => id).filter((id) => id !== "rcli");
-  const [catalog, queued, ...reads] = await Promise.all([harnessCatalog(false), queuedHarnesses(), ...ids.map((id) => harnessVersions(id, false))]);
+  const [catalog, queued, setup, ...reads] = await Promise.all([harnessCatalog(false), queuedHarnesses(), loadSetupStatus(), ...ids.map((id) => harnessVersions(id, false))]);
   assert(reads.length === ids.length, "one versions read per offered harness");
   const entries = catalog.kind === "ok" ? catalog.value : [];
   const waiting = queued.kind === "ok" ? queued.value : [];
@@ -74,7 +84,9 @@ async function readRows(): Promise<{ rows: Record<string, HarnessRow>; problem: 
       : { kind: "refused", reason: failure(read), guide: null };
   });
   const problem = catalog.kind !== "ok" ? failure(catalog) : queued.kind !== "ok" ? failure(queued) : "";
-  return { rows, problem };
+  const found = setup.kind === "ok" ? setup.value.dependencies.find((item) => item.name === "node") : undefined;
+  const needed = nodeNeeded(reads.map((read) => read.kind === "ok" ? read.value : null));
+  return { rows, node: nodeOffer(needed, found?.state ?? null), problem };
 }
 
 function failure(result: Exclude<Result<unknown>, { kind: "ok" }>): string {
@@ -86,19 +98,21 @@ function assert(condition: boolean, message: string): asserts condition {
 }
 
 /** The Harnesses step: reads the offered harnesses, installs the picked ones in the engine one
- * after another, reads again a few seconds after each read lands while any waits or installs,
- * and lets the owner continue at any time while the engine keeps installing.
- * Input: what to do on Continue. */
+ * after another and Node.js alone when a harness needs it, reads again a few seconds after each
+ * read lands while any install waits or runs, and lets the owner continue at any time while the
+ * engine keeps installing. Input: what to do on Continue. */
 export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
   const [rows, setRows] = useState<Rows>({});
   const [picks, setPicks] = useState<string[]>([]);
   const [started, setStarted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
+  const [node, setNode] = useState<NodeOffer>({ kind: "none" });
   const [reads, setReads] = useState(0);
   const [reading, setReading] = useState(false);
   const [polls, setPolls] = useState(0);
-  const pending = Object.values(rows).some((row) => row.kind === "waiting" || row.kind === "installing") || (started && progress(installable(picks), rows).running);
+  const pending = Object.values(rows).some((row) => row.kind === "waiting" || row.kind === "installing") || (started && progress(installable(picks), rows).running)
+    || node.kind === "installing";
 
   useEffect(() => {
     let live = true;
@@ -106,6 +120,7 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
     void readRows().then((read) => {
       if (!live) return;
       setRows(read.rows);
+      setNode(read.node);
       if (read.problem) setProblem(read.problem);
       setReading(false);
     });
@@ -134,6 +149,18 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
     setReads((count) => count + 1);
   };
 
+  const installNode = async () => {
+    if (busy) return;
+    setBusy(true);
+    setProblem("");
+    const result = await installDependency("node");
+    setBusy(false);
+    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Installing tools isn't in this build." : result.message); return; }
+    setNode({ kind: "installing" });
+    setPolls(0);
+    setReads((count) => count + 1);
+  };
+
   const again = (id: string) => {
     const row = rows[id];
     if (row === undefined) return;
@@ -141,7 +168,7 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
     else { setProblem(""); setReads((count) => count + 1); }
   };
 
-  return <HarnessesStepView rows={rows} picks={picks} started={started} busy={busy} problem={problem}
-    onPick={(id, on) => setPicks((old) => on ? [...old.filter((item) => item !== id), id] : old.filter((item) => item !== id))}
+  return <HarnessesStepView rows={rows} picks={picks} started={started} busy={busy} problem={problem} node={node}
+    onInstallNode={() => void installNode()} onPick={(id, on) => setPicks((old) => on ? [...old.filter((item) => item !== id), id] : old.filter((item) => item !== id))}
     onInstall={() => void send(installable(picks))} onRetry={again} onContinue={onContinue} onGuide={(url) => void openLink(url)} />;
 }
