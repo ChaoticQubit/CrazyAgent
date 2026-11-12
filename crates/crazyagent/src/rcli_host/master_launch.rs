@@ -121,6 +121,7 @@ impl RcliMasterLaunch {
         self.validate_paths()?;
         pinned_file(&self.executable, &self.artifact_sha256, true)?;
         self.validate_profile()?;
+        let model = self.model_flag()?;
         let mut command = Command::new(&self.executable);
         command
             .args(["--session-id", self.binding.session_id.as_str()])
@@ -139,12 +140,39 @@ impl RcliMasterLaunch {
         if let Some(instructions) = &self.instructions {
             command.arg("--instructions-file").arg(instructions);
         }
+        if let Some(model) = &model {
+            command.arg("--model").arg(model);
+        }
         assert_eq!(command.get_program(), self.executable.as_os_str());
         assert_eq!(
             command.get_args().count(),
-            if self.instructions.is_some() { 10 } else { 8 }
+            8 + 2 * usize::from(self.instructions.is_some()) + 2 * usize::from(model.is_some())
         );
         Ok(command)
+    }
+
+    /// Names the `--model` value a chosen master model adds (DEC-150 M-5): the profile's
+    /// provider and the id, as `<provider>/<id>`, none with no chosen model or the account's
+    /// own. Takes the launch. Returns the value, or `rcli_master_model_unserved` for an id
+    /// the store would not save or the account's provider does not serve.
+    fn model_flag(&self) -> Result<Option<String>, ProtocolError> {
+        let Some(model) = &self.model else {
+            return Ok(None);
+        };
+        let connection = &self.binding.connection;
+        if !crate::model_choice::model_valid("rcli", model)
+            || !crate::model_choice::rcli_serves(model, connection)
+        {
+            return Err(error("rcli_master_model_unserved"));
+        }
+        if *model == connection.model.id {
+            return Ok(None);
+        }
+        let provider = configured_sdk_connection(connection)?.provider;
+        let flag = format!("{}/{model}", provider.as_str());
+        assert!(flag.len() <= 65 + crate::model_choice::MODEL_BYTES_MAX);
+        assert!(!flag.starts_with('-'));
+        Ok(Some(flag))
     }
 
     #[cfg(unix)]
