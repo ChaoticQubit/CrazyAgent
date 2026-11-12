@@ -16847,6 +16847,72 @@ fn a_message_wake_that_starts_a_fresh_session_carries_the_task_start_reminder_on
     team.workers.clear();
 }
 
+/// F31, S2R1-L1: edits a later turn adds to a change set already pending for the owner are
+/// no news. A sub-agent's two task turns that both edit files of one pending set, ended
+/// through the team runtime's turn end, give the team chat one "waiting for you in Changes"
+/// note and the agent one change_set_ready event, both for the first task.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_task_turns_that_grow_one_pending_set_give_one_note_and_one_ready_event() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let (agent, _, worktree, _) = native_lead_linked_in_the_project(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut tasks = Vec::new();
+    for (prompt, file) in [("Write page.md", "page.md"), ("Write more.md", "more.md")] {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms) VALUES (?1,'master','claude-code',0,?2,'running',?3,?4)",
+                params![PROJECT, prompt, agent, now_ms()],
+            )
+            .unwrap();
+        let task = fixture.connection.last_insert_rowid();
+        std::fs::write(worktree.join(file), "Written by the sub-agent.\n").unwrap();
+        team.land(agent, &project, Some(Busy::Task(task)), TurnEnd::Success)
+            .unwrap();
+        tasks.push(task);
+    }
+    let landing = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&landing, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:#?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].files, 2, "the second turn grew the same set");
+    let waiting: Vec<String> = fixture
+        .status()
+        .messages
+        .into_iter()
+        .filter(|message| {
+            message.state == MessageState::Note
+                && message.text.ends_with("are waiting for you in Changes.")
+        })
+        .map(|message| message.text)
+        .collect();
+    assert_eq!(
+        waiting,
+        [format!(
+            "The edits from task {} (claude-code, sub-agent {agent}) are waiting for you in Changes.",
+            tasks[0]
+        )],
+        "one note for the set, none for the turn that only grew it"
+    );
+    let ready: Vec<Option<i64>> = {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT task FROM team_events WHERE project=?1 AND agent=?2 AND kind='change_set_ready' ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map(params![PROJECT, agent], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(ready, [Some(tasks[0])], "one ready event for the set");
+    team.shutdown().unwrap();
+}
+
 /// An agent whose last turn ended well is stopped, not failed, when a command it started
 /// outlives it, and the reason stays for the owner (HB-S5-D). A failed or unfinished turn,
 /// a closed process and a listing that failed still fail it.

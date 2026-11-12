@@ -3561,6 +3561,38 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
 }
 
+/// F31, S2R1-L1: a conversation master's second editing turn that only grows the change set
+/// already pending for the owner is no news. Its turn ends through the master runtime with
+/// no changes note, while the first turn keeps its note and the one set holds both files.
+#[tokio::test]
+async fn a_master_s_second_editing_turn_on_a_pending_set_ends_with_no_changes_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let first = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    drop(prepared);
+    let second = case.submit("Write more notes.").await;
+    let next = case.prepared(&second).await;
+    let more = |cwd: &Path| fs::write(cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let grown = end_tools_turn(&case, &next, &second, more, landing_reply(&next)).await;
+    drop(next);
+    let sets = case.change_sets().await;
+    let settled = case.settled_turns(2).await;
+    case.finish().await;
+    assert_eq!(first.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(grown.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(
+        grown.changes, None,
+        "a turn that only grew the pending set posts no note (F31)"
+    );
+    assert_eq!(settled[1].id, second);
+    assert_eq!(settled[1].changes, None);
+    assert_eq!(settled[0].changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].files, 2);
+}
+
 #[tokio::test]
 async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_no_branch() {
     let (case, prepared) = tools_case(true).await;
