@@ -139,8 +139,9 @@ pub struct Row {
 
 /// A harness's Models section at one scope: its three slots in page order, every
 /// candidate id, the catalog's first, then the owner's, whether the shipped catalog was
-/// checked on the installed harness version, with the reason when it was not (DEC-150
-/// G1), and whether a test launch runs on the harness, so the owner can add and test an id.
+/// checked on the installed harness version, with the reason when it was not (an unchecked
+/// version keeps the catalog ids, DEC-150 G1), and whether a test launch runs on the
+/// harness, so the owner can add and test an id (MUG2-L1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Models {
