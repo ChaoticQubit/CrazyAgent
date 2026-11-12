@@ -55,7 +55,7 @@ pub struct TerminalSession {
     reader: TranscriptReader,
     queue: VecDeque<LaunchEvent>,
     limits: LaunchLimits,
-    deadline: Instant,
+    deadline: Option<Instant>,
     checked: Instant,
     ready: bool,
     first: Option<FirstScreen>,
@@ -344,7 +344,7 @@ impl TerminalSession {
             reader,
             queue: VecDeque::from([ready]),
             limits: request.limits,
-            deadline: Instant::now() + request.limits.run_time,
+            deadline: Some(Instant::now() + request.limits.run_time),
             checked: Instant::now(),
             ready: false,
             first: None,
@@ -511,7 +511,10 @@ impl TerminalSession {
             if self.exited {
                 return Err(failure("launch_closed"));
             }
-            if Instant::now() >= self.deadline {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.halt();
                 return Err(failure("launch_deadline"));
             }
@@ -519,14 +522,23 @@ impl TerminalSession {
             if !self.queue.is_empty() {
                 continue;
             }
-            let left = until
-                .min(self.deadline)
+            let left = self
+                .deadline
+                .map_or(until, |deadline| until.min(deadline))
                 .saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);
             }
             std::thread::sleep(left.min(POLL));
         }
+    }
+
+    /// Lifts the launch's run time from this pane, so only `stop` or the pane's own end ends
+    /// it, as a live master needs: the runtime's Master run time bounds it (F01). Takes the
+    /// session. Returns nothing.
+    pub fn clear_deadline(&mut self) {
+        self.deadline = None;
+        assert!(self.deadline.is_none());
     }
 
     /// Follows every turn in the pane from now on, the ones the owner types included, as a
@@ -578,7 +590,10 @@ impl TerminalSession {
             if self.exited {
                 return Err(failure("launch_closed"));
             }
-            if Instant::now() >= self.deadline {
+            if self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+            {
                 self.halt();
                 return Err(failure("launch_deadline"));
             }
@@ -586,8 +601,9 @@ impl TerminalSession {
             if !self.facts.is_empty() {
                 continue;
             }
-            let left = until
-                .min(self.deadline)
+            let left = self
+                .deadline
+                .map_or(until, |deadline| until.min(deadline))
                 .saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);

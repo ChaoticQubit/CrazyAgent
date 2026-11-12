@@ -439,6 +439,37 @@ mod own_turns {
         assert_eq!(pane.session.stop().unwrap(), None);
     }
 
+    /// Owner 11-11 item 5: a live master's pane drops the launch's run time, so the 24 h
+    /// launch deadline never ends it; a pane that keeps the deadline still ends at it.
+    #[test]
+    fn a_live_pane_with_its_deadline_cleared_outlives_the_launch_run_time() {
+        let mut kept = start("deadline-kept");
+        kept.session.follow_every_turn();
+        kept.session.deadline = Some(Instant::now() + Duration::from_millis(500));
+        let ended = (0..40)
+            .find_map(|_| kept.session.next_fact(Duration::from_millis(100)).err())
+            .map(|problem| problem.0);
+        assert_eq!(ended.as_deref(), Some("launch_deadline"));
+
+        let mut live = start("deadline-cleared");
+        live.session.follow_every_turn();
+        live.session.deadline = Some(Instant::now() + Duration::from_millis(500));
+        live.session.clear_deadline();
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            assert_eq!(
+                live.session.next_fact(Duration::from_millis(100)).unwrap(),
+                None
+            );
+        }
+        live.write(&[&user("go")]);
+        assert_eq!(
+            live.session.next_fact(Duration::from_secs(5)).unwrap(),
+            Some(TranscriptEvent::TurnStarted)
+        );
+        assert_eq!(live.session.stop().unwrap(), None);
+    }
+
     /// Checks that an open turn with a silent record never counts as stale on a pane that
     /// runs `script`, for more than twice the `stale_turn` it is given. Takes the agent name
     /// and the script.

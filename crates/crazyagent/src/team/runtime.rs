@@ -9852,7 +9852,7 @@ fn live(
                     Ok(request) => request,
                     Err(problem) => return Some(problem),
                 };
-            let credential = match profile.hand_to_agent(&home, plan.limits.run_time, &plan.entry) {
+            let credential = match profile.hand_to_turn(&home, None, &plan.entry) {
                 Ok(credential) => credential,
                 Err(problem) => {
                     return Some(with_code(
@@ -9932,11 +9932,7 @@ fn live_adopted(
         }
     };
     let Grant { profile, .. } = *grant;
-    let credential = match profile.hand_to_agent(
-        &managed.home,
-        record.run_time_left(limits.run_time),
-        &managed.executable,
-    ) {
+    let credential = match profile.hand_to_turn(&managed.home, None, &managed.executable) {
         Ok(credential) => credential,
         Err(problem) => {
             let _ = end_left_pane(host.as_ref(), &agent, "team");
@@ -9980,9 +9976,10 @@ fn live_adopted(
 /// ends is tried again on the next pass, except Codex's folder access step running out,
 /// which ends the session. A turn left open that is none any more (see
 /// `TerminalSession::turn_stale`) is reported as `Report::NoTurn`, and starts again as a
-/// turn when the model works in it after all. Takes the session, the worker's channels and
-/// flags, whether a later engine may take the pane over, and the account's credential copy
-/// and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
+/// turn when the model works in it after all. The launch's run time does not bound the
+/// pane: the runtime's Master run time does (F01). Takes the session, the worker's channels
+/// and flags, whether a later engine may take the pane over, and the account's credential
+/// copy and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
 fn live_serve(
     mut session: TerminalSession,
@@ -9995,6 +9992,7 @@ fn live_serve(
     by: &HoldBy,
 ) -> Option<String> {
     session.follow_every_turn();
+    session.clear_deadline();
     let _ = reports.send(Report::Ready {
         group: session.process_group(),
         pane: session.record().filter(|_| keep).cloned().map(Box::new),
