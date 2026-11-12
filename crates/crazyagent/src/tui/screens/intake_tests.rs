@@ -1297,6 +1297,40 @@ async fn home_reads_learn_crazyagent_from_the_engine_and_hide_guide_keeps_get_se
     assert!(!shows(&rows, "Get set up"), "{rows:#?}");
     let footer = rows.last().unwrap();
     assert!(footer.contains("h Hide guide"), "{rows:#?}");
+    let done = |rows: &[String]| -> usize {
+        let row = rows
+            .iter()
+            .find(|row| row.contains(" of 13 done"))
+            .expect("the progress line");
+        let text = row.rsplit('│').next().unwrap().trim();
+        text.split(' ').next().unwrap().parse().unwrap()
+    };
+    let before = done(&rows);
+
+    shell.key(Key::Char('u'));
+    assert_eq!(shell.place(), Some(Place::Usage));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(
+        sent.contains(&"learning"),
+        "the visit sends the metrics and usage marks: {sent:?}"
+    );
+    let engine_read = engine.controller.learning_progress().await.unwrap();
+    for id in [
+        crate::learning::StepId::Metrics,
+        crate::learning::StepId::Usage,
+    ] {
+        assert!(
+            engine_read
+                .steps
+                .iter()
+                .any(|step| step.id == id && step.done()),
+            "{id:?} ticks from the visit: {engine_read:?}"
+        );
+    }
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Home));
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(done(&render(&mut shell, 80, 24)), before + 2);
 
     shell.key(Key::Char('h'));
     let sent = pump(&mut shell, &mut connection).await;

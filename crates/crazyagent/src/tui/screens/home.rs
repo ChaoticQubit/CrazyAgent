@@ -46,7 +46,7 @@ enum Panel {
 
 /// Where Enter on a row of Home's side panel goes: a place, or a step only the desktop app
 /// has, which Enter explains instead of opening.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum Target {
     Place(Place),
     Desktop,
@@ -54,7 +54,7 @@ enum Target {
 
 /// One row of Home's side panel: a setup item or a learning step, whether it is done, its
 /// title and wrapped words, what Enter says and does, and whether the progress line counts it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct GuideItem {
     done: bool,
     title: String,
@@ -66,7 +66,7 @@ struct GuideItem {
 
 /// Home's side panel: "Get set up" with the setup items, or "Learn CrazyAgent" with the
 /// setup items under Basics and the engine's learning steps under their topics.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 struct Guide {
     learning: bool,
     groups: Vec<(Option<&'static str>, Vec<GuideItem>)>,
@@ -138,15 +138,16 @@ fn step_target(id: StepId, project: Option<&ProjectCard>) -> (&'static str, Targ
 }
 
 /// Hides the learning guide until the owner asks to see it again: sets the engine's skipped
-/// mark. Input: the context. Output: none; the panel goes once the next learning read,
-/// which a set mark asks for, shows the mark.
-fn hide(ctx: &mut Ctx) {
+/// mark. Input: the context. Output: the generation the mark went with; the panel goes once
+/// the next learning read, which a set mark asks for, shows the mark.
+fn hide(ctx: &mut Ctx) -> u64 {
     let generation = ctx.next_generation();
     ctx.request(Request::Learning(Box::new(LearningQuery::Mark {
         step: MarkStep::Skipped,
         on: true,
         generation,
     })));
+    generation
 }
 
 /// One row of the project list: the New project draft kept after leaving the
@@ -270,6 +271,7 @@ pub struct Home {
     filtering: bool,
     was_done: Option<bool>,
     owner_moved: bool,
+    hiding: Option<u64>,
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
 }
@@ -293,6 +295,7 @@ impl Home {
             filtering: false,
             was_done: None,
             owner_moved: false,
+            hiding: None,
             folder: Load::Idle,
             found: Load::Idle,
         }
@@ -897,8 +900,9 @@ impl Home {
                 Role::Muted,
                 theme,
             ));
+        } else {
+            head.push(Line::default());
         }
-        head.push(Line::default());
         let mut body = Vec::new();
         let mut picked = 0..0;
         let mut index = 0;
@@ -1033,7 +1037,7 @@ impl Home {
                 Flow::Handled
             }
             Key::Char('h') if self.panel == Panel::Setup && learning => {
-                hide(ctx);
+                self.hiding = Some(hide(ctx));
                 Flow::Handled
             }
             Key::Up | Key::Down if self.panel == Panel::Setup => {
@@ -1237,20 +1241,18 @@ impl Screen for Home {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
-        self.clamp(ctx);
         if let Arrival::Owner(owner) = arrival
             && let OwnerEvent::Learning(reply) = owner.as_ref()
-            && let LearningQuery::Mark {
-                step: MarkStep::Skipped,
-                on: true,
-                ..
-            } = reply.query
-            && let Err(code) = &reply.result
+            && let LearningQuery::Mark { generation, .. } = reply.query
+            && self.hiding == Some(generation)
         {
-            ctx.say(Message::error(
-                "Your Learn CrazyAgent progress was not saved.",
-                plain(code),
-            ));
+            self.hiding = None;
+            if let Err(code) = &reply.result {
+                ctx.say(Message::error(
+                    "Your Learn CrazyAgent progress was not saved.",
+                    plain(code),
+                ));
+            }
         }
         if let Some(reply) = event(arrival) {
             match (&reply.query, &reply.result) {
@@ -1285,6 +1287,7 @@ impl Screen for Home {
         }
         match arrival {
             Arrival::Pools(Ok(_)) | Arrival::Owner(_) => {
+                self.clamp(ctx);
                 self.notice(ctx);
                 Flow::Handled
             }
@@ -1888,6 +1891,8 @@ pub(in crate::tui) mod tests {
             "[ ] Talk to the master",
             "IDE and terminals",
             "[ ] Open the IDE",
+            "Process, Metrics and Usage",
+            "[ ] Check your usage",
         ] {
             assert!(shows(&rows, wanted), "{wanted:?} in {rows:#?}");
         }
@@ -2055,25 +2060,27 @@ pub(in crate::tui) mod tests {
         assert!(footer.contains("Enter Open usage"), "{footer}");
         shell.key(Key::Char('h'));
         let sent = learning_requests(&mut shell);
-        assert!(
-            matches!(
-                sent.as_slice(),
-                [LearningQuery::Mark {
-                    step: MarkStep::Skipped,
-                    on: true,
-                    ..
-                }]
-            ),
-            "{sent:?}"
-        );
-        shell.arrive(reply(
+        let [
             LearningQuery::Mark {
                 step: MarkStep::Skipped,
                 on: true,
-                generation: 1,
+                generation,
             },
-            Err("owner_busy".into()),
-        ));
+        ] = sent.as_slice()
+        else {
+            panic!("h sets the skipped mark: {sent:?}");
+        };
+        let hide = |generation: u64| LearningQuery::Mark {
+            step: MarkStep::Skipped,
+            on: true,
+            generation,
+        };
+        shell.arrive(reply(hide(generation + 1), Err("owner_busy".into())));
+        assert!(
+            shell.ctx.message().is_none(),
+            "a skip another page sent is that page's to report"
+        );
+        shell.arrive(reply(hide(*generation), Err("owner_busy".into())));
         assert_eq!(
             shell.ctx.message().map(|message| message.lead.clone()),
             Some("Your Learn CrazyAgent progress was not saved.".into())
