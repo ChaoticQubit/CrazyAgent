@@ -2024,6 +2024,13 @@ fn a_master_withdraws_its_own_and_its_sub_agents_questions_only() {
         code(withdraw(&case.db, &case.project, &session, other, 0)),
         "questions_not_found"
     );
+    let page = case.page();
+    assert_eq!(
+        page.matches("\nWithdrawn by the master.\n").count(),
+        2,
+        "{page}"
+    );
+    assert!(!page.contains("Dismissed by the owner."), "{page}");
 }
 
 /// F12: the master reports an answer the owner typed into its terminal only after the
@@ -2133,6 +2140,11 @@ fn a_master_relays_an_answer_typed_in_its_terminal_once_per_owner_key() {
         )),
         "questions_in_terminal"
     );
+    let page = case.page();
+    assert!(
+        page.contains("\nAnswered by the owner in the master's terminal. The master reports:\n\n"),
+        "{page}"
+    );
 }
 
 /// F14, DEC-147.8: an old free-text engine question is asked again as a choice: the old one
@@ -2215,6 +2227,13 @@ fn an_old_free_text_question_is_asked_again_as_a_choice_under_its_engine_asker()
     assert_eq!(
         code(reask(&case.db, &case.project, &MASTER, &choice, 999_999)),
         "questions_replace_invalid"
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("\nAsked again as a choice question.\n")
+            .count(),
+        2,
+        "{page}"
     );
 }
 
