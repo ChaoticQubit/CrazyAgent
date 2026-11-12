@@ -33,6 +33,14 @@ const ID_BYTES_MAX: usize = 128;
 const CODE_BYTES_MAX: usize = super::FAILURE_BYTES_MAX;
 const FULL_PERCENT: f64 = 100.0;
 const NAME_BYTES_MAX: usize = 64;
+/// The refusals that settle a first send, since none can have used a reset: a request that
+/// never left, a 400, 404 or 409 (`usage_spend_refused`), a 401 or 403 and a 429.
+const SETTLING_REFUSALS: [&str; 4] = [
+    "usage_request_invalid",
+    "usage_spend_refused",
+    "usage_sign_in_lapsed",
+    "usage_rate_limited",
+];
 
 const _: () = assert!(TRIES_MAX >= 1 && ATTEMPTS_KEPT >= 1);
 const _: () = assert!(AUTO_SPENDS_PER_HOUR >= 1);
@@ -194,13 +202,15 @@ pub struct SpendView {
 }
 
 /// A spend waiting to be sent, as the usage thread reads it: the key goes only into the
-/// request's stdin config.
+/// request's stdin config. `resend` is set when an earlier send of this attempt left, so
+/// its reset may already be used and only a definite outcome may settle it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Queued {
     pub id: i64,
     pub account: CredentialRef,
     pub key: String,
     pub tries: i64,
+    pub resend: bool,
 }
 
 /// Reads the owner's spend settings, the defaults until one was made. Input: the store.
@@ -355,19 +365,25 @@ fn queue(
 pub fn queued(db: &Connection) -> Result<Vec<Queued>, EngineError> {
     let mut statement = db
         .prepare(
-            "SELECT id,account,attempt_key,tries FROM usage_spend_attempts
+            "SELECT id,account,attempt_key,tries,sent_ms IS NOT NULL FROM usage_spend_attempts
              WHERE state='queued' ORDER BY id LIMIT ?1",
         )
         .map_err(storage)?;
-    let rows: Vec<(i64, String, String, i64)> = statement
+    let rows: Vec<(i64, String, String, i64, bool)> = statement
         .query_map([QUEUED_PER_STEP], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
         })
         .map_err(storage)?
         .collect::<Result<_, _>>()
         .map_err(storage)?;
     rows.into_iter()
-        .map(|(id, account, key, tries)| {
+        .map(|(id, account, key, tries, resend)| {
             let account = CredentialRef::new(account).map_err(storage)?;
             if !key_shaped(&key) {
                 return Err(failure("usage_unavailable"));
@@ -377,6 +393,7 @@ pub fn queued(db: &Connection) -> Result<Vec<Queued>, EngineError> {
                 account,
                 key,
                 tries,
+                resend,
             })
         })
         .collect()
@@ -414,33 +431,49 @@ fn settle(db: &Connection, id: i64, code: &str, now_ms: i64) -> Result<(), Engin
     Ok(())
 }
 
-/// Records a sent attempt's result: a reply settles it with its outcome code, a failure
-/// with its plain code, and no reply at all (`usage_unreachable`) leaves it sent, to be
-/// settled by a later poll and never re-sent by the engine. Inputs: the store, the
-/// attempt, the result and the time. Output: done.
+/// Records a sent attempt's result. Only a definite answer settles it: one of the four
+/// outcome words, or on a first send a refusal that cannot have used a reset. Anything
+/// else (no reply, a 5xx, an unreadable reply, an unknown 2xx, or any refusal of a resend)
+/// leaves it sent with its key: the owner's next Spend reuses that key, and a later
+/// successful poll settles it. Inputs: the store, the attempt, the result and the time.
+/// Output: done.
 pub fn sent(
     db: &Connection,
-    id: i64,
+    attempt: &Queued,
     result: &Result<Outcome, EngineError>,
     now_ms: i64,
 ) -> Result<(), EngineError> {
     match result {
-        Ok(outcome) => settle(db, id, outcome.code(), now_ms),
-        Err(problem) if problem.0 == "usage_unreachable" => Ok(()),
-        Err(problem) => settle(db, id, plain_code(problem), now_ms),
+        Ok(Outcome::Unknown) => Ok(()),
+        Ok(outcome) => settle(db, attempt.id, outcome.code(), now_ms),
+        Err(problem) if !attempt.resend && SETTLING_REFUSALS.contains(&problem.0.as_str()) => {
+            settle(db, attempt.id, &problem.0, now_ms)
+        }
+        Err(_) => Ok(()),
     }
 }
 
 /// Records an attempt that was not sent: with no problem its account was busy or not
 /// signed in, and it waits for the next step until `TRIES_MAX` tries; a problem settles it
-/// with that problem's code. Inputs: the store, the attempt, the problem and the time.
-/// Output: done.
+/// with that problem's code. A resend goes back to sent with its key instead, since its
+/// earlier send may have used a reset. Inputs: the store, the attempt, the problem and the
+/// time. Output: done.
 pub fn not_sent(
     db: &Connection,
     attempt: &Queued,
     problem: Option<&EngineError>,
     now_ms: i64,
 ) -> Result<(), EngineError> {
+    if attempt.resend {
+        let back = db
+            .execute(
+                "UPDATE usage_spend_attempts SET state='sent' WHERE id=?1 AND state='queued'",
+                params![attempt.id],
+            )
+            .map_err(storage)?;
+        assert!(back <= 1);
+        return Ok(());
+    }
     if let Some(problem) = problem {
         return settle(db, attempt.id, plain_code(problem), now_ms);
     }
@@ -456,15 +489,16 @@ pub fn not_sent(
     Ok(())
 }
 
-/// Settles each sent attempt whose reply never came once a poll of its account newer than
-/// the send has run: its outcome stays unknown and the poll shows where the limits stand.
-/// Inputs: the store and the time. Output: done.
+/// Settles each sent attempt with no definite answer once a successful poll of its account
+/// newer than the send has run (a failed poll reads no limits): its outcome stays unknown
+/// and the poll shows where the limits stand. Inputs: the store and the time. Output: done.
 pub fn settle_sent(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
     let ids: Vec<i64> = {
         let mut statement = db
             .prepare(
                 "SELECT a.id FROM usage_spend_attempts a JOIN account_limits l ON l.account=a.account
-                 WHERE a.state='sent' AND a.sent_ms IS NOT NULL AND l.checked_ms>a.sent_ms",
+                 WHERE a.state='sent' AND a.sent_ms IS NOT NULL AND l.checked_ms>a.sent_ms
+                   AND l.failure IS NULL",
             )
             .map_err(storage)?;
         statement
@@ -479,21 +513,25 @@ pub fn settle_sent(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Why a queued spend cannot go to its account's connection: gone from the settings, or
-/// not a Claude or Codex sign-in. Input: the connection, none when it was removed. Output:
-/// the code, none when the spend may be sent.
+/// Why a queued spend cannot go to its account's connection, checked before any token is
+/// read: gone from the settings, a Claude sign-in whose spend call has not landed yet
+/// (DEC-154 addendum S9), or not a Claude or Codex sign-in. Input: the connection, none
+/// when it was removed. Output: the code, none when the spend may be sent.
 pub fn not_spendable(connection: Option<&ModelConnection>) -> Option<&'static str> {
     match connection.map(MemberKind::of) {
         None => Some("usage_spend_no_account"),
-        Some(MemberKind::Claude | MemberKind::Chatgpt) => None,
+        Some(MemberKind::Chatgpt) => None,
+        Some(MemberKind::Claude) => Some("usage_spend_unavailable"),
         Some(_) => Some("usage_spend_not_in_app"),
     }
 }
 
 /// Sends one queued spend with its stored key: marks it sent first, makes the provider's
-/// call, records the result, and asks for a poll after any reply so the limits catch up.
+/// call, records the result, and asks for a poll after every send so the limits catch up
+/// and an unclear result settles soon.
 /// With spending turned off since it was asked for, it settles `usage_spend_off` unsent. A
-/// Claude spend waits for its call shape and settles `usage_spend_unavailable` unsent.
+/// Claude spend waits for its call shape and settles `usage_spend_unavailable` unsent. A
+/// resend that does not go out returns to sent with its key.
 /// Inputs: the store, the attempt, the provider, the credential the custody lease read,
 /// the Claude and Codex usage URLs, whether loopback URLs are allowed and the time.
 /// Output: done, or the store's failure.
@@ -523,11 +561,8 @@ pub fn send_one(
     let url = wire::codex_consume_url(codex)?;
     mark_sent(db, attempt.id, now_ms)?;
     let result = wire::codex_consume(url, credential, &attempt.key, loopback);
-    sent(db, attempt.id, &result, now_ms)?;
-    if result.is_ok() {
-        super::service::request_refresh(db, now_ms + 1)?;
-    }
-    Ok(())
+    sent(db, attempt, &result, now_ms)?;
+    super::service::request_refresh(db, now_ms + 1)
 }
 
 /// The window key of an account a poll read at its limit: the latest reset time among its
@@ -578,13 +613,10 @@ pub fn track_pools(db: &Connection, access: &ModelAccess, now_ms: i64) -> Result
         .map(|row| (row.account.as_str().to_owned(), row))
         .collect();
     let in_app = |member: &CredentialRef| {
-        access.connections.iter().any(|connection| {
-            &connection.id == member
-                && matches!(
-                    MemberKind::of(connection),
-                    MemberKind::Chatgpt | MemberKind::Claude
-                )
-        })
+        access
+            .connections
+            .iter()
+            .any(|connection| &connection.id == member && not_spendable(Some(connection)).is_none())
     };
     let mut current = Vec::new();
     for pool in access.pools.iter().take(LIMITED_POOLS_MAX) {
@@ -703,7 +735,11 @@ fn auto_spend(
     }
     for (member, key, counted_ms) in with_resets {
         let Some(window) = *key else { continue };
-        let Some(polled_ms) = limits.get(member.as_str()).and_then(|row| row.checked_ms) else {
+        let Some(polled_ms) = limits
+            .get(member.as_str())
+            .filter(|row| row.failure.is_none())
+            .and_then(|row| row.checked_ms)
+        else {
             continue;
         };
         let Some(counted_ms) = *counted_ms else {

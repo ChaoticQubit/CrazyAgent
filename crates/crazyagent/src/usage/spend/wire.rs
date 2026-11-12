@@ -61,8 +61,10 @@ pub(super) fn codex_request<'a>(
 /// Spends one Codex free reset: a POST of `{}` with the key, so the backend picks the reset
 /// and no reset id is ever handled. Inputs: the consume URL, the credential, the key and
 /// whether a loopback test URL is allowed. Output: the outcome; `usage_sign_in_lapsed` for
-/// 401 or 403, `usage_rate_limited` for 429, `usage_spend_failed` for another status,
-/// `usage_unreachable` when no reply came, or `usage_request_invalid`.
+/// 401 or 403, `usage_rate_limited` for 429, `usage_spend_refused` for 400, 404 or 409,
+/// `usage_spend_failed` for another status (a 5xx may have used the reset),
+/// `usage_reply_invalid` for an unreadable reply, `usage_unreachable` when no reply came,
+/// or `usage_request_invalid`.
 pub fn codex_consume(
     url: url::Url,
     credential: &PollCredential,
@@ -81,6 +83,7 @@ pub fn codex_consume(
         200..=299 => Ok(consume_outcome(&reply.body)),
         401 | 403 => Err(failure("usage_sign_in_lapsed")),
         429 => Err(failure("usage_rate_limited")),
+        400 | 404 | 409 => Err(failure("usage_spend_refused")),
         _ => Err(failure("usage_spend_failed")),
     }
 }

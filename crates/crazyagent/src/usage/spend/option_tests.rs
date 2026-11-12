@@ -334,7 +334,7 @@ fn an_unknown_2xx_reply_then_a_second_spend_before_the_next_poll_sends_the_same_
 }
 
 #[test]
-fn an_unreadable_reply_then_a_second_spend_sends_the_same_key() {
+fn a_2xx_reply_that_is_not_json_then_a_second_spend_sends_the_same_key() {
     a_second_spend_after_an_unclear_reply_sends_the_same_key(Answer::bytes(
         200,
         b"not json".to_vec(),
