@@ -589,7 +589,10 @@ const DEPENDENCY_ABOUT: Record<DependencyName, string> = {
   tmux: "Runs each agent in a live terminal.",
   uv: "Installs graphify.",
   graphify: "Builds a code graph of each project.",
+  node: "Runs the harnesses CrazyAgent installs with npm.",
 };
+
+const INSTALL_ALONE: ReadonlySet<DependencyName> = new Set<DependencyName>(["node"]);
 
 /** Badge word, tone and detail line for a tool or pack entry state.
  * Input: the state. Output: the fixed word, its tone and one line or null. */
@@ -682,6 +685,13 @@ export function approvalLine(pack: PackEntry[], ticked: string[]): string | null
  * Input: the status. Output: true while a tool shows Checking. */
 export function toolsChecking(status: SetupStatus): boolean {
   return status.dependencies.some((item) => item.state.state === "checking");
+}
+
+/** Tells whether a tool row offers its own Install: Node alone, while it is missing or failed
+ * and no setup run, install or check goes on. Inputs: the row and the status. Output: the answer. */
+export function rowInstall(dependency: Dependency, status: SetupStatus): boolean {
+  const wanted = dependency.state.state === "missing" || dependency.state.state === "failed";
+  return INSTALL_ALONE.has(dependency.name) && wanted && !setupBusy(status) && !toolsChecking(status);
 }
 
 /** Tells whether setup is still working. Input: the status. Output: true while it runs or

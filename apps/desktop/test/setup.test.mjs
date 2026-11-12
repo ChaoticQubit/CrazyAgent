@@ -86,7 +86,7 @@ test("the Node row installs Node alone through its own desktop command, which th
   assert.ok(match, "installDependency must invoke a desktop command with the name and a generation");
   assert.equal(match[1], "desktop_install_dependency");
   assert.ok(commands.includes("async fn desktop_install_dependency("), "the command exists");
-  assert.match(commands, /generate_handler!\[[^\]]*\bdesktop_install_dependency,/, "the command is registered");
+  assert.match(commands, /native_commands! \{[^}]*\bdesktop_install_dependency,/, "the command is registered");
   assert.match(setup, /pub async fn install_dependency\([^)]*name: Dependency,\s*generation: u64,?\s*\) -> Result<SetupStatus, BridgeError>/);
   assert.match(setup, /pub async fn install_dependency\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::InstallDependency \{ name \}, generation\)/);
   assert.ok(bridge.includes(`=> ("install_dependency", None, None)`));
