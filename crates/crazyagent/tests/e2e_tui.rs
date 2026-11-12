@@ -158,12 +158,16 @@ fn on_team(screen: &str, project: &str) -> bool {
     screen.contains(&format!("/  {project}  /  Team")) && screen.contains("Master")
 }
 
-/// Whether the crumbs end on the project named exactly `project`, or go on to one of its
-/// tabs. Inputs: the screen and the project name. Output: true when the crumbs name it.
+/// Whether the crumbs end on the project named exactly `project`, go on to one of its
+/// tabs, or are followed by the header's right status, such as the notification counts,
+/// which sits at least three spaces after the last crumb. Inputs: the screen and the
+/// project name. Output: true when the crumbs name it.
 fn in_project(screen: &str, project: &str) -> bool {
     let crumbs = screen.lines().next().unwrap_or_default().trim_end();
     let place = format!("/  {project}");
-    crumbs.ends_with(&place) || crumbs.contains(&format!("{place}  /  "))
+    crumbs.ends_with(&place)
+        || crumbs.contains(&format!("{place}  /  "))
+        || crumbs.contains(&format!("{place}   "))
 }
 
 /// Whether Home's selection bar marks the card named exactly `project`: the bar, then the
