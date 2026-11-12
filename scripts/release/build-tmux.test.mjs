@@ -7,7 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const SCRIPT = fileURLToPath(new URL("./build-tmux.sh", import.meta.url));
-const SOURCES = ["TMUX", "LIBEVENT", "UTF8PROC", "NCURSES"];
+const SOURCES = ["TMUX", "LIBEVENT", "UTF8PROC", "NCURSES", "JEMALLOC"];
 
 /**
  * Reads one pin the build script sets on a line of its own, such as `TMUX_VERSION=3.8`.
@@ -33,11 +33,11 @@ test("the bundled tmux is the latest stable tmux 3.8 and every source tarball is
   const text = readFileSync(SCRIPT, "utf8");
   assert.equal(pin(text, "TMUX_VERSION"), "3.8");
   assert.equal(pin(text, "TMUX_SHA256"), "e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e");
-  assert.deepEqual(["LIBEVENT", "UTF8PROC", "NCURSES"].map((name) => pin(text, `${name}_VERSION`)), ["2.1.13-stable", "2.12.0", "6.6"]);
+  assert.deepEqual(["LIBEVENT", "UTF8PROC", "NCURSES", "JEMALLOC"].map((name) => pin(text, `${name}_VERSION`)), ["2.1.13-stable", "2.12.0", "6.6", "5.4.0"]);
   const hashes = SOURCES.map((name) => pin(text, `${name}_SHA256`));
   for (const [index, name] of SOURCES.entries()) {
     const url = pin(text, `${name}_URL`);
-    assert.match(url, /^https:\/\/[a-z0-9.-]+\/\S+\.tar\.gz$/, `${name} is one tarball over https`);
+    assert.match(url, /^https:\/\/[a-z0-9.-]+\/\S+\.tar\.(gz|bz2)$/, `${name} is one tarball over https`);
     assert(url.includes(pin(text, `${name}_VERSION`)), `${name}'s URL names its pinned version`);
     assert.match(hashes[index], /^[0-9a-f]{64}$/, `${name} is pinned by SHA-256`);
   }
@@ -52,6 +52,16 @@ test("the tmux build follows only https, installs nothing on the machine and car
   assert(!/\b(brew|sudo|apt-get|dnf|yum)\b/.test(text), "no package manager and no root");
   assert.deepEqual(text.split("\n").slice(1).filter((line) => /^\s*#/.test(line)), [], "no comment lines");
   assert((statSync(SCRIPT).mode & 0o111) !== 0, "the release job runs it directly");
+});
+
+test("on macOS tmux links jemalloc as Homebrew's tmux does, force-loaded so its malloc zone replaces the calloc tmux refuses to trust, with each architecture's page size", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  assert.match(text, /JEMALLOC_LIBS="-Wl,-force_load,\$prefix\/lib\/libjemalloc\.a"/);
+  assert.match(text, /--enable-jemalloc/);
+  assert.match(text, /aarch64-apple-darwin\) [^\n]*page=14/);
+  assert.match(text, /x86_64-apple-darwin\) [^\n]*page=12/);
+  assert.match(text, /--with-lg-page="\$page"/);
+  assert.match(text, /check_jemalloc/, "the built tmux is checked to hold jemalloc's zone");
 });
 
 test("the tmux build refuses an unknown target, a used work folder or an existing output before it downloads anything", () => {
