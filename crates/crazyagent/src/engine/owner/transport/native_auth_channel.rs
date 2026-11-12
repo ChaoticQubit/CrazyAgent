@@ -2662,6 +2662,14 @@ fallback_allowed = false
         }
 
         async fn open_with(catalog: &str, action: NativeAuthAction) -> Self {
+            Self::open_registered(catalog, action, false).await
+        }
+
+        /// Opens a case like `open_with`; with `codex`, first registers a stand-in Codex
+        /// executable in the case folder, before sign-in freezes the registrations, so a
+        /// master launch gets past the harness lookup. The stand-in never runs. Inputs: the
+        /// catalog, the sign-in action and whether to register the stand-in. Output: the case.
+        async fn open_registered(catalog: &str, action: NativeAuthAction, codex: bool) -> Self {
             let root = tempfile::Builder::new()
                 .prefix("ca-auth-observe-")
                 .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -2673,7 +2681,7 @@ fallback_allowed = false
             let project = root.path().join("p.toml");
             let config = crate::config::resolve_config(&global, &project).unwrap();
             let (_stop, stopped) = tokio::sync::watch::channel(false);
-            let service = EngineService::start_with_settings_sources(
+            let mut service = EngineService::start_with_settings_sources(
                 root.path(),
                 "e.sock",
                 &global,
@@ -2682,6 +2690,13 @@ fallback_allowed = false
             )
             .await
             .unwrap();
+            if codex {
+                let stand_in = root.path().join("codex");
+                std::fs::write(&stand_in, b"#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(&stand_in, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                service.register_codex_executable(&stand_in).unwrap();
+            }
             let host = service.owner_runtime().unwrap();
             let client = OwnerClient::attach(
                 &host.authority.root.path,
@@ -3633,6 +3648,104 @@ fallback_allowed = false
             );
             drop(held);
             assert!(agents.holders(&account).is_empty());
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    /// Every argument of a launch command as text. Input: the command. Output: the args.
+    fn arguments(command: &ProcessCommand) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// DEC-150 F7, the S9 row: a signed-in Codex master's launch runs the owner's master
+    /// model, read by `master_settings` and swapped into the turn's connection by
+    /// `prepare_master_host`, and the account's own model while no master model is set.
+    #[tokio::test]
+    async fn a_signed_in_master_launch_runs_the_owner_s_master_model_and_the_account_s_without_one()
+    {
+        use crate::harness_settings::Scope;
+        use crate::model_choice::{Slot, Written, store};
+        tokio::time::timeout(Duration::from_secs(120), async {
+            let mut case = Case::open_registered(
+                MASTER_CATALOG,
+                NativeAuthAction::SignIn {
+                    method: NativeAuthMethod::CodexBrowser,
+                },
+                true,
+            )
+            .await;
+            case.complete_sign_in().await;
+            case.open_master().await;
+            let prepared = admitted(case.prepare_next_turn("master-model-turn").await);
+            let host = case.service.owner_runtime().unwrap();
+            let catalog = crate::model_choice::catalog("codex");
+            let master = catalog[0].clone();
+            assert_ne!(
+                master, "model-a",
+                "the master model differs from the account's"
+            );
+            let pair = |model: &str| format!("model=\"{model}\"");
+            let (profile, _) = host
+                .acquire_master_profile(&prepared, &id("master-model-turn"))
+                .await
+                .unwrap();
+
+            let (settings, model) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(model, None, "no master model is set yet");
+            let launch = host
+                .prepare_master_host(&prepared, &profile, settings, model.as_deref())
+                .unwrap();
+            let own = arguments(&launch.command);
+            drop(launch);
+            assert!(
+                own.windows(2)
+                    .any(|pair_of| pair_of[0] == "-c" && pair_of[1] == pair("model-a")),
+                "the account's own model runs: {own:?}"
+            );
+            assert!(!own.contains(&pair(&master)), "{own:?}");
+
+            let root = super::super::changes::engine_root(&host.authority).unwrap();
+            let db = crate::storage::versioned::open(&root).unwrap();
+            let version = store::values(&db, "codex", &catalog, &Scope::App, None)
+                .unwrap()
+                .rows
+                .iter()
+                .find(|row| row.slot == Slot::Master)
+                .unwrap()
+                .version;
+            let written = store::set(
+                &db,
+                "codex",
+                &catalog,
+                &Scope::App,
+                Slot::Master,
+                &json!(master),
+                version,
+            )
+            .unwrap();
+            assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+            drop(db);
+
+            let (settings, model) = host.master_settings(&prepared).await.unwrap();
+            assert_eq!(model.as_deref(), Some(master.as_str()));
+            let launch = host
+                .prepare_master_host(&prepared, &profile, settings, model.as_deref())
+                .unwrap();
+            let chosen = arguments(&launch.command);
+            drop(launch);
+            assert!(
+                chosen
+                    .windows(2)
+                    .any(|pair_of| pair_of[0] == "-c" && pair_of[1] == pair(&master)),
+                "the owner's master model runs: {chosen:?}"
+            );
+            assert!(!chosen.contains(&pair("model-a")), "{chosen:?}");
+            drop(profile);
             case.close().await;
         })
         .await
