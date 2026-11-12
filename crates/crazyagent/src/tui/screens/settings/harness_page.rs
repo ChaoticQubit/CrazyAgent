@@ -703,7 +703,7 @@ impl HarnessPage {
             lines = vec![row(
                 limit,
                 styled(name.clone(), Role::Heading, theme),
-                styled(version, role),
+                styled(version, role, theme),
                 glyphs,
             )];
         } else {
