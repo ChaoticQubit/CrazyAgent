@@ -26,12 +26,10 @@ const SEED: [(&str, &str); 5] = [
 const SEED_COMMIT: &str = "Add the demo web page";
 #[cfg(unix)]
 const SEED_FAILED: &str = "demo_seed_failed";
-const GOAL_SENT: &str = "SELECT EXISTS(SELECT 1 FROM master_turns AS t JOIN master_sessions AS s ON s.id=t.session WHERE s.project=?1)";
-const AGENT_STARTED: &str =
-    "SELECT EXISTS(SELECT 1 FROM team_agents WHERE project=?1 AND role<>'master')";
+const GOAL_SENT: &str = "SELECT EXISTS(SELECT 1 FROM master_turns AS t JOIN master_sessions AS s ON s.id=t.session WHERE s.project=?1 AND t.input>(SELECT turn_floor FROM demo_projects WHERE project_id=?1))";
+const AGENT_STARTED: &str = "SELECT EXISTS(SELECT 1 FROM team_agents WHERE project=?1 AND role<>'master' AND created_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
 const QUESTION_ANSWERED: &str = "SELECT EXISTS(SELECT 1 FROM questions_log WHERE project=?1 AND status IN ('answered','answered_in_terminal'))";
-const CHANGE_SET_ACCEPTED: &str =
-    "SELECT EXISTS(SELECT 1 FROM landing_change_sets WHERE project=?1 AND state='accepted')";
+const CHANGE_SET_ACCEPTED: &str = "SELECT EXISTS(SELECT 1 FROM landing_change_sets WHERE project=?1 AND state='accepted' AND created_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
 
 /// The one id a demo project has (DEC-153): clients send it with CreateDemo and the engine
 /// refuses any other, so at most one demo exists and a client never invents its id.
@@ -117,7 +115,8 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS demo_projects (
             project_id TEXT PRIMARY KEY NOT NULL CHECK(project_id = '{PROJECT_ID}'),
-            created_ms INTEGER NOT NULL CHECK(created_ms > 0)
+            created_ms INTEGER NOT NULL CHECK(created_ms > 0),
+            turn_floor INTEGER NOT NULL CHECK(turn_floor >= 0)
         )"
     ))
     .map_err(error)
@@ -159,9 +158,9 @@ pub fn create_action(
 
 /// Says why a demo cannot run on a saved pool, or none when it can: the pool is gone
 /// (`demo_pool_missing`), holds only RCLI accounts, which run no live agents until V3
-/// (`demo_harness_unavailable`, DEC-141), or has no account for the master New Project's
-/// team default picks (`demo_pool_not_ready`). Inputs: a transaction, the configuration
-/// and the pool. Output: the code or none.
+/// (`demo_harness_unavailable`, DEC-141), or has no account New Project's own team check
+/// can start the default master on, such as a signed-out one (`demo_pool_not_ready`).
+/// Inputs: a transaction, the configuration and the pool. Output: the code or none.
 pub(crate) fn pool_unavailable(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -183,9 +182,10 @@ pub(crate) fn pool_unavailable(
         return Ok(Some("demo_harness_unavailable"));
     }
     let signed = crate::project_setup::signed_in_connections(tx, config, Some(pool))?;
-    let master = crate::project_setup::default_team(config, Some(pool), &signed).master;
-    assert_ne!(master, RCLI);
-    Ok((!harnesses.contains(&master.as_str())).then_some("demo_pool_not_ready"))
+    Ok(
+        crate::project_setup::default_team_status(config, Some(pool), &signed)
+            .map(|_| "demo_pool_not_ready"),
+    )
 }
 
 /// Tells whether the demo project already exists, so a second CreateDemo is refused as
@@ -211,9 +211,9 @@ pub(crate) fn refusal(code: String) -> String {
     }
 }
 
-/// Marks the project the demo created as the demo, in the transaction that records it; a
-/// mark a deleted demo left is replaced. Inputs: the transaction, the project and when.
-/// Output: done.
+/// Marks the project the demo created as the demo, in the transaction that records it, with
+/// the newest master turn cursor so steps count only this demo's rows; a mark a deleted
+/// demo left is replaced. Inputs: the transaction, the project and when. Output: done.
 pub(crate) fn record(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -221,10 +221,19 @@ pub(crate) fn record(
 ) -> Result<(), EngineError> {
     assert_eq!(project_id.as_str(), PROJECT_ID);
     assert!(now_ms > 0);
+    let turn_floor: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(input),0) FROM master_turns",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    assert!(turn_floor >= 0);
     tx.execute(
-        "INSERT INTO demo_projects(project_id,created_ms) VALUES(?1,?2)
-         ON CONFLICT(project_id) DO UPDATE SET created_ms=excluded.created_ms",
-        params![PROJECT_ID, now_ms],
+        "INSERT INTO demo_projects(project_id,created_ms,turn_floor) VALUES(?1,?2,?3)
+         ON CONFLICT(project_id) DO UPDATE SET created_ms=excluded.created_ms,
+         turn_floor=excluded.turn_floor",
+        params![PROJECT_ID, now_ms, turn_floor],
     )
     .map_err(error)?;
     Ok(())
@@ -252,8 +261,9 @@ fn any(tx: &Transaction<'_>, query: &str) -> Result<bool, EngineError> {
 
 /// Reads the demo: the demo project while both its mark and its project exist, each step
 /// from whether its row exists (a master turn, a team agent that is not the master, an
-/// answered question, an accepted change set), the goal, and every saved pool with why a
-/// demo cannot run on it. Inputs: a transaction and the configuration. Output: the view.
+/// answered question, an accepted change set), counting only rows made since this demo was
+/// marked, since Delete everything keeps some of them; the goal; every saved pool with why
+/// a demo cannot run on it. Inputs: a transaction and the configuration. Output: the view.
 pub(crate) fn view(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,

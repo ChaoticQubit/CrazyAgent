@@ -734,6 +734,26 @@ fn questions(root: &Path, project: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
+/// Records the managed profile `profile` as signed in, the way a finished sign-in
+/// leaves it, in the database in the runtime folder `root`.
+#[cfg(target_os = "macos")]
+fn sign_in(root: &Path, profile: &str) {
+    use sha2::Digest;
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let key = format!("{:x}", sha2::Sha256::digest(profile.as_bytes()));
+    db.execute(
+        "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact)
+         VALUES('demo-sign-in',?1,1,'authenticated_observed',X'7B7D',X'7B7D')",
+        [key],
+    )
+    .unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question() {
@@ -761,13 +781,18 @@ async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question()
     assert_eq!(before.project_id, None);
     assert!(!before.steps.created && before.created_ms.is_none());
     assert_eq!(before.name, NAME);
-    assert!(
-        before
-            .pools
+    let offered = |view: &crazyagent::demo::DemoView| {
+        view.pools
             .iter()
-            .any(|item| item.pool == pool && item.unavailable.is_none())
-    );
+            .find(|item| item.pool == pool)
+            .map(|item| item.unavailable.clone())
+    };
+    assert_eq!(offered(&before), Some(Some("demo_pool_not_ready".into())));
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), rejected("demo_pool_not_ready"));
 
+    sign_in(engine.root.path(), "profile-codex");
+    assert_eq!(offered(&owner.project_demo().await.unwrap()), Some(None));
     let response = owner.create_demo(pool.clone(), next()).await.unwrap();
     assert_eq!(result(response), rejected("projects_home_unset"));
     let response = owner

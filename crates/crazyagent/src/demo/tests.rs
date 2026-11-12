@@ -65,9 +65,9 @@ fn database(root: &Path) -> Connection {
         "CREATE TABLE projects(id TEXT PRIMARY KEY);
          CREATE TABLE native_auth_operations(profile_key TEXT, generation INTEGER, phase TEXT);
          CREATE TABLE master_sessions(id TEXT PRIMARY KEY, project TEXT);
-         CREATE TABLE master_turns(session TEXT, ordinal INTEGER);
-         CREATE TABLE team_agents(project TEXT, role TEXT);
-         CREATE TABLE landing_change_sets(project TEXT, state TEXT);",
+         CREATE TABLE master_turns(session TEXT, ordinal INTEGER, input INTEGER);
+         CREATE TABLE team_agents(project TEXT, role TEXT, created_ms INTEGER);
+         CREATE TABLE landing_change_sets(project TEXT, state TEXT, created_ms INTEGER);",
     )
     .unwrap();
     crate::questions::initialize(&db).unwrap();
@@ -217,35 +217,45 @@ fn a_demo_is_a_plain_new_project_with_the_picked_pool_and_only_the_demo_id() {
 }
 
 #[test]
-fn a_pool_offers_the_demo_only_with_an_account_for_its_master_and_never_on_rcli_alone() {
+fn a_pool_offers_the_demo_only_with_a_signed_in_account_for_its_master_and_never_on_rcli_alone() {
     let temp = tempfile::tempdir().unwrap();
     let mut db = database(temp.path());
     let config = config();
     let tx = db.transaction().unwrap();
     let why = |id: &str| pool_unavailable(&tx, &config, &pool(id)).unwrap();
-    assert_eq!(why("pool-codex"), None);
-    assert_eq!(why("pool-rcli"), Some("demo_harness_unavailable"));
+    let sign_in = |profile: &[u8]| {
+        tx.execute(
+            "INSERT INTO native_auth_operations VALUES(?1,1,'authenticated_observed')",
+            [crate::memory::hash(profile)],
+        )
+        .unwrap();
+    };
+    assert_eq!(why("pool-codex"), Some("demo_pool_not_ready"), "signed out");
     assert_eq!(
         why("pool-claude"),
         Some("demo_pool_not_ready"),
         "signed out"
     );
+    assert_eq!(why("pool-rcli"), Some("demo_harness_unavailable"));
     assert_eq!(why("pool-gone"), Some("demo_pool_missing"));
-    let key = crate::memory::hash(b"profile-claude");
-    tx.execute(
-        "INSERT INTO native_auth_operations VALUES(?1,1,'authenticated_observed')",
-        [key],
-    )
-    .unwrap();
+    sign_in(b"profile-codex");
     assert_eq!(
-        pool_unavailable(&tx, &config, &pool("pool-claude")).unwrap(),
+        why("pool-codex"),
+        None,
+        "a signed-in Codex account runs the master"
+    );
+    assert_eq!(why("pool-claude"), Some("demo_pool_not_ready"));
+    sign_in(b"profile-claude");
+    assert_eq!(
+        why("pool-claude"),
         None,
         "a signed-in Claude account runs the master"
     );
+    assert_eq!(why("pool-rcli"), Some("demo_harness_unavailable"));
 }
 
 #[test]
-fn the_demo_reads_each_step_from_its_own_rows_and_reads_none_once_the_project_is_gone() {
+fn the_demo_reads_each_step_from_its_own_rows_and_a_new_demo_never_inherits_a_deleted_ones() {
     let temp = tempfile::tempdir().unwrap();
     let mut db = database(temp.path());
     let config = config();
@@ -255,7 +265,7 @@ fn the_demo_reads_each_step_from_its_own_rows_and_reads_none_once_the_project_is
     assert_eq!(empty.created_ms, None);
     assert_eq!(empty.steps, DemoSteps::default());
     assert_eq!(empty.goal, GOAL);
-    assert_eq!(empty.pools.len(), 4);
+    assert_eq!(empty.pools.len(), 3);
     assert!(!exists(&tx).unwrap());
     let id = ProjectId::new(PROJECT_ID).unwrap();
     tx.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
@@ -277,8 +287,8 @@ fn the_demo_reads_each_step_from_its_own_rows_and_reads_none_once_the_project_is
     );
     tx.execute_batch(
         "INSERT INTO master_sessions VALUES('s1','crazyagent-demo');
-         INSERT INTO master_turns VALUES('s1',1);
-         INSERT INTO team_agents VALUES('crazyagent-demo','master');",
+         INSERT INTO master_turns VALUES('s1',1,7);
+         INSERT INTO team_agents VALUES('crazyagent-demo','master',1000);",
     )
     .unwrap();
     let sent = view(&tx, &config).unwrap().steps;
@@ -287,9 +297,9 @@ fn the_demo_reads_each_step_from_its_own_rows_and_reads_none_once_the_project_is
         "the master alone is not a team agent"
     );
     tx.execute_batch(
-        "INSERT INTO team_agents VALUES('crazyagent-demo','agent');
-         INSERT INTO landing_change_sets VALUES('other-project','accepted');
-         INSERT INTO landing_change_sets VALUES('crazyagent-demo','pending');",
+        "INSERT INTO team_agents VALUES('crazyagent-demo','agent',1500);
+         INSERT INTO landing_change_sets VALUES('other-project','accepted',1500);
+         INSERT INTO landing_change_sets VALUES('crazyagent-demo','pending',1500);",
     )
     .unwrap();
     let working = view(&tx, &config).unwrap().steps;
@@ -308,7 +318,24 @@ fn the_demo_reads_each_step_from_its_own_rows_and_reads_none_once_the_project_is
     record(&tx, &id, 2_000).unwrap();
     tx.execute("INSERT INTO projects VALUES(?1)", [PROJECT_ID])
         .unwrap();
-    assert_eq!(view(&tx, &config).unwrap().created_ms, Some(2_000));
+    let again = view(&tx, &config).unwrap();
+    assert_eq!(again.created_ms, Some(2_000));
+    assert_eq!(
+        again.steps,
+        DemoSteps {
+            created: true,
+            ..DemoSteps::default()
+        },
+        "rows Delete everything kept belong to the deleted demo"
+    );
+    tx.execute_batch(
+        "INSERT INTO master_sessions VALUES('s2','crazyagent-demo');
+         INSERT INTO master_turns VALUES('s2',1,8);
+         INSERT INTO team_agents VALUES('crazyagent-demo','agent',2000);",
+    )
+    .unwrap();
+    let fresh = view(&tx, &config).unwrap().steps;
+    assert!(fresh.goal_sent && fresh.agent_started && !fresh.change_set_accepted);
 }
 
 #[test]
