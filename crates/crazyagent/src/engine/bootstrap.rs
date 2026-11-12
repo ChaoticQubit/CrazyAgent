@@ -119,6 +119,30 @@ fn engine_version_valid(version: &str) -> bool {
     version.len() <= ENGINE_VERSION_BYTES_MAX && !version.chars().any(char::is_control)
 }
 
+/// The codes a client meets when the locator still names an engine that stopped without
+/// its cleanup and no engine has published a new one yet (F35). The engine sets such a
+/// locator aside at its next start, logging one line for it.
+pub const STALE_ENGINE_CODES: [&str; 5] = [
+    "owner_locator_database_mismatch",
+    "owner_locator_replaced_or_unsafe",
+    "owner_generation_replaced_or_unsafe",
+    "owner_endpoint_replaced_or_unsafe",
+    "owner_ordinary_socket_mismatch",
+];
+
+/// The owner's line, the same in every client, for a connect refused by one of
+/// [`STALE_ENGINE_CODES`].
+pub const STALE_ENGINE_TEXT: &str = "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.";
+
+/// The plain line for a client that cannot connect, when the cause is a locator an engine
+/// that stopped left behind. Input: the connect failure code. Output: the line, or none for
+/// any other code.
+pub fn stale_engine_text(code: &str) -> Option<&'static str> {
+    STALE_ENGINE_CODES
+        .contains(&code)
+        .then_some(STALE_ENGINE_TEXT)
+}
+
 fn fail(code: &str) -> EngineError {
     EngineError(code.into())
 }
@@ -1751,6 +1775,29 @@ mod tests {
         assert!(std::fs::symlink_metadata(&other_socket).is_ok());
         service.shutdown().await.unwrap();
         drop(listener);
+    }
+
+    /// F35: a client refused by a locator a stopped engine left gets one plain line, and
+    /// every such code is one this module really returns.
+    #[test]
+    fn a_connect_refused_by_a_stale_locator_gets_one_plain_line() {
+        let source = include_str!("bootstrap.rs");
+        for code in STALE_ENGINE_CODES {
+            assert!(
+                source.contains(&format!("fail(\"{code}\")")),
+                "{code} is not a bootstrap refusal"
+            );
+            assert_eq!(stale_engine_text(code), Some(STALE_ENGINE_TEXT));
+        }
+        for code in [
+            "owner_locator_missing",
+            "owner_anchor_requires_private_directory",
+            "owner_bootstrap_capabilities_unavailable",
+            "",
+        ] {
+            assert_eq!(stale_engine_text(code), None, "{code}");
+        }
+        assert!(!STALE_ENGINE_TEXT.contains('_'));
     }
 
     #[test]

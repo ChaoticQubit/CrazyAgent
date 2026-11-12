@@ -13,6 +13,16 @@ export type Result<T> = { kind: "ok"; value: T } | Failure;
 
 const FALLBACK = "Something went wrong. Try again.";
 const UNREACHABLE = "engine_unreachable";
+const STALE_ENGINE = "engine_stopped_unclean";
+/** The engine causes of a refused connect where the locator still names an engine that stopped
+ * without its cleanup (F35), as the engine's `STALE_ENGINE_CODES` lists them. */
+export const STALE_ENGINE_CAUSES: readonly string[] = [
+  "owner_locator_database_mismatch",
+  "owner_locator_replaced_or_unsafe",
+  "owner_generation_replaced_or_unsafe",
+  "owner_endpoint_replaced_or_unsafe",
+  "owner_ordinary_socket_mismatch",
+];
 const PAGE_LIMIT = 200;
 const ACCOUNT_PAGES_MAX = 100;
 
@@ -20,6 +30,7 @@ const COPY: Record<string, string> = {
   engine_unreachable: "CrazyAgent's engine isn't running.",
   engine_version_mismatch: "CrazyAgent's engine is a different version from this app. Restart the engine.",
   engine_start_failed: "CrazyAgent's engine didn't start. Try again.",
+  engine_stopped_unclean: "CrazyAgent's engine stopped without closing cleanly and has not started again yet. Restart the engine, then reconnect.",
   engine_backup_failed: "CrazyAgent's engine didn't start: it couldn't back up your data before updating it, so nothing was changed. Check that your disk has free space, then try again.",
   owner_not_ready: "The engine isn't ready for changes yet. Try again in a moment.",
   owner_read_failed: "Couldn't read this from the engine. Try again.",
@@ -188,6 +199,7 @@ export function classifyFailure(error: unknown): Failure {
   const raw = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "unknown";
   const code = ["not_connected", "not_configured", "owner_unavailable", "owner_revoked"].includes(raw) ? UNREACHABLE : raw;
   const cause = typeof error === "object" && error !== null && "cause" in error && typeof error.cause === "string" ? error.cause : undefined;
+  if (code === UNREACHABLE && cause !== undefined && STALE_ENGINE_CAUSES.includes(cause)) return { kind: "error", code: STALE_ENGINE, cause, message: plainError(STALE_ENGINE) };
   return cause === undefined ? { kind: "error", code, message: plainError(code) } : { kind: "error", code, cause, message: plainError(code, cause) };
 }
 
