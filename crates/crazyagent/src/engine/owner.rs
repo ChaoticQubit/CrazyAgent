@@ -301,6 +301,9 @@ pub enum OwnerMutation {
         step: crate::learning::MarkStep,
         on: bool,
     },
+    Notifications {
+        action: crate::notifications::NoticeAction,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -640,6 +643,9 @@ impl OwnerMutation {
             Self::CreateDemo { project_id, pool } => Command::ProjectSetup {
                 action: crate::demo::create_action(project_id, pool)?,
             },
+            Self::Notifications { action } => Command::OwnerNotifications {
+                action: action.clone(),
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -848,6 +854,10 @@ pub enum OwnerRead {
     ProjectDemo,
     SetupStatus,
     LearningProgress,
+    Notifications {
+        query: crate::notifications::NoticeQuery,
+    },
+    NotificationSettings,
     FoundProjects,
     FolderSize {
         path: String,
@@ -954,6 +964,7 @@ impl OwnerRead {
             | Self::ProjectDemo
             | Self::SetupStatus
             | Self::LearningProgress
+            | Self::NotificationSettings
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -963,6 +974,10 @@ impl OwnerRead {
             | Self::AccountRanking => return Ok(None),
             Self::Memories { search, limit, .. } => {
                 crate::memory::library::validate_page(search.as_deref(), *limit)?;
+                return Ok(None);
+            }
+            Self::Notifications { query } => {
+                crate::notifications::validate_query(query)?;
                 return Ok(None);
             }
             Self::ProjectCatalog { research, .. } => {
@@ -1418,6 +1433,12 @@ pub enum OwnerData {
     },
     LearningProgress {
         progress: crate::learning::LearningProgress,
+    },
+    Notifications {
+        page: crate::notifications::NoticePage,
+    },
+    NotificationSettings {
+        settings: crate::notifications::NoticeSettings,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,

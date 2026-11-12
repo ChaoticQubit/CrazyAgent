@@ -1104,6 +1104,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_time_limit::initialize(connection)?;
     crate::master_frame_limit::initialize(connection)?;
     crate::learning::initialize(connection)?;
+    crate::notifications::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1471,6 +1472,7 @@ fn apply(
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
             | Command::OwnerLearningMark { .. }
+            | Command::OwnerNotifications { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1662,6 +1664,9 @@ fn execute(
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
         Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
+        Command::OwnerNotifications { action } => {
+            crate::notifications::apply(tx, action, crate::team::now_ms())
+        }
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -2870,6 +2875,12 @@ fn owner_read(
         },
         OwnerRead::LearningProgress => OwnerData::LearningProgress {
             progress: crate::learning::progress(&tx)?,
+        },
+        OwnerRead::Notifications { query } => OwnerData::Notifications {
+            page: crate::notifications::page(&tx, query)?,
+        },
+        OwnerRead::NotificationSettings => OwnerData::NotificationSettings {
+            settings: crate::notifications::settings(&tx)?,
         },
         OwnerRead::Memories {
             scope,

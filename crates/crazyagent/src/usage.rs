@@ -517,6 +517,7 @@ pub fn record_observation(
         "a poll names whose usage call it made"
     );
     let checked = polled.then_some(now_ms);
+    let before = crate::notifications::events::limits(db, account);
     db.execute(
         "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,\
             weekly_percent,weekly_resets_ms,source,observed_ms,checked_ms,failure,\
@@ -562,6 +563,7 @@ pub fn record_observation(
         ],
     )
     .map_err(storage)?;
+    crate::notifications::events::limits_crossed(db, account, before, now_ms);
     Ok(())
 }
 
