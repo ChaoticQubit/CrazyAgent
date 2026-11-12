@@ -20,7 +20,8 @@ export interface EngineWatch {
 }
 
 export const NOTIFY_PER_READ_MAX = 3;
-export const BANNER_WINDOWS_PER_READ_MAX = 4;
+export const BANNER_WINDOWS_PER_READ_MAX = 8;
+export const BANNER_WINDOW_IDS = 12;
 
 export const UNAVAILABLE_LINE = "System notifications are unavailable on this system.";
 export const AVAILABLE_LINE = "While CrazyAgent is in the background, macOS shows a notification for each item Settings, Notifications sends there. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications.";
@@ -29,6 +30,8 @@ export const FAILED_LINE = "Couldn't show a macOS notification. Check that Crazy
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
+
+assert(BANNER_WINDOW_IDS >= 1 && BANNER_WINDOW_IDS <= PAGE_MAX, "a banner window is one page at most");
 
 /** The plain line Settings shows about system notifications. Input: what the app reported,
  * or undefined while it loads. Output: the line, or null while loading or in a build
@@ -40,13 +43,13 @@ export function systemNotificationsLine(state: Result<SystemNotifications> | und
 }
 
 /** The store read one window of the watch takes: unfolded items in every filter whose ids
- * are the next `PAGE_MAX` past the cursor, so the window always fits one page and the walk
- * goes oldest first, or on the first look only the store's newest id. Input: the cursor,
- * null before the first look. Output: the query. */
+ * are the next `BANNER_WINDOW_IDS` past the cursor, the engine's `WINDOW_IDS_MAX`, so the
+ * window is never cut by bytes and the walk goes oldest first, or on the first look only
+ * the store's newest id. Input: the cursor, null before the first look. Output: the query. */
 export function bannerQuery(kept: number | null): NoticeQuery {
   assert(kept === null || (Number.isSafeInteger(kept) && kept >= 0), "the cursor is a store id");
   if (kept === null) return { filter: "all", project_id: null, kind: null, fold: false, before: null, after: null, limit: 1 };
-  const query: NoticeQuery = { filter: "all", project_id: null, kind: null, fold: false, before: kept + PAGE_MAX + 1, after: kept, limit: PAGE_MAX };
+  const query: NoticeQuery = { filter: "all", project_id: null, kind: null, fold: false, before: kept + BANNER_WINDOW_IDS + 1, after: kept, limit: BANNER_WINDOW_IDS };
   assert(query.before !== null && Number.isSafeInteger(query.before), "the window end is a store id");
   return query;
 }
@@ -63,9 +66,9 @@ export function freshNotices(kept: number | null, page: NoticePage, notifying: b
   assert(Number.isSafeInteger(room) && room >= 1 && room <= NOTIFY_PER_READ_MAX, "a window may send at least one and at most a read's worth");
   if (kept === null || page.newest < kept) return { kept: page.newest, send: [] };
   if (!notifying) return { kept: Math.max(kept, page.newest), send: [] };
-  const end = kept + PAGE_MAX;
-  assert(page.items.every((item) => item.id > kept && item.id <= end), "a window lists only ids past the cursor, at most one page of them");
-  assert(!page.more, "a window of one page of ids has no more rows");
+  const end = kept + BANNER_WINDOW_IDS;
+  assert(page.items.every((item) => item.id > kept && item.id <= end), "a window lists only ids past the cursor, at most a window of them");
+  assert(!page.more, "a window the engine never cuts by bytes has no more rows");
   const fresh = [...page.items].sort((a, b) => a.id - b.id);
   const send: number[] = [];
   let next = kept;
