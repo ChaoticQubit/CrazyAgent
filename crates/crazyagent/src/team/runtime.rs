@@ -1034,6 +1034,7 @@ impl TeamRuntime {
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
         crate::notifications::initialize(&connection)?;
+        crate::notifications::events::engine_started(&connection, now_ms());
         if let Err(problem) = crate::usage::initialize(&connection) {
             eprintln!(
                 "team usage is not counted: {}",
@@ -2775,6 +2776,7 @@ impl TeamRuntime {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
         crate::recovery::capture(&tx, Some(now))?;
+        crate::notifications::events::engine_stopped(&tx)?;
         for id in ids {
             let left = running_tasks(&tx, "agent=?1 AND cancel_requested=0", [id])?;
             tx.execute(
@@ -4187,7 +4189,9 @@ impl TeamRuntime {
         {
             super::master::set_live(&self.connection, project, false)?;
             self.live_starts.remove(project);
-            return self.note(project, &live_gone(&harness));
+            let line = live_gone(&harness);
+            crate::notifications::events::master_off(&self.connection, project, &line, now_ms());
+            return self.note(project, &line);
         }
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
@@ -4233,8 +4237,25 @@ impl TeamRuntime {
                 if let Some(note) = note {
                     self.note(project, &note)?;
                 }
-                if left.is_some_and(|left| left != account.connection) {
+                if let Some(left) = left.filter(|left| *left != account.connection) {
                     self.note(project, LIVE_MASTER_MOVED)?;
+                    let from = crate::notifications::events::connection_name(
+                        &self.connection,
+                        access,
+                        &left,
+                    );
+                    let to = crate::notifications::events::connection_name(
+                        &self.connection,
+                        access,
+                        &account.connection,
+                    );
+                    crate::notifications::events::master_moved(
+                        &self.connection,
+                        project,
+                        &from,
+                        &to,
+                        now_ms(),
+                    );
                 }
                 self.brief(stored, access, id)
             }
@@ -4641,6 +4662,7 @@ impl TeamRuntime {
         self.live_starts.remove(project);
         if super::master::problem(&self.connection, project, Some(line))? {
             self.note(project, line)?;
+            crate::notifications::events::master_off(&self.connection, project, line, now_ms());
         }
         Ok(())
     }

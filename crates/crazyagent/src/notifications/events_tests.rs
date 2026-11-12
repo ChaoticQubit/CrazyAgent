@@ -1,6 +1,4 @@
-use super::events::{
-    engine_started, engine_stopped, harness_update, master_moved, master_off,
-};
+use super::events::{engine_started, engine_stopped, harness_update, master_moved, master_off};
 use super::*;
 use crate::protocol::CredentialRef;
 use crate::usage::poll::Provider;
@@ -136,7 +134,13 @@ fn a_live_master_the_engine_turned_off_records_its_line_on_the_conversation_page
 #[test]
 fn a_live_master_moved_to_another_pool_account_records_a_failover_naming_both() {
     let (_folder, connection) = store();
-    master_moved(&connection, &project("p1"), "Work Claude", "Home Claude", NOW_MS);
+    master_moved(
+        &connection,
+        &project("p1"),
+        "Work Claude",
+        "Home Claude",
+        NOW_MS,
+    );
     let found = items(&connection);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, NoticeKind::PoolFailover);

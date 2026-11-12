@@ -9,6 +9,7 @@ use crate::protocol::{CredentialRef, Outcome, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
+pub(crate) mod events;
 pub mod reconcile;
 mod sources;
 
@@ -962,10 +963,7 @@ fn delete(tx: &Transaction<'_>, ids: &[i64], now: i64) -> Result<(), EngineError
 fn reported(tx: &Transaction<'_>, report: &NoticeReport, now: i64) -> Result<Outcome, EngineError> {
     match report {
         NoticeReport::AppUpdateReady { version } => {
-            let plain = version
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'));
-            if version.is_empty() || version.len() > VERSION_BYTES_MAX || !plain {
+            if !plain_version(version) {
                 return Ok(rejected("notification_report_invalid"));
             }
             let subject = format!("app_update:{version}");
@@ -1002,6 +1000,15 @@ fn reported(tx: &Transaction<'_>, report: &NoticeReport, now: i64) -> Result<Out
         }
     }
     Ok(Outcome::Applied)
+}
+
+/// Whether a reported version is plain: 1 to `VERSION_BYTES_MAX` letters, digits, dots,
+/// dashes and pluses. Input: the version. Output: the answer.
+pub(crate) fn plain_version(version: &str) -> bool {
+    let plain = version
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'));
+    !version.is_empty() && version.len() <= VERSION_BYTES_MAX && plain
 }
 
 fn app_info<'a>(
@@ -1157,3 +1164,6 @@ mod tests;
 
 #[cfg(all(test, unix))]
 mod reconcile_tests;
+
+#[cfg(test)]
+mod events_tests;

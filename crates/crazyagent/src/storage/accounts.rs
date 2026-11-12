@@ -190,6 +190,15 @@ fn registry_exists(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
+/// The name the owner gave a registered account. Inputs: the engine database and the
+/// connection id. Output: the name, or none for an account not in the registry.
+pub(crate) fn registered_name(
+    db: &Connection,
+    id: &CredentialRef,
+) -> Result<Option<String>, EngineError> {
+    Ok(registered(db, id)?.map(|(_, record)| record.details.name))
+}
+
 fn registered(db: &Connection, id: &CredentialRef) -> Result<Option<(i64, Record)>, EngineError> {
     if !registry_exists(db)? {
         return Ok(None);

@@ -244,7 +244,7 @@ struct Import {
 
 /// Reads one source's cursor. Inputs: the database and the source. Output: the last id it
 /// copied, or none before its first tick.
-fn cursor(connection: &Connection, source: &str) -> Result<Option<i64>, EngineError> {
+pub(super) fn cursor(connection: &Connection, source: &str) -> Result<Option<i64>, EngineError> {
     connection
         .query_row(
             "SELECT last FROM owner_notice_cursors WHERE source=?1",
