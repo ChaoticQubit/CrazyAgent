@@ -318,13 +318,24 @@ function useIdeFocus(running: boolean) {
   }, [running]);
 }
 
+/** The page a user-menu dialog opens over and the address it came from. */
+export interface PageUnder { route: Route; hash?: string }
+
+/** The page a user-menu dialog opens over: the shown route with its live address, or the
+ * page kept before for Welcome and a user-menu route. Inputs: the shown route, the live
+ * hash and the page kept. Output: the page to keep. */
+export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnder {
+  if (route.name === "welcome" || (route.name === "settings" && isUserMenuTab(route.tab))) return kept;
+  return { route, hash: hash || undefined };
+}
+
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
  * notification and question watch and the TUI's "open in IDE" focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
-  const under = useRef<{ route: Route; hash?: string }>({ route: { name: "home" } });
-  if (route.name !== "welcome" && !(route.name === "settings" && isUserMenuTab(route.tab))) under.current = { route, hash: window.location.hash || undefined };
+  const under = useRef<PageUnder>({ route: { name: "home" } });
+  under.current = pageUnder(route, window.location.hash, under.current);
   useShortcuts();
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
