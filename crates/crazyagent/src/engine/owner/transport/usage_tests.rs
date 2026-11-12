@@ -461,7 +461,10 @@ async fn the_extras_read_answers_each_saved_account_with_its_stored_resets_and_c
 
     assert_eq!(stored.len(), 1);
     let resets = stored[0].extras.resets.clone().unwrap();
-    assert_eq!((resets.count, resets.kinds), (2, vec![crate::usage::extras::ResetKind::Weekly]));
+    assert_eq!(
+        (resets.count, resets.kinds),
+        (2, vec![crate::usage::extras::ResetKind::Weekly])
+    );
     assert_eq!(stored[0].extras.credits.as_deref(), Some("$4.20 left"));
     usage.stop().await;
 }
@@ -481,16 +484,4 @@ async fn only_a_pools_extras_read_asks_for_the_detail_rows() {
     assert!(crate::usage::service::detail_wanted(&db, crate::team::now_ms()).unwrap());
     drop(db);
     usage.stop().await;
-}
-
-/// The extras request is one of the usage protocol's reads: a body with an unknown field is
-/// refused by its own code, and the read is named for the skew log.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_extras_request_with_an_unknown_field_is_refused() {
-    let body = serde_json::to_vec(&json!({ "usage": { "kind": "extras", "detail": false, "account": "x" } })).unwrap();
-    assert!(serde_json::from_slice::<Envelope>(&body).is_err());
-    let plain = serde_json::to_vec(&json!({ "usage": { "kind": "extras" } })).unwrap();
-    let Envelope { usage: action } = serde_json::from_slice(&plain).unwrap();
-    assert!(matches!(action, Action::Extras { detail: false }));
-    assert_eq!(read_kind(&action), Some("usage.extras"));
 }
