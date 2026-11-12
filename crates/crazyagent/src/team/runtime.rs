@@ -11083,9 +11083,7 @@ fn conversation_note(ended: &EndedTask) -> String {
 }
 
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
-/// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
-/// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
-/// the master asked for the lead that takes it.
+
 /// The note a lead or the master gets when a task sent to a retired sub-agent started it
 /// again (F10). Input: the agent's label. Output: the note.
 fn restarted_note(label: &str) -> String {
@@ -11094,6 +11092,9 @@ fn restarted_note(label: &str) -> String {
     )
 }
 
+/// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
+/// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
+/// the master asked for the lead that takes it.
 type QueuedTask = (
     i64,
     String,
