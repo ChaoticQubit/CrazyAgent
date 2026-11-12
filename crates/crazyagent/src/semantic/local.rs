@@ -7,7 +7,7 @@ pub mod download;
 pub mod safetensors;
 pub mod tokenizer;
 
-pub use download::{Downloads, Phase};
+pub use download::{Downloads, Phase, cancel_download, delete, start_download, state};
 pub use safetensors::Rows;
 pub use tokenizer::Tokenizer;
 
@@ -22,16 +22,13 @@ pub const DIMS: usize = 256;
 pub const TEXTS_MAX: usize = 2_048;
 
 /// Every refusal code of the local runtime, each with a plain sentence in app_plugins.
-pub const CODES: [&str; 9] = [
+pub const CODES: [&str; 6] = [
     "search_model_confirm",
-    "search_model_busy",
-    "search_model_unreachable",
-    "search_model_too_large",
-    "search_model_hash",
-    "search_model_write",
+    "search_model_downloading",
+    "search_model_download_failed",
+    "search_model_mismatch",
+    "search_model_store_unavailable",
     "search_model_missing",
-    "search_model_format",
-    "search_model_read",
 ];
 
 /// One file of the local runtime, pinned by its reviewed revision: the name it is saved
@@ -93,30 +90,32 @@ pub fn folder(root: &Path) -> PathBuf {
 
 /// Opens a pinned file to read: a plain file, never through a link, of the pinned size.
 /// Inputs: the path and the pinned size. Output: the open file, or `search_model_missing`,
-/// `search_model_read` or `search_model_hash`.
+/// `search_model_store_unavailable` or `search_model_mismatch`.
 fn open_sized(path: &Path, bytes: u64) -> Result<File, &'static str> {
     let file = crate::platform::open_plain(path).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => "search_model_missing",
-        _ => "search_model_read",
+        _ => "search_model_store_unavailable",
     })?;
-    let metadata = file.metadata().map_err(|_| "search_model_read")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "search_model_store_unavailable")?;
     if !metadata.is_file() || metadata.len() != bytes {
-        return Err("search_model_hash");
+        return Err("search_model_mismatch");
     }
     Ok(file)
 }
 
 /// Reads a small pinned file whole and keeps it only when its size and sha256 match, so the
 /// bytes checked are the bytes used. Inputs: the path, the pinned size and sha256. Output:
-/// the bytes, or the codes of `open_sized` and `search_model_hash`.
+/// the bytes, or the codes of `open_sized` and `search_model_mismatch`.
 fn verified_bytes(path: &Path, bytes: u64, sha256: &str) -> Result<Vec<u8>, &'static str> {
     let file = open_sized(path, bytes)?;
     let mut kept = Vec::new();
     file.take(bytes.saturating_add(1))
         .read_to_end(&mut kept)
-        .map_err(|_| "search_model_read")?;
+        .map_err(|_| "search_model_store_unavailable")?;
     if kept.len() as u64 != bytes || format!("{:x}", Sha256::digest(&kept)) != sha256 {
-        return Err("search_model_hash");
+        return Err("search_model_mismatch");
     }
     Ok(kept)
 }
@@ -124,7 +123,7 @@ fn verified_bytes(path: &Path, bytes: u64, sha256: &str) -> Result<Vec<u8>, &'st
 /// Opens the large pinned file only when its size and sha256 match, hashing through the
 /// handle that is returned; its rows are then read by position from that handle. Inputs:
 /// the path, the pinned size and sha256. Output: the open file, or
-/// `search_model_missing`, `search_model_read` or `search_model_hash`.
+/// `search_model_missing`, `search_model_store_unavailable` or `search_model_mismatch`.
 pub fn verified(path: &Path, bytes: u64, sha256: &str) -> Result<File, &'static str> {
     let mut file = open_sized(path, bytes)?;
     let mut hasher = Sha256::new();
@@ -135,16 +134,16 @@ pub fn verified(path: &Path, bytes: u64, sha256: &str) -> Result<File, &'static 
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return Err("search_model_read"),
+            Err(_) => return Err("search_model_store_unavailable"),
         };
         seen += read as u64;
         if seen > bytes {
-            return Err("search_model_hash");
+            return Err("search_model_mismatch");
         }
         hasher.update(&chunk[..read]);
     }
     if seen != bytes || format!("{:x}", hasher.finalize()) != sha256 {
-        return Err("search_model_hash");
+        return Err("search_model_mismatch");
     }
     Ok(file)
 }
@@ -158,8 +157,8 @@ pub struct LocalModel {
 
 impl LocalModel {
     /// Opens the downloaded runtime, re-hashing both pinned files on every open. Input: the
-    /// engine root. Output: the model, or `search_model_missing`, `search_model_hash`,
-    /// `search_model_read` or `search_model_format`.
+    /// engine root. Output: the model, or `search_model_missing`, `search_model_mismatch` or
+    /// `search_model_store_unavailable`.
     pub fn open(root: &Path) -> Result<Self, &'static str> {
         Self::open_pinned(root, &PINNED, &SHAPE)
     }

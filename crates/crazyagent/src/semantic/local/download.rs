@@ -1,13 +1,15 @@
 use super::{PINNED, Pinned, folder};
 use crate::app_plugins::Problem;
+use crate::engine::EngineError;
 use crate::semantic::ModelState;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 const CURL: &str = "/usr/bin/curl";
 const USER_AGENT: &str = "CrazyAgent";
@@ -17,6 +19,10 @@ const CHUNK_BYTES: usize = 1 << 16;
 const CURL_TOO_LARGE: i32 = 63;
 const PART_SUFFIX: &str = ".part";
 const FIRST_URL: &str = "https://huggingface.co/";
+const ROOTS_MAX: usize = 256;
+
+static BY_ROOT: LazyLock<Mutex<HashMap<PathBuf, Downloads>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Where the local runtime's one-time download stands: not on this computer, downloading
 /// with the bytes received so far, ready (both pinned files at their sizes), or failed
@@ -27,6 +33,24 @@ pub enum Phase {
     Downloading { done_bytes: u64 },
     Ready,
     Failed(&'static str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fault {
+    Over,
+    Mismatch,
+    Store,
+    Read,
+}
+
+impl Fault {
+    fn code(self) -> &'static str {
+        match self {
+            Fault::Over | Fault::Mismatch => "search_model_mismatch",
+            Fault::Store => "search_model_store_unavailable",
+            Fault::Read => "search_model_download_failed",
+        }
+    }
 }
 
 enum Run {
@@ -52,6 +76,7 @@ struct Shared {
 /// The local runtime's download, one per engine. A start needs the owner's confirm of the
 /// exact size; the files come through the engine's own curl child, which Cancel kills;
 /// each lands in `<root>/models/<runtime>/` only after its size and sha256 match its pin.
+#[derive(Clone)]
 pub struct Downloads {
     shared: Arc<Shared>,
 }
@@ -132,17 +157,18 @@ impl Downloads {
         }
     }
 
-    /// Starts the download in the background once the owner confirmed its exact size.
-    /// Input: the size the owner confirmed. Output: unit, `search_model_confirm` for any
-    /// other size, `search_model_busy` while one runs, or `search_model_unreachable` when
-    /// no thread could start.
+    /// Starts the download in the background once the owner confirmed its exact size; a
+    /// start while one runs or with both files ready starts nothing. Input: the size the
+    /// owner confirmed. Output: unit, `search_model_confirm` for any other size, or
+    /// `search_model_download_failed` when no thread could start.
     pub fn start(&self, confirm_bytes: u64) -> Result<(), &'static str> {
         if confirm_bytes != self.total() {
             return Err("search_model_confirm");
         }
         let mut control = lock(&self.shared.control);
-        if matches!(control.run, Run::Running) {
-            return Err("search_model_busy");
+        let ready = matches!(control.run, Run::Idle) && self.present();
+        if matches!(control.run, Run::Running) || ready {
+            return Ok(());
         }
         control.run = Run::Running;
         control.cancelled = false;
@@ -163,8 +189,8 @@ impl Downloads {
                 };
             });
         if spawned.is_err() {
-            lock(&self.shared.control).run = Run::Failed("search_model_unreachable");
-            return Err("search_model_unreachable");
+            lock(&self.shared.control).run = Run::Failed("search_model_download_failed");
+            return Err("search_model_download_failed");
         }
         Ok(())
     }
@@ -183,11 +209,11 @@ impl Downloads {
     }
 
     /// Deletes the downloaded files and any part file and clears a failure. Output: unit,
-    /// `search_model_busy` while a download runs, or `search_model_write`.
+    /// `search_model_downloading` while a download runs, or `search_model_store_unavailable`.
     pub fn delete(&self) -> Result<(), &'static str> {
         let mut control = lock(&self.shared.control);
         if matches!(control.run, Run::Running) {
-            return Err("search_model_busy");
+            return Err("search_model_downloading");
         }
         let place = folder(&self.shared.root);
         for pin in &self.shared.pins {
@@ -195,13 +221,52 @@ impl Downloads {
                 match fs::remove_file(&path) {
                     Ok(()) => {}
                     Err(error) if error.kind() == ErrorKind::NotFound => {}
-                    Err(_) => return Err("search_model_write"),
+                    Err(_) => return Err("search_model_store_unavailable"),
                 }
             }
         }
         control.run = Run::Idle;
         Ok(())
     }
+}
+
+fn for_root(root: &Path) -> Downloads {
+    let mut by_root = BY_ROOT.lock().unwrap_or_else(PoisonError::into_inner);
+    let downloads = by_root
+        .entry(root.to_path_buf())
+        .or_insert_with(|| Downloads::new(root.to_path_buf()))
+        .clone();
+    assert!(by_root.len() <= ROOTS_MAX, "one download per engine root");
+    downloads
+}
+
+/// The local model's download as the Search settings show it; cheap, nothing is hashed.
+/// Input: the engine root. Output: the model state.
+pub fn state(root: &Path) -> ModelState {
+    for_root(root).state()
+}
+
+/// Starts the one-time download for the owner's Download, once the request carries the
+/// exact size the owner confirmed (leader QC); a start while one runs or with the model
+/// ready starts nothing. Inputs: the engine root and the confirmed size. Output: unit or
+/// `search_model_confirm` / `search_model_download_failed`.
+pub fn start_download(root: &Path, confirm_bytes: u64) -> Result<(), EngineError> {
+    for_root(root)
+        .start(confirm_bytes)
+        .map_err(|code| EngineError(code.to_owned()))
+}
+
+/// Cancels a running download for the owner's Cancel. Input: the engine root.
+pub fn cancel_download(root: &Path) {
+    for_root(root).cancel();
+}
+
+/// Deletes the downloaded model for the owner's Delete. Input: the engine root. Output:
+/// unit, `search_model_downloading` or `search_model_store_unavailable`.
+pub fn delete(root: &Path) -> Result<(), EngineError> {
+    for_root(root)
+        .delete()
+        .map_err(|code| EngineError(code.to_owned()))
 }
 
 fn part_path(place: &Path, pin: &Pinned) -> PathBuf {
@@ -217,7 +282,7 @@ fn fetch_all(shared: &Shared) -> Result<(), &'static str> {
         match fs::remove_file(part_path(&place, pin)) {
             Ok(()) => {}
             Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(_) => return Err("search_model_write"),
+            Err(_) => return Err("search_model_store_unavailable"),
         }
     }
     for pin in &shared.pins {
@@ -236,10 +301,10 @@ fn fetch_one(shared: &Shared, pin: &Pinned, place: &Path) -> Result<(), &'static
     let (mut stdin, stdout) = {
         let mut control = lock(&shared.control);
         if control.cancelled {
-            return Err("search_model_unreachable");
+            return Err("search_model_download_failed");
         }
         let mut child =
-            crate::spawn_gate::spawn(&mut command).map_err(|_| "search_model_unreachable")?;
+            crate::spawn_gate::spawn(&mut command).map_err(|_| "search_model_download_failed")?;
         let stdin = child.stdin.take().expect("curl stdin is piped");
         let stdout = child.stdout.take().expect("curl stdout is piped");
         control.child = Some(child);
@@ -247,7 +312,7 @@ fn fetch_one(shared: &Shared, pin: &Pinned, place: &Path) -> Result<(), &'static
     };
     let written = stdin.write_all(&config);
     drop(stdin);
-    let received = receive(stdout, pin, &part, &shared.done);
+    let received = receive_part(stdout, pin, &part, &shared.done);
     let child = lock(&shared.control).child.take();
     let status = child.and_then(|mut child| {
         if received.is_err() {
@@ -260,13 +325,14 @@ fn fetch_one(shared: &Shared, pin: &Pinned, place: &Path) -> Result<(), &'static
         Ok(()) if succeeded && written.is_ok() => land(&part, &place.join(pin.name)),
         Ok(()) => {
             let _ = fs::remove_file(&part);
-            Err("search_model_unreachable")
+            Err("search_model_download_failed")
         }
+        Err(fault @ (Fault::Over | Fault::Store)) => Err(fault.code()),
         Err(_) if status.and_then(|status| status.code()) == Some(CURL_TOO_LARGE) => {
-            Err("search_model_too_large")
+            Err("search_model_mismatch")
         }
-        Err(code) if code == "search_model_too_large" || succeeded => Err(code),
-        Err(_) => Err("search_model_unreachable"),
+        Err(fault) if succeeded => Err(fault.code()),
+        Err(_) => Err("search_model_download_failed"),
     }
 }
 
@@ -316,17 +382,26 @@ pub(crate) fn curl_command(curl: &Path, pin: &Pinned) -> (Command, Vec<u8>) {
 /// Streams a body into a new private part file (0600, never through a link), counting the
 /// bytes into the progress, and keeps it only when it is exactly the pinned size with the
 /// pinned sha256; on any failure the part file is deleted. Inputs: the body, the pin, the
-/// part path and the progress counter. Output: unit, `search_model_too_large`,
-/// `search_model_hash`, `search_model_write` or `search_model_unreachable`.
+/// part path and the progress counter. Output: unit, `search_model_mismatch`,
+/// `search_model_store_unavailable` or `search_model_download_failed`.
 pub(crate) fn receive(
-    mut source: impl Read,
+    source: impl Read,
     pin: &Pinned,
     part: &Path,
     done: &AtomicU64,
 ) -> Result<(), &'static str> {
-    let file = create_private(part).map_err(|_| "search_model_write")?;
+    receive_part(source, pin, part, done).map_err(Fault::code)
+}
+
+fn receive_part(
+    mut source: impl Read,
+    pin: &Pinned,
+    part: &Path,
+    done: &AtomicU64,
+) -> Result<(), Fault> {
+    let file = create_private(part).map_err(|_| Fault::Store)?;
     let outcome = stream(&mut source, &file, pin, done)
-        .and_then(|()| file.sync_all().map_err(|_| "search_model_write"));
+        .and_then(|()| file.sync_all().map_err(|_| Fault::Store));
     if outcome.is_err() {
         let _ = fs::remove_file(part);
     }
@@ -338,7 +413,7 @@ fn stream(
     mut file: &File,
     pin: &Pinned,
     done: &AtomicU64,
-) -> Result<(), &'static str> {
+) -> Result<(), Fault> {
     let mut hasher = Sha256::new();
     let mut chunk = vec![0; CHUNK_BYTES];
     let mut seen: u64 = 0;
@@ -347,29 +422,28 @@ fn stream(
             Ok(0) => break,
             Ok(read) => read,
             Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-            Err(_) => return Err("search_model_unreachable"),
+            Err(_) => return Err(Fault::Read),
         };
         seen += read as u64;
         if seen > pin.bytes {
-            return Err("search_model_too_large");
+            return Err(Fault::Over);
         }
         hasher.update(&chunk[..read]);
-        file.write_all(&chunk[..read])
-            .map_err(|_| "search_model_write")?;
+        file.write_all(&chunk[..read]).map_err(|_| Fault::Store)?;
         done.fetch_add(read as u64, Ordering::Relaxed);
     }
     if seen != pin.bytes || format!("{:x}", hasher.finalize()) != pin.sha256 {
-        return Err("search_model_hash");
+        return Err(Fault::Mismatch);
     }
     Ok(())
 }
 
 /// Renames a checked part file into place and syncs the folder. Inputs: the part and the
-/// final path. Output: unit or `search_model_write`.
+/// final path. Output: unit or `search_model_store_unavailable`.
 fn land(part: &Path, last: &Path) -> Result<(), &'static str> {
     if fs::rename(part, last).is_err() {
         let _ = fs::remove_file(part);
-        return Err("search_model_write");
+        return Err("search_model_store_unavailable");
     }
     if let Some(parent) = last.parent() {
         let _ = File::open(parent).and_then(|folder| folder.sync_all());
@@ -378,7 +452,7 @@ fn land(part: &Path, last: &Path) -> Result<(), &'static str> {
 }
 
 /// Creates the model folder and its parents owner-only (0700), and accepts it only as a
-/// real folder, never a link. Input: the folder. Output: unit or `search_model_write`.
+/// real folder, never a link. Input: the folder. Output: unit or `search_model_store_unavailable`.
 fn private_folder(place: &Path) -> Result<(), &'static str> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -387,10 +461,12 @@ fn private_folder(place: &Path) -> Result<(), &'static str> {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder.create(place).map_err(|_| "search_model_write")?;
-    let metadata = fs::symlink_metadata(place).map_err(|_| "search_model_write")?;
+    builder
+        .create(place)
+        .map_err(|_| "search_model_store_unavailable")?;
+    let metadata = fs::symlink_metadata(place).map_err(|_| "search_model_store_unavailable")?;
     if !metadata.file_type().is_dir() {
-        return Err("search_model_write");
+        return Err("search_model_store_unavailable");
     }
     Ok(())
 }

@@ -80,12 +80,12 @@ impl Tokenizer {
     /// the pinned file is: BertNormalizer with clean text, CJK spacing, accents stripped and
     /// lowercase; BertPreTokenizer; WordPiece with `##` and an unknown token; no truncation
     /// or padding; special tokens matched raw; one id per matrix row. Inputs: the file bytes
-    /// and the matrix rows. Output: the tokenizer, or `search_model_format`.
+    /// and the matrix rows. Output: the tokenizer, or `search_model_mismatch`.
     pub fn from_json(bytes: &[u8], rows: usize) -> Result<Self, &'static str> {
         if bytes.len() > TOKENIZER_BYTES_MAX {
-            return Err("search_model_format");
+            return Err("search_model_mismatch");
         }
-        let file: FileJson = serde_json::from_slice(bytes).map_err(|_| "search_model_format")?;
+        let file: FileJson = serde_json::from_slice(bytes).map_err(|_| "search_model_mismatch")?;
         let normalizer = &file.normalizer;
         let bert_uncased = normalizer.kind == "BertNormalizer"
             && normalizer.clean_text
@@ -104,20 +104,20 @@ impl Tokenizer {
             || model.vocab.len() != rows
             || file.added_tokens.len() > SPECIAL_MAX
         {
-            return Err("search_model_format");
+            return Err("search_model_mismatch");
         }
         let mut seen = vec![false; rows];
         for (token, id) in &model.vocab {
             let id = *id as usize;
             if token.is_empty() || token.len() > TOKEN_BYTES_MAX || id >= rows || seen[id] {
-                return Err("search_model_format");
+                return Err("search_model_mismatch");
             }
             seen[id] = true;
         }
         let unk = *model
             .vocab
             .get(&model.unk_token)
-            .ok_or("search_model_format")?;
+            .ok_or("search_model_mismatch")?;
         let mut special = Vec::with_capacity(file.added_tokens.len());
         for added in &file.added_tokens {
             let raw = added.special
@@ -126,7 +126,7 @@ impl Tokenizer {
                 && !added.lstrip
                 && !added.rstrip;
             if !raw || model.vocab.get(&added.content) != Some(&added.id) {
-                return Err("search_model_format");
+                return Err("search_model_mismatch");
             }
             special.push((added.content.clone(), added.id));
         }
