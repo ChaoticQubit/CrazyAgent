@@ -1130,6 +1130,7 @@ fn delete_session(
     ] {
         tx.execute(statement, [id.as_str()]).map_err(error)?;
     }
+    crate::search_index::forget_session(tx, id.as_str())?;
     assert!(!crate::master_sessions::has_owner_turn(tx, id)?);
     Ok(Outcome::Applied)
 }

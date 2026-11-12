@@ -1128,6 +1128,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     native_auth::initialize(connection)?;
     master_bootstrap::initialize(connection)?;
     harness_groups::initialize(connection)?;
+    crate::search_index::initialize(connection)?;
     crate::tracker::initialize(connection)
 }
 
