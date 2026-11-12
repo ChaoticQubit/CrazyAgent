@@ -273,12 +273,16 @@ impl NativeBridge {
     }
 
     /// Starts the built-in model download the owner confirmed, run without the bridge lock.
+    /// Input: the size the confirm named, which the engine checks against the pinned size.
     /// Output: the Search page.
-    pub fn search_model_download(&self) -> Result<Unlocked<SearchView>, BridgeError> {
+    pub fn search_model_download(
+        &self,
+        confirm_bytes: u64,
+    ) -> Result<Unlocked<SearchView>, BridgeError> {
         let client = self.app_plugins_client()?;
         Ok(Box::pin(async move {
             client
-                .search_model_download()
+                .search_model_download(confirm_bytes)
                 .await
                 .map_err(app_plugin_error)
         }))

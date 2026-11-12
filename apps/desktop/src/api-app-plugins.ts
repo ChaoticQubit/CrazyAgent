@@ -236,9 +236,10 @@ export function saveSearch(choice: SearchChoice, confirmHost: string | null, ver
   return call<SearchSave>("desktop_set_search", { choice, confirmHost, version });
 }
 
-/** Starts the built-in model download the owner confirmed. Output: the Search page. */
-export function downloadSearchModel(): Promise<Result<SearchView>> {
-  return call<SearchView>("desktop_search_model_download");
+/** Starts the built-in model download the owner confirmed. Input: the size in bytes the
+ * confirm named, which the engine checks against the pinned size. Output: the Search page. */
+export function downloadSearchModel(confirmBytes: number): Promise<Result<SearchView>> {
+  return call<SearchView>("desktop_search_model_download", { confirmBytes });
 }
 
 /** Cancels the running built-in model download. Output: the Search page. */

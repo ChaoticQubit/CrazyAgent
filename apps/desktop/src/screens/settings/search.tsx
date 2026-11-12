@@ -13,11 +13,12 @@ const NOT_READY = "This isn't ready in this build yet.";
 const CHOICE = "search-choice";
 
 /** What Search has open: nothing, the confirm before an HTTP plugin is chosen, the confirm
- * before the built-in model downloads, or the confirm before it is deleted. */
+ * before the built-in model downloads (holding the size it names, sent as confirm_bytes), or
+ * the confirm before it is deleted. */
 export type SearchDialog =
   | { kind: "none" }
   | { kind: "http"; option: SearchOption }
-  | { kind: "download" }
+  | { kind: "download"; bytes: number }
   | { kind: "delete" };
 
 /** Everything the Search view asks its container to do. */
@@ -80,7 +81,7 @@ function SearchDialogs({ dialog, model, busy, failure, actions }: { dialog: Sear
       footer={<><Button disabled={busy} onClick={actions.onClose}>Cancel</Button>
         <Button variant="primary" pending={busy} pendingLabel="Starting..." onClick={actions.onConfirmDownload}>Download</Button></>}>
       {problem}
-      <p>{`${megabytes(model.size_bytes)}, once. CrazyAgent checks it before use; search uses full text until it is ready.`}</p>
+      <p>{`${megabytes(dialog.bytes)}, once. CrazyAgent checks it before use; search uses full text until it is ready.`}</p>
     </Dialog>;
   }
   if (dialog.kind === "delete") {
@@ -200,8 +201,16 @@ export function SearchSettings() {
       void save(() => saveSearch(choice, null, version));
     },
     onConfirmHttp: confirmHttp,
-    onDownload: () => { setFailure(""); setDialog({ kind: "download" }); },
-    onConfirmDownload: () => { if (!busy) void model(downloadSearchModel); },
+    onDownload: () => {
+      if (search.kind !== "ok") return;
+      setFailure("");
+      setDialog({ kind: "download", bytes: search.value.model.size_bytes });
+    },
+    onConfirmDownload: () => {
+      if (busy || dialog.kind !== "download") return;
+      const bytes = dialog.bytes;
+      void model(() => downloadSearchModel(bytes));
+    },
     onCancelDownload: () => { if (!busy) void model(cancelSearchModel); },
     onDelete: () => { setFailure(""); setDialog({ kind: "delete" }); },
     onConfirmDelete: () => { if (!busy) void model(deleteSearchModel); },

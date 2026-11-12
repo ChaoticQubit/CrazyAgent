@@ -4159,9 +4159,10 @@ async fn desktop_set_search(
 async fn desktop_search_model_download(
     webview: Webview,
     state: State<'_, NativeState>,
+    confirm_bytes: u64,
 ) -> Result<crazyagent::semantic::SearchView, BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.search_model_download()?;
+    let call = lock(&state).await?.search_model_download(confirm_bytes)?;
     call.await
 }
 
