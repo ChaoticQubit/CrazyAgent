@@ -151,7 +151,7 @@ const STEPS: [(StepId, Topic, &str, &str, &[Signal]); 10] = [
             },
             Signal {
                 table: "session_messages",
-                filter: "speaker='owner'",
+                filter: "speaker='owner' AND mode='live'",
             },
         ],
     ),
