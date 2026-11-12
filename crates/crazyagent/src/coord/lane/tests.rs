@@ -382,7 +382,7 @@ fn tick_frees_the_place_of_a_lane_command_that_died() {
     tick(
         &connection,
         &project(),
-        &[a.clone()],
+        std::slice::from_ref(&a),
         &CoordSettings::default(),
         1_000,
     )
@@ -392,7 +392,7 @@ fn tick_frees_the_place_of_a_lane_command_that_died() {
     tick(
         &connection,
         &project(),
-        &[a.clone()],
+        std::slice::from_ref(&a),
         &CoordSettings::default(),
         2_000,
     )
@@ -412,7 +412,7 @@ fn tick_drops_the_commands_of_an_agent_it_no_longer_reads() {
     tick(
         &connection,
         &project(),
-        &[a.clone()],
+        std::slice::from_ref(&a),
         &CoordSettings::default(),
         1_000,
     )
@@ -439,7 +439,7 @@ fn tick_refuses_a_ticket_naming_a_resource_the_project_lacks() {
     tick(
         &connection,
         &project(),
-        &[a.clone()],
+        std::slice::from_ref(&a),
         &CoordSettings::default(),
         1_000,
     )
@@ -495,7 +495,7 @@ fn tick_never_follows_a_link_planted_at_an_answer() {
     tick(
         &connection,
         &project(),
-        &[a.clone()],
+        std::slice::from_ref(&a),
         &CoordSettings::default(),
         1_000,
     )
@@ -598,7 +598,7 @@ fn a_project_whose_last_agent_stopped_is_still_ticked_until_its_lane_is_clear() 
     tick(
         &connection,
         &project(),
-        &[a.clone()],
+        std::slice::from_ref(&a),
         &CoordSettings::default(),
         1_000,
     )
@@ -937,8 +937,22 @@ fn a_row_hidden_from_the_lane_read_never_fails_the_tick() {
         insert(99, &format!("{seq:032x}"), seq);
     }
     insert(1, &entry.id, STORED_MAX as i64 + 10);
-    tick(&connection, &project(), &[a.clone()], &settings, 2_000).unwrap();
-    tick(&connection, &project(), &[a.clone()], &settings, 3_000).unwrap();
+    tick(
+        &connection,
+        &project(),
+        std::slice::from_ref(&a),
+        &settings,
+        2_000,
+    )
+    .unwrap();
+    tick(
+        &connection,
+        &project(),
+        std::slice::from_ref(&a),
+        &settings,
+        3_000,
+    )
+    .unwrap();
     assert_eq!(rows(&connection), 1);
     assert!(has(&a, &entry, GO));
     entry.leave();
