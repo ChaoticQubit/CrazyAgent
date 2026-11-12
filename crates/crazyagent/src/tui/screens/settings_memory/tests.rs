@@ -916,13 +916,9 @@ fn a_project_memory_reads_only_its_project_and_y_approves_a_requested_memory_in_
         SettingsJob::Memories { scopes } => assert_eq!(scopes, [only("fieldnotes")]),
         other => panic!("memories expected, got {other:?}"),
     }
-    match job(&mut ctx) {
-        SettingsJob::Suggestions { projects } => assert_eq!(projects, [fieldnotes.clone()]),
-        other => panic!("suggestions expected, got {other:?}"),
-    }
     assert!(
         ctx.next_request().is_none(),
-        "the app-wide Agent memory writes setting is not read here"
+        "the app-wide Agent memory writes setting and research suggestions stay in Settings"
     );
 
     let list = vec![
@@ -1049,4 +1045,61 @@ fn a_project_memory_counts_one_or_many_waiting_and_says_when_none_wait() {
     assert!(empty.starts_with("Project memory"), "{empty}");
     assert!(empty.contains("No memories yet."), "{empty}");
     assert!(empty.contains("it waits here for your approval"), "{empty}");
+}
+
+#[test]
+fn a_project_memory_keeps_only_its_own_reply_and_its_own_project_and_rereads_on_return() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::for_project(
+        ProjectId::new("fieldnotes").unwrap(),
+        "Fieldnotes Mobile".into(),
+    );
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    let mut mixed = memories();
+    mixed.insert(0, asked(9, "Ship on Fridays."));
+    screen.arrive(
+        &settings(SettingsEvent::Memories(Ok(mixed.clone()))),
+        &mut ctx,
+    );
+    assert!(
+        screen
+            .memories
+            .iter()
+            .all(|memory| memory.scope == only("fieldnotes"))
+    );
+    assert!(
+        screen
+            .memories
+            .iter()
+            .any(|memory| memory.id.as_str() == "memory-9")
+    );
+    assert!(screen.memories.len() < mixed.len());
+    let ids = |screen: &Memory| -> Vec<String> {
+        screen
+            .memories
+            .iter()
+            .map(|memory| memory.id.as_str().to_owned())
+            .collect()
+    };
+    let kept = ids(&screen);
+    screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
+    assert_eq!(
+        ids(&screen),
+        kept,
+        "a reply this screen never asked for belongs to another Memory screen"
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Memories(Err("engine_unreachable".into()))),
+        &mut ctx,
+    );
+    assert!(matches!(screen.load, Load::Ready(())));
+    assert!(ctx.message().is_none());
+
+    screen.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+    match job(&mut ctx) {
+        SettingsJob::Memories { scopes } => assert_eq!(scopes, [only("fieldnotes")]),
+        other => panic!("a fresh read expected on return, got {other:?}"),
+    }
 }

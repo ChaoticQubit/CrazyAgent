@@ -244,9 +244,9 @@ impl Memory {
         }
     }
 
-    /// One project's memory, opened from its Context tab: only that project's memories and
-    /// research suggestions, with y approving a memory an agent asked for right there and s
-    /// opening Settings, Memory for the app-wide Agent memory writes setting.
+    /// One project's memory, opened from its Context tab: only that project's memories, read
+    /// afresh each time it shows, with y approving a memory an agent asked for right there and
+    /// s opening Settings, Memory for the app-wide setting and research suggestions.
     /// Input: the project id and name. Output: the screen; `shown` asks the engine.
     pub fn for_project(id: ProjectId, name: String) -> Self {
         let mut screen = Self::new();
@@ -372,7 +372,7 @@ impl Memory {
                 MemoryScope::Global => None,
             })
             .collect();
-        if projects.is_empty() {
+        if projects.is_empty() || self.project.is_some() {
             self.suggestions.clear();
             return;
         }
@@ -1177,15 +1177,22 @@ impl Screen for Memory {
             Some(SettingsEvent::Memories(result)) => {
                 let asked = std::mem::take(&mut self.waiting);
                 match result {
-                    Ok(memories) => {
-                        self.memories = memories.clone();
+                    Ok(memories) if asked => {
+                        self.memories = memories
+                            .iter()
+                            .filter(|memory| self.scoped.contains(&memory.scope))
+                            .cloned()
+                            .collect();
                         self.load = Load::Ready(());
                         self.clamp(ctx);
                         if self.project.is_none() {
                             ctx.store.memory = Load::Ready(self.memories.len());
                         }
                     }
-                    Err(code) if self.memories.is_empty() => self.load = Load::Failed(code.clone()),
+                    Ok(_) => {}
+                    Err(code) if asked && self.memories.is_empty() => {
+                        self.load = Load::Failed(code.clone())
+                    }
                     Err(code) if asked => {
                         ctx.say(Message::error("Could not refresh memories.", plain(code)))
                     }
@@ -1397,7 +1404,7 @@ impl Screen for Memory {
 
     fn shown(&mut self, ctx: &mut Ctx) {
         ctx.request(Request::Projects);
-        if matches!(self.load, Load::Idle) {
+        if matches!(self.load, Load::Idle) || self.project.is_some() {
             self.reload(ctx);
         }
     }
