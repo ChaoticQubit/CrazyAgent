@@ -159,16 +159,20 @@ export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean 
   return reads.some((read) => read !== null && (read.refusal === NEEDS_NODE || read.needs?.program === "node"));
 }
 
-/** What the step offers for Node.js, from whether a harness needs it and setup's Node row.
- * Inputs: the need, the Node row's state, null while unread, and whether a setup run goes on.
- * Output: the offer. */
-export function nodeOffer(needed: boolean, node: DependencyState | null, _busy: boolean): NodeOffer {
+/** What the step offers for Node.js, from whether a harness needs it and setup's Node row. A row
+ * not settled while a setup run goes on reads installing, since setup finds Node before it marks
+ * the row. Inputs: the need, the Node row's state, null while unread, and whether a setup run goes
+ * on. Output: the offer. */
+export function nodeOffer(needed: boolean, node: DependencyState | null, busy: boolean): NodeOffer {
   if (!needed) return { kind: "none" };
   switch (node?.state) {
     case "installing": return { kind: "installing" };
     case "failed": return { kind: "failed", reason: displayText(node.reason) };
-    case undefined:
-    case "missing": return { kind: "offer" };
-    default: return { kind: "none" };
+    case "found":
+    case "installed":
+    case "bundled": return { kind: "none" };
+    default:
+      if (busy) return { kind: "installing" };
+      return node === null || node.state === "missing" ? { kind: "offer" } : { kind: "none" };
   }
 }

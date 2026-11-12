@@ -150,9 +150,10 @@ enum NodeOffer {
 }
 
 /// What the step offers for Node.js, from whether an offered harness needs it and the Node
-/// row of setup. Inputs: the need, the Node row's state, none while unread, and whether a
-/// setup run goes on. Output: the offer.
-fn node_offer(needed: bool, node: Option<&DependencyState>, _busy: bool) -> NodeOffer {
+/// row of setup. A row not settled while a setup run goes on reads installing, since setup
+/// finds Node before it marks the row. Inputs: the need, the Node row's state, none while
+/// unread, and whether a setup run goes on. Output: the offer.
+fn node_offer(needed: bool, node: Option<&DependencyState>, busy: bool) -> NodeOffer {
     if !needed {
         return NodeOffer::None;
     }
@@ -161,8 +162,10 @@ fn node_offer(needed: bool, node: Option<&DependencyState>, _busy: bool) -> Node
         Some(DependencyState::Failed { reason }) => NodeOffer::Failed {
             reason: reason.clone(),
         },
+        Some(DependencyState::Found { .. } | DependencyState::Installed { .. }) => NodeOffer::None,
+        _ if busy => NodeOffer::Installing,
         None | Some(DependencyState::Missing) => NodeOffer::Offer,
-        Some(_) => NodeOffer::None,
+        Some(DependencyState::Checking) => NodeOffer::None,
     }
 }
 
@@ -287,7 +290,9 @@ pub struct HarnessSetup {
     asking: BTreeSet<&'static str>,
     sending: Option<Vec<String>>,
     node: Option<DependencyState>,
+    setup_busy: bool,
     sending_node: bool,
+    reread: bool,
     started: bool,
     loaded: bool,
     reads: usize,
@@ -308,7 +313,9 @@ impl HarnessSetup {
             asking: BTreeSet::new(),
             sending: None,
             node: None,
+            setup_busy: false,
             sending_node: false,
+            reread: false,
             started: false,
             loaded: false,
             reads: 0,
@@ -346,7 +353,7 @@ impl HarnessSetup {
             .versions
             .values()
             .any(|read| read.as_ref().is_ok_and(node_needed));
-        node_offer(needed, self.node.as_ref(), false)
+        node_offer(needed, self.node.as_ref(), self.setup_busy)
     }
 
     fn pending(&self) -> bool {
@@ -367,6 +374,7 @@ impl HarnessSetup {
             return;
         }
         self.loaded = true;
+        self.reread = false;
         self.reads += 1;
         self.asking.insert(CATALOG);
         send(ctx, SettingsJob::HarnessList);
@@ -494,6 +502,7 @@ impl HarnessSetup {
                 if !self.asking.remove(SETUP) {
                     return;
                 }
+                self.setup_busy = result.as_ref().is_ok_and(|status| status.running);
                 self.node = result.as_ref().ok().and_then(|status| {
                     status
                         .dependencies
@@ -511,6 +520,7 @@ impl HarnessSetup {
                     Ok(()) => {
                         self.node = Some(DependencyState::Installing);
                         self.reads = 0;
+                        self.reread = true;
                         self.read(ctx);
                     }
                     Err(code) => self.problem = setup_plain(code),
@@ -724,6 +734,9 @@ impl Screen for HarnessSetup {
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if let Some(event) = settings_event(arrival) {
             self.arrived(event, ctx);
+        }
+        if self.reread && self.asking.is_empty() {
+            self.read(ctx);
         }
         assert!(self.asking.len() <= OFFERED.len() + 2);
         Flow::Handled
