@@ -33,21 +33,43 @@ allowed_destinations = []
 [model_access]
 accounts = ["local-1"]
 connections = [
-  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://127.0.0.1:11434/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
+  { id = "local-a", provider = "openai-compatible", harness = "rcli", protocol = "openai-chat", account_ref = "local-1", endpoint = { kind = "http", url = "http://LOCAL_ADDRESS/v1" }, model = { id = "qwen2.5:0.5b", author = "openai-compatible" }, auth = { method = "none" } },
 ]
 pools = [
   { id = "pool-a", name = "Main", members = ["local-a"], projects = [], roles = [], fallback_allowed = false },
 ]
 "#;
 
+/// Stands for the seeded local account's address in test settings. `Engine::with` swaps it
+/// for a loopback port that refuses every connection, so no row reaches a model server the
+/// host runs (a host Ollama on 127.0.0.1:11434 made the account read ready).
+const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
+
 struct Engine {
     root: tempfile::TempDir,
     user: tempfile::TempDir,
     _service: EngineService,
     _stop: tokio::sync::watch::Sender<bool>,
+    _refusing: tokio::net::TcpSocket,
     controller: OwnerController,
     #[cfg(target_os = "macos")]
     _keychain: crate::credentials::test_keychain::TestKeychain,
+}
+
+/// Binds a loopback port without listening on it, so every connection to it is refused
+/// while the socket lives and no other process can take the port. Output: the socket, which
+/// the test engine holds, and its address.
+fn refusing_port() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket
+        .bind(std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .unwrap();
+    let address = socket.local_addr().unwrap();
+    assert!(
+        address.ip().is_loopback() && address.port() != 0,
+        "{address}"
+    );
+    (socket, address)
 }
 
 impl Engine {
@@ -56,6 +78,9 @@ impl Engine {
     }
 
     async fn with(settings: &str) -> Self {
+        let (refusing, address) = refusing_port();
+        let settings = settings.replace(LOCAL_ADDRESS, &address.to_string());
+        assert!(!settings.contains(LOCAL_ADDRESS), "{settings}");
         let root = tempfile::Builder::new()
             .prefix("ca-tui-intake-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -68,7 +93,7 @@ impl Engine {
             keychain
         };
         let global = root.path().join("global.toml");
-        std::fs::write(&global, settings).unwrap();
+        std::fs::write(&global, &settings).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -98,6 +123,7 @@ impl Engine {
             user,
             _service: service,
             _stop: stop,
+            _refusing: refusing,
             controller,
             #[cfg(target_os = "macos")]
             _keychain: keychain,
