@@ -865,4 +865,62 @@ mod tests {
         flag.store(false, Ordering::SeqCst);
         assert!(!runner.reproving(), "the wait ends with the re-proof");
     }
+
+    #[test]
+    fn a_status_run_with_no_account_waits_without_a_line_while_an_account_check_of_this_engine_runs()
+     {
+        let (temp, runner, db) = engine_without_accounts(None);
+        db.execute_batch(
+            "CREATE TABLE owner_meta(singleton INTEGER PRIMARY KEY, schema_version INTEGER,
+               runtime_state TEXT, db_instance TEXT, engine_epoch TEXT);
+             INSERT INTO owner_meta VALUES(1,1,'active','instance','epoch-now');
+             CREATE TABLE native_auth_fences(profile_key TEXT PRIMARY KEY, db_instance TEXT,
+               engine_epoch TEXT);
+             INSERT INTO native_auth_fences VALUES('profile','instance','epoch-now');",
+        )
+        .unwrap();
+        let project = ProjectId::new("alpha").unwrap();
+        let resolve = |_: &str, _: &str| -> Option<(PathBuf, AccountPick)> { None };
+        let engine = temp.path().canonicalize().unwrap().join("engine");
+        let mut upkeep = StatusUpkeep::open(&engine.join("engine.db"));
+        let mut pass = |upkeep: &mut StatusUpkeep| {
+            for _ in 0..STATUS_EVERY_TICKS {
+                upkeep.tick(&runner, &resolve);
+            }
+        };
+        let now = crate::team::now_ms();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        pass(&mut upkeep);
+        for (table, line) in [
+            ("roadmap_status", "problem"),
+            ("project_overview", "failure"),
+        ] {
+            let (stale, due_ms, running, shown) = waiting_row(&db, table, line);
+            assert_eq!(
+                shown, None,
+                "{table} shows no line while an account is checked"
+            );
+            assert!(
+                stale && running.is_none() && due_ms > now,
+                "{table} tries again"
+            );
+        }
+
+        db.execute(
+            "UPDATE native_auth_fences SET engine_epoch='epoch-before'",
+            [],
+        )
+        .unwrap();
+        crate::project_overview::refresh(&db, &project).unwrap();
+        crate::roadmap_status::refresh(&db, &project).unwrap();
+        pass(&mut upkeep);
+        let (_, _, _, overview) = waiting_row(&db, "project_overview", "failure");
+        let (_, _, _, roadmap) = waiting_row(&db, "roadmap_status", "problem");
+        assert_eq!(
+            overview.as_deref(),
+            Some(crate::project_overview::NO_ACCOUNT)
+        );
+        assert_eq!(roadmap.as_deref(), Some(crate::roadmap_status::NO_ACCOUNT));
+    }
 }
