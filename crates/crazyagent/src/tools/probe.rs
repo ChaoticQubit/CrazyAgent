@@ -525,8 +525,8 @@ pub(crate) fn login_path(
 }
 
 /// The folders of a PATH value a launch may search: absolute plain folders of bounded
-/// length that exist, in no `.crazyagent` folder and in no project (a folder at or below one
-/// holding `.crazyagent`, HOME and `/` not counted), that only this user and the system can
+/// length that exist, in no `.crazyagent` folder and in no project ([`super::in_project`],
+/// the rule [`super::Places`] applies too), that only this user and the system can
 /// change, each once, at most [`FOLDERS_MAX`]. Inputs: the PATH value and HOME. Output: the
 /// folders in order.
 pub(crate) fn kept(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
@@ -566,21 +566,8 @@ fn searchable(folder: &Path, real_home: Option<&Path>) -> bool {
     };
     real.is_dir()
         && !crate::harnesses::in_crazyagent_folder(&real)
-        && !in_project(&real, real_home)
+        && !super::in_project(real_home, &real)
         && crate::service::changeable_by_others(folder).is_none()
-}
-
-/// Whether a real folder is a project or inside one: it or a folder above it, other than
-/// HOME and `/`, holds a `.crazyagent` folder. Inputs: the real folder and the real HOME.
-/// Output: the answer.
-fn in_project(real: &Path, real_home: Option<&Path>) -> bool {
-    real.ancestors()
-        .filter(|above| Some(*above) != real_home && above.parent().is_some())
-        .any(|above| {
-            above
-                .join(crate::projects_home::CRAZYAGENT_DIRECTORY)
-                .is_dir()
-        })
 }
 
 /// The `bin` folder of the npm global prefix npm prints. Input: npm's output. Output: the
