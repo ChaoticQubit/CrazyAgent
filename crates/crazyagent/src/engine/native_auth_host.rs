@@ -241,6 +241,15 @@ impl RegisteredNativeAuthHost {
         Ok(Arc::new(fresh))
     }
 
+    /// Whether the harness this host pins is gone from disk: the entry a launch resolves (the
+    /// pinned path for a host with no entry) leads to nothing, so it answers NotFound. A file
+    /// that is there but changed or unsafe is not gone and stays refused. Input: none.
+    /// Output: true when the entry leads to nothing.
+    pub(crate) fn vanished(&self) -> bool {
+        let named = self.entry.as_deref().unwrap_or(&self.path);
+        matches!(std::fs::metadata(named), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    }
+
     /// The PATH entry this host was captured through, which a launch resolves again each
     /// time. Input: none. Output: the entry, or none for a host captured by its real path.
     pub(crate) fn entry(&self) -> Option<&Path> {

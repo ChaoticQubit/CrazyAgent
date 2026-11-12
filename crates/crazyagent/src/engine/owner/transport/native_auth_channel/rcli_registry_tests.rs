@@ -660,3 +660,55 @@ async fn look_again_searches_only_where_engine_start_said_and_an_engine_without_
     })
     .await;
 }
+
+#[tokio::test]
+async fn check_again_replaces_a_pin_whose_file_is_gone_but_never_one_that_changed_or_is_unsafe() {
+    registry_case(|host, root| async move {
+        let first = root.join("first");
+        let second = root.join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let old = physical_file(&first, "codex", b"first-codex");
+        let path = std::env::join_paths([first.clone(), second.clone()]).unwrap();
+        host.set_harness_search(on(&path)).unwrap();
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Registered { path: old.clone() }
+        );
+        let new = physical_file(&second, "codex", b"second-codex");
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o770)).unwrap();
+        let unsafe_file = host.look_again("codex").unwrap();
+        assert!(
+            matches!(&unsafe_file, Found::Refused { path, .. } if path == &old),
+            "{unsafe_file:?}"
+        );
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&old, b"first-codex-rewritten-in-place").unwrap();
+        let changed = host.look_again("codex").unwrap();
+        assert!(
+            matches!(&changed, Found::Refused { path, code } if path == &old && code == "native_auth_host_executable_changed"),
+            "{changed:?}"
+        );
+        assert!(host.registered_codex_executable().is_err());
+
+        std::fs::remove_file(&old).unwrap();
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Registered { path: new.clone() }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            new
+        );
+        assert_eq!(
+            host.look_again("codex").unwrap(),
+            Found::Ready { path: new }
+        );
+    })
+    .await;
+}

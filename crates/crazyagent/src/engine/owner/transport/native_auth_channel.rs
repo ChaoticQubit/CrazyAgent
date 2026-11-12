@@ -239,17 +239,17 @@ impl NativeAuthDispatchHost {
         })
     }
 
-    /// The pinned host for a sign-in; when none is pinned, the sign-in is a retry that looks
+    /// The pinned host for a sign-in; when none is usable, the sign-in is a retry that looks
     /// again first ([`OwnerRuntimeHandle::look_again`]), so a harness installed after engine
-    /// start is used without a restart. Inputs: the catalog id and its slot. Output: the
-    /// host, none when it is still missing or refused, or the registration error.
+    /// start, or reinstalled after its pinned file vanished, is used without a restart.
+    /// Inputs: the catalog id and its slot. Output: the host, none, or the refusal.
     fn registered_or_found(
         &self,
         harness: &str,
         slot: HarnessSlot,
     ) -> Result<Option<Arc<RegisteredNativeAuthHost>>, EngineError> {
         let authority = self.authority()?;
-        if let Some(host) = current_harness(&authority.native_auth_host, slot)? {
+        if let Ok(Some(host)) = current_harness(&authority.native_auth_host, slot) {
             return Ok(Some(host));
         }
         let owner = OwnerRuntimeHandle {
@@ -529,9 +529,9 @@ impl OwnerRuntimeHandle {
 
     /// Looks for Codex or Claude Code again, for Check again, Choose file, a sign-in retry
     /// and the install pin: the chosen file, else the engine search, captured with every
-    /// check of an engine-start registration. Only an empty slot is filled; a pinned host is
-    /// never replaced and a disabled registration refuses. Inputs: the id, the checked
-    /// chosen file, the search and PATH. Output: what was found ([`Found`]).
+    /// check of an engine-start registration. It fills an empty slot or one whose pinned file
+    /// is gone ([`RegisteredNativeAuthHost::vanished`]); no other pin is replaced, and a disabled
+    /// registration refuses. Inputs: the id, chosen file, search and PATH. Output: [`Found`].
     pub(crate) fn find_harness(
         &self,
         harness: &str,
@@ -558,6 +558,10 @@ impl OwnerRuntimeHandle {
                 return Err(failure("native_auth_host_registration_frozen"));
             }
             slot(&mut registration).clone()
+        };
+        let (held, gone) = match held {
+            Some(held) if held.vanished() => (None, Some(held)),
+            held => (held, None),
         };
         if let Some(held) = held {
             let shown = held.entry().map(Path::to_path_buf);
@@ -615,7 +619,9 @@ impl OwnerRuntimeHandle {
             return Err(failure("native_auth_host_registration_frozen"));
         }
         let kept = slot(&mut registration);
-        if let Some(kept) = kept.as_ref() {
+        if let Some(kept) = kept.as_ref()
+            && !gone.as_ref().is_some_and(|gone| Arc::ptr_eq(kept, gone))
+        {
             return Ok(Found::Ready {
                 path: kept.entry().map(Path::to_path_buf).unwrap_or(entry),
             });

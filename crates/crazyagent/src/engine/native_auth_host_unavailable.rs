@@ -35,6 +35,10 @@ impl RegisteredNativeAuthHost {
         match *self {}
     }
 
+    pub(crate) fn vanished(&self) -> bool {
+        match *self {}
+    }
+
     pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
         match *self {}
     }
