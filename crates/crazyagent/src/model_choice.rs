@@ -145,9 +145,10 @@ pub enum Written {
     Refused { code: String, row: Row },
 }
 
-/// Checks one model id before it can reach a command line or a `-c model="..."` line:
-/// 1 to `MODEL_BYTES_MAX` bytes, starting with an ASCII letter or digit, then letters,
-/// digits and `-_.:/@+`; Claude Code ids may also hold `[` and `]`, as in `opus[1m]`.
+/// Checks one model id before it can reach a command line or a `-c model="..."` line, the
+/// one rule the store saves by and every agent launch starts by: 1 to `MODEL_BYTES_MAX`
+/// bytes, an ASCII letter or digit first, then letters, digits and `-_.:/@+`; Claude Code
+/// ids, passed as their own argument, may also hold `[` and `]`, as in `opus[1m]`.
 /// Inputs: the catalog harness id and the model id. Output: true when it may be used.
 pub fn model_valid(harness: &str, model: &str) -> bool {
     let brackets = harness == "claude-code";

@@ -839,12 +839,7 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     }
     validate_home(request.account.home())?;
     if let Some(model) = &request.model
-        && (model.is_empty()
-            || model.len() > 256
-            || !model.as_bytes()[0].is_ascii_alphanumeric()
-            || !model
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte)))
+        && !crate::model_choice::model_valid(harness_id(request), model)
     {
         return Err(failure("launch_model_invalid"));
     }
