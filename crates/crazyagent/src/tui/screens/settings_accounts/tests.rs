@@ -461,9 +461,9 @@ fn filtering_keeps_matching_rows_and_counts_them() {
     shell.key(Key::Esc);
     let rows = render(&mut shell, 80, 24);
     assert!(
-        rows[21].starts_with("  Showing 1-12 of 240."),
+        rows[20].starts_with("  Showing 1-11 of 240."),
         "{}",
-        rows[21]
+        rows[20]
     );
 }
 

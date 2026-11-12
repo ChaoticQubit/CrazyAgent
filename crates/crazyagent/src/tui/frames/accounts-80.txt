@@ -17,8 +17,8 @@
     ChatGPT Team - seat 01   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
     ChatGPT Team - seat 02   ⬡ ChatGPT / Codex  ✓ Signed in             1    │  
     ChatGPT Team - seat 03   ⬡ ChatGPT / Codex  ✓ Signed in             -    │  
-    Claude Max - work        ✻ Claude           ✓ Signed in             1    │  
                                                                                 
-  Showing 1-12 of 240. Needs attention first, then by name.                     
+  Showing 1-11 of 240. Needs attention first, then by name.                     
                                                                                 
- a Add account  Enter Open  / Filter  f Needs attention  Space Select    ? Help 
+ a Add account  Enter Open  / Filter  f Needs attention  Space Select           
+ Shift-←→ Sections  Esc Home                                             ? Help 
