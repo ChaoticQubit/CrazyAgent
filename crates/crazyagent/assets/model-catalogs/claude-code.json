@@ -1,7 +1,10 @@
 {
   "harness": "claude-code",
-  "qualified_versions": ["2.1.309"],
-  "sources": ["https://code.claude.com/docs/en/model-config"],
+  "qualified_versions": ["2.1.309", "2.1.322"],
+  "sources": [
+    "https://code.claude.com/docs/en/model-config",
+    "https://platform.claude.com/docs/en/about-claude/models/overview"
+  ],
   "models": [
     "opus",
     "sonnet",
