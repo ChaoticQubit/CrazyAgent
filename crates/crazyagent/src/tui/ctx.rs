@@ -111,6 +111,7 @@ pub struct Ctx {
     pub appearance: Appearance,
     pub width: u16,
     pub height: u16,
+    pub hint_rows: u16,
     pub tick: u64,
     pub quiet: bool,
     pub store: Store,
@@ -152,6 +153,7 @@ impl Ctx {
             appearance,
             width: 120,
             height: 36,
+            hint_rows: 1,
             tick: 0,
             quiet: false,
             store: Store::default(),
@@ -173,6 +175,13 @@ impl Ctx {
             message: None,
             generation: 0,
         }
+    }
+
+    /// The rows a wrapped help bar takes from the body past its first row, as the last
+    /// frame drew it: 0 unless a settings screen's hints wrap. Input: none. Output: the rows.
+    pub fn extra_hint_rows(&self) -> usize {
+        assert!(self.hint_rows >= 1);
+        usize::from(self.hint_rows - 1)
     }
 
     /// Rebuilds the theme after the Colors choice or system appearance changed.

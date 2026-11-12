@@ -248,6 +248,10 @@ pub fn used_by(pool: &PoolSummary, names: bool, ctx: &Ctx) -> String {
 }
 
 impl Screen for Pools {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Settings".into(), "Pools".into()]
     }

@@ -220,6 +220,12 @@ fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no row has {needle:?}:\n{}", rows.join("\n")))
 }
 
+/// The help bar's text, every row of it, as a settings bar may wrap. Takes the rendered
+/// rows. Returns the bar rows joined by newlines.
+fn bar(rows: &[String]) -> String {
+    crate::tui::screens::settings_accounts::tests::bar_rows(rows).join("\n")
+}
+
 fn lead(shell: &Shell) -> String {
     shell
         .ctx
@@ -399,7 +405,7 @@ fn first_run_offers_to_continue_without_installing_and_runs_nothing() {
     for (width, height) in [(80, 24), (120, 36)] {
         let mut shell = first_run(width, height);
         let rows = render(&mut shell, width, height);
-        let help = rows.last().unwrap();
+        let help = bar(&rows);
         assert!(help.contains("Enter Install and continue"), "{help}");
         assert!(help.contains("c Continue without installing"), "{help}");
         shell.key(Key::Char('c'));
@@ -431,7 +437,7 @@ fn a_failed_install_keeps_first_run_here_until_the_owner_continues() {
     assert_eq!(shell.place(), Some(Place::Setup { first_run: true }));
     let rows = render(&mut shell, 120, 36);
     find(&rows, "Homebrew is not installed. Install tmux yourself");
-    assert!(rows.last().unwrap().contains("c Continue without it"));
+    assert!(bar(&rows).contains("c Continue without it"));
     shell.key(Key::Down);
     shell.key(Key::Down);
     find(
@@ -556,7 +562,7 @@ fn without_engine_support_first_run_says_not_ready_and_continues() {
     shell.arrive(event(AppSetupEvent::Status(Err(NOT_READY.into()))));
     let rows = render(&mut shell, 80, 24);
     find(&rows, "Not ready yet.");
-    assert!(rows.last().unwrap().contains("Enter Continue"));
+    assert!(bar(&rows).contains("Enter Continue"));
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::Home));
 }
@@ -667,7 +673,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     let github = find(&rows, "GitHub    ");
     assert!(github.contains("Signed in as octocat"));
     assert!(github.contains("with GitHub sign-in"));
-    assert!(rows.last().unwrap().contains("g Sign out of GitHub"));
+    assert!(bar(&rows).contains("g Sign out of GitHub"));
     shell.key(Key::Char('g'));
     find(&render(&mut shell, 120, 36), "Sign out of GitHub?");
     shell.key(Key::Char('y'));
@@ -686,7 +692,7 @@ fn settings_show_the_home_and_github_and_sign_out_after_yes() {
     assert_eq!(lead(&shell), "Signed out of GitHub.");
     let rows = render(&mut shell, 120, 36);
     assert!(find(&rows, "GitHub    ").contains("Not signed in"));
-    assert!(!rows.last().unwrap().contains("Sign out of GitHub"));
+    assert!(!bar(&rows).contains("Sign out of GitHub"));
 }
 
 #[test]
@@ -804,7 +810,7 @@ fn settings_show_the_linux_sockets_setting_and_its_risk() {
             .1
             .contains("Wrappers are judged by their first file, a script by its interpreter")
     );
-    assert!(rows.last().unwrap().contains("l Linux sockets"));
+    assert!(bar(&rows).contains("l Linux sockets"));
     shell.key(Key::Char('l'));
     let rows = render(&mut shell, 120, 60);
     find(
@@ -921,7 +927,7 @@ fn settings_show_finished_agents_one_day_after_by_default_and_what_stays() {
         &rows,
         "Only the worktree goes: the code checkout and its build files.",
     );
-    assert!(rows.last().unwrap().contains("f Finished agents"));
+    assert!(bar(&rows).contains("f Finished agents"));
     shell.key(Key::Char('f'));
     let rows = render(&mut shell, 160, 60);
     find(
@@ -1090,7 +1096,7 @@ fn settings_show_team_agents_kept_running_and_ended_a_day_after_quitting_by_defa
         ),
         "{note}"
     );
-    assert!(rows.last().unwrap().contains("q Quitting"));
+    assert!(bar(&rows).contains("q Quitting"));
     shell.key(Key::Char('q'));
     let rows = render(&mut shell, 200, 60);
     find(&rows, "what happens to team agents that are running");
@@ -1104,7 +1110,7 @@ fn settings_show_team_agents_kept_running_and_ended_a_day_after_quitting_by_defa
         &rows,
         "Each agent stops as Stop would, and its task goes back to the queue.",
     );
-    assert!(rows.last().unwrap().contains("Enter Next"));
+    assert!(bar(&rows).contains("Enter Next"));
     shell.key(Key::Enter);
     let rows = render(&mut shell, 200, 60);
     find(
@@ -1289,7 +1295,7 @@ fn settings_show_no_master_step_limit_by_default_with_the_four_options() {
         shown.contains("Stopped after N steps; reply with 'continue' to go on."),
         "{shown}"
     );
-    assert!(rows.last().unwrap().contains("m Master steps"));
+    assert!(bar(&rows).contains("m Master steps"));
     shell.key(Key::Char('m'));
     let rows = render(&mut shell, 200, 80);
     find(&rows, "the most steps a project's master takes in one turn");
@@ -1312,7 +1318,7 @@ fn settings_show_no_master_step_limit_by_default_with_the_four_options() {
         "{shown}"
     );
     assert!(!shown.contains("counts no steps"), "{shown}");
-    assert!(rows.last().unwrap().contains("Enter Save"));
+    assert!(bar(&rows).contains("Enter Save"));
     shell.key(Key::Enter);
     assert!(
         jobs(&mut shell).is_empty(),
@@ -1406,7 +1412,7 @@ fn settings_show_no_master_time_limit_by_default_with_the_four_options() {
         "{shown}"
     );
     assert!(!shown.contains("ran out of time"), "{shown}");
-    assert!(rows.last().unwrap().contains("t Master time"));
+    assert!(bar(&rows).contains("t Master time"));
     shell.key(Key::Char('t'));
     let rows = render(&mut shell, 200, 80);
     find(&rows, "the longest a project's master works on one turn");
@@ -1423,7 +1429,7 @@ fn settings_show_no_master_time_limit_by_default_with_the_four_options() {
     assert!(shown.contains("The limit covers every master:"), "{shown}");
     assert!(shown.contains("Claude, Codex and rcli."), "{shown}");
     assert!(!shown.contains("still stops after"), "{shown}");
-    assert!(rows.last().unwrap().contains("Enter Save"));
+    assert!(bar(&rows).contains("Enter Save"));
     shell.key(Key::Enter);
     assert!(
         jobs(&mut shell).is_empty(),
@@ -1664,8 +1670,11 @@ fn settings_show_a_64_kib_master_frame_by_default_with_the_three_options() {
         shown.contains("or at 1 MiB shorten the message or the instructions"),
         "{shown}"
     );
-    let bar = rows.last().unwrap();
-    assert!(bar.contains("t Master time   z Master frame"), "{bar}");
+    let shown_bar = bar(&rows);
+    assert!(
+        shown_bar.contains("t Master time   z Master frame"),
+        "{shown_bar}"
+    );
     shell.key(Key::Char('z'));
     let rows = render(&mut shell, 200, 80);
     find(
@@ -1690,7 +1699,7 @@ fn settings_show_a_64_kib_master_frame_by_default_with_the_three_options() {
         "{shown}"
     );
     assert!(shown.contains("rcli keeps 64 KiB."), "{shown}");
-    assert!(rows.last().unwrap().contains("Enter Save"));
+    assert!(bar(&rows).contains("Enter Save"));
     shell.key(Key::Enter);
     assert!(
         jobs(&mut shell).is_empty(),

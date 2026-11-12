@@ -1964,6 +1964,10 @@ fn ask_skip(lines: usize, ask_top: usize, height: usize) -> usize {
 }
 
 impl Screen for AppSetup {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         if self.first_run {
             vec!["Setup".into()]

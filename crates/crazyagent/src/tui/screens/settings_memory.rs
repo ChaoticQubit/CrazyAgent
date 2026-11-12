@@ -861,7 +861,7 @@ impl Memory {
     fn window(ctx: &Ctx) -> usize {
         let detail = if ctx.wide() { DETAIL_ROWS } else { 0 };
         (ctx.height as usize)
-            .saturating_sub(CHROME_ROWS + HEAD_ROWS + detail)
+            .saturating_sub(CHROME_ROWS + HEAD_ROWS + detail + ctx.extra_hint_rows())
             .max(1)
     }
 
@@ -1140,6 +1140,10 @@ impl Memory {
 }
 
 impl Screen for Memory {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         match &self.project {
             Some((_, name)) => vec![name.clone(), "Project memory".into()],

@@ -259,6 +259,10 @@ impl ImportSkillsPage {
 }
 
 impl Screen for ImportSkillsPage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec![
             "Settings".into(),
