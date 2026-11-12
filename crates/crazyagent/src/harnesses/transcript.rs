@@ -74,6 +74,7 @@ pub struct TranscriptReader {
     start: u64,
     pending: Vec<u8>,
     scanned: usize,
+    skipping: bool,
     in_turn: bool,
     aside: bool,
     dropped: bool,
@@ -125,6 +126,7 @@ impl TranscriptReader {
             start: 0,
             pending: Vec::new(),
             scanned: 0,
+            skipping: false,
             in_turn: false,
             aside: false,
             dropped: false,
@@ -203,8 +205,8 @@ impl TranscriptReader {
         matches!(self.source, Transcript::ClaudeSession { .. })
     }
 
-    /// Counts the bytes read from the record so far, so a caller can bound a session's output.
-    /// Output: the total since the reader started.
+    /// Counts the bytes read from the record so far, the lines passed over included, so a
+    /// caller can tell the record grew. Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
         self.consumed
     }
@@ -228,9 +230,11 @@ impl TranscriptReader {
 
     /// Reads what the harness appended since the last read, at most `READ_BYTES_MAX` bytes,
     /// scanning on from where the last read stopped and draining the used lines once, so many
-    /// short lines cost one pass and a poll with no new bytes scans nothing. Output: the facts
-    /// in order, none while the record does not exist yet, or a plain code when a line passes
-    /// `LINE_BYTES_MAX` or the record cannot be read.
+    /// short lines cost one pass and a poll with no new bytes scans nothing. A line longer
+    /// than `LINE_BYTES_MAX` is passed over to its newline with one note in the engine log,
+    /// never an error, so the reader holds at most `LINE_BYTES_MAX + READ_BYTES_MAX` bytes.
+    /// Output: the facts in order, none while the record does not exist yet, or a plain code
+    /// when the record cannot be read.
     pub fn read(&mut self) -> Result<Vec<TranscriptEvent>, LaunchError> {
         if self.file.is_none() {
             let opened = match &self.source {
@@ -250,11 +254,22 @@ impl TranscriptReader {
         let Some(file) = self.file.as_mut() else {
             return Ok(Vec::new());
         };
+        let room = (LINE_BYTES_MAX + READ_BYTES_MAX).saturating_sub(self.pending.len());
         let count = file
-            .take(READ_BYTES_MAX as u64)
+            .take(READ_BYTES_MAX.min(room) as u64)
             .read_to_end(&mut self.pending)
             .map_err(|_| failure("launch_transcript_unavailable"))?;
         self.consumed += count as u64;
+        if self.skipping {
+            assert_eq!(self.scanned, 0);
+            match self.pending.iter().position(|byte| *byte == b'\n') {
+                Some(end) => {
+                    self.pending.drain(..=end);
+                    self.skipping = false;
+                }
+                None => self.pending.clear(),
+            }
+        }
         let mut events = Vec::new();
         let mut used = 0;
         let mut scanned = self.scanned;
@@ -295,9 +310,13 @@ impl TranscriptReader {
         }
         self.pending.drain(..used);
         self.scanned = scanned - used;
-        if self.pending.len() > LINE_BYTES_MAX {
-            return Err(failure("launch_transcript_line_too_long"));
+        if self.pending.len() > LINE_BYTES_MAX && self.scanned == self.pending.len() {
+            self.pending.clear();
+            self.scanned = 0;
+            self.skipping = true;
+            eprintln!("launch_transcript_line_skipped over={LINE_BYTES_MAX}");
         }
+        assert!(self.pending.len() <= LINE_BYTES_MAX + READ_BYTES_MAX);
         assert!(self.scanned <= self.pending.len());
         assert!(events.len() >= EVENTS_PER_READ_MAX || self.scanned == self.pending.len());
         Ok(events)
@@ -1222,7 +1241,7 @@ pub fn typed_after(harness: &str, record: &Path, offset: u64) -> Option<Vec<Stri
 /// next. It reads on to the record's end as it was when opened, `TYPED_CHUNK_BYTES` at a
 /// time and never following a link, so a turn that wrote any amount to the record hides no
 /// typed line behind it. Only lines the harness finished are read. A line longer than
-/// `LINE_BYTES_MAX`, which the turn reader refuses too, is passed over unread. A Claude
+/// `LINE_BYTES_MAX`, which the turn reader passes over too, is passed over unread. A Claude
 /// Code line is typed only when it is a prompt that starts a turn (`claude_prompt`), so a
 /// compact summary, a line only the transcript shows or a sub-agent's line is never read
 /// as a turn's words. Reading stops early once `EXCERPT_MESSAGES_MAX` typed texts or more
