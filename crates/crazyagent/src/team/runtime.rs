@@ -3668,7 +3668,7 @@ impl TeamRuntime {
             riding.clear();
         }
         if author == "owner"
-            && owner_typed(&self.connection, project, message)?
+            && owner_chat_turn(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
             && crate::coord::settings::read(&self.connection, project)?.task_start
                 == crate::coord::settings::TaskStart::On
@@ -4794,7 +4794,7 @@ impl TeamRuntime {
             riding.clear();
         }
         if author == "owner"
-            && owner_typed(&self.connection, project, message)?
+            && owner_chat_turn(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
             && typed.len() + "\n\n".len() + reminder.len() <= super::master::INPUT_TEXT_MAX
             && crate::coord::settings::read(&self.connection, project)?.task_start
@@ -11320,7 +11320,7 @@ fn settle_takeover(
 /// starts a master's task and so carries its Task-start reminder (F30); an answer to a
 /// question the engine relays as the owner's has no owner turn. Takes the connection, the
 /// project and the message id. Returns the answer, or the SQLite failure.
-fn owner_typed(
+fn owner_chat_turn(
     connection: &Connection,
     project: &ProjectId,
     message: i64,
