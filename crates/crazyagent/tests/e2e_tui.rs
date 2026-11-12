@@ -1805,8 +1805,9 @@ fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
 }
 
 /// DEC-136a key n: n on Home opens the notifications list over every project, Esc goes
-/// back, and Enter on the newest item, an open question, opens that project's Questions
-/// tab and marks the item read, so the header drops one unread and keeps it pending.
+/// back, and Enter on the newest row, two open questions folded, opens that project's
+/// Questions tab on the newest question rather than the first one listed and marks both
+/// read, so the header drops two unread and keeps them pending.
 #[test]
 fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_read() {
     let mut engine = Engine::start("ca-e2e-notice-n-");
@@ -1840,6 +1841,22 @@ fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_r
         &ProjectId::new(NOTICE_PROJECT).unwrap(),
         &EngineSource::Planning,
         &Ask {
+            question: "Which colour should the shop use?".into(),
+            kind: QuestionKind::Single,
+            options: vec!["Green".into(), "Blue".into()],
+            recommended: Some("Green".into()),
+            context: None,
+        },
+    )
+    .unwrap();
+    pty.until("the older question is counted", |screen| {
+        header_row(screen).contains("2 unread, 2 pending")
+    });
+    questions::raise(
+        &db,
+        &ProjectId::new(NOTICE_PROJECT).unwrap(),
+        &EngineSource::Planning,
+        &Ask {
             question: "Which page ships first?".into(),
             kind: QuestionKind::Single,
             options: vec!["Shop".into(), "Blog".into()],
@@ -1849,8 +1866,8 @@ fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_r
     )
     .unwrap();
     drop(db);
-    pty.until("the open question is counted", |screen| {
-        header_row(screen).contains("2 unread, 2 pending")
+    pty.until("the newer question is counted", |screen| {
+        header_row(screen).contains("3 unread, 3 pending")
     });
 
     pty.keys(&["n"]);
@@ -1868,12 +1885,13 @@ fn the_tui_n_key_lists_notifications_and_enter_opens_the_question_and_marks_it_r
     });
     pty.keys(&["Enter"]);
     pty.until(
-        "Enter opens the question's project on Questions, read but still pending",
+        "Enter opens Questions on the newest question, both read but still pending",
         |screen| {
             let header = header_row(screen);
             header.contains(&format!("/  {PROJECT}  /  Questions"))
-                && header.contains("1 unread, 2 pending")
-                && screen.contains("Which page ships first?")
+                && header.contains("1 unread, 3 pending")
+                && screen.contains("1. Shop (recommended)")
+                && !screen.contains("1. Green (recommended)")
         },
     );
     drop(pty);
