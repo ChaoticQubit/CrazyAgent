@@ -193,6 +193,8 @@ fn main() {
         "desktop_set_cleanup_settings",
         "desktop_quit_settings",
         "desktop_set_quit_settings",
+        "desktop_learning_progress",
+        "desktop_set_learning_mark",
         "desktop_master_step_settings",
         "desktop_set_master_step_settings",
         "desktop_master_time_settings",

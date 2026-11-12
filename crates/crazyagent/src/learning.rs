@@ -40,9 +40,28 @@ pub enum StepId {
     Usage,
 }
 
+impl StepId {
+    /// The step's stored name, the same as its snake case wire name. Input: none. Output: the
+    /// fixed name its learning mark is kept under.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Master => "master",
+            Self::Agents => "agents",
+            Self::Question => "question",
+            Self::ChangeSet => "change_set",
+            Self::Ide => "ide",
+            Self::Terminal => "terminal",
+            Self::Process => "process",
+            Self::Metrics => "metrics",
+            Self::Usage => "usage",
+        }
+    }
+}
+
 /// A mark the owner's clients set where no other engine row tells the step: a terminal, the
 /// Process, Metrics or Usage page opened, or the learning guide skipped. Closed by this enum;
-/// the table stores only these names.
+/// besides these, the table keeps only the steps `latch` kept, under their `StepId` names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MarkStep {
@@ -57,10 +76,10 @@ impl MarkStep {
     /// The stored name of the mark. Input: none. Output: its fixed snake case name.
     fn name(self) -> &'static str {
         match self {
-            Self::Terminal => "terminal",
-            Self::Process => "process",
-            Self::Metrics => "metrics",
-            Self::Usage => "usage",
+            Self::Terminal => StepId::Terminal.name(),
+            Self::Process => StepId::Process.name(),
+            Self::Metrics => StepId::Metrics.name(),
+            Self::Usage => StepId::Usage.name(),
             Self::Skipped => "skipped",
         }
     }
@@ -109,106 +128,94 @@ impl LearningProgress {
     }
 }
 
-const STEPS: [(StepId, Topic, &str, &str, Signal); 10] = [
+const STEPS: [(StepId, Topic, &str, &str, Option<Signal>); 10] = [
     (
         StepId::Project,
         Topic::Basics,
         "Create a project",
         "A project is a folder the agents work in. Start a new one, add a folder or clone from GitHub.",
-        Signal {
+        Some(Signal {
             table: "projects",
             filter: "1",
-        },
+        }),
     ),
     (
         StepId::Master,
         Topic::CoreLoop,
         "Talk to the master",
         "Each project has a master you message in its conversation. It plans the work and hands parts to agents.",
-        Signal {
+        Some(Signal {
             table: "conversation_entries",
             filter: "kind='message'",
-        },
+        }),
     ),
     (
         StepId::Agents,
         Topic::CoreLoop,
         "Watch the team work",
         "The master starts agents, each in its own copy of the project. The project's Agents page shows who works on what.",
-        Signal {
+        Some(Signal {
             table: "team_agents",
             filter: "role='sub'",
-        },
+        }),
     ),
     (
         StepId::Question,
         Topic::CoreLoop,
         "Answer a question",
         "Agents ask when they need your call. Your answer goes back to the agent that asked.",
-        Signal {
+        Some(Signal {
             table: "questions_log",
             filter: "status IN ('answered','answered_in_terminal')",
-        },
+        }),
     ),
     (
         StepId::ChangeSet,
         Topic::CoreLoop,
         "Accept a change set",
         "Finished work waits as a change set you review. Accept it to land the work on the project's branch.",
-        Signal {
+        Some(Signal {
             table: "landing_change_sets",
             filter: "state='accepted'",
-        },
+        }),
     ),
     (
         StepId::Ide,
         Topic::IdeAndTerminals,
         "Open the IDE",
         "The IDE opens the project in a code editor beside the agents. What you may change there follows the project's access.",
-        Signal {
+        Some(Signal {
             table: "ide_workspaces",
             filter: "1",
-        },
+        }),
     ),
     (
         StepId::Terminal,
         Topic::IdeAndTerminals,
         "Open a terminal",
         "Each agent runs in a terminal you can open and watch live. Type in it when an agent waits for you.",
-        Signal {
-            table: "learning_marks",
-            filter: "step='terminal'",
-        },
+        None,
     ),
     (
         StepId::Process,
         Topic::ProcessMetricsUsage,
         "Set your process",
         "Process holds the instructions every agent gets. Import a CLAUDE.md or start from the default process.",
-        Signal {
-            table: "learning_marks",
-            filter: "step='process'",
-        },
+        None,
     ),
     (
         StepId::Metrics,
         Topic::ProcessMetricsUsage,
         "Read your metrics",
         "Metrics shows what the team did with its time and accounts. Use it to see what works.",
-        Signal {
-            table: "learning_marks",
-            filter: "step='metrics'",
-        },
+        None,
     ),
     (
         StepId::Usage,
         Topic::ProcessMetricsUsage,
         "Check your usage",
         "Usage shows how much of each account's limits the agents used. It helps you pick accounts and pools.",
-        Signal {
-            table: "learning_marks",
-            filter: "step='usage'",
-        },
+        None,
     ),
 ];
 
@@ -226,27 +233,31 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(unavailable)
 }
 
-/// Reads the learning steps with their row counts. A table not created yet counts 0, since
-/// several tables appear on first use. Input: the read transaction. Output: every step in
-/// order and whether the guide is skipped, or the storage failure.
+/// Reads the learning steps with their counts: a step's rows when it has rows that tell it,
+/// else its own learning mark. A table not created yet counts 0, since several tables appear
+/// on first use. Input: the read transaction. Output: every step in order and whether the
+/// guide is skipped, or the storage failure.
 pub(crate) fn progress(tx: &Transaction<'_>) -> Result<LearningProgress, EngineError> {
     let mut steps = Vec::with_capacity(STEPS.len());
     for (id, topic, title, body, signal) in STEPS {
+        let rows = match signal {
+            Some(signal) => count(tx, signal)?,
+            None => 0,
+        };
+        let count = if rows > 0 {
+            rows
+        } else {
+            marked(tx, id.name())?
+        };
         steps.push(LearningStep {
             id,
             topic,
             title: title.to_owned(),
             body: body.to_owned(),
-            count: count(tx, signal)?,
+            count,
         });
     }
-    let skipped = count(
-        tx,
-        Signal {
-            table: "learning_marks",
-            filter: "step='skipped'",
-        },
-    )? > 0;
+    let skipped = marked(tx, MarkStep::Skipped.name())? > 0;
     Ok(LearningProgress { steps, skipped })
 }
 
@@ -258,30 +269,95 @@ pub(crate) fn mark(
     step: MarkStep,
     on: bool,
 ) -> Result<Outcome, EngineError> {
+    set(connection, step.name(), on)?;
+    Ok(Outcome::Applied)
+}
+
+/// Keeps every step ticked now as a learning mark under the step's own name, so a removal
+/// of rows (a project removed or deleted, a master session deleted) never unticks what the
+/// owner already did. Runs in that removal's transaction before its rows go, under its own
+/// savepoint: a failure rolls back only these marks, logs `learning_latch_failed` and lets
+/// the removal go on. Input: the transaction. Output: none.
+pub(crate) fn latch(tx: &Transaction<'_>) {
+    if tx.execute_batch("SAVEPOINT learning_latch").is_err() {
+        eprintln!("learning_latch_failed cause=savepoint");
+        return;
+    }
+    match keep_ticked(tx) {
+        Ok(()) => {
+            if tx.execute_batch("RELEASE learning_latch").is_err() {
+                eprintln!("learning_latch_failed cause=release");
+            }
+        }
+        Err(error) => {
+            eprintln!("learning_latch_failed cause={}", error.0);
+            if tx
+                .execute_batch("ROLLBACK TO learning_latch; RELEASE learning_latch")
+                .is_err()
+            {
+                eprintln!("learning_latch_failed cause=rollback");
+            }
+        }
+    }
+}
+
+fn keep_ticked(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    for (id, _, _, _, signal) in STEPS {
+        if let Some(signal) = signal
+            && count(tx, signal)? > 0
+        {
+            set(tx, id.name(), true)?;
+        }
+    }
+    Ok(())
+}
+
+/// Sets or clears one stored mark by its fixed name; a repeat keeps the first time. Inputs:
+/// the connection, the name and whether it is set. Output: Ok, or
+/// `learning_mark_unavailable`.
+fn set(connection: &Connection, name: &'static str, on: bool) -> Result<(), EngineError> {
     let written = if on {
         connection.execute(
             "INSERT INTO learning_marks(step, marked_ms) VALUES(?1, ?2) ON CONFLICT(step) DO NOTHING",
-            rusqlite::params![step.name(), crate::team::now_ms()],
+            rusqlite::params![name, crate::team::now_ms()],
         )
     } else {
-        connection.execute("DELETE FROM learning_marks WHERE step=?1", [step.name()])
+        connection.execute("DELETE FROM learning_marks WHERE step=?1", [name])
     };
     written.map_err(|_| EngineError("learning_mark_unavailable".into()))?;
-    Ok(Outcome::Applied)
+    Ok(())
+}
+
+/// Reads one stored mark by its fixed name. Inputs: the transaction and the name. Output: 1
+/// when it is set, else 0, also before the table exists.
+fn marked(tx: &Transaction<'_>, name: &'static str) -> Result<u32, EngineError> {
+    if !exists(tx, "learning_marks")? {
+        return Ok(0);
+    }
+    tx.query_row(
+        "SELECT COUNT(*) FROM learning_marks WHERE step=?1",
+        [name],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
+fn exists(tx: &Transaction<'_>, table: &'static str) -> Result<bool, EngineError> {
+    let found: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    Ok(found.is_some())
 }
 
 /// Counts up to `COUNT_MAX` rows of one signal. Inputs: the transaction and the signal.
 /// Output: the count, 0 when the table does not exist yet.
 fn count(tx: &Transaction<'_>, signal: Signal) -> Result<u32, EngineError> {
-    let exists: Option<i64> = tx
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-            [signal.table],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(unavailable)?;
-    if exists.is_none() {
+    if !exists(tx, signal.table)? {
         return Ok(0);
     }
     let sql = format!(

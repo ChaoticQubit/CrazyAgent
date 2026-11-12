@@ -233,3 +233,62 @@ fn a_mark_read_carries_no_time() {
     let wire = serde_json::to_string(&read(&mut db)).unwrap();
     assert!(!wire.contains("1234567"), "{wire}");
 }
+
+#[test]
+fn a_latch_keeps_every_ticked_step_once_its_rows_go_and_ticks_nothing_else() {
+    let mut db = Connection::open_in_memory().unwrap();
+    tables(&db);
+    db.execute_batch(
+        "INSERT INTO projects VALUES ('p1','{}');
+         INSERT INTO conversation_entries VALUES ('p1','message','Hi.');
+         INSERT INTO team_agents(project,role) VALUES ('p1','sub');
+         INSERT INTO questions_log(project,status) VALUES ('p1','pending');",
+    )
+    .unwrap();
+    set(&mut db, MarkStep::Process, true);
+    for _ in 0..2 {
+        let tx = db.transaction().unwrap();
+        latch(&tx);
+        tx.commit().unwrap();
+    }
+    db.execute_batch(
+        "DELETE FROM projects; DELETE FROM conversation_entries; DELETE FROM team_agents;
+         DELETE FROM questions_log;",
+    )
+    .unwrap();
+    let progress = read(&mut db);
+    assert_eq!(
+        done(&progress),
+        [
+            StepId::Project,
+            StepId::Master,
+            StepId::Agents,
+            StepId::Process
+        ]
+    );
+    assert!(!progress.skipped);
+    let names: Vec<String> = marks(&db).into_iter().map(|(name, _)| name).collect();
+    assert_eq!(names, ["agents", "master", "process", "project"]);
+}
+
+#[test]
+fn a_failed_latch_keeps_none_of_its_marks_and_leaves_the_transaction_usable() {
+    let mut db = Connection::open_in_memory().unwrap();
+    tables(&db);
+    db.execute_batch(
+        "INSERT INTO projects VALUES ('p1','{}');
+         INSERT INTO conversation_entries VALUES ('p1','message','Hi.');
+         CREATE TRIGGER learning_marks_fail BEFORE INSERT ON learning_marks WHEN NEW.step='master'
+         BEGIN SELECT RAISE(ABORT, 'learning_marks_fail'); END;",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    latch(&tx);
+    tx.execute("DELETE FROM projects", []).unwrap();
+    tx.commit().unwrap();
+    assert!(
+        marks(&db).is_empty(),
+        "a failed latch keeps none of its marks"
+    );
+    assert_eq!(count(&read(&mut db), StepId::Project), 0);
+}

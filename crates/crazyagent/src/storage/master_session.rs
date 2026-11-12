@@ -1118,6 +1118,7 @@ fn delete_session(
         end_session(tx, &mut session, revision, MasterSessionPhase::Closed)?;
         save_session(tx, &session)?;
     }
+    crate::learning::latch(tx);
     for statement in [
         "DELETE FROM master_preparations WHERE session=?1",
         "DELETE FROM conversation_entries WHERE kind='message' AND event_cursor IN (SELECT input FROM master_turns WHERE session=?1)",
