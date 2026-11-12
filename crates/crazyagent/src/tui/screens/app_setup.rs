@@ -2048,7 +2048,7 @@ impl Screen for AppSetup {
             hints.push(hint("q", "Quitting"));
             hints.push(hint("m", "Master steps"));
             hints.push(hint("t", "Master time"));
-            hints.push(hint("z", "Master frame size"));
+            hints.push(hint("z", "Master frame"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
