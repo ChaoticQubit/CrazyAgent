@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod http;
 pub mod manifest;
 pub mod store;
 pub mod yaml;
@@ -432,6 +433,14 @@ const PLAIN: &[(&str, &str)] = &[
         "the key could not be saved; nothing was changed.",
     ),
     (
+        "app_plugin_call_failed",
+        "the plugin's host did not answer with vectors; search uses full text for now.",
+    ),
+    (
+        "app_plugin_reply_invalid",
+        "the plugin's reply was not the vectors its file declares.",
+    ),
+    (
         "app_plugin_request_invalid",
         "the request could not be read.",
     ),
@@ -447,6 +456,10 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "search_confirm_required",
         "choosing a plugin that sends your text to a host needs a confirm naming that host.",
+    ),
+    (
+        "search_choice_removed",
+        "the chosen plugin was removed, so search uses full text.",
     ),
     (
         "search_choice_unavailable",

@@ -80,6 +80,11 @@ pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
 /// so the owner's configured local model ports are known nowhere (OWNER-PORTS-FAIL-OPEN).
 pub const OWNER_PORTS_UNREADABLE: &str = "owner_ports_settings_unreadable";
 
+/// Why a tools-on launch does not start: the app plugins folder does not read, so the
+/// loopback ports its embedding plugins send to cannot all be kept free of agent listeners
+/// (rv-code V3-PLUGINS-1 F1).
+pub const APP_PLUGIN_PORTS_UNREADABLE: &str = "app_plugin_ports_unreadable";
+
 /// The owner's configured local model ports, read from the engine's two settings files at
 /// each tools-on launch, as [`owner_ports`] lists them; none when no file exists. A file that
 /// does not read fails closed and logs only the code, since its error text can carry the
@@ -314,9 +319,15 @@ const ENGINE_SECRET_FILES: &[&str] = &[
 const ENGINE_SECRET_FOLDERS: &[&str] = &[
     "account-keys",
     crate::storage::accounts::PLUGIN_KEYS,
+    crate::app_plugins::http::SCRATCH,
     crate::terminal::FOLDER,
     crate::ide::FOLDER,
 ];
+
+const ENGINE_SECRET_NESTED: &[[&str; 2]] = &[[
+    crate::storage::plugins::STORE,
+    crate::storage::plugins::SECRETS,
+]];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
 
@@ -1151,9 +1162,10 @@ impl ProjectSandbox {
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
     /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the terminal server folder and every engine socket and socket
-    /// folder found in it now. The agent's own home and temp dirs may sit inside it, but no
-    /// root granted so far may hold or sit inside one of those secrets.
+    /// saved account and plugin keys, the plugin secrets, the terminal server folder and every
+    /// engine socket and socket folder found in it now; no root granted so far may hold or sit
+    /// inside one. With an open network it also keeps every loopback app plugin port free of
+    /// agent listeners, failing closed when the plugins folder does not read.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
@@ -1170,6 +1182,11 @@ impl ProjectSandbox {
             clear_of_secrets(root, &secrets)?;
         }
         self.engine_secrets = secrets;
+        if matches!(self.network, SandboxNetwork::Open) {
+            let ports = crate::app_plugins::store::loopback_ports(&runtime)
+                .map_err(|_| invalid(APP_PLUGIN_PORTS_UNREADABLE))?;
+            self = self.keep_ports(&ports)?;
+        }
         Ok(self)
     }
 
@@ -3659,6 +3676,11 @@ fn engine_secrets_in(runtime: &Path) -> Result<Vec<PathBuf>, SandboxError> {
         .iter()
         .chain(ENGINE_SECRET_FOLDERS)
         .map(|name| runtime.join(name))
+        .chain(
+            ENGINE_SECRET_NESTED
+                .iter()
+                .map(|[folder, inner]| runtime.join(folder).join(inner)),
+        )
         .collect();
     for entry in bounded_entries(runtime)? {
         if !secrets.contains(&entry) && engine_socket_place(&entry)? {

@@ -599,3 +599,55 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_one_is_refused() {
         "app_plugin_not_found"
     );
 }
+
+#[test]
+fn every_loopback_plugin_port_is_listed_for_the_sandbox_and_an_unsafe_folder_fails_closed() {
+    let case = case();
+    assert_eq!(loopback_ports(&case.root).unwrap(), [11434]);
+    drop_in(&case, "near.yaml", NEAR);
+    drop_in(
+        &case,
+        "studio.yaml",
+        &NEAR
+            .replace("name: near", "name: studio")
+            .replace(
+                "http://127.0.0.1:9000/embed",
+                "http://localhost:1234/v1/embeddings",
+            )
+            .replace("[127.0.0.1]", "[localhost]"),
+    );
+    drop_in(&case, "acme.yaml", ACME);
+    drop_in(&case, "bad.yaml", "a: 1\n\tb: 2\n");
+    assert_eq!(loopback_ports(&case.root).unwrap(), [1234, 9000, 11434]);
+    let folder = case.root.join(crate::app_plugins::FOLDER);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(code(loopback_ports(&case.root)), "app_plugin_folder_unsafe");
+}
+
+#[test]
+fn removing_the_chosen_plugin_turns_search_back_to_full_text() {
+    let case = case();
+    add(&case.db, &case.root, NEAR, &sha(NEAR), false, 1).unwrap();
+    crate::semantic::settings::set(
+        &case.db,
+        &case.root,
+        &crate::semantic::SearchChoice::Plugin {
+            name: "near".into(),
+        },
+        Some("127.0.0.1"),
+        0,
+    )
+    .unwrap()
+    .unwrap();
+    remove(&case.db, &case.root, "near").unwrap();
+    let search = crate::semantic::settings::view(&case.db, &case.root).unwrap();
+    assert_eq!(search.choice, crate::semantic::SearchChoice::FullText);
+    assert_eq!(search.version, 2);
+    assert_eq!(
+        search.note,
+        Some(crate::app_plugins::Problem::new("search_choice_removed", None, None).message)
+    );
+    assert!(crate::semantic::settings::chosen(&case.db, &case.root).is_none());
+    add(&case.db, &case.root, NEAR, &sha(NEAR), false, 2).unwrap();
+    assert!(crate::semantic::settings::chosen(&case.db, &case.root).is_none());
+}

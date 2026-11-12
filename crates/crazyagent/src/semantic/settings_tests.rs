@@ -54,7 +54,7 @@ fn search_starts_on_the_local_plugin_and_lists_only_enabled_plugins() {
     assert!(local.sends.is_empty());
     assert!(matches!(
         local.runs,
-        crate::app_plugins::RunsView::Local { .. }
+        Some(crate::app_plugins::RunsView::Local { .. })
     ));
     assert!(option(&search, "openai").is_none());
     assert!(option(&search, "ollama").is_none());
@@ -228,4 +228,85 @@ fn a_chosen_plugin_moved_to_another_host_stops_until_confirmed_again() {
         1,
     ));
     assert!(chosen(&case.db, &case.root).is_some());
+}
+
+#[test]
+fn a_chosen_plugin_that_is_gone_or_refused_stays_listed_with_its_reason() {
+    let case = case();
+    let sha = crate::semantic::sha256_hex(NEAR.as_bytes());
+    store::add(&case.db, &case.root, NEAR, &sha, false, 1).unwrap();
+    saved(set(
+        &case.db,
+        &case.root,
+        &plugin("near"),
+        Some("127.0.0.1"),
+        0,
+    ));
+    let path = case.root.join(crate::app_plugins::FOLDER).join("near.yaml");
+    std::fs::write(&path, "a: 1\n\tb: 2\n").unwrap();
+    assert!(chosen(&case.db, &case.root).is_none());
+    let search = view(&case.db, &case.root).unwrap();
+    assert_eq!(search.choice, plugin("near"));
+    let near = option(&search, "near").unwrap();
+    assert_eq!((near.usable, &near.runs), (false, &None));
+    assert_eq!(
+        near.reason.as_deref(),
+        Some(
+            crate::app_plugins::Problem::new("app_plugin_refused", None, None)
+                .message
+                .as_str()
+        )
+    );
+    std::fs::remove_file(&path).unwrap();
+    let search = view(&case.db, &case.root).unwrap();
+    let near = option(&search, "near").unwrap();
+    assert!(!near.usable);
+    assert_eq!(
+        near.reason.as_deref(),
+        Some(
+            crate::app_plugins::Problem::new("app_plugin_not_found", None, None)
+                .message
+                .as_str()
+        )
+    );
+}
+
+#[test]
+fn a_confirm_belongs_to_the_reviewed_file_so_a_same_name_replacement_needs_a_new_one() {
+    let case = case();
+    let sha = crate::semantic::sha256_hex(NEAR.as_bytes());
+    store::add(&case.db, &case.root, NEAR, &sha, false, 1).unwrap();
+    saved(set(
+        &case.db,
+        &case.root,
+        &plugin("near"),
+        Some("127.0.0.1"),
+        0,
+    ));
+    let path = case.root.join(crate::app_plugins::FOLDER).join("near.yaml");
+    let other = NEAR.replace("title: Near", "title: Near again");
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, &other).unwrap();
+    let other_sha = crate::semantic::sha256_hex(other.as_bytes());
+    store::trust_file(&case.db, &case.root, "near", &other_sha, 2).unwrap();
+    assert!(chosen(&case.db, &case.root).is_none());
+    let search = view(&case.db, &case.root).unwrap();
+    let near = option(&search, "near").unwrap();
+    assert_eq!(
+        near.reason.as_deref(),
+        Some(
+            crate::app_plugins::Problem::new("search_confirm_required", None, None)
+                .message
+                .as_str()
+        )
+    );
+    saved(set(
+        &case.db,
+        &case.root,
+        &plugin("near"),
+        Some("127.0.0.1"),
+        1,
+    ));
+    assert!(chosen(&case.db, &case.root).is_some());
+    assert!(view(&case.db, &case.root).unwrap().note.is_none());
 }
