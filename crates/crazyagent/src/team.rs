@@ -47,8 +47,6 @@ pub const STATUS_MESSAGES_MAX: i64 = 50;
 pub const STATUS_AGENTS_MAX: i64 = 80;
 pub const STATUS_REPLY_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX - 4096;
 const STATUS_TEXT_CAPS: [usize; 8] = [8192, 4096, 2048, 1024, 512, 256, 128, 64];
-pub const DELEGATE_MARKER: &str = "DELEGATE";
-pub const WAKE_MARKER: &str = "WAKE";
 pub const WAKE_NAME_BYTES_MAX: usize = 64;
 pub const DIRECT_INPUT_BYTES_MAX: usize = 4096;
 const NATIVE_DEFAULT_MODEL: &str = "native-default";
@@ -343,10 +341,10 @@ impl DelegationPath {
     pub fn label(self) -> &'static str {
         match self {
             Self::Reply => {
-                "Asks for sub-agents in its reply; the engine checks the team plan and creates the tasks"
+                "Writes a crazyagent-task block in its reply; the engine checks the team plan and creates the tasks"
             }
             Self::Tool => {
-                "Calls the engine's delegate tool or asks in its reply; the engine checks the team plan and creates the tasks"
+                "Calls the engine's team tools; the engine checks the team plan and creates the tasks"
             }
             Self::Unavailable => {
                 "Cannot lead sub-agents yet; you can still hand tasks to sub-agents yourself"
@@ -1345,7 +1343,8 @@ pub fn resumes_on(pool: &[TeamAccount], picked: &TeamAccount, kept: &str) -> boo
                 .any(|account| account.connection.as_str() == kept && subscription(account)))
 }
 
-/// One task the master asked for in its reply, with the role handle it gave the job, if any.
+/// One task the master asked for with its `delegate` tool or a `crazyagent-task` block (L6),
+/// with the role handle it gave the job, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
     pub harness: Option<String>,
@@ -1354,88 +1353,13 @@ pub struct Delegation {
     pub role: Option<String>,
 }
 
-/// Reads delegation lines from a master reply: `DELEGATE: task` or `DELEGATE harness: task`.
-/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
-/// Returns at most eight delegations whose task text is within bounds.
-pub fn parse_delegations(reply: &str) -> Vec<Delegation> {
-    let mut found = Vec::new();
-    for line in reply.lines() {
-        if found.len() == DELEGATIONS_PER_REPLY_MAX {
-            break;
-        }
-        let line = reply_line(line);
-        let Some(head) = line.get(..DELEGATE_MARKER.len()) else {
-            continue;
-        };
-        if !head.eq_ignore_ascii_case(DELEGATE_MARKER) {
-            continue;
-        }
-        let Some((target, task)) = line[DELEGATE_MARKER.len()..].split_once(':') else {
-            continue;
-        };
-        if let Some(delegation) = delegation(target, task.trim().trim_matches('`')) {
-            found.push(delegation);
-        }
-    }
-    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
-    found
-}
-
-/// Strips the list bullets, quotes and backticks a model puts around a reply line.
-/// Takes the line. Returns its text.
-fn reply_line(line: &str) -> &str {
-    line.trim()
-        .trim_start_matches(|c: char| {
-            c == '-' || c == '*' || c == '>' || c == '`' || c.is_ascii_digit() || c == '.'
-        })
-        .trim()
-        .trim_end_matches('`')
-        .trim()
-}
-
-/// One finished sub-agent a master that is not live asked in its reply to wake (WK-R5): the
-/// name or number it gave and the text for the agent's next task.
+/// One finished sub-agent a master that is not live asked to wake (WK-R5), with its `wake`
+/// tool or a `crazyagent-task` block (L6): the name or number it gave and the text for the
+/// agent's next task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WakeLine {
     pub agent: String,
     pub text: String,
-}
-
-/// Reads wake lines from a master reply: `WAKE <name or Sub-agent number>: <text>`.
-/// Takes the reply text; list bullets, quotes and backticks around a line are ignored.
-/// Returns at most eight wakes, each with a name of up to `WAKE_NAME_BYTES_MAX` bytes and a
-/// task text within bounds.
-pub fn parse_wakes(reply: &str) -> Vec<WakeLine> {
-    let mut found = Vec::new();
-    for line in reply.lines() {
-        if found.len() == DELEGATIONS_PER_REPLY_MAX {
-            break;
-        }
-        let line = reply_line(line);
-        let Some(head) = line.get(..WAKE_MARKER.len()) else {
-            continue;
-        };
-        let rest = &line[WAKE_MARKER.len()..];
-        if !head.eq_ignore_ascii_case(WAKE_MARKER) || !rest.starts_with(char::is_whitespace) {
-            continue;
-        }
-        let Some((agent, text)) = rest.split_once(':') else {
-            continue;
-        };
-        let (agent, text) = (agent.trim(), text.trim().trim_matches('`').trim());
-        if agent.is_empty()
-            || agent.len() > WAKE_NAME_BYTES_MAX
-            || !text_valid(text, TASK_PROMPT_BYTES_MAX)
-        {
-            continue;
-        }
-        found.push(WakeLine {
-            agent: agent.to_owned(),
-            text: text.to_owned(),
-        });
-    }
-    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);
-    found
 }
 
 fn delegation(target: &str, task: &str) -> Option<Delegation> {
@@ -3024,7 +2948,8 @@ fn master_reply(
         .map_err(error)
 }
 
-/// Lists the sub-agent tasks a master reply proposed, each with the task handed off for it.
+/// Lists the sub-agent tasks a master reply proposed in its `crazyagent-task` blocks, read
+/// by `tool::reply_blocks`, each with the task handed off for it.
 /// Takes a connection, the project, the master reply id and its text.
 /// Returns at most eight steps in reply order; equal prompts match tasks in creation order.
 pub fn plan_steps(
@@ -3047,8 +2972,15 @@ pub fn plan_steps(
         .map(|task| task.map(Some))
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
-    let steps: Vec<PlanStep> = parse_delegations(text)
-        .into_iter()
+    let delegations =
+        tool::reply_blocks(text)
+            .0
+            .into_iter()
+            .filter_map(|proposed| match proposed {
+                tool::Proposal::Delegate(found) => Some(found),
+                tool::Proposal::Wake(_) => None,
+            });
+    let steps: Vec<PlanStep> = delegations
         .enumerate()
         .map(|(step, delegation)| PlanStep {
             reply,

@@ -1,4 +1,7 @@
-use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
+use super::{
+    DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, WAKE_NAME_BYTES_MAX, WakeLine,
+    delegation, names, text_valid,
+};
 use crate::coord::{Finish, QuestionFor, Severity};
 use crate::questions::QuestionKind;
 #[cfg(unix)]
@@ -12,6 +15,16 @@ use std::path::Path;
 pub const SERVER_NAME: &str = "crazyagent-team";
 pub const SERVER_COMMAND: &str = "team-mcp";
 pub const TOOL_NAME: &str = "delegate";
+/// The configured master's tool that wakes a finished sub-agent with its next task (L6,
+/// F16), recorded beside `delegate` and taken when the reply ends.
+pub const WAKE_TOOL: &str = "wake";
+/// The fence line that opens the one machine block a master without team tools hands out
+/// work with (L6): a JSON object read through the same schema as a `delegate` or `wake`
+/// record, never free prose.
+pub const BLOCK_FENCE: &str = "```crazyagent-task";
+const BLOCK_CLOSE: &str = "```";
+/// The most bytes of one block's JSON object.
+pub const BLOCK_BYTES_MAX: usize = TASK_PROMPT_BYTES_MAX * 2 + 512;
 pub const DROP_FILE: &str = "crazyagent-delegations.jsonl";
 pub const DROP_BYTES_MAX: u64 =
     (DELEGATIONS_PER_REPLY_MAX * (TASK_PROMPT_BYTES_MAX * 2 + 256)) as u64;
@@ -21,10 +34,21 @@ const RECORDED: &str = "Recorded. When your reply ends, the engine checks this t
 const INVALID: &str = "Not recorded: give a task of plain text up to 4000 bytes and, if you choose them, a harness name from the team plan and a short role such as onboarding-fix.";
 const ROLE_BYTES_MAX: usize = 64;
 const FULL: &str = "Not recorded: the engine takes at most 8 tasks from one reply.";
+const WAKE_RECORDED: &str = "Recorded. When your reply ends, the engine wakes that sub-agent in its own worktree with your text as its next task, and tells you if it cannot.";
+const WAKE_INVALID: &str = "Not recorded: name a finished sub-agent by its name, @role handle or Sub-agent number in up to 64 bytes, and give its next task as plain text up to 4000 bytes.";
+const WAKE_FULL: &str = "Not recorded: the engine takes at most 8 tasks and wakes from one reply.";
+pub(crate) const BLOCK_UNCLOSED: &str = "a crazyagent-task block has no closing ``` line";
+pub(crate) const BLOCK_TOO_LONG: &str = "a crazyagent-task block is longer than the engine reads";
+pub(crate) const BLOCK_INVALID: &str = "a crazyagent-task block is not one JSON object with task and, if you choose them, harness and role, or task and wake; no other field is taken";
+pub(crate) const BLOCK_BOUNDS: &str =
+    "a crazyagent-task block has an empty or overlong task, harness, role or agent name";
+pub(crate) const BLOCKS_FULL: &str =
+    "the engine takes at most 8 crazyagent-task blocks from one reply";
 const UNWRITABLE: &str = "Not recorded: the engine's task record could not be written.";
 
 const _: () = assert!(DROP_BYTES_MAX as usize >= DELEGATIONS_PER_REPLY_MAX * TASK_PROMPT_BYTES_MAX);
 const _: () = assert!(TASK_PROMPT_BYTES_MAX == 4000 && DELEGATIONS_PER_REPLY_MAX == 8);
+const _: () = assert!(BLOCK_BYTES_MAX < DROP_BYTES_MAX as usize && WAKE_NAME_BYTES_MAX == 64);
 
 pub const LIVE_SERVER_COMMAND: &str = "team-mcp-live";
 /// The engine subcommand that serves a sub-agent's team tools; it lists the same tools as
@@ -330,21 +354,35 @@ impl MemoryReach {
     }
 }
 
+/// One task or wake a master proposes, as its `delegate` or `wake` tool records it and as a
+/// `crazyagent-task` block of a reply without team tools writes it: the one schema both
+/// paths read, with every unknown field refused.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recorded {
+    #[serde(default)]
     harness: Option<String>,
     task: String,
     #[serde(default)]
     role: Option<String>,
+    #[serde(default)]
+    wake: Option<String>,
 }
 
-/// Serves the master's `delegate` and `ask` tools as an MCP server over stdio until its client
+/// What a master asked for in one record or block: a task for a new sub-agent, or a wake
+/// of a finished one with its next task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Proposal {
+    Delegate(Delegation),
+    Wake(WakeLine),
+}
+
+/// Serves the master's `delegate`, `wake` and `ask` tools as an MCP server over stdio until its client
 /// closes input, and with a mailbox also its `MEMORY_TOOLS` less the ones switched off, each
 /// answered by the engine through the mailbox. Takes the client's input and output, the absolute
 /// drop file in the master's private temporary folder, the mailbox folder the engine made for a
 /// team master without its live terminal, and the tools left out. Returns an input or output
-/// failure, or a refusal when the mailbox is not a plain folder; a `delegate` or `ask` call only
+/// failure, or a refusal when the mailbox is not a plain folder; a `delegate`, `wake` or `ask` call only
 /// records a proposal or question, which the engine takes after the turn.
 pub fn serve(
     input: impl BufRead,
@@ -490,7 +528,11 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
-            tools.extend([questions::ask_listing(), questions::record_listing()]);
+            tools.extend([
+                questions::ask_listing(),
+                questions::record_listing(),
+                wake_listing(),
+            ]);
             if mailbox.is_some() {
                 tools.extend(
                     MEMORY_TOOLS
@@ -499,7 +541,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                         .map(|name| spec(name)),
                 );
             }
-            assert!(tools.len() <= 3 + MEMORY_TOOLS.len());
+            assert!(tools.len() <= 4 + MEMORY_TOOLS.len());
             json!({ "tools": tools })
         }
         Some("tools/call") => match (mailbox, name) {
@@ -510,6 +552,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                 }
             }
             _ => match call(params, drop)
+                .or_else(|| wake_call(params, drop))
                 .map(|(text, error)| (text.to_owned(), error))
                 .or_else(|| questions::drop_call(params, drop))
             {
@@ -1645,6 +1688,157 @@ fn call(params: Option<&Value>, drop: &Path) -> Option<(&'static str, bool)> {
     })
 }
 
+/// Lists the configured master's `wake` tool. Returns its MCP listing.
+fn wake_listing() -> Value {
+    json!({
+        "name": WAKE_TOOL,
+        "description": "Wake a finished sub-agent of this project in its own worktree with your text as its next task. The engine wakes it when your reply ends. Prefer it over a new task for work that agent knows.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "The finished sub-agent's name, @role handle or Sub-agent number."},
+                "task": {"type": "string", "description": "What it should do next, in plain words."},
+            },
+            "required": ["agent", "task"],
+            "additionalProperties": false,
+        },
+    })
+}
+
+/// Records one `wake` call in the master's drop file, through the same schema and bounds
+/// a `crazyagent-task` block's wake is read with. Takes the call's parameters and the drop
+/// file. Returns the answer and whether it is a refusal, or none for another tool.
+fn wake_call(params: Option<&Value>, drop: &Path) -> Option<(&'static str, bool)> {
+    if params?.get("name")?.as_str()? != WAKE_TOOL {
+        return None;
+    }
+    let argument = |name: &str| {
+        params
+            .and_then(|params| params.get("arguments"))
+            .and_then(|arguments| arguments.get(name))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let recorded = Recorded {
+        harness: None,
+        task: argument("task"),
+        role: None,
+        wake: Some(argument("agent")),
+    };
+    let Some(Proposal::Wake(wake)) = proposal(recorded) else {
+        return Some((WAKE_INVALID, true));
+    };
+    Some(
+        match record_line(drop, &json!({"task": wake.text, "wake": wake.agent})) {
+            Ok(true) => (WAKE_RECORDED, false),
+            Ok(false) => (WAKE_FULL, true),
+            Err(_) => (UNWRITABLE, true),
+        },
+    )
+}
+
+/// Reads one record or block into what the master asked for, the single check both paths
+/// share: a delegation through `delegation` with its role made a handle or dropped, or a
+/// wake with a bounded agent name and task text and no harness or role. Takes the record.
+/// Returns the proposal, or none when it fails a bound.
+fn proposal(recorded: Recorded) -> Option<Proposal> {
+    let Recorded {
+        harness,
+        task,
+        role,
+        wake,
+    } = recorded;
+    let Some(agent) = wake else {
+        let mut found = delegation(harness.as_deref().unwrap_or_default(), &task)?;
+        found.role = role.as_deref().and_then(names::handle);
+        return Some(Proposal::Delegate(found));
+    };
+    if harness.is_some() || role.is_some() {
+        return None;
+    }
+    let (agent, text) = (agent.trim(), task.trim());
+    if agent.is_empty()
+        || agent.len() > WAKE_NAME_BYTES_MAX
+        || agent.chars().any(char::is_control)
+        || !text_valid(text, TASK_PROMPT_BYTES_MAX)
+    {
+        return None;
+    }
+    Some(Proposal::Wake(WakeLine {
+        agent: agent.to_owned(),
+        text: text.to_owned(),
+    }))
+}
+
+/// Reads the `crazyagent-task` blocks of a reply from a master without team tools (L6,
+/// F16): each opens with a line that is exactly `BLOCK_FENCE`, at the start of the line,
+/// so a quoted line never opens one, holds one JSON object of at most `BLOCK_BYTES_MAX`
+/// bytes read through the same schema and checks as a tool record, with a role checked as
+/// the `delegate` tool checks it, and closes with a line that is exactly ```. No other text
+/// of the reply is read. Takes the reply. Returns at most eight proposals in reply order
+/// and the distinct reasons blocks were not read.
+pub fn reply_blocks(reply: &str) -> (Vec<Proposal>, Vec<&'static str>) {
+    let mut found = Vec::new();
+    let mut unread: Vec<&'static str> = Vec::new();
+    let mut lines = reply.split('\n');
+    while let Some(line) = lines.next() {
+        if line.trim_end() != BLOCK_FENCE {
+            continue;
+        }
+        let mut body = String::new();
+        let (mut closed, mut long) = (false, false);
+        for inner in lines.by_ref() {
+            if inner.trim_end() == BLOCK_CLOSE {
+                closed = true;
+                break;
+            }
+            if long || body.len() + inner.len() + 1 > BLOCK_BYTES_MAX {
+                long = true;
+                continue;
+            }
+            body.push_str(inner);
+            body.push('\n');
+        }
+        let reason = if !closed {
+            Some(BLOCK_UNCLOSED)
+        } else if long {
+            Some(BLOCK_TOO_LONG)
+        } else if found.len() >= DELEGATIONS_PER_REPLY_MAX {
+            Some(BLOCKS_FULL)
+        } else {
+            match serde_json::from_str::<Recorded>(&body) {
+                Ok(recorded) => match block_proposal(recorded) {
+                    Some(proposed) => {
+                        found.push(proposed);
+                        None
+                    }
+                    None => Some(BLOCK_BOUNDS),
+                },
+                Err(_) => Some(BLOCK_INVALID),
+            }
+        };
+        if let Some(reason) = reason
+            && !unread.contains(&reason)
+        {
+            unread.push(reason);
+        }
+    }
+    assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX && unread.len() <= 5);
+    (found, unread)
+}
+
+/// Checks a block's role the way the `delegate` tool checks one, since no tool call checked
+/// it first, then reads the block as `proposal` does. Takes the record. Returns the
+/// proposal, or none for an unusable role or a failed bound.
+fn block_proposal(recorded: Recorded) -> Option<Proposal> {
+    let role = recorded.role.as_deref().unwrap_or_default().trim();
+    if role.len() > ROLE_BYTES_MAX || (!role.is_empty() && names::handle(role).is_none()) {
+        return None;
+    }
+    proposal(recorded)
+}
+
 /// Opens the drop file to read and append, creating it 0600, never through a link.
 /// Takes its path. Returns the open file or the I/O error.
 #[cfg(unix)]
@@ -1693,6 +1887,16 @@ fn open_recorded(drop: &Path) -> std::io::Result<File> {
 }
 
 fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
+    record_line(
+        drop,
+        &json!({"harness": proposed.harness, "task": proposed.prompt, "role": proposed.role}),
+    )
+}
+
+/// Appends one proposal to the master's drop file while it holds fewer than eight and
+/// stays within `DROP_BYTES_MAX`. Takes the drop file and the record. Returns whether it was
+/// recorded, or the I/O error.
+fn record_line(drop: &Path, value: &Value) -> std::io::Result<bool> {
     let mut file = open_drop(drop)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -1700,10 +1904,7 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
     }
     let mut recorded = Vec::new();
     (&file).take(DROP_BYTES_MAX).read_to_end(&mut recorded)?;
-    let mut line = serde_json::to_vec(
-        &json!({"harness": proposed.harness, "task": proposed.prompt, "role": proposed.role}),
-    )
-    .map_err(std::io::Error::other)?;
+    let mut line = serde_json::to_vec(value).map_err(std::io::Error::other)?;
     line.push(b'\n');
     let calls = recorded.iter().filter(|byte| **byte == b'\n').count();
     if calls >= DELEGATIONS_PER_REPLY_MAX || metadata.len() + line.len() as u64 > DROP_BYTES_MAX {
@@ -1713,11 +1914,25 @@ fn record(drop: &Path, proposed: &Delegation) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the record.
+/// Takes the tasks a master proposed with its `delegate` tool during one turn, and clears the
+/// record, as `take_proposals` does, leaving out any wake. Takes the drop file. Returns at
+/// most eight valid delegations in call order.
+pub fn take(drop: &Path) -> Vec<Delegation> {
+    take_proposals(drop)
+        .into_iter()
+        .filter_map(|proposed| match proposed {
+            Proposal::Delegate(found) => Some(found),
+            Proposal::Wake(_) => None,
+        })
+        .collect()
+}
+
+/// Takes the tasks and wakes a master proposed with its `delegate` and `wake` tools during
+/// one turn, and clears the record.
 /// Takes the drop file in the master's private temporary folder; a link or other non-file is never
 /// read, nor a file reached through a link the master put in place of that folder.
 /// Returns at most eight valid proposals in call order, none when there is no record.
-pub fn take(drop: &Path) -> Vec<Delegation> {
+pub fn take_proposals(drop: &Path) -> Vec<Proposal> {
     let opened = open_taken(drop);
     clear(drop);
     let Ok(file) = opened else {
@@ -1730,17 +1945,10 @@ pub fn take(drop: &Path) -> Vec<Delegation> {
     if (&file).take(DROP_BYTES_MAX).read_to_end(&mut text).is_err() {
         return Vec::new();
     }
-    let found: Vec<Delegation> = text
+    let found: Vec<Proposal> = text
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<Recorded>(line).ok())
-        .filter_map(|recorded| {
-            let mut found = delegation(
-                recorded.harness.as_deref().unwrap_or_default(),
-                &recorded.task,
-            )?;
-            found.role = recorded.role.as_deref().and_then(names::handle);
-            Some(found)
-        })
+        .filter_map(proposal)
         .take(DELEGATIONS_PER_REPLY_MAX)
         .collect();
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX);

@@ -34,6 +34,138 @@ fn by_id(answers: &[Value]) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// The configured master's `wake` tool records a wake in the same drop file as `delegate`,
+/// through the same schema and bounds, and the engine takes both once, in call order (L6).
+#[test]
+fn the_wake_tool_records_a_wake_beside_the_delegations_and_the_engine_takes_both_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let drop = directory.path().join(DROP_FILE);
+    let wake = |id: u64, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": WAKE_TOOL, "arguments": arguments}})
+    };
+    let answers = by_id(&served(
+        requests(&[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+            call_line(2, json!({"task": "Write apple.txt"})),
+            wake(
+                3,
+                json!({"agent": " @page-writer ", "task": " Add the footer "}),
+            ),
+            wake(4, json!({"agent": "", "task": "Add the footer"})),
+            wake(
+                5,
+                json!({"agent": "a".repeat(WAKE_NAME_BYTES_MAX + 1), "task": "x"}),
+            ),
+            wake(6, json!({"agent": "Ada", "task": "   "})),
+            wake(
+                7,
+                json!({"agent": "Ada", "task": "x".repeat(TASK_PROMPT_BYTES_MAX + 1)}),
+            ),
+        ]),
+        &drop,
+    ));
+    let listed = &answers["1"]["result"]["tools"][3];
+    assert_eq!(listed["name"], WAKE_TOOL);
+    assert_eq!(listed["inputSchema"]["required"], json!(["agent", "task"]));
+    assert_eq!(listed["inputSchema"]["additionalProperties"], false);
+    assert_eq!(answers["3"]["result"]["isError"], false);
+    assert_eq!(answers["3"]["result"]["content"][0]["text"], WAKE_RECORDED);
+    for id in ["4", "5", "6", "7"] {
+        assert_eq!(answers[id]["result"]["isError"], true, "{id}");
+        assert_eq!(
+            answers[id]["result"]["content"][0]["text"], WAKE_INVALID,
+            "{id}"
+        );
+    }
+    assert_eq!(
+        take_proposals(&drop),
+        [
+            Proposal::Delegate(Delegation {
+                harness: None,
+                prompt: "Write apple.txt".into(),
+                role: None,
+            }),
+            Proposal::Wake(WakeLine {
+                agent: "@page-writer".into(),
+                text: "Add the footer".into(),
+            }),
+        ]
+    );
+    assert!(take_proposals(&drop).is_empty(), "taken once");
+}
+
+/// A master without team tools hands out work only through `crazyagent-task` blocks (L6,
+/// F16): a fence line exactly at the start of a line, one JSON object with no unknown
+/// field, every text within its bound, at most eight. Free lines, quoted or indented
+/// blocks are not read, and each unread block's reason is reported once.
+#[test]
+fn only_strict_task_blocks_are_read_from_a_reply_and_each_refusal_is_reported() {
+    let block = |object: &str| format!("{BLOCK_FENCE}\n{object}\n```");
+    let reply = [
+        "Two of them now.".to_owned(),
+        "DELEGATE: Write pear.txt".to_owned(),
+        "WAKE Ada: Check the title".to_owned(),
+        block(r#"{"task": " Write apple.txt ", "harness": "Claude-Code", "role": "Apple Writer"}"#),
+        format!("> {BLOCK_FENCE}\n> {{\"task\": \"Quoted\"}}\n> ```"),
+        format!("  {BLOCK_FENCE}\n{{\"task\": \"Indented\"}}\n```"),
+        format!("{BLOCK_FENCE}  \r\n{{\"wake\": \"@page-writer\", \"task\": \"Add the footer\"}}\r\n```\r"),
+    ]
+    .join("\n");
+    let (found, unread) = reply_blocks(&reply);
+    assert_eq!(
+        found,
+        [
+            Proposal::Delegate(Delegation {
+                harness: Some("claude-code".into()),
+                prompt: "Write apple.txt".into(),
+                role: Some("apple-writer".into()),
+            }),
+            Proposal::Wake(WakeLine {
+                agent: "@page-writer".into(),
+                text: "Add the footer".into(),
+            }),
+        ]
+    );
+    assert!(unread.is_empty(), "{unread:?}");
+    for (object, reason) in [
+        (r#"{"task": "a", "extra": 1}"#, BLOCK_INVALID),
+        (r#"{"task": "a"} {"task": "b"}"#, BLOCK_INVALID),
+        (r#"{"task": "a", "task": "b"}"#, BLOCK_INVALID),
+        ("DELEGATE: not json", BLOCK_INVALID),
+        (r#"{"harness": "codex"}"#, BLOCK_INVALID),
+        (r#"{"task": "   "}"#, BLOCK_BOUNDS),
+        (r#"{"task": "a", "role": "???"}"#, BLOCK_BOUNDS),
+        (
+            r#"{"task": "a", "wake": "Ada", "harness": "codex"}"#,
+            BLOCK_BOUNDS,
+        ),
+        (r#"{"task": "a", "wake": ""}"#, BLOCK_BOUNDS),
+    ] {
+        let (found, unread) = reply_blocks(&block(object));
+        assert!(found.is_empty(), "{object}");
+        assert_eq!(unread, [reason], "{object}");
+    }
+    let role = format!(
+        r#"{{"task": "a", "role": "{}"}}"#,
+        "a".repeat(ROLE_BYTES_MAX + 1)
+    );
+    assert_eq!(reply_blocks(&block(&role)).1, [BLOCK_BOUNDS]);
+    let long = format!(r#"{{"task": "{}"}}"#, "x".repeat(BLOCK_BYTES_MAX));
+    assert_eq!(reply_blocks(&block(&long)), (vec![], vec![BLOCK_TOO_LONG]));
+    assert_eq!(
+        reply_blocks(&format!("{BLOCK_FENCE}\n{{\"task\": \"a\"}}")),
+        (vec![], vec![BLOCK_UNCLOSED])
+    );
+    let many: Vec<String> = (0..DELEGATIONS_PER_REPLY_MAX + 2)
+        .map(|at| block(&format!(r#"{{"task": "Write file {at}"}}"#)))
+        .collect();
+    let (found, unread) = reply_blocks(&many.join("\n"));
+    assert_eq!(found.len(), DELEGATIONS_PER_REPLY_MAX);
+    assert_eq!(unread, [BLOCKS_FULL], "two blocks over, one reason");
+    assert_eq!(reply_blocks(""), (vec![], vec![]));
+}
+
 #[test]
 fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -68,11 +200,12 @@ fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     assert_eq!(answers["1"]["result"]["serverInfo"]["name"], SERVER_NAME);
     assert!(answers["1"]["result"]["capabilities"]["tools"].is_object());
     let tools = answers["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 4);
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["required"], json!(["task"]));
     assert_eq!(tools[1], ask_tool());
     assert_eq!(tools[2], record_tool());
+    assert_eq!(tools[3]["name"], WAKE_TOOL);
     for id in ["3", "4"] {
         assert_eq!(answers[id]["result"]["isError"], false, "{id}");
         assert_eq!(answers[id]["result"]["content"][0]["text"], RECORDED);

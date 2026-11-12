@@ -2219,8 +2219,7 @@ pub(super) fn wake_in(
             tool::SPAWN_TOOL
         ),
         Err("team_agent_no_worktree") => format!(
-            "the worktree of {label} was cleaned up. Hand the work out with a {} line instead.",
-            super::DELEGATE_MARKER
+            "the worktree of {label} was cleaned up. Hand the work out as a new task instead."
         ),
         Err(code) => format!("{}.", super::runtime::refusal(code)),
     };
