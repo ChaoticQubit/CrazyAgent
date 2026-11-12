@@ -445,9 +445,9 @@ impl OwnerRuntimeHandle {
     }
 
     /// Runs the Configure flow for the prepared turn's account with the key saved with it,
-    /// as the session's owner, and waits for the writer, which runs on even if the turn is
-    /// dropped. Input: the prepared turn. Output: Ok once the writer wrote the key and the
-    /// operation settled; any refusal otherwise, with a reserved operation abandoned.
+    /// as the session's owner, still admitted before Finish, and waits for the writer, which
+    /// runs on even if the turn is dropped. Input: the prepared turn. Output: Ok once the
+    /// key is written and the operation settled; any refusal otherwise.
     async fn configure_saved_key(
         &self,
         prepared: &crate::storage::PreparedMasterTurn,
@@ -517,6 +517,14 @@ impl OwnerRuntimeHandle {
                 }
             };
             let (work, succeeded) = writer::run(&runtime, work).await?;
+            let admitted = runtime.authority.slots.lock().is_ok_and(|slots| {
+                slots.iter().any(|slot| {
+                    slot.registration.active && slot.registration.admission == admission
+                })
+            });
+            if !admitted {
+                return Err(failure("master_runtime_scope_revoked"));
+            }
             actor(
                 &runtime.engine,
                 &admission,
