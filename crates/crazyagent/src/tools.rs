@@ -264,6 +264,8 @@ fn in_temp(folder: &Path) -> bool {
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
 /// named by path in its first line or by name through `env`, which needs a search path.
+/// `by_name` also marks an interpreter found past a version-manager shim the first line
+/// names, so the launch names the real install and never the shim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Kind {
     Native,
@@ -284,19 +286,24 @@ pub struct Resolved {
 
 impl Resolved {
     /// The words that start this tool with no search path: the real file, which the system
-    /// runs itself for a program or a script naming its interpreter by path, or for a script
-    /// that asks `env` for its interpreter by name, that interpreter's words, the first
-    /// line's arguments, then the script's real file. A launch adds its own arguments after
-    /// these. Output: the absolute words.
+    /// runs itself for a program or a script whose first line names a program by path;
+    /// otherwise the interpreter's own words, the first line's arguments, then the script's
+    /// real file, for a script that asks `env` by name, names a shim, or names an interpreter
+    /// that is itself a script, which macOS does not run. Output: the absolute words.
     pub fn argv(&self) -> Vec<OsString> {
         let words: Vec<OsString> = match &self.kind {
-            Kind::Native | Kind::Script { by_name: false, .. } => {
+            Kind::Native => vec![self.program.clone().into_os_string()],
+            Kind::Script {
+                interpreter,
+                by_name: false,
+                ..
+            } if interpreter.kind == Kind::Native => {
                 vec![self.program.clone().into_os_string()]
             }
             Kind::Script {
                 interpreter,
                 arguments,
-                by_name: true,
+                ..
             } => {
                 let mut words = interpreter.argv();
                 words.extend(arguments.iter().map(OsString::from));
@@ -309,7 +316,8 @@ impl Resolved {
     }
 
     /// Every real file this tool runs or reads to start, the program first and then each
-    /// interpreter, which is exactly what a sandbox grants it. Output: the files.
+    /// interpreter, which is exactly what a sandbox grants it. A Node package's own folder is
+    /// not among them; the sandbox adds it from the program's npm prefix. Output: the files.
     pub fn grants(&self) -> Vec<PathBuf> {
         let mut files = vec![self.program.clone()];
         if let Kind::Script { interpreter, .. } = &self.kind {
@@ -390,8 +398,8 @@ pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
 
 /// Reads how an entry already chosen runs, such as a harness file the engine pinned: its
 /// real file and, for a script, the interpreter its first line names, found by
-/// [`resolve`]. Inputs: the absolute entry and the places. Output: the tool, or why it
-/// cannot run.
+/// [`resolve`]. The entry and every interpreter pass the same checks as a tool found by
+/// name. Inputs: the absolute entry and the places. Output: the tool, or why it cannot run.
 pub fn resolve_entry(entry: &Path, places: &Places) -> Result<Resolved, Missing> {
     entry_at(entry, places, 0)
 }
@@ -428,7 +436,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     let program = entry
         .canonicalize()
         .ok()
-        .filter(|real| entry.is_absolute() && executable_file(real))
+        .filter(|_| entry.is_absolute() && usable_candidate(places, entry))
         .ok_or_else(|| Missing {
             tool: tool.clone(),
             reason: Reason::NotFound,
@@ -452,8 +460,11 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     if depth == INTERPRETER_DEPTH_MAX {
         return Err(needs(&interpreter_name));
     }
+    let through_shim =
+        shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
     let interpreter = match &shebang.by_name {
         Some(name) => resolve_at(name, places, depth + 1),
+        None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
     .map_err(|_| needs(&interpreter_name))?;
@@ -463,7 +474,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         kind: Kind::Script {
             interpreter: Box::new(interpreter),
             arguments: shebang.arguments,
-            by_name: shebang.by_name.is_some(),
+            by_name: shebang.by_name.is_some() || through_shim,
         },
     })
 }
