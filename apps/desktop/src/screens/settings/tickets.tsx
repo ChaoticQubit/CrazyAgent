@@ -27,8 +27,8 @@ export function TicketKeyField({ row, scope, draft, busy, onDraft }: TicketKeyFi
   const text = keyText(row.key);
   const checked = draftValue(row, draft);
   const changed = "value" in checked && checked.value !== null && checked.value !== row.below;
-  return <SettingLine wide label={text.label} help={text.help} changed={changed}>
-    <fieldset className="field" disabled={busy}>
+  return <SettingLine wide label={text.label} help={<span id={`${name}-help`}>{text.help}</span>} changed={changed}>
+    <fieldset className="field" disabled={busy} aria-describedby={`${name}-help`}>
       <legend className="visually-hidden">{text.label}</legend>
       <RadioCard name={name} value="below" checked={draft.kind === "below"} onChecked={() => onDraft({ kind: "below" })}
         title={belowLabel(row, scope)} details={[optionText(row.key, row.below).line]} />

@@ -25,6 +25,16 @@ test("Tickets shows its title, then Ticket rules with each setting's words above
   assert.equal(seen.says.includes("Use app default"), false, "only a project page clears its values");
 });
 
+test("each setting's choices are described by the help words shown above them", async () => {
+  const seen = await onTab("tickets", {}, (page) => page.evaluate(`[...document.querySelectorAll("#mount .set-row")].map((row) => {
+    const help = document.getElementById(row.querySelector("fieldset")?.getAttribute("aria-describedby") ?? "");
+    return { help: help?.textContent ?? null, shown: row.querySelector(".set-help")?.textContent ?? null, inRow: help !== null && row.querySelector(".set-help")?.contains(help) === true };
+  })`));
+  assert.equal(seen.length, LABELS.length);
+  assert.equal(seen[0].help, "Who or what closes a ticket once its work is done.");
+  for (const row of seen) assert.ok(row.inRow && row.help === row.shown, JSON.stringify(row));
+});
+
 test("the changed mark shows only away from the default, for a stored value and a fresh pick", async () => {
   const marks = (page) => page.evaluate("Fixture.sections()[0].rows.map((row) => row.mark)");
   const fresh = await onTab("tickets", {}, async (page) => {

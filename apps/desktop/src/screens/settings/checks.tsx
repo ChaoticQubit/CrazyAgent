@@ -32,8 +32,8 @@ export function ChecksKeyField({ row, scope, picked, busy, onPick }: { row: Chec
   const name = `cs-${row.key}`;
   const text = checksKeyText(row.key);
   const chosen = Object.hasOwn(picked, row.key) ? picked[row.key] ?? null : row.here;
-  return <SettingLine wide label={text.label} help={text.help} changed={chosen !== null && chosen !== row.below}>
-    <fieldset className="field" disabled={busy}>
+  return <SettingLine wide label={text.label} help={<span id={`${name}-help`}>{text.help}</span>} changed={chosen !== null && chosen !== row.below}>
+    <fieldset className="field" disabled={busy} aria-describedby={`${name}-help`}>
       <legend className="visually-hidden">{text.label}</legend>
       <RadioCard name={name} value="below" checked={chosen === null} onChecked={() => onPick(null)}
         title={checksBelowLabel(row, scope)} details={[checksOptionText(row.key, row.below).line]} />
