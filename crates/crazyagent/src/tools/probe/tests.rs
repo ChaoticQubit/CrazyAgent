@@ -179,18 +179,80 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
     let places = || crate::tools::Places::new(Vec::new(), Some(home.clone()));
     assert_eq!(
         probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
-        [global, tools.clone(), other.clone()]
+        (vec![global, tools.clone(), other.clone()], true)
     );
     assert_eq!(
         probed(&[other.clone()], places(), &home, "owner"),
-        [other.clone()],
-        "no npm found, the login folders alone"
+        (vec![other.clone()], true),
+        "no npm found, the login folders alone, and nothing failed"
     );
     std::fs::write(&npm, "#!/bin/sh\necho \"$HOME/absent\"\n").unwrap();
     assert_eq!(
         probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
-        [tools, other],
+        (vec![tools.clone(), other.clone()], true),
         "a prefix with no bin folder adds nothing"
+    );
+    std::fs::write(&npm, "#!/bin/sh\nexit 1\n").unwrap();
+    assert_eq!(
+        probed(&[tools.clone(), other.clone()], places(), &home, "owner"),
+        (vec![tools, other], false),
+        "an npm that failed makes the run one to retry"
+    );
+}
+
+#[test]
+fn the_folder_probes_run_again_after_a_failure_or_a_miss_once_the_backoff_passed_and_after_the_refresh_age()
+ {
+    let start = Instant::now();
+    let tick = Duration::from_millis(1);
+    let (a, b) = (PathBuf::from("/a/bin"), PathBuf::from("/b/bin"));
+    let mut probes = Probes::new();
+    assert!(probes.start(start, false), "the first call starts a run");
+    assert!(
+        !probes.start(start + RETRY_AFTER, true),
+        "one run at a time"
+    );
+    probes.finish(vec![a.clone()], false, start);
+    assert_eq!(probes.found, [a.clone()]);
+    assert!(!probes.start(start + RETRY_AFTER - tick, false));
+    let retried = start + RETRY_AFTER;
+    assert!(
+        probes.start(retried, false),
+        "a failed run is retried after the backoff"
+    );
+    probes.finish(vec![b.clone()], false, retried);
+    assert_eq!(
+        probes.found,
+        [b.clone(), a.clone()],
+        "a failed run never drops what an earlier run found"
+    );
+    assert!(probes.start(retried + RETRY_AFTER, false));
+    let complete = retried + RETRY_AFTER;
+    probes.finish(vec![b.clone()], true, complete);
+    assert_eq!(
+        probes.found,
+        [b.clone()],
+        "a complete run replaces the folders"
+    );
+    assert!(
+        !probes.start(complete + RETRY_AFTER, false),
+        "a complete run is kept"
+    );
+    assert!(
+        !probes.start(complete + RETRY_AFTER - tick, true),
+        "a resolve that missed waits for the backoff"
+    );
+    assert!(
+        probes.start(complete + RETRY_AFTER, true),
+        "a resolve that missed probes again"
+    );
+    let missed = complete + RETRY_AFTER;
+    probes.finish(vec![a.clone(), b.clone()], true, missed);
+    assert_eq!(probes.found, [a, b], "a tool installed later is found");
+    assert!(!probes.start(missed + REFRESH_AGE - tick, false));
+    assert!(
+        probes.start(missed + REFRESH_AGE, false),
+        "a complete run is refreshed after the refresh age"
     );
 }
 
@@ -230,20 +292,95 @@ fn a_version_is_the_first_word_with_a_digit_and_a_program_reports_its_own() {
     assert!(started.elapsed() < Duration::from_secs(5));
 }
 
+/// Asks for a program's version until its probe answered, for at most ten seconds.
+fn answered(tool: &Path) -> Option<String> {
+    let started = Instant::now();
+    let mut found = None;
+    while found.is_none() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        found = version(tool);
+    }
+    found
+}
+
+/// Sets a file's modification time without touching its contents.
+fn modified_at(file: &Path, time: std::time::SystemTime) {
+    std::fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(time)
+        .unwrap();
+}
+
 #[test]
-fn version_answers_at_once_then_from_its_cache() {
+fn version_answers_at_once_then_from_its_cache_until_the_file_is_updated_in_place() {
     let (_folder, root) = scratch();
     let tool = program(&root.join("tool"), "#!/bin/sh\necho \"tool 4.5.6\"\n");
     let started = Instant::now();
     assert_eq!(version(&tool), None, "unknown until the probe ran");
     assert!(started.elapsed() < Duration::from_secs(1), "never waits");
-    let mut found = None;
-    while found.is_none() && started.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(20));
-        found = version(&tool);
-    }
-    assert_eq!(found.as_deref(), Some("4.5.6"));
+    assert_eq!(answered(&tool).as_deref(), Some("4.5.6"));
+    let modified = std::fs::metadata(&tool).unwrap().modified().unwrap();
     std::fs::write(&tool, "#!/bin/sh\necho \"tool 9.9.9\"\n").unwrap();
-    assert_eq!(version(&tool).as_deref(), Some("4.5.6"), "cached");
+    modified_at(&tool, modified);
+    assert_eq!(
+        version(&tool).as_deref(),
+        Some("4.5.6"),
+        "the same file, size and time answer from the cache"
+    );
+    std::fs::write(&tool, "#!/bin/sh\necho \"tool 10.0.0\"\n").unwrap();
+    modified_at(&tool, modified + Duration::from_secs(5));
+    assert_eq!(
+        version(&tool),
+        None,
+        "a file updated in place is probed again"
+    );
+    assert_eq!(answered(&tool).as_deref(), Some("10.0.0"));
     assert_eq!(version(Path::new("relative/tool")), None);
+}
+
+#[test]
+fn a_version_is_probed_again_when_its_file_changes_or_after_the_backoff_when_it_gave_none() {
+    let now = Instant::now();
+    let tick = Duration::from_millis(1);
+    let identity = Identity {
+        device: 1,
+        inode: 2,
+        size: 3,
+        modified: (4, 5),
+    };
+    let updated = Identity {
+        modified: (6, 0),
+        ..identity
+    };
+    let known = |version: Option<&str>, finished: Option<Instant>| Known {
+        identity,
+        version: version.map(str::to_owned),
+        finished,
+    };
+    assert!(version_due(None, identity, now), "never probed");
+    assert!(
+        !version_due(Some(&known(None, None)), identity, now + RETRY_AFTER),
+        "one probe at a time"
+    );
+    let answered = known(Some("1.0"), Some(now));
+    assert!(
+        !version_due(Some(&answered), identity, now + REFRESH_AGE),
+        "a version stays while its file does"
+    );
+    assert!(
+        version_due(Some(&answered), updated, now),
+        "a file updated in place"
+    );
+    let gave_none = known(None, Some(now));
+    assert!(!version_due(
+        Some(&gave_none),
+        identity,
+        now + RETRY_AFTER - tick
+    ));
+    assert!(
+        version_due(Some(&gave_none), identity, now + RETRY_AFTER),
+        "a probe that gave none is retried after the backoff"
+    );
 }
