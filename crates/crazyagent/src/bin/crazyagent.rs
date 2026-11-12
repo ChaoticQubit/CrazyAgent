@@ -545,6 +545,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     }
     .map_err(|e| e.to_string())?;
     layout.prepare().map_err(|e| e.to_string())?;
+    crazyagent::tools::record_engine_root(layout.root());
     let executable = current_executable()?;
     let found_on_path = [
         explicit.codex.is_none(),
@@ -584,7 +585,11 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             .claude
             .or(chosen.claude)
             .or_else(|| found("claude-code")),
-        rcli: crazyagent::paths::rcli_entry(explicit.rcli, path.as_deref(), executable.parent()),
+        rcli: crazyagent::paths::rcli_entry(
+            explicit.rcli,
+            &crazyagent::tools::Places::from_environment(Some(layout.root())),
+            executable.parent(),
+        ),
     };
     Ok(EngineStart {
         root: layout.root().to_path_buf(),
@@ -775,6 +780,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         harnesses.codex.as_deref(),
                         harnesses.claude.as_deref(),
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         agents,
                         service
                             .owner_runtime()
@@ -834,6 +840,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         std::env::current_exe().ok().as_deref(),
                         agents,
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         service.owner_runtime().map(|handle| handle.reproving()),
                         service
                             .owner_runtime()
@@ -1192,9 +1199,24 @@ fn stop_background(
     }
 }
 
+/// Looks for the engine's terminal host again, as tmux is found now, for a team runtime
+/// that started without one, so tmux installed after the engine started runs the live
+/// master with no engine restart. Takes the engine service. Returns the probe, or none
+/// without an owner runtime.
+fn terminal_probe(
+    service: &crazyagent::engine::bootstrap::EngineService,
+) -> Option<crazyagent::team::runtime::TerminalProbe> {
+    let handle = service.owner_runtime()?.clone();
+    Some(Box::new(move || {
+        let host = handle.terminal().ok()?;
+        host.alive().ok()?;
+        Some(host)
+    }))
+}
+
 /// Opens the engine's terminal host for team and research agents when it can run now.
-/// Takes the engine service. Returns the host, or none after saying why on stderr; agents
-/// then run headless until the engine restarts with tmux available.
+/// Takes the engine service. Returns the host, or none after saying why on stderr; team
+/// agents then run headless until a live master start finds tmux ([`terminal_probe`]).
 fn agent_terminal(
     service: &crazyagent::engine::bootstrap::EngineService,
 ) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {

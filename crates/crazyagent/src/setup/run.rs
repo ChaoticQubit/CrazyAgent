@@ -1,4 +1,6 @@
-use super::{InstallError, Version};
+use super::InstallError;
+#[cfg(any(target_os = "windows", test))]
+use super::Version;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -66,6 +68,7 @@ pub fn run_bounded(
 /// Reads a tool's version from its version report, such as `tmux 3.4` or
 /// `uv 0.9.5 (0a1b2c3 2025-10-01)`: the first word holding a digit, without a leading `v`.
 /// Output: the version, or `setup_version_unreadable`.
+#[cfg(any(target_os = "windows", test))]
 pub fn reported_version(output: &[u8]) -> Result<Version, InstallError> {
     let unreadable = InstallError("setup_version_unreadable");
     let text = std::str::from_utf8(output).map_err(|_| unreadable)?;

@@ -249,34 +249,40 @@ fn native_auth_codex_launch_uses_official_stdio_and_only_explicit_environment() 
     assert_eq!(command.get_current_dir(), Some(case.home.as_path()));
 }
 
+/// An npm-built Codex is a script whose first line asks `env` for its interpreter. Its
+/// sign-in child starts that interpreter as the tool resolver finds it, by its absolute file,
+/// then the script, with PATH /usr/bin:/bin and no folder added; a native program starts as
+/// itself. The stand-in asks for `sh`, which the resolver finds on every Mac.
 #[test]
-fn native_auth_sign_in_child_finds_node_beside_an_npm_installed_codex_script() {
+fn native_auth_sign_in_child_starts_an_env_script_through_its_resolved_interpreter() {
     let temp = tempfile::tempdir().unwrap();
     let prefix = std::fs::canonicalize(temp.path())
         .unwrap()
         .join("nvm/versions/node/v22.11.0");
     let script = prefix.join("lib/node_modules/@openai/codex/bin/codex.js");
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-    std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
-    let case = Case::new();
-    let path_of = |executable: &std::path::Path| {
-        super::command(executable, &case.home)
-            .unwrap()
-            .get_envs()
-            .find(|(name, _)| *name == std::ffi::OsStr::new("PATH"))
-            .and_then(|(_, value)| value.map(|value| value.to_owned()))
-            .unwrap()
-    };
-    assert_eq!(path_of(&script), "/usr/bin:/bin");
+    std::fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::create_dir_all(prefix.join("bin")).unwrap();
     std::fs::write(prefix.join("bin/node"), "node").unwrap();
-    let expected = format!("{}:/usr/bin:/bin", prefix.join("bin").display());
-    assert_eq!(path_of(&script), std::ffi::OsString::from(expected));
+    let case = Case::new();
+    let command = super::command(&script, &case.home).unwrap();
+    let interpreter =
+        crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+    assert_eq!(command.get_program(), interpreter.program.as_os_str());
+    assert_eq!(command.get_args().next(), Some(script.as_os_str()));
+    let path = command
+        .get_envs()
+        .find(|(name, _)| *name == std::ffi::OsStr::new("PATH"))
+        .and_then(|(_, value)| value.map(|value| value.to_owned()))
+        .unwrap();
+    assert_eq!(path, "/usr/bin:/bin", "no npm prefix folder is added");
+    let native = prefix.join("codex-native");
+    std::fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&native, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
-        path_of(std::path::Path::new(
-            "/opt/homebrew/Caskroom/codex/1.0.0/codex-aarch64-apple-darwin"
-        )),
-        "/usr/bin:/bin"
+        super::command(&native, &case.home).unwrap().get_program(),
+        native.as_os_str()
     );
 }
 
@@ -394,4 +400,23 @@ fn native_auth_codex_dropped_names_never_carry_a_letters_only_code() {
         "account/login/completedV2"
     );
     assert_eq!(super::dropped_name("code/KLMN-PQRS", None), "*");
+}
+
+/// A sign-in or token renewal child whose harness file sits inside a project, where agents
+/// can write, never starts unsandboxed: the command is refused with the tool resolver's
+/// owner line for that file.
+#[test]
+fn a_sign_in_harness_inside_a_project_is_refused_with_the_resolvers_line() {
+    let temp = tempfile::tempdir().unwrap();
+    let project = std::fs::canonicalize(temp.path()).unwrap().join("project");
+    std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
+    let entry = project.join("bin").join("codex");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
+        .unwrap_err()
+        .line();
+    let refused = crate::engine::native_auth_host::sign_in_command(&entry).unwrap_err();
+    assert_eq!(refused.0, line);
 }

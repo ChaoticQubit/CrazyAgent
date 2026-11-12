@@ -690,14 +690,18 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     let harness_env = environment
         .iter()
         .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
+    let words = super::interactive::launch_words(&request.executable)?;
+    let (program, script) = words
+        .split_first()
+        .ok_or_else(|| failure("launch_environment_refused"))?;
+    let program = Path::new(program);
     let mut command = match &request.sandbox_profile {
-        Some(profile) => {
-            crate::sandbox::agent_command(profile, &request.executable, &base, harness_env)
-        }
-        None => crate::sandbox::unconfined_command(&request.executable, &base, harness_env),
+        Some(profile) => crate::sandbox::agent_command(profile, program, &base, harness_env),
+        None => crate::sandbox::unconfined_command(program, &base, harness_env),
     }
     .map_err(|_| failure("launch_environment_refused"))?;
     command
+        .args(script)
         .args(&arguments)
         .current_dir(&request.working_dir)
         .stdin(Stdio::piped())

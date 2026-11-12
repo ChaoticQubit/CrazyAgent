@@ -303,10 +303,60 @@ pub struct ResearchRunner {
     stopping: AtomicBool,
     setup: Mutex<()>,
     custody: Mutex<Result<NativeProfileCustody, EngineError>>,
-    terminal: Option<Arc<dyn Host>>,
+    terminal: Mutex<Option<Arc<dyn Host>>>,
+    terminal_probe: Option<Mutex<crate::team::runtime::TerminalProbe>>,
     agents: Option<Arc<Agents>>,
     settings: Option<(PathBuf, PathBuf)>,
     reproving: Option<Arc<AtomicBool>>,
+}
+
+/// The words that start a research harness with no search path
+/// ([`crate::harnesses::interactive::launch_words`]): its file, or for a script that asks
+/// `env` for its interpreter, such as an npm-built Codex asking for `node`, that
+/// interpreter's absolute file and then the script. Input: the harness's real file. Output:
+/// the words, or the tool resolver's owner line when the interpreter is missing.
+fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
+    let words = crate::harnesses::interactive::launch_words(program)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    assert!(
+        words
+            .first()
+            .is_some_and(|word| Path::new(word).is_absolute())
+    );
+    Ok(words)
+}
+
+/// Lets a research harness run in `sandbox`, only once the tool resolver lets it launch
+/// ([`crate::harnesses::interactive::launch_tool`]): the real file that starts, the Node
+/// folders of an npm install ([`ProjectSandbox::allow_node_for`]) and its interpreters
+/// ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets. Inputs: the
+/// sandbox and the harness's real file. Output: the sandbox, or the resolver's owner line.
+fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandbox, RunError> {
+    let places = crate::tools::Places::from_environment(None);
+    let launched = crate::harnesses::interactive::launch_tool(program, &places)
+        .map_err(|problem| RunError::Invalid(problem.0))?;
+    let sandbox = sandbox
+        .allow_exec(&launched.program)?
+        .allow_node_for(&launched.program)?;
+    Ok(sandbox.allow_interpreters(&launched)?)
+}
+
+/// Ends every research pane an earlier engine left in `host`, with every process its harness
+/// started, since that engine's jobs went back to the queue. Takes the host. Returns the
+/// host's plain code when it cannot list or end them.
+fn end_left_panes(host: &dyn Host) -> Result<(), RunError> {
+    let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
+    for agent in host.alive().map_err(host_error)? {
+        if !agent.as_str().starts_with(PANE_PREFIX) {
+            continue;
+        }
+        match end_left_pane(host, &agent, "research") {
+            Ok(_) => {}
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            Err(problem) => return Err(host_error(problem)),
+        }
+    }
+    Ok(())
 }
 
 /// Where one launch of a claimed research job runs: the canonical project folder, its
@@ -454,7 +504,8 @@ impl ResearchRunner {
             stopping: AtomicBool::new(false),
             setup: Mutex::new(()),
             custody: Mutex::new(custody),
-            terminal: None,
+            terminal: Mutex::new(None),
+            terminal_probe: None,
             agents: None,
             settings: None,
             reproving: None,
@@ -475,19 +526,40 @@ impl ResearchRunner {
     /// the queue; a cleanup not confirmed is reported on stderr. Takes the host.
     /// Returns the runner, or the host's plain code.
     pub fn with_terminal(mut self, host: Arc<dyn Host>) -> Result<Self, RunError> {
-        let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
-        for agent in host.alive().map_err(host_error)? {
-            if !agent.as_str().starts_with(PANE_PREFIX) {
-                continue;
-            }
-            match end_left_pane(host.as_ref(), &agent, "research") {
-                Ok(_) => {}
-                Err(problem) if problem.0 == "terminal_agent_unknown" => {}
-                Err(problem) => return Err(host_error(problem)),
+        end_left_panes(host.as_ref())?;
+        *self
+            .terminal
+            .get_mut()
+            .unwrap_or_else(PoisonError::into_inner) = Some(host);
+        Ok(self)
+    }
+
+    /// Lets a runner that started with no terminal host look for one again at each research
+    /// agent's start, so tmux installed after the engine started runs the next agent in a
+    /// pane with no engine restart. Takes the probe. Returns the runner.
+    pub fn with_terminal_probe(mut self, probe: crate::team::runtime::TerminalProbe) -> Self {
+        self.terminal_probe = Some(Mutex::new(probe));
+        self
+    }
+
+    /// The terminal host a research agent starts in now: the one the runner holds, else the
+    /// one its probe finds, kept once its earlier panes end ([`end_left_panes`]). Output:
+    /// the host, or none while no terminal program is found, so the agent runs headless.
+    fn terminal(&self) -> Option<Arc<dyn Host>> {
+        let mut held = self.terminal.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.is_none() {
+            let probe = self.terminal_probe.as_ref()?;
+            let host = (probe.lock().unwrap_or_else(PoisonError::into_inner))()?;
+            match end_left_panes(host.as_ref()) {
+                Ok(()) => *held = Some(host),
+                Err(problem) => {
+                    eprintln!(
+                        "research terminal found but not used ({problem}); agents run headless"
+                    );
+                }
             }
         }
-        self.terminal = Some(host);
-        Ok(self)
+        held.clone()
     }
 
     /// Names each running research job in the engine's agent register as a holder of the
@@ -985,7 +1057,7 @@ impl ResearchRunner {
         for folder in read_folders(&program, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
-        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
+        sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let sandbox = self.keep_held(job, || -> Result<ProjectSandbox, RunError> {
@@ -1014,7 +1086,7 @@ impl ResearchRunner {
         let linked = self.linked_research(job, &root)?;
         let prompt = research_prompt(&root, &job.kind, &linked)?;
         write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
-        if let Some(host) = &self.terminal {
+        if let Some(host) = self.terminal() {
             let output = match harness {
                 ResearchHarness::Codex => tmp.join("report.md"),
                 ResearchHarness::ClaudeCode => agent.join("output.md"),
@@ -1082,7 +1154,9 @@ impl ResearchRunner {
         if let Some(relay) = relay {
             write_relay_token(&home, relay)?;
         }
-        let mut launch = Command::new(&program);
+        let words = harness_words(&program)?;
+        let mut launch = Command::new(&words[0]);
+        launch.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
@@ -1637,7 +1711,7 @@ impl ResearchRunner {
         if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
-        sandbox = sandbox.allow_exec(&program)?.allow_node_for(&program)?;
+        sandbox = allow_harness(sandbox, &program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
@@ -1668,7 +1742,9 @@ impl ResearchRunner {
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, &program);
+        let words = harness_words(&program)?;
+        let mut command = sandbox.command(&profile, Path::new(&words[0]));
+        command.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
@@ -3991,6 +4067,165 @@ mod tests {
 
     fn reference(value: &str) -> CredentialRef {
         CredentialRef::new(value).unwrap()
+    }
+
+    /// A terminal host that lists the panes it was given and fails every other call, or
+    /// fails its listing too, as a tmux server that cannot answer.
+    struct Listed(Result<Vec<AgentId>, crate::terminal::HostError>);
+
+    impl Host for Listed {
+        fn spawn(
+            &self,
+            _agent: &AgentId,
+            _command: &crate::harnesses::interactive::InteractiveCommand,
+        ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn attach(
+            &self,
+            _agent: &AgentId,
+        ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn input(&self, _agent: &AgentId, _bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn resize(
+            &self,
+            _agent: &AgentId,
+            _cols: u16,
+            _rows: u16,
+        ) -> Result<(), crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        }
+
+        fn kill(&self, _agent: &AgentId) -> Result<(), crate::terminal::HostError> {
+            Err(crate::terminal::HostError("terminal_agent_unknown".into()))
+        }
+
+        fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
+            self.0.clone()
+        }
+    }
+
+    /// On a fresh Mac the engine starts before setup installs tmux. Research agents then run
+    /// headless only until tmux is found: the runner looks for the terminal again at each
+    /// agent's start, keeps the first host that answers and asks no more, and a host that
+    /// cannot list its panes is not kept, so the next agent looks again.
+    #[test]
+    fn a_terminal_found_after_engine_start_runs_the_next_research_agent_in_a_pane() {
+        use std::sync::atomic::AtomicUsize;
+        let root = engine_root();
+        let found: Arc<Mutex<Option<Arc<dyn Host>>>> = Arc::new(Mutex::new(None));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let probe = {
+            let found = found.clone();
+            let asked = asked.clone();
+            Box::new(move || {
+                asked.fetch_add(1, Ordering::SeqCst);
+                found.lock().unwrap().clone()
+            })
+        };
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_terminal_probe(probe);
+        assert!(runner.terminal().is_none());
+        assert!(runner.terminal().is_none());
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "each agent's start looks again"
+        );
+        let broken: Arc<dyn Host> = Arc::new(Listed(Err(crate::terminal::HostError(
+            "terminal_unavailable".into(),
+        ))));
+        *found.lock().unwrap() = Some(broken);
+        assert!(
+            runner.terminal().is_none(),
+            "a host that cannot answer is not kept"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        let host: Arc<dyn Host> = Arc::new(Listed(Ok(vec![AgentId::new("team-7").unwrap()])));
+        *found.lock().unwrap() = Some(host.clone());
+        let first = runner
+            .terminal()
+            .expect("tmux installed after start is found");
+        assert!(Arc::ptr_eq(&first, &host));
+        *found.lock().unwrap() = None;
+        let kept = runner.terminal().expect("the found host is kept");
+        assert!(Arc::ptr_eq(&kept, &host));
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            4,
+            "a kept host is not looked for again"
+        );
+    }
+
+    /// An npm-built harness asks `env` for its interpreter, and a research agent runs with
+    /// no search path that finds Node from nvm, volta or Homebrew. Its launch words start
+    /// the interpreter the tool resolver finds, by its absolute file, then the script; a
+    /// native harness is one word. The stand-in asks for `sh`, found on every Mac.
+    #[test]
+    fn a_research_harness_script_starts_through_its_resolved_interpreter() {
+        let install = tempfile::tempdir().unwrap();
+        let base = install.path().canonicalize().unwrap();
+        let script = base.join("lib/node_modules/@openai/codex/bin/codex.js");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let interpreter =
+            crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+        assert_eq!(
+            harness_words(&script).unwrap(),
+            vec![
+                interpreter.program.to_str().unwrap().to_owned(),
+                script.to_str().unwrap().to_owned()
+            ]
+        );
+        let native = base.join("codex");
+        fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            harness_words(&native).unwrap(),
+            vec![native.to_str().unwrap().to_owned()]
+        );
+    }
+
+    /// A research harness whose file sits inside a project, where agents can write, gets
+    /// no launch words and no sandbox grant: both answer with the tool resolver's owner line
+    /// before anything runs.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_research_harness_inside_a_project_is_refused_before_any_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        for folder in [&project, &home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let harness = base.join("installed").join("project");
+        fs::create_dir_all(harness.join(".crazyagent")).unwrap();
+        let program = harness.join("bin").join("codex");
+        fs::create_dir_all(program.parent().unwrap()).unwrap();
+        fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let line =
+            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None))
+                .unwrap_err()
+                .line();
+        assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        assert!(matches!(
+            allow_harness(sandbox, &program),
+            Err(RunError::Invalid(code)) if code == line
+        ));
     }
 
     #[test]

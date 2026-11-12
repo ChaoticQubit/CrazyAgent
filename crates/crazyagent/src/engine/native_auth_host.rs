@@ -8,21 +8,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
-const SIGN_IN_PATH: &str = "/usr/bin:/bin";
+/// The PATH every sign-in or token renewal child runs with, no folder added: a script
+/// harness starts through its resolved interpreter instead ([`sign_in_command`]).
+pub(crate) const SIGN_IN_PATH: &str = "/usr/bin:/bin";
 
-/// The PATH a sign-in or token renewal child runs with: `/usr/bin:/bin`, after the `bin`
-/// folder of the npm prefix a Node script harness sits in ([`crate::harnesses::node_prefix`]),
-/// the same folder an agent launch puts first. Input: the real file. Output: the PATH value.
-pub(crate) fn sign_in_path(executable: &Path) -> std::ffi::OsString {
-    match crate::harnesses::node_prefix(executable) {
-        Some(prefix) => {
-            let mut path = prefix.join("bin").into_os_string();
-            path.push(":");
-            path.push(SIGN_IN_PATH);
-            path
-        }
-        None => SIGN_IN_PATH.into(),
-    }
+/// Starts a sign-in or token renewal child with no search path: the harness file itself, or
+/// for a script that asks `env` for its interpreter, such as an npm-built Codex asking for
+/// `node`, that interpreter's absolute file and then the script
+/// ([`crate::harnesses::interactive::launch_words`]). Input: the harness's real file.
+/// Output: the command with those words, or the tool resolver's owner line.
+pub(crate) fn sign_in_command(executable: &Path) -> Result<std::process::Command, EngineError> {
+    let words = crate::harnesses::interactive::launch_words(executable)
+        .map_err(|problem| EngineError(problem.0))?;
+    let (program, script) = words
+        .split_first()
+        .ok_or_else(|| EngineError("native_auth_launch_invalid".into()))?;
+    assert!(Path::new(program).is_absolute());
+    let mut command = std::process::Command::new(program);
+    command.args(script);
+    Ok(command)
 }
 
 /// How long after a harness identity was first seen a matching hash must start to prove its

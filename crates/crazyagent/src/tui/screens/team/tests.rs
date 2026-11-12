@@ -2613,8 +2613,8 @@ fn the_master_view_turns_the_live_master_on_once_and_its_terminal_fills_the_body
 
 /// Opening the master view turns a stored switch that is off on, once per open and whatever
 /// stopped it, and shows it starting rather than the reason it stopped. The header and hints
-/// carry no stop or start key. A stop the engine makes right after says why and that opening
-/// the view or a new session starts it again; a switch already on is left alone.
+/// carry no stop or start key. A stop the engine makes right after says why and that s tries
+/// again, which turns the switch on once more (owner 11-12); a switch already on is left alone.
 #[test]
 fn the_master_view_turns_an_off_switch_on_at_open() {
     let mut shell = master_view(80, 24);
@@ -2681,18 +2681,22 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
         rows[4]
     );
     let restart = rows[4..10].join("\n");
-    assert!(
-        restart.contains("It starts again when you open this view again or press n for a new"),
-        "{restart}"
-    );
-    assert!(restart.contains("session."), "{restart}");
+    assert!(restart.contains("s tries again."), "{restart}");
+    assert!(rows[23].contains("s Try again"), "{}", rows[23]);
     shell.key(Key::Char('s'));
-    assert!(
-        requests(&mut shell)
-            .iter()
-            .all(|sent| !live_master_change(sent, true) && !live_master_change(sent, false)),
-        "s neither stops nor starts the live master"
+    let sent = requests(&mut shell);
+    assert_eq!(
+        sent.iter()
+            .filter(|sent| live_master_change(sent, true))
+            .count(),
+        1,
+        "s tries the start again once (owner 11-12): {sent:?}"
     );
+    assert!(sent.iter().all(|sent| !live_master_change(sent, false)));
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), Some(again)));
+    requests(&mut shell);
     shell.arrive(Arrival::TeamGraph {
         project: project(),
         result: Ok(graph()),
@@ -5252,4 +5256,94 @@ fn the_master_view_head_ends_with_the_time_left_and_the_rounds_while_the_master_
     shell.arrive(harnessed(Some(true), "codex", None));
     let rows = render(&mut shell);
     assert!(!rows[2].contains("Sub-agent rounds"), "{}", rows[2]);
+}
+
+fn master_shell(screen: super::Team, width: u16, height: u16) -> Shell {
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    ctx.width = width;
+    ctx.height = height;
+    ctx.link = Link::Ready;
+    Shell::with(ctx, Box::new(screen))
+}
+
+/// On a Mac with no tmux the engine turns the live master off with the line that says tmux
+/// is missing and how to install it. The master view shows that line, never the endless
+/// wait, and s tries again, which turns the switch on once more (owner 11-12).
+#[test]
+fn a_master_with_no_tmux_says_tmux_is_missing_and_s_tries_again() {
+    let missing = crate::team::master::TERMINAL_MISSING;
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), Some(missing)));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(sent.as_slice(), [start] if live_master_change(start, true)),
+        "{sent:?}"
+    );
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    shell.arrive(switch(Some(false), Some(missing)));
+    assert!(requests(&mut shell).is_empty(), "one start per open");
+    let rows = render(&mut shell);
+    let body = rows[4..22].join("\n");
+    assert!(
+        body.contains("tmux is missing, so the live master's"),
+        "{body}"
+    );
+    assert!(body.contains("s tries again."), "{body}");
+    assert!(!body.contains("Starting the master's terminal"), "{body}");
+    assert!(rows[23].contains("s Try again"), "{}", rows[23]);
+    shell.key(Key::Char('s'));
+    let sent = requests(&mut shell);
+    assert_eq!(
+        sent.iter()
+            .filter(|sent| live_master_change(sent, true))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+}
+
+/// A master whose terminal has not opened a minute after the view started waiting stops
+/// waiting in silence: it says so, with the engine's line when there is one, gives the keys
+/// back to the view and offers s to try again; the new start waits afresh (owner 11-12).
+#[test]
+fn a_master_terminal_not_open_after_a_minute_says_so_and_s_tries_again() {
+    let mut screen = super::Team::master(project(), "Tidepool".into());
+    screen.waiting_since = Some(crate::tui::clock::now_ms() - 61_000);
+    let mut shell = master_shell(screen, 80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    requests(&mut shell);
+    let rows = render(&mut shell);
+    let body = rows[4..22].join("\n");
+    assert!(
+        body.contains("The master's terminal hasn't opened after a minute."),
+        "{body}"
+    );
+    assert!(body.contains("s tries again."), "{body}");
+    assert!(!body.contains("Starting the master's terminal"), "{body}");
+    assert!(rows[23].contains("s Try again"), "{}", rows[23]);
+    shell.key(Key::Char('s'));
+    let sent = requests(&mut shell);
+    assert_eq!(
+        sent.iter()
+            .filter(|sent| live_master_change(sent, true))
+            .count(),
+        1,
+        "{sent:?}"
+    );
+    let rows = render(&mut shell);
+    let body = rows[4..22].join("\n");
+    assert!(
+        body.contains("Starting the master's terminal"),
+        "the new start waits afresh: {body}"
+    );
+    assert!(!rows[23].contains("s Try again"), "{}", rows[23]);
 }
