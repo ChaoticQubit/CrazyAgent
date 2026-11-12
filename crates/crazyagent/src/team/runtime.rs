@@ -1245,7 +1245,7 @@ impl TeamRuntime {
 
     /// Replaces what the runtime runs to look for tools again when the owner switches a live
     /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "macos"))]
     fn with_tools_refresh(mut self, refresh: fn()) -> Self {
         self.tools_refresh = refresh;
         self
