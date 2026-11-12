@@ -566,15 +566,15 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             Err(current) => Ok(Reply::Stale { current }),
         },
         Action::DownloadModel => {
-            crate::semantic::model::start_download(root)?;
+            crate::semantic::local::start_download(root)?;
             search(&db)
         }
         Action::CancelDownload => {
-            crate::semantic::model::cancel_download(root);
+            crate::semantic::local::cancel_download(root);
             search(&db)
         }
         Action::DeleteModel => {
-            crate::semantic::model::delete(root)?;
+            crate::semantic::local::delete(root)?;
             search(&db)
         }
     }

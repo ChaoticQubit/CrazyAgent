@@ -1,7 +1,7 @@
 use crate::app_plugins::{Problem, RunsView};
 use serde::{Deserialize, Serialize};
 
-pub mod model;
+pub mod local;
 pub mod settings;
 
 /// The wall clock in milliseconds since the Unix epoch, 0 before it.
