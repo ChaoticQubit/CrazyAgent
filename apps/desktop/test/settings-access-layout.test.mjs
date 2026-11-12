@@ -8,7 +8,7 @@ const run = tabRunner(fixture);
 const onAccounts = (scene, check, ...rest) => run({ tab: "accounts", ...scene }, check, ...rest);
 const onGitHub = (scene, check, ...rest) => run({ tab: "github", ...scene }, check, ...rest);
 const onProfile = (scene, check, ...rest) => run({ tab: "profile", ...scene }, check, ...rest);
-const DIALOG = "dialog[open]";
+const DIALOG = "dialog[open]:not(:has(> .dialog-body > .user-dialog))";
 const top = (page) => page.evaluate("Fixture.top()");
 const read = (page) => page.evaluate("Fixture.sections()");
 const say = (page) => page.evaluate("Fixture.text()");

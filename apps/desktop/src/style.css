@@ -140,6 +140,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .sidebar-foot .foot-retry { flex: none; height: 24px; margin: -3px 0; padding: 0 var(--space-1); }
 .sidebar-foot .engine-state { white-space: nowrap; }
 .sidebar-foot .me { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 18px; font-weight: 600; color: var(--text); text-decoration: none; }
+.sidebar-foot button.me { padding: 0; border: 0; border-radius: var(--radius-control); background: none; font-family: inherit; text-align: left; cursor: pointer; }
 .engine-state { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; }
 .engine-state.running { color: var(--ok); }
 .engine-state.down { color: var(--danger); }

@@ -704,6 +704,8 @@ async function main() {
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/settings/profile` });
         await view.click(label, `[role=radiogroup][aria-label="Questions show"] button`);
         await until("questions_show_saved", VIEW_MS, async () => (await page.evaluate(`document.querySelector('[role=radiogroup][aria-label="Questions show"] button[aria-checked="true"]')?.textContent?.trim() ?? ""`)) === label);
+        for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+        await until("profile_dialog_closed", VIEW_MS, async () => page.evaluate("document.querySelector('dialog[open]') === null"));
       };
       const noneWaiting = () => {
         const waiting = rows(database, "SELECT id, question FROM questions_log WHERE project = ? AND status = 'pending'", state.project);

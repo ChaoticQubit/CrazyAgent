@@ -53,7 +53,7 @@ export const checks = [{
   why: "owner: every time I go to Home it first shows the side status bar for a few seconds and then it goes away",
   after: "open-app",
   run: async (kit) => {
-    const line = await measure(kit, "#/settings/profile", [
+    const line = await measure(kit, "#/settings/memory", [
       ["Home", "#/home"], ["Accounts", "#/settings/accounts"], ["Pools", "#/settings/pools"],
       ["Harnesses", "#/settings/harnesses"], ["Home again", "#/home"],
     ]);
@@ -68,7 +68,7 @@ export const checks = [{
   after: "end",
   run: async (kit) => {
     const id = encodeURIComponent(kit.project());
-    const line = await measure(kit, "#/settings/profile", [
+    const line = await measure(kit, "#/settings/memory", [
       ["Home", "#/home"], ["project overview", `#/projects/${id}/overview`], ["conversation", `#/projects/${id}/conversation`],
       ["agents", `#/projects/${id}/agents`], ["project settings", `#/projects/${id}/settings`], ["Home again", "#/home"],
     ]);

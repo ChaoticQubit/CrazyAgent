@@ -95,7 +95,7 @@ async function useLast(connection) {
 
 /** Opens Settings, Pools and waits for the Live master account card. Output: none. */
 async function poolsPage() {
-  await go("#/settings/profile");
+  await go("#/settings/accounts");
   await settingsTab("Pools");
   await until(() => shown(segment(SETTING, KEEP)), UI_MS, "Settings, Pools never showed Live master account");
 }
