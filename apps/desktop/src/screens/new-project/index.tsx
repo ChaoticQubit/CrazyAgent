@@ -11,7 +11,7 @@ import { displayText } from "../conversation";
 import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
-import { AccessLevels, accessLabel } from "../project/access";
+import { AccessLevels, accessLabel, policyOf } from "../project/access";
 import { PoolPicker } from "./pool-picker";
 import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "./fields";
 import { TeamEditor } from "./team-editor";
@@ -167,7 +167,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     const access = draftAccess(draft, catalogValue?.agent_access);
     if (access !== "sandboxed") {
       const read = await loadAgentPolicy(id);
-      const saved = read.kind === "ok" ? await saveAgentPolicy(id, { access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }, read.value.version, nextGeneration()) : read;
+      const saved = read.kind === "ok" ? await saveAgentPolicy(id, policyOf(read.value, access, read.value.network, read.value.toolchains.map((row) => row.allowed), read.value.ide_git_hooks, read.value.ide_agent_files), read.value.version, nextGeneration()) : read;
       const state = saved.kind === "ok" ? receiptState(saved.value) : null;
       if (state?.kind !== "applied") {
         const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";

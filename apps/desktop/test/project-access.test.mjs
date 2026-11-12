@@ -153,8 +153,8 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(client, /export interface PolicyView \{[\s\S]*?\n  version: number;\n\}/);
   assert.match(client, /call<IntentReceipt>\("desktop_set_project_agent_policy", \{ id, version, policy, generation \}\)/);
   const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, \{ access, network: "open", toolchains: \[\], ide_git_hooks: false, ide_agent_files: "allow_all" \}, read\.value\.version, nextGeneration\(\)\) : read;/,
-    "a new project's chosen access is saved at the version the engine holds");
+  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, policyOf\(read\.value, access, read\.value\.network, read\.value\.toolchains\.map\(\(row\) => row\.allowed\), read\.value\.ide_git_hooks, read\.value\.ide_agent_files\), read\.value\.version, nextGeneration\(\)\) : read;/,
+    "a new project's chosen access is saved at the version the engine holds, keeping the toolchains and shared folders onboarding recorded");
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(lib, /async fn desktop_set_project_agent_policy\([^)]*version: u64/);
 });
@@ -174,7 +174,7 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
   const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.ok(created.includes('{ access, network: "open", toolchains: [], ide_git_hooks: false, ide_agent_files: "allow_all" }'));
+  assert.ok(created.includes("read.value.ide_git_hooks"), "a new project keeps the IDE hooks switch the engine saved, Off");
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);
 });
@@ -321,4 +321,19 @@ test("secret paths are read one per line, the picker keeps a picked folder that 
   assert.throws(() => access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "shared", { ...SHARED, scope: "chosen", chosen: many }), /within the engine's bounds/);
   const secrets = Array.from({ length: access.SHARED_SECRETS_MAX + 1 }, (_, index) => `s${index}`);
   assert.throws(() => access.policyOf(view, "sandboxed", "open", [true, false], false, "allow_all", "shared", { ...SHARED, secrets }), /within the engine's bounds/);
+});
+
+test("a new project's access save keeps the toolchains onboarding recorded and the shared folders choice (F26)", () => {
+  const recorded = {
+    ...view,
+    toolchains: [
+      { toolchain: "rust", label: "Rust", installed: true, used: true, allowed: true },
+      { toolchain: "node", label: "Node", installed: true, used: false, allowed: true },
+    ],
+    shared_folders: { scope: "chosen", access: "read_only", chosen: ["program"], secrets: [] },
+  };
+  const policy = access.policyOf(recorded, "own_branch", recorded.network, recorded.toolchains.map((row) => row.allowed), recorded.ide_git_hooks, recorded.ide_agent_files);
+  assert.deepEqual(policy.toolchains, [{ toolchain: "node", allowed: true }], "an installed toolchain the project does not use yet stays allowed");
+  assert.deepEqual(policy.shared_folders, recorded.shared_folders);
+  assert.equal(policy.access, "own_branch");
 });
