@@ -1429,10 +1429,7 @@ fn a_question_with_a_credential_line_never_reaches_the_store_or_a_client() {
         NOW_MS,
     );
     let page = listed(&connection, &query(NoticeFilter::All));
-    assert_eq!(
-        texts(&page),
-        vec!["[hidden: this line may contain a secret]"]
-    );
+    assert_eq!(texts(&page), vec!["Master asks: deploy now? [hidden]"]);
     let stored = stored_texts(&connection);
     assert_eq!(stored.len(), 1);
     assert!(!stored[0].contains(&secret));
@@ -1520,4 +1517,60 @@ fn a_window_of_window_ids_max_unfolded_ids_is_never_cut_by_bytes() {
     let page = listed(&connection, &window);
     assert_eq!(page.items.len(), usize::from(WINDOW_IDS_MAX));
     assert!(!page.more);
+}
+
+#[test]
+fn a_question_that_only_mentions_a_password_or_a_secret_keeps_its_words() {
+    let (_folder, mut connection) = store();
+    let asked = [
+        "Master asks: should the login form have a password reset link?",
+        "Master asks: which secret manager should the deploy use?",
+        "Master asks: keep the cookie banner or drop it?",
+    ];
+    let live: Vec<Condition> = asked
+        .iter()
+        .enumerate()
+        .map(|(at, text)| question("p1", &format!("question:c{at}"), text))
+        .collect();
+    synced(&mut connection, &[NoticeKind::Question], &live, NOW_MS);
+    let page = listed(&connection, &query(NoticeFilter::All));
+    let mut shown_texts = texts(&page);
+    shown_texts.sort_unstable();
+    let mut expected = asked.to_vec();
+    expected.sort_unstable();
+    assert_eq!(shown_texts, expected);
+}
+
+#[test]
+fn a_password_or_token_given_in_a_question_is_still_hidden() {
+    let secret = token();
+    assert_eq!(
+        shown("Master asks: is the password: hunter2 still right?"),
+        "Master asks: is the password: [hidden] still right?"
+    );
+    assert_eq!(
+        shown("Master asks: use password=hunter2 here?"),
+        "Master asks: use [hidden] here?"
+    );
+    assert_eq!(
+        shown(&format!(
+            "Master asks: send Authorization: Bearer {secret} too?"
+        )),
+        "Master asks: send Authorization: [hidden] [hidden] too?"
+    );
+    assert_eq!(
+        shown("Master asks: the password:\nhunter2 is it?"),
+        "Master asks: the password: [hidden] is it?"
+    );
+}
+
+#[test]
+fn the_hidden_line_mark_of_a_key_block_never_hides_the_rest_of_the_notice() {
+    let secret = token();
+    let text = shown(&format!(
+        "Master asks: deploy?\n-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----"
+    ));
+    assert!(text.starts_with("Master asks: deploy? [hidden: this line may contain a secret]"));
+    assert!(!text.contains(&secret));
+    assert_eq!(shown(&text), text);
 }
