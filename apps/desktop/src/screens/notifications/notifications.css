@@ -35,3 +35,4 @@
 @media (prefers-reduced-motion: reduce) { .notice-bell, .notice-highlight { transition: none; } }
 .notice-choices:disabled label { cursor: default; opacity: 0.6; }
 .notice-problem { margin: 0 0 var(--space-2); padding: var(--space-2); border-radius: var(--radius-control); background: var(--danger-soft); color: var(--danger); }
+.main > .page > .banner { margin-right: var(--notice-room); }
