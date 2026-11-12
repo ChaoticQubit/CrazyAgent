@@ -310,6 +310,22 @@ pub struct ResearchRunner {
     reproving: Option<Arc<AtomicBool>>,
 }
 
+/// The words that start a research harness with no search path
+/// ([`crate::harnesses::interactive::launch_words`]): its file, or for a script that asks
+/// `env` for its interpreter, such as an npm-built Codex asking for `node`, that
+/// interpreter's absolute file and then the script. Input: the harness's real file. Output:
+/// the words, or the tool resolver's owner line when the interpreter is missing.
+fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
+    let words = vec![
+        program
+            .to_str()
+            .ok_or_else(|| RunError::Invalid("harness path is not text".into()))?
+            .to_owned(),
+    ];
+    assert!(!words.is_empty());
+    Ok(words)
+}
+
 /// Ends every research pane an earlier engine left in `host`, with every process its harness
 /// started, since that engine's jobs went back to the queue. Takes the host. Returns the
 /// host's plain code when it cannot list or end them.
@@ -1123,7 +1139,9 @@ impl ResearchRunner {
         if let Some(relay) = relay {
             write_relay_token(&home, relay)?;
         }
-        let mut launch = Command::new(&program);
+        let words = harness_words(&program)?;
+        let mut launch = Command::new(&words[0]);
+        launch.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
@@ -1709,7 +1727,9 @@ impl ResearchRunner {
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
-        let mut command = sandbox.command(&profile, &program);
+        let words = harness_words(&program)?;
+        let mut command = sandbox.command(&profile, Path::new(&words[0]));
+        command.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
@@ -4127,6 +4147,36 @@ mod tests {
             asked.load(Ordering::SeqCst),
             4,
             "a kept host is not looked for again"
+        );
+    }
+
+    /// An npm-built harness asks `env` for its interpreter, and a research agent runs with
+    /// no search path that finds Node from nvm, volta or Homebrew. Its launch words start
+    /// the interpreter the tool resolver finds, by its absolute file, then the script; a
+    /// native harness is one word. The stand-in asks for `sh`, found on every Mac.
+    #[test]
+    fn a_research_harness_script_starts_through_its_resolved_interpreter() {
+        let install = tempfile::tempdir().unwrap();
+        let base = install.path().canonicalize().unwrap();
+        let script = base.join("lib/node_modules/@openai/codex/bin/codex.js");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let interpreter =
+            crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+        assert_eq!(
+            harness_words(&script).unwrap(),
+            vec![
+                interpreter.program.to_str().unwrap().to_owned(),
+                script.to_str().unwrap().to_owned()
+            ]
+        );
+        let native = base.join("codex");
+        fs::write(&native, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&native, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            harness_words(&native).unwrap(),
+            vec![native.to_str().unwrap().to_owned()]
         );
     }
 

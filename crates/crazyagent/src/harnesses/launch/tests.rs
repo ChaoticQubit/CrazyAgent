@@ -762,6 +762,66 @@ fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
     assert!(std::fs::read_dir(&home).unwrap().next().is_none());
 }
 
+/// An npm-built harness is a script whose first line asks `env` for its interpreter, and a
+/// tools-off launch runs with PATH /usr/bin:/bin, where `env` finds no Node from nvm, volta
+/// or Homebrew. The headless launch starts the interpreter the tool resolver finds, by its
+/// absolute file, then the script's real file, and PATH stays exactly the tools-off value.
+/// The stand-in asks for `sh`, which the resolver finds in the system folders on every Mac.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_tools_off() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-env-script-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let install = tempfile::tempdir().unwrap();
+    let script = install
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("lib/node_modules/@anthropic-ai/claude-code/cli.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable: script.clone(),
+        working_dir: work.clone(),
+        account: AccountBinding::Subscription { home: home.clone() },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile.clone()),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let command = super::command(&request).unwrap();
+    let interpreter =
+        crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+    assert!(interpreter.program.is_absolute());
+    let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
+    let at = args
+        .iter()
+        .position(|argument| *argument == interpreter.program.as_os_str())
+        .expect("the resolved interpreter starts the harness");
+    assert_eq!(args.get(at + 1), Some(&script.as_os_str()));
+    let path = command
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value)
+        .unwrap();
+    assert_eq!(path, super::TOOLS_OFF_PATH);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
