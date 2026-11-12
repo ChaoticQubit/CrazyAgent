@@ -148,7 +148,9 @@ fn the_learn_offer_shows_ticked_under_the_buttons_and_space_unticks_it() {
 fn learning(shell: &mut Shell) -> Vec<LearningQuery> {
     std::iter::from_fn(|| shell.ctx.next_request())
         .filter_map(|request| match request {
-            Request::Learning(query) => Some(*query),
+            Request::Learning(query) if matches!(*query, LearningQuery::Mark { .. }) => {
+                Some(*query)
+            }
             _ => None,
         })
         .collect()
