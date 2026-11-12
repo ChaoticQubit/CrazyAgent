@@ -1447,6 +1447,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Memory => Flow::Open(Place::ProjectMemory {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
             ProjectReply::Usage => Flow::Open(Place::Usage),
             ProjectReply::AccountOrder(strategy) => {
                 self.set_order(strategy, ctx);

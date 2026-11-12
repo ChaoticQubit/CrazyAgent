@@ -29,18 +29,23 @@ export function rememberPrompt(token) {
 }
 
 /** Judges trial 4 check N-D24 on what the owner sees. Input: { token, writes, source, approved,
- * shown }: the token the fact holds, the Agent memory writes setting (save or ask), the source
- * line Settings, Memory shows under the fact before any approval, whether the trial approved it
- * there and the text of Context, Project memory afterwards. Output: the step detail. Throws
- * when the fact is not the master's, waits unapproved under Ask me first, or is not in Context,
- * Project memory (OP-22). */
-export function memoryVerdict({ token, writes, source, approved, shown }) {
+ * waiting, shown }: the token the fact holds, the Agent memory writes setting (save or ask), the
+ * source line Settings, Memory shows under the fact before any approval, whether the trial
+ * approved it in Context, Project memory, the text of that panel before approval and its text
+ * afterwards. Output: the step detail. Throws when the fact is not the master's, waits
+ * unapproved under Ask me first, waited with no waiting count in the project, is not in
+ * Context, Project memory, or the project sends the owner to Settings, Memory (OP-22). */
+export function memoryVerdict({ token, writes, source, approved, waiting, shown }) {
   assert(["save", "ask"].includes(writes), "Agent memory writes is save or ask");
-  assert(typeof source === "string" && typeof shown === "string" && typeof approved === "boolean", "the readings are text");
+  assert(typeof source === "string" && typeof waiting === "string" && typeof shown === "string" && typeof approved === "boolean", "the readings are text");
   if (!/\b(?:saved|asked) by Master$/u.test(source)) throw new Error(`the fact in Settings, Memory is not the master's: ${source}`);
   const waited = source.startsWith("Waiting for your approval.");
   if (waited && !approved) throw new Error(`the master's fact still waits for approval: ${source}`);
+  if (waited && !/\b\d+ memor(?:y waits|ies wait) for your approval\./u.test(waiting)) {
+    throw new Error("Context, Project memory does not say how many memories wait for approval");
+  }
+  if (/Settings, Memory/u.test(`${waiting}\n${shown}`)) throw new Error("Context, Project memory still sends the owner to Settings, Memory");
   if (!shown.includes(token)) throw new Error(`OP-22: Context, Project memory does not show the master's fact ${token}`);
-  const how = waited ? "it waited for approval under Ask me first and was approved in Settings, Memory" : "it was saved at once";
+  const how = waited ? "it waited for approval under Ask me first and was approved in Context, Project memory" : "it was saved at once";
   return `Agent memory writes: ${writes === "ask" ? "Ask me first" : "Save directly"}; the master saved ${token} with remember (${source}); ${how}; Context, Project memory shows it`;
 }

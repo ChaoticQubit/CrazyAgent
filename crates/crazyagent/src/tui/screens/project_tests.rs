@@ -4587,3 +4587,37 @@ mod overview_read {
         assert!(overview_asked(&mut screen, 101).is_some());
     }
 }
+
+#[test]
+fn p_on_the_context_tab_opens_project_memory_and_both_layouts_say_so() {
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    screen.context = Some(ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![ContextItem {
+            path: "context/documents/spec.md".into(),
+            kind: ContextKind::Document,
+            bytes: 20,
+            linked: false,
+        }],
+    });
+    let look = Look::plain();
+    for (width, height) in [(80, 24), (120, 36)] {
+        let drawn = project_screen(&mut screen, width, height, &look);
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("p opens Project memory."),
+            "{width}: {shown}"
+        );
+        assert!(!shown.contains("Settings, Memory"), "{width}: {shown}");
+        assert!(
+            drawn.help.contains(&("p", "Project memory")),
+            "{width}: {:?}",
+            drawn.help
+        );
+    }
+    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Memory);
+}

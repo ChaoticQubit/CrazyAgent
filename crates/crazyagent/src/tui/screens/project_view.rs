@@ -2211,6 +2211,7 @@ fn context(
         TABS,
         ("Esc", "Home"),
         ("O", "Open in IDE"),
+        ("p", "Project memory"),
     ];
     let mut lines = vec![
         spread(
@@ -2232,6 +2233,8 @@ fn context(
         tree.push(Row::default());
         tree.push(Row::of("Agents write results here", look.muted));
         tree.push(Row::of("as Markdown files.", look.muted));
+        tree.push(Row::default());
+        tree.push(Row::of(PROJECT_MEMORY_LINE, look.muted));
         let preview = preview_rows(screen, preview_width, room.saturating_sub(2), look);
         for index in 0..tree.len().max(preview.len()) {
             lines.push(
@@ -2259,8 +2262,11 @@ fn context(
         "Agents write results here as Markdown. o opens a file in your editor.",
         look.muted,
     ));
+    lines.push(Row::of(PROJECT_MEMORY_LINE, look.muted));
     (lines, None, help)
 }
+
+const PROJECT_MEMORY_LINE: &str = "p opens Project memory.";
 
 const LABEL: usize = 13;
 

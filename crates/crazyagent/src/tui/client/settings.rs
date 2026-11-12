@@ -340,7 +340,7 @@ pub(in crate::tui) enum SettingsEvent {
     RecountDecided(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
-    Memories(Result<Vec<SavedMemory>, String>),
+    Memories(Vec<MemoryScope>, Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
     MemoryApproved(Result<(), String>),
     AgentWrites(Result<AgentWrites, String>),
@@ -397,7 +397,7 @@ impl SettingsEvent {
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
-            SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
+            SettingsJob::Memories { scopes } => Self::Memories(scopes.clone(), Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
             SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
             SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
@@ -629,7 +629,7 @@ impl NativeOwner {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
             }
             SettingsJob::Memories { scopes } => {
-                SettingsEvent::Memories(self.all_memories(scopes, lost).await)
+                SettingsEvent::Memories(scopes.clone(), self.all_memories(scopes, lost).await)
             }
             SettingsJob::Plugins => SettingsEvent::Plugins(self.plugins(None, lost).await),
             SettingsJob::ProjectPlugins { project } => SettingsEvent::ProjectPlugins(
@@ -1465,7 +1465,7 @@ mod tests {
             nowhere,
             SettingsEvent::MemoryAdded(Err(code)) if code == "memory_project_missing"
         ));
-        let SettingsEvent::Memories(Ok(memories)) = native
+        let SettingsEvent::Memories(_, Ok(memories)) = native
             .settings(SettingsJob::Memories {
                 scopes: vec![MemoryScope::Global],
             })
@@ -1483,7 +1483,7 @@ mod tests {
             })
             .await;
         assert!(matches!(deleted, SettingsEvent::MemoryDeleted(Ok(()))));
-        let SettingsEvent::Memories(Ok(memories)) = native
+        let SettingsEvent::Memories(_, Ok(memories)) = native
             .settings(SettingsJob::Memories {
                 scopes: vec![MemoryScope::Global],
             })
@@ -2087,7 +2087,7 @@ mod tests {
         drop(db);
         let agent = "Ada (@lead-a)".to_owned();
         let listed = |event: SettingsEvent| {
-            let SettingsEvent::Memories(Ok(list)) = event else {
+            let SettingsEvent::Memories(_, Ok(list)) = event else {
                 panic!("the memories were not listed");
             };
             list
@@ -2157,7 +2157,7 @@ mod tests {
             SettingsEvent::Accounts(Err(code))
             | SettingsEvent::AllAccounts(Err(code))
             | SettingsEvent::Harnesses(Err(code))
-            | SettingsEvent::Memories(Err(code))
+            | SettingsEvent::Memories(_, Err(code))
             | SettingsEvent::MemoryAdded(Err(code))
             | SettingsEvent::Plugins(Err(code)) => Some(code),
             _ => None,
