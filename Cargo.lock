@@ -5516,7 +5516,7 @@ dependencies = [
 
 [[package]]
 name = "trackwright-cli"
-version = "0.2.0"
+version = "2.3.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -5529,7 +5529,7 @@ dependencies = [
 
 [[package]]
 name = "trackwright-core"
-version = "0.2.0"
+version = "2.3.0"
 dependencies = [
  "quick-xml",
  "rusqlite",
@@ -5542,7 +5542,7 @@ dependencies = [
 
 [[package]]
 name = "trackwright-mcp"
-version = "0.2.0"
+version = "2.3.0"
 dependencies = [
  "rusqlite",
  "serde_json",
