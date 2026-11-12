@@ -2454,18 +2454,33 @@ fn perform(
             if task.is_some() && matched == 0 {
                 return Ok(rejected("team_task_missing"));
             }
-            tx.execute(
-                "UPDATE team_tasks SET status='cancelled', finished_ms=?3, error='Cancelled by you'
-                 WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status IN ('queued','needs_pool')",
-                params![project.as_str(), task, now],
-            )
-            .map_err(error)?;
-            tx.execute(
-                "UPDATE team_tasks SET cancel_requested=1
-                 WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status='running'",
-                params![project.as_str(), task],
-            )
-            .map_err(error)?;
+            let by = if task.is_some() {
+                CancelBy::Task
+            } else {
+                CancelBy::All
+            };
+            let waiting = tx
+                .execute(
+                    "UPDATE team_tasks SET status='cancelled', finished_ms=?3, error=?4, cancel_by=?5
+                     WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status IN ('queued','needs_pool')",
+                    params![
+                        project.as_str(),
+                        task,
+                        now,
+                        cancel_reason(Some(by), CancelPath::Waiting),
+                        by.name()
+                    ],
+                )
+                .map_err(error)?;
+            let running = tx
+                .execute(
+                    "UPDATE team_tasks SET cancel_requested=1, cancel_by=?3
+                     WHERE project=?1 AND (?2 IS NULL OR id=?2) AND status='running'",
+                    params![project.as_str(), task, by.name()],
+                )
+                .map_err(error)?;
+            let text = cancel_audit(tx, *task, waiting, running)?;
+            note_owner_action(tx, project, &text, now);
             Ok(Outcome::Applied)
         }
         TeamAction::KeepWarm { on, version, .. } => {
@@ -2691,6 +2706,7 @@ fn perform(
         }
         TeamAction::Pause { .. } => {
             pause(tx, project, now)?;
+            note_owner_action(tx, project, OWNER_STOPPED_TEAM, now);
             Ok(Outcome::Applied)
         }
         TeamAction::Resume { .. } => {
@@ -2699,6 +2715,7 @@ fn perform(
                 [project.as_str()],
             )
             .map_err(error)?;
+            note_owner_action(tx, project, OWNER_RESUMED_TEAM, now);
             let baseline = usage_from(tx, project, hour_of(now))?;
             tx.execute(
                 "UPDATE team_token_budgets SET since_ms=?2, baseline=?3, reached_ms=NULL WHERE project=?1",
@@ -2712,6 +2729,8 @@ fn perform(
                 return Ok(rejected(code));
             }
             owner_stop(tx, project, *agent, now)?;
+            let text = format!("You stopped {}", audit_agent(tx, *agent));
+            note_owner_action(tx, project, &text, now);
             Ok(Outcome::Applied)
         }
         TeamAction::MessageAgent { agent, text, .. } => {
@@ -2740,11 +2759,12 @@ fn perform(
                     params![agent, project.as_str(), pane, now],
                 )
                 .map_err(error)?;
-            Ok(if changed == 0 {
-                rejected("team_teammate_not_found")
-            } else {
-                Outcome::Applied
-            })
+            if changed == 0 {
+                return Ok(rejected("team_teammate_not_found"));
+            }
+            let text = format!("You stopped a teammate of {}", audit_agent(tx, *agent));
+            note_owner_action(tx, project, &text, now);
+            Ok(Outcome::Applied)
         }
         TeamAction::SpreadAccounts { on, .. } => {
             if *on {
@@ -2907,6 +2927,133 @@ pub const TEAM_PAUSED: &str = "team_paused";
 
 /// The refusal code for a lead's wake of a sub-agent the master stopped (HB-S5-B).
 pub const MASTER_STOPPED: &str = "team_agent_master_stopped";
+
+/// Which owner request cancelled a task (F17): Cancel on that one task, or Pause all, which
+/// cancels every task of the project. Stored on the task beside its cancel request, so each
+/// later path names the request the owner really made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelBy {
+    Task,
+    All,
+}
+
+impl CancelBy {
+    /// The stored name of the request. Output: `task` or `all`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Task => "task",
+            Self::All => "all",
+        }
+    }
+
+    /// Reads a stored request name; a request stored before names were kept reads as a
+    /// Cancel of one task. Input: the stored name or None. Output: the request.
+    pub fn named(name: Option<&str>) -> Self {
+        match name {
+            Some("all") => Self::All,
+            _ => Self::Task,
+        }
+    }
+}
+
+/// Where a task was when it ended cancelled (F17): waiting in the queue, stopped while it
+/// ran, cancelled after its agent was stopped and its work held, or stopped while
+/// CrazyAgent was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelPath {
+    Waiting,
+    Running,
+    Held,
+    Closed,
+}
+
+/// The reason a cancelled task shows, one per path and owner request (F17), so a task is
+/// never marked "Cancelled by you" for something the owner did not do. Takes the owner's
+/// request, None when no owner request stopped it, and the path. Returns the plain line.
+pub fn cancel_reason(by: Option<CancelBy>, path: CancelPath) -> &'static str {
+    match (path, by) {
+        (CancelPath::Waiting, Some(CancelBy::Task) | None) => "Cancelled by you",
+        (CancelPath::Waiting, Some(CancelBy::All)) => "Cancelled when you paused all agents",
+        (CancelPath::Running, Some(CancelBy::Task)) => "Stopped by you while it ran",
+        (CancelPath::Running, Some(CancelBy::All)) => {
+            "Stopped while it ran, when you paused all agents"
+        }
+        (CancelPath::Running, None) => "Stopped when CrazyAgent stopped its agent",
+        (CancelPath::Held, Some(CancelBy::Task) | None) => {
+            "Cancelled by you while its agent was stopped"
+        }
+        (CancelPath::Held, Some(CancelBy::All)) => {
+            "Cancelled while its agent was stopped, when you paused all agents"
+        }
+        (CancelPath::Closed, Some(CancelBy::Task) | None) => {
+            "Cancelled by you; CrazyAgent closed before it stopped"
+        }
+        (CancelPath::Closed, Some(CancelBy::All)) => {
+            "Cancelled when you paused all agents; CrazyAgent closed before it stopped"
+        }
+    }
+}
+
+/// The activity line of the owner's Stop all of a team (F17 audit).
+pub const OWNER_STOPPED_TEAM: &str = "You stopped the team";
+/// The activity line of the owner's start of a stopped team again (F17 audit).
+pub const OWNER_RESUMED_TEAM: &str = "You started the team again";
+/// The longest task title an owner action line quotes.
+const AUDIT_TITLE_BYTES_MAX: usize = 80;
+
+/// Writes the activity line of an owner Cancel (F17 audit): the one task by number and
+/// title, or Pause all with how many waiting tasks it cancelled and running ones it stops.
+/// Takes the transaction, the task named or None and the two counts. Returns the line.
+fn cancel_audit(
+    tx: &Transaction<'_>,
+    task: Option<i64>,
+    waiting: usize,
+    running: usize,
+) -> Result<String, EngineError> {
+    let Some(task) = task else {
+        return Ok(format!(
+            "You paused all agents: {waiting} waiting {} cancelled, {running} running {} stopping",
+            if waiting == 1 { "task" } else { "tasks" },
+            if running == 1 { "task" } else { "tasks" }
+        ));
+    };
+    assert!(waiting + running <= 1);
+    let prompt: String = tx
+        .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(error)?
+        .unwrap_or_default();
+    let title = bound_text(
+        prompt.lines().next().unwrap_or_default().trim(),
+        AUDIT_TITLE_BYTES_MAX,
+    );
+    let verb = if running == 1 { "stopped" } else { "cancelled" };
+    Ok(format!("You {verb} task {task}: {title}"))
+}
+
+/// Names a team agent in an owner action line the way the team list names it, or by its
+/// number when its row cannot be read. Takes the transaction and the agent. Returns the name.
+fn audit_agent(tx: &Transaction<'_>, agent: i64) -> String {
+    crate::activity::agent_actor(tx, agent).unwrap_or_else(|_| format!("agent {agent}"))
+}
+
+/// Records one owner team action in the project's activity (F17 audit), as the owner's own
+/// row, so every cancel, stop and pause the owner made can be read back with its time. A
+/// failed write is logged by its plain code and never refuses the action. Takes the
+/// transaction, the project, the line and the time.
+fn note_owner_action(tx: &Transaction<'_>, project: &ProjectId, text: &str, now: i64) {
+    let item = crate::activity::NewActivity {
+        kind: crate::activity::ActivityKind::TeamAction,
+        actor: crate::activity::OWNER_ACTOR,
+        agent: None,
+        goal: None,
+        text,
+        change_set: None,
+    };
+    crate::activity::note(tx, project, &item, now);
+}
 
 /// Tells whether the owner stopped a sub-agent that has not started again since (AW-1), so
 /// only the owner's Wake or restart may start it. Takes a connection and the agent. Returns
@@ -3664,6 +3811,11 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "pane", "TEXT"),
         ("team_agents", "mode", "TEXT"),
         ("team_tasks", "mode", "TEXT"),
+        (
+            "team_tasks",
+            "cancel_by",
+            "TEXT CHECK(cancel_by IS NULL OR cancel_by IN ('task','all'))",
+        ),
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),

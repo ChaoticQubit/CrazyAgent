@@ -3,10 +3,11 @@ use super::events::{
     OWNER_STOPPED_AGENT, OWNER_WOKE,
 };
 use super::{
-    AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
-    MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy, TaskSource, TaskStatus, TeamAccount,
-    TeamReach, admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness,
-    names, now_ms, parse_delegations, parse_wakes, pick_account_held, tool,
+    AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
+    DELEGATIONS_PER_REPLY_MAX, Delegation, MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy,
+    TaskSource, TaskStatus, TeamAccount, TeamReach, admit, agent_row, append_message, bound_text,
+    eligible_accounts, launch_harness, names, now_ms, parse_delegations, parse_wakes,
+    pick_account_held, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -759,6 +760,36 @@ fn running_tasks(
         .collect())
 }
 
+/// Ends running tasks the owner asked to cancel as cancelled, each with the reason of its
+/// request and path (F17): every such task, or only `task` when one is named. A task ended
+/// while CrazyAgent was closed also drops its agent. Takes the connection, the task or
+/// None, the path and the time in ms. Returns how many tasks ended, or a SQLite failure.
+fn cancel_requested_tasks(
+    connection: &Connection,
+    task: Option<i64>,
+    path: CancelPath,
+    now: i64,
+) -> Result<usize, EngineError> {
+    assert!(matches!(path, CancelPath::Held | CancelPath::Closed));
+    let ended = connection
+        .execute(
+            "UPDATE team_tasks SET status='cancelled', finished_ms=?2,
+                 error=CASE cancel_by WHEN 'all' THEN ?3 ELSE ?4 END,
+                 agent=CASE WHEN ?5 THEN NULL ELSE agent END
+             WHERE status='running' AND cancel_requested=1 AND (?1 IS NULL OR id=?1)",
+            params![
+                task,
+                now,
+                super::cancel_reason(Some(CancelBy::All), path),
+                super::cancel_reason(Some(CancelBy::Task), path),
+                path == CancelPath::Closed
+            ],
+        )
+        .map_err(error)?;
+    assert!(task.is_none() || ended <= 1);
+    Ok(ended)
+}
+
 /// Tells the project's activity how each task in `left` left its agent: stopped when the
 /// owner asked to cancel it, else stopped and back in the queue. Takes the connection, the
 /// tasks and the time in ms.
@@ -936,11 +967,10 @@ impl TeamRuntime {
                WHERE status IN ('starting','idle','working');
              UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
                WHERE status='running' AND cancel_requested=0;
-             UPDATE team_tasks SET status='cancelled', agent=NULL, error='Cancelled by you', finished_ms={now}
-               WHERE status='running' AND cancel_requested=1;
              UPDATE team_messages SET state='pending' WHERE state='sent';"
         ))
         .map_err(error)?;
+        cancel_requested_tasks(&tx, None, CancelPath::Closed, now)?;
         note_left_tasks(&tx, &left, now);
         tx.commit().map_err(error)?;
         delivery::settle(&connection)?;
@@ -2989,13 +3019,7 @@ impl TeamRuntime {
                         )
                         .map_err(error)?;
                 }
-                self.connection
-                    .execute(
-                        "UPDATE team_tasks SET status='cancelled', error='Cancelled by you', finished_ms=?2
-                         WHERE id=?1 AND status='running'",
-                        params![task, now],
-                    )
-                    .map_err(error)?;
+                cancel_requested_tasks(&self.connection, Some(task), CancelPath::Held, now)?;
                 note_left_tasks(&self.connection, &left, now);
             }
             Busy::Message(message) => {
@@ -9186,18 +9210,20 @@ impl TeamRuntime {
         end: TurnEnd,
         cause: Option<&str>,
     ) -> Result<(), EngineError> {
-        let Some(attempts): Option<i64> = self
+        let Some((attempts, asked)): Option<(i64, Option<String>)> = self
             .connection
             .query_row(
-                "SELECT attempts FROM team_tasks WHERE id=?1",
+                "SELECT attempts, CASE WHEN cancel_requested=1 THEN COALESCE(cancel_by,'task') END
+                 FROM team_tasks WHERE id=?1",
                 [task],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(error)?
         else {
             return Ok(());
         };
+        let asked = asked.map(|name| CancelBy::named(Some(&name)));
         let left = running_tasks(&self.connection, "id=?1", [task])?;
         assert!(left.len() <= 1);
         let retry = attempts < self.limits.attempts_max;
@@ -9205,7 +9231,10 @@ impl TeamRuntime {
         let timed = format!("The sub-agent was {}", cause.unwrap_or(TIME_LIMIT_NOTE));
         let (status, problem) = match end {
             TurnEnd::Success => (TaskStatus::Done, None),
-            TurnEnd::Cancelled => (TaskStatus::Cancelled, Some("Cancelled by you")),
+            TurnEnd::Cancelled => (
+                TaskStatus::Cancelled,
+                Some(super::cancel_reason(asked, CancelPath::Running)),
+            ),
             TurnEnd::Interrupted => (TaskStatus::Cancelled, Some("Interrupted by you")),
             TurnEnd::RateLimited => (
                 if retry {

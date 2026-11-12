@@ -6841,3 +6841,301 @@ fn opening_the_runtime_makes_the_usage_tables_its_turn_ends_write() {
         .unwrap();
     assert_eq!(tables, ["usage_tokens", "usage_turns"]);
 }
+
+/// A team database with one project of a one-slot codex plan, the activity tables and the
+/// owner's pool. Returns the folder, the connection, the setup and the pool.
+fn audited_team(project: &str) -> (tempfile::TempDir, Connection, StoredSetup, ModelAccess) {
+    let (directory, connection) = database();
+    crate::activity::initialize(&connection).unwrap();
+    let setup = stored(
+        project,
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access(project, &["local-a"]);
+    (directory, connection, setup, pool)
+}
+
+/// The owner's team actions a project's activity shows, oldest first, as (actor, text).
+fn owner_actions(connection: &Connection, project: &ProjectId) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = crate::activity::listed(connection, project, 50)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::TeamAction)
+        .map(|item| (item.actor, item.text))
+        .collect();
+    rows.reverse();
+    rows
+}
+
+/// F17: every cancel path and owner request has its own reason, so no path reads as another,
+/// and only a Cancel of one waiting task reads "Cancelled by you".
+#[test]
+fn each_cancel_path_and_owner_request_names_its_own_reason() {
+    let requests = [Some(CancelBy::Task), Some(CancelBy::All), None];
+    let paths = [
+        CancelPath::Waiting,
+        CancelPath::Running,
+        CancelPath::Held,
+        CancelPath::Closed,
+    ];
+    let mut seen = std::collections::BTreeMap::new();
+    for path in paths {
+        for by in requests {
+            let reason = cancel_reason(by, path);
+            assert!(!reason.is_empty() && reason.len() <= 120, "{reason}");
+            assert!(!reason.contains('\u{2014}'), "{reason}");
+            let kept = by.unwrap_or(CancelBy::Task);
+            let shared = by.is_none() && path != CancelPath::Running;
+            if !shared {
+                assert_eq!(
+                    seen.insert(reason, (path, kept)),
+                    None,
+                    "{reason} names two paths"
+                );
+            }
+        }
+    }
+    assert_eq!(seen.len(), 9);
+    assert_eq!(
+        cancel_reason(Some(CancelBy::Task), CancelPath::Waiting),
+        "Cancelled by you"
+    );
+    assert_eq!(
+        cancel_reason(Some(CancelBy::All), CancelPath::Waiting),
+        "Cancelled when you paused all agents"
+    );
+    assert_eq!(
+        cancel_reason(None, CancelPath::Running),
+        "Stopped when CrazyAgent stopped its agent"
+    );
+    assert_eq!(CancelBy::named(Some("all")), CancelBy::All);
+    assert_eq!(CancelBy::named(Some("task")), CancelBy::Task);
+    assert_eq!(CancelBy::named(None), CancelBy::Task);
+}
+
+/// F17: Pause all, a Cancel that names no task, marks every waiting task with its own reason,
+/// keeps which request it was on a running task for the runtime, and logs the owner's action
+/// with its counts; a Cancel of one task keeps "Cancelled by you" and logs that task.
+#[test]
+fn pause_all_and_a_one_task_cancel_each_keep_their_reason_and_an_owner_action_row() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-audit");
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for prompt in [
+        "Write login.md",
+        "Write signup.md",
+        "Write reset.md",
+        "Write help.md",
+    ] {
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::Delegate {
+                    project_id: project.clone(),
+                    harness: None,
+                    prompt: prompt.into(),
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Cancel {
+                project_id: project.clone(),
+                task: Some(1),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.execute("UPDATE team_tasks SET status='running' WHERE id=2", [])
+        .unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Cancel {
+                project_id: project.clone(),
+                task: None,
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let rows: Vec<(i64, String, Option<String>, bool, Option<String>)> = connection
+        .prepare("SELECT id,status,error,cancel_requested,cancel_by FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                1,
+                "cancelled".into(),
+                Some("Cancelled by you".into()),
+                false,
+                Some("task".into())
+            ),
+            (2, "running".into(), None, true, Some("all".into())),
+            (
+                3,
+                "cancelled".into(),
+                Some("Cancelled when you paused all agents".into()),
+                false,
+                Some("all".into())
+            ),
+            (
+                4,
+                "cancelled".into(),
+                Some("Cancelled when you paused all agents".into()),
+                false,
+                Some("all".into())
+            ),
+        ]
+    );
+    assert_eq!(
+        owner_actions(&connection, &project),
+        [
+            (
+                crate::activity::OWNER_ACTOR.to_owned(),
+                "You cancelled task 1: Write login.md".to_owned()
+            ),
+            (
+                crate::activity::OWNER_ACTOR.to_owned(),
+                "You paused all agents: 2 waiting tasks cancelled, 1 running task stopping"
+                    .to_owned()
+            ),
+        ]
+    );
+}
+
+/// F17: the owner's stop of a sub-agent, Stop all and the start again are each logged as the
+/// owner's own team action, in the order they were made.
+#[test]
+fn owner_stops_and_the_team_start_again_are_logged_as_owner_actions() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-audit-stop");
+    let project = setup.project_id.clone();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','codex',0,'idle',1,1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    let named = crate::activity::agent_actor(&connection, agent).unwrap();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent,
+        },
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+        TeamAction::Resume {
+            project_id: project.clone(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.commit().unwrap();
+    let owner = crate::activity::OWNER_ACTOR.to_owned();
+    assert_eq!(
+        owner_actions(&connection, &project),
+        [
+            (owner.clone(), format!("You stopped {named}")),
+            (owner.clone(), OWNER_STOPPED_TEAM.to_owned()),
+            (owner, OWNER_RESUMED_TEAM.to_owned()),
+        ]
+    );
+}
+
+/// F17: a task the owner asked to cancel that still ran when CrazyAgent closed ends at the
+/// next start with the reason of the request the owner made, Pause all or Cancel of that one
+/// task, never another path's.
+#[test]
+fn a_cancel_left_running_at_close_names_the_owner_request_at_the_next_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms,cancel_requested,cancel_by) VALUES
+               ('team-closed','owner','codex',0,'one','running',1,1,1,'task'),
+               ('team-closed','owner','codex',0,'all','running',1,1,1,'all'),
+               ('team-closed','owner','codex',0,'old','running',1,1,1,NULL);",
+        )
+        .unwrap();
+    let reopened = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(|| None),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    drop(reopened);
+    let rows: Vec<(String, String, Option<String>, Option<i64>)> = connection
+        .prepare("SELECT prompt,status,error,agent FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let closed = |by| Some(cancel_reason(Some(by), CancelPath::Closed).to_owned());
+    assert_eq!(
+        rows,
+        [
+            (
+                "one".into(),
+                "cancelled".into(),
+                closed(CancelBy::Task),
+                None
+            ),
+            (
+                "all".into(),
+                "cancelled".into(),
+                closed(CancelBy::All),
+                None
+            ),
+            (
+                "old".into(),
+                "cancelled".into(),
+                closed(CancelBy::Task),
+                None
+            ),
+        ]
+    );
+}

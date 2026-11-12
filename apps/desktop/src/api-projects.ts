@@ -119,7 +119,8 @@ export type ActivityKind =
   | "work_complete"
   | "work_closed"
   | "phase"
-  | "test";
+  | "test"
+  | "team_action";
 
 export interface ActivityItem {
   id: number;

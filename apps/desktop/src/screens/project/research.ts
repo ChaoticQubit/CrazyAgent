@@ -464,6 +464,7 @@ const FILTER_OF: Record<ActivityKind, Exclude<ActivityFilter, "all"> | null> = {
   work_closed: "task",
   phase: "phase",
   test: "tests",
+  team_action: "task",
 };
 
 /** The chip an event shows under besides All. Input: its kind. Output: the chip, or null for
