@@ -2393,8 +2393,9 @@ async fn a_sign_in_check_the_host_could_not_run_leaves_the_earlier_sign_in_to_be
 /// v2.4.0 owner update bug: four engine starts in five minutes cut every re-proof check, an
 /// engine stop settled them `native_auth_interrupted`, a lost custody session
 /// `native_auth_recovery_required` and a slow status `native_auth_claude_deadline`, and no
-/// later start re-proved the accounts. Each such check is looked past; a provider's signed-out
-/// answer still ends the re-proof.
+/// later start re-proved the accounts. Each such check of an earlier run is looked past; one
+/// cut in the running engine stays, so it is not re-run before every turn, and a provider's
+/// signed-out answer still ends the re-proof.
 #[tokio::test]
 async fn a_sign_in_check_cut_before_the_provider_answered_leaves_the_earlier_sign_in_to_be_re_proved()
  {
@@ -2408,6 +2409,8 @@ async fn a_sign_in_check_cut_before_the_provider_answered_leaves_the_earlier_sig
         case.move_to_earlier_run("claude-a");
         case.check("claude-a").await;
         case.end_newest_check("claude-a", Some(code));
+        assert!(case.stale().await.is_empty(), "{code} in this run");
+        case.move_to_earlier_run("claude-a");
         assert_eq!(case.stale().await, vec![reference("claude-a")], "{code}");
         case.finish().await;
     }
@@ -2416,6 +2419,7 @@ async fn a_sign_in_check_cut_before_the_provider_answered_leaves_the_earlier_sig
     case.move_to_earlier_run("claude-a");
     case.check("claude-a").await;
     case.end_newest_check("claude-a", None);
+    case.move_to_earlier_run("claude-a");
     assert!(case.stale().await.is_empty());
     case.finish().await;
 }

@@ -1319,7 +1319,7 @@ fn earlier_run(
         .map_err(error)?;
     for bytes in rows {
         let fact = decode_fact(&bytes)?;
-        if never_ran(&fact) {
+        if never_ran(&fact, host) {
             continue;
         }
         if fact.phase != NativeAuthPhase::AuthenticatedObserved
@@ -1341,17 +1341,21 @@ fn earlier_run(
 
 /// Tells whether an operation was an account check that got no answer from the provider,
 /// which says nothing about the sign-in it would have checked: the host could not run it,
-/// or it ended unanswered, cut by an engine stop, a lost custody session or its time bound.
-/// Input: the operation's fact. Output: true for such an existing-account check.
-fn never_ran(fact: &NativeAuthFact) -> bool {
+/// or an earlier run's check ended unanswered, cut by an engine stop, a lost custody session
+/// or its time bound. A check cut in the running host stays, so it is not retried each turn.
+/// Inputs: the operation's fact and the running host. Output: true for such a check.
+fn never_ran(fact: &NativeAuthFact, host: &HostStamp) -> bool {
     let unanswered = match fact.phase {
         NativeAuthPhase::Unavailable => {
             fact.code.as_deref() == Some("native_auth_host_unavailable")
         }
-        NativeAuthPhase::Failed | NativeAuthPhase::Uncertain => fact
-            .code
-            .as_deref()
-            .is_some_and(|code| UNANSWERED_CHECK_CODES.contains(&code)),
+        NativeAuthPhase::Failed | NativeAuthPhase::Uncertain => {
+            fact.binding.engine_epoch != host.engine_epoch
+                && fact
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| UNANSWERED_CHECK_CODES.contains(&code))
+        }
         _ => false,
     };
     unanswered
