@@ -1,4 +1,5 @@
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import assert from "node:assert/strict";
+import { lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from "node:fs";
 import { userInfo } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -25,4 +26,24 @@ export function chooseHome(fresh, env = process.env, realHome = userInfo().homed
   if (info.uid !== process.getuid()) throw new Error(`CRAZYAGENT_E2E_HOME must be owned by this user: ${named}`);
   if (realpathSync(named) === realpathSync(realHome)) throw new Error(`CRAZYAGENT_E2E_HOME must not be the real home: ${named}`);
   return { home: named, prepared: true };
+}
+
+/** Makes one native run's projects folder: a new private Projects-XXXXXX folder in the home,
+ * so runs that share a prepared home never meet an earlier run's projects or its folder.
+ * Input: the home. Output: the folder's path. */
+export function runProjects(home) {
+  const projects = mkdtempSync(join(home, "Projects-"));
+  const info = lstatSync(projects);
+  assert(info.isDirectory() && !info.isSymbolicLink(), "the run's projects folder is a new folder");
+  assert.equal(info.mode & 0o777, 0o700, "the run's projects folder is private");
+  return projects;
+}
+
+/** Removes the WebKit folder an earlier run left in the home before the app starts, so the
+ * app's web storage starts empty as in a fresh home, where there is none to remove. The home's
+ * keychain and every other folder stay. Input: the home. Output: nothing. */
+export function clearWebStore(home) {
+  const store = join(home, "Library", "WebKit");
+  rmSync(store, { recursive: true, force: true });
+  assert.throws(() => lstatSync(store), { code: "ENOENT" }, "no web store is left for the run");
 }

@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chooseHome } from "./run-layout.mjs";
+import { chooseHome, clearWebStore } from "./run-layout.mjs";
 
 process.umask(0o077);
 const app = process.env.WD_APP;
@@ -138,7 +138,7 @@ let engine;
  * rejects when it exits or never answers. */
 function startEngine() {
   mkdirSync(join(root, "bin"), { mode: 0o700 });
-  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: process.env.TMPDIR ?? "/tmp", LANG: "en_US.UTF-8" };
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: join(root, "codex"), TMPDIR: process.env.TMPDIR ?? "/tmp", LANG: "en_US.UTF-8" };
   const args = ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings",
     "--codex-executable", standIn("codex", CODEX), "--claude-executable", standIn("claude", CLAUDE)];
   engine = spawn(engineBinary, args, { cwd: runtime, env, stdio: ["ignore", "pipe", "pipe"] });
@@ -205,7 +205,9 @@ export const config = {
     } catch {
       throw new Error(`MS_ROOT must name a new folder: ${root}`);
     }
-    mkdirSync(join(home, ".codex"), { recursive: true, mode: 0o700 });
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    mkdirSync(join(root, "codex"), { mode: 0o700 });
+    clearWebStore(home);
     mkdirSync(runtime, { mode: 0o700 });
     settings(runtime);
     try {
