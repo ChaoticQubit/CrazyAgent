@@ -124,7 +124,7 @@ function PluginDialogs({ dialog, accounts, busy, failure, keyRef, actions }: {
         <Button variant="primary" disabled={dialog.yaml.trim() === ""} pending={busy} pendingLabel="Checking..." onClick={actions.onCheck}>Check</Button></>}>
       <div className="pj-stack-s">
         {problem}
-        <TextArea id="app-plugin-yaml" label="Plugin manifest (YAML)" rows={12} value={dialog.yaml} maxLength={MANIFEST_CHARS_MAX} onValue={actions.onYaml}
+        <TextArea id="app-plugin-yaml" label="Plugin manifest (YAML)" rows={12} value={dialog.yaml} maxLength={MANIFEST_CHARS_MAX + 1} onValue={actions.onYaml}
           helper="Paste a manifest or pick a .yaml file. Nothing runs until you confirm its trust screen." />
         <span><Button disabled={busy} onClick={actions.onPick}>Pick a .yaml file</Button></span>
       </div>
