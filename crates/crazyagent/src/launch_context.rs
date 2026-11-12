@@ -2173,16 +2173,23 @@ static PARKED_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 /// own through one descriptor ([`release_skills`]), and is moved once more, so a pin an
 /// earlier run left refuses no Codex launch a Claude Code launch would make (DEC-141 PA-19).
 /// A file with a second link keeps its pins: it may be the owner's file an agent linked in. A
-/// `skills` of another user is left alone. Input: the validated agent home. Output: Ok, or
-/// [`SKILLS_KEPT`] when `skills` stays in the home, comes back, or is no longer a folder once
-/// the engine made it.
+/// `skills` of another user is left alone. A home the engine cannot open, such as one whose
+/// ACL denies listing, is released by its fixed path and opened once more, and refused when it
+/// still does not open, so its `skills` never stays for Codex to load (ACL r1 F2). Input: the
+/// validated agent home. Output: Ok, or [`SKILLS_KEPT`] when the home stays closed or `skills`
+/// stays in the home, comes back, or is no longer a folder once the engine made it.
 #[cfg(unix)]
 fn remove_copies(home: &Path) -> Result<(), LaunchError> {
     use rustix::fs::{AtFlags, FileType};
     assert!(home.is_absolute());
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let Ok(parent) = rustix::fs::open(home, folder, Mode::empty()) else {
-        return Ok(());
+    let parent = match rustix::fs::open(home, folder, Mode::empty()) {
+        Ok(parent) => parent,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(_) => {
+            release(home, false);
+            rustix::fs::open(home, folder, Mode::empty()).map_err(|_| failure(SKILLS_KEPT))?
+        }
     };
     let stat = match rustix::fs::statat(&parent, "skills", AtFlags::SYMLINK_NOFOLLOW) {
         Err(rustix::io::Errno::NOENT) => return Ok(()),
@@ -2228,7 +2235,10 @@ thread_local! {
 /// a link and changed only when that open entry is this user's folder or a file with one link,
 /// so an owner's file an agent links in at that name, before or after the check, keeps its
 /// pins. Flags go through `/dev/fd/<n>`, the ACL through `/bin/chmod -N` on the descriptor
-/// given as its standard input. Input: the home's open folder.
+/// given as its standard input, and a folder gains the owner's read, write and search through
+/// `fchmod`, since moving a folder to a new parent needs write on it (ACL r1 F2). A folder that
+/// does not open, with no read or an ACL denying listing, is left as it is. Input: the home's
+/// open folder.
 #[cfg(target_os = "macos")]
 fn release_skills(parent: &std::os::fd::OwnedFd) {
     use nix::sys::stat::FileFlag;
@@ -2271,6 +2281,9 @@ fn release_skills(parent: &std::os::fd::OwnedFd) {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
     );
+    if kind == FileType::Directory {
+        let _ = rustix::fs::fchmod(&entry, Mode::from_raw_mode(found.st_mode) | Mode::RWXU);
+    }
 }
 
 /// Leaves `skills` as it is off macOS, where the engine releases nothing an agent set; a
@@ -2420,15 +2433,21 @@ const RELEASED_TREE: [&[&str]; 4] = [
     ],
 ];
 
-/// Clears the immutable and append only flags and every ACL entry of one path and adds the
-/// owner's read, write and folder search, or releases a tree with [`RELEASED_TREE`], never
-/// following a link and never changing a file with a second link, which may be the owner's
-/// file an agent linked in (V231-ACL). A failure leaves the path as it was; the caller checks
-/// what is still there. Inputs: the absolute path and whether to walk the tree under it.
+/// Clears the immutable and append only flags and every ACL entry of one folder and adds the
+/// owner's read, write and search, or releases a tree with [`RELEASED_TREE`], never following
+/// a link and never changing a file with a second link, which may be the owner's file an agent
+/// linked in (V231-ACL). The one folder is a validated home, never a link, whose ACL is cleared
+/// by path because `chmod -h -N` opens it and fails when it denies listing (ACL r1 F2). A
+/// failure leaves the path as it was; the caller checks what is still there. Inputs: the
+/// absolute path and whether to walk the tree under it.
 #[cfg(target_os = "macos")]
 fn release(path: &Path, tree: bool) {
     use std::process::{Command, Stdio};
     assert!(path.is_absolute());
+    assert!(
+        tree || !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()),
+        "a home released by its path is never a link"
+    );
     let commands: Vec<Command> = if tree {
         RELEASED_TREE
             .iter()
@@ -2441,12 +2460,11 @@ fn release(path: &Path, tree: bool) {
     } else {
         let mut flags = Command::new("/usr/bin/chflags");
         flags.args(["-h", "nouchg,nouappnd"]).arg(path);
-        let modes = ["-N", "u+rwX"].map(|change| {
-            let mut command = Command::new("/bin/chmod");
-            command.args(["-h", change]).arg(path);
-            command
-        });
-        std::iter::once(flags).chain(modes).collect()
+        let mut acl = Command::new("/bin/chmod");
+        acl.arg("-N").arg(path);
+        let mut mode = Command::new("/bin/chmod");
+        mode.args(["-h", "u+rwX"]).arg(path);
+        vec![flags, acl, mode]
     };
     for mut command in commands {
         let _ = crate::spawn_gate::status(
