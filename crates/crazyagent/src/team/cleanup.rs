@@ -300,9 +300,10 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 }
 
 /// Says whether an agent's worktree record waits in `team_retiring` for its files to go,
-/// not marked as left behind, so a task sent to it waits instead of failing (F10). Inputs:
-/// the store, the project and the agent. Output: the answer, false before the table is
-/// made.
+/// a record marked as left behind included, since a later removal deletes what is at its
+/// path, which a fresh start would reuse; a task sent to it then waits instead of failing
+/// or starting (F10). Inputs: the store, the project and the agent. Output: the answer,
+/// false before the table is made.
 pub(crate) fn retiring(db: &Connection, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
     let table: bool = db
         .query_row(
@@ -315,7 +316,7 @@ pub(crate) fn retiring(db: &Connection, project: &ProjectId, id: i64) -> Result<
         return Ok(false);
     }
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM team_retiring WHERE agent=?1 AND project=?2 AND leftover=0)",
+        "SELECT EXISTS(SELECT 1 FROM team_retiring WHERE agent=?1 AND project=?2)",
         params![id, project.as_str()],
         |row| row.get(0),
     )

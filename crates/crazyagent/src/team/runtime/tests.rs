@@ -8765,7 +8765,8 @@ fn retire_like_cleanup(fixture: &Fixture, agent: i64) -> PathBuf {
 }
 
 /// F10: a task pinned to a sub-agent that cleanup then retired is never failed. While its
-/// old record still waits in `team_retiring` the task stays queued and nothing starts; once
+/// old record still waits in `team_retiring`, left behind or not, the task stays queued and
+/// nothing starts; once
 /// the record is gone the agent starts again under the same id and name in a new worktree
 /// on the current tip, with a fresh conversation, and gets the task.
 #[cfg(target_os = "macos")]
@@ -8825,6 +8826,24 @@ fn a_task_for_a_retired_sub_agent_waits_while_it_retires_then_starts_it_fresh_un
         "the task waits while the agent retires"
     );
     assert_eq!(fixture.agent_status(member).0, AgentStatus::Stopped);
+    assert_eq!(launches(&fixture, member).len(), 1, "nothing started yet");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_retiring SET leftover=1 WHERE agent=?1",
+            [member],
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        status(&fixture),
+        "queued",
+        "a record left behind holds the task too, since its removal deletes what is at the path"
+    );
     assert_eq!(launches(&fixture, member).len(), 1, "nothing started yet");
 
     fixture

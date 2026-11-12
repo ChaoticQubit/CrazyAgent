@@ -679,6 +679,7 @@ pub struct TeamRuntime {
     resuming: Option<(i64, Resume)>,
     settled: bool,
     naming: Option<i64>,
+    fresh_start: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
     claims_next: BTreeMap<ProjectId, Instant>,
@@ -984,6 +985,7 @@ impl TeamRuntime {
             resuming: None,
             settled: false,
             naming: None,
+            fresh_start: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
@@ -5555,7 +5557,10 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    match self.wake(stored, pinned, &harness, slot.tools, &account, None)? {
+                    self.fresh_start = retired.then_some(pinned);
+                    let woken = self.wake(stored, pinned, &harness, slot.tools, &account, None);
+                    self.fresh_start = None;
+                    match woken? {
                         Ok((agent, resumed)) => {
                             woken_fresh = !resumed;
                             if retired {
@@ -6248,7 +6253,7 @@ impl TeamRuntime {
             _ => None,
         };
         let again = again.or(own.as_ref());
-        let resume = if self.retired(&stored.project_id, id)? {
+        let resume = if self.fresh_start == Some(id) {
             None
         } else {
             self.kept_conversation(id, harness, &account.connection)?
@@ -6307,8 +6312,9 @@ impl TeamRuntime {
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
     /// or the plain reason it could not start; the worktree must still be the one recorded
-    /// when it first started, except for a sub-agent cleanup retired, which starts under its
-    /// own id and name in a new worktree on the current tip (F10).
+    /// when it first started, except for a retired sub-agent whose pinned task the route
+    /// loop marked in `fresh_start`, which starts under its own id and name in a new
+    /// worktree on the current tip (F10).
     #[allow(clippy::too_many_arguments)]
     fn revive(
         &mut self,
@@ -6336,13 +6342,16 @@ impl TeamRuntime {
             .map_err(error)?;
         let kept = kept.map(|(repository, worktree, git_dir)| [repository, worktree, git_dir]);
         if kept.is_none() {
-            if role != AgentRole::Sub {
+            if role != AgentRole::Sub || self.fresh_start != Some(id) {
                 return Ok(Err("the agent's worktree is no longer known".into()));
             }
             if super::cleanup::retiring(&self.connection, &stored.project_id, id)? {
                 return Ok(Err("the agent's old worktree is still being removed".into()));
             }
             self.resuming = None;
+            self.connection
+                .execute("DELETE FROM team_agent_conversations WHERE agent=?1", [id])
+                .map_err(error)?;
         }
         let changed = self
             .connection
