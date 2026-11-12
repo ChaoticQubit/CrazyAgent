@@ -1511,7 +1511,8 @@ pub(crate) enum ReadOnlyEnding {
 }
 
 impl ResearchRunner {
-    /// Runs one agent with tools off that can read `run.folder` but write only
+    /// Runs one agent with tools off that can read `run.folder`, its secret files
+    /// closed but the ones the owner shared back (DEC-147.9), but write only
     /// its own engine-owned work, home and temp folders, reaching nothing but
     /// its model endpoint. A managed account is held under the engine custody
     /// lease for the whole run. Takes the run and `stop`, polled while the
@@ -1635,6 +1636,22 @@ impl ResearchRunner {
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
             sandbox = sandbox.hide(sub)?;
         }
+        let secrets = match run.project {
+            Some(project) => {
+                ResearchJobs::open(&self.database)?
+                    .agent_policy(project)
+                    .map_err(|_| RunError::Invalid("project agent policy unreadable".into()))?
+                    .shared_folders
+                    .secrets
+            }
+            None => Vec::new(),
+        };
+        let closed = crate::sandbox::shared_folders::SharedFolders {
+            secrets,
+            ..Default::default()
+        };
+        sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &closed)
+            .map_err(|code| RunError::Invalid(code.into()))?;
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
@@ -3975,6 +3992,71 @@ mod tests {
                 row.4.as_str()
             ),
             ("alpha", "", "onboarding", "codex")
+        );
+    }
+
+    /// DEC-147.9: a read-only run on a project folder runs under the secret deny of that
+    /// folder, with the secret the owner shared back readable again and nothing else.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_keeps_the_project_secrets_closed_but_the_shared_back_ones() {
+        let root = engine_root();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join(".env"), "TOKEN=1\n").unwrap();
+        let project = ProjectId::new("alpha").unwrap();
+        let connection = rusqlite::Connection::open(&root.database).unwrap();
+        let policy = crate::sandbox::policy::AgentPolicy {
+            shared_folders: crate::sandbox::shared_folders::SharedFolders {
+                secrets: vec![".env".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        drop(connection);
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-alpha-1",
+            agent: "overview",
+            project: Some(&project),
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(5),
+            output_tokens: None,
+        };
+        let _ = runner.run_read_only(&run, &|| false);
+        let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-1.sb"))
+            .expect("the run installed its profile");
+        assert!(
+            profile.contains(&format!(
+                "(require-not (subpath \"{}/.git\"))",
+                folder.display()
+            )),
+            "{profile}"
+        );
+        assert!(
+            profile.contains(&format!(
+                "(allow file-read-data file-read-xattr\n  (subpath \"{}\")",
+                folder.join(".env").display()
+            )),
+            "{profile}"
         );
     }
 
