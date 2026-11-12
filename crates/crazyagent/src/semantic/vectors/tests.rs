@@ -650,6 +650,37 @@ fn the_built_in_model_note_names_missing_or_failed_files_and_says_loading_only_b
 }
 
 #[test]
+fn the_http_thread_serves_waiting_projects_round_robin_after_the_last_served() {
+    use crate::semantic::take_next;
+    let mut wanted: std::collections::BTreeSet<String> =
+        ["alpha", "beta", "gamma"].map(String::from).into();
+    let first = take_next(&mut wanted, None).unwrap();
+    assert_eq!(first, "alpha");
+    wanted.insert("alpha".to_owned());
+    assert_eq!(
+        take_next(&mut wanted, Some(&first)).as_deref(),
+        Some("beta"),
+        "a project queued again during its turn waits for the others"
+    );
+    wanted.insert("beta".to_owned());
+    assert_eq!(
+        take_next(&mut wanted, Some("beta")).as_deref(),
+        Some("gamma")
+    );
+    assert_eq!(
+        take_next(&mut wanted, Some("gamma")).as_deref(),
+        Some("alpha"),
+        "wraps to the first"
+    );
+    assert_eq!(
+        take_next(&mut wanted, Some("alpha")).as_deref(),
+        Some("beta")
+    );
+    assert_eq!(take_next(&mut wanted, Some("beta")), None);
+    assert!(wanted.is_empty());
+}
+
+#[test]
 fn fusion_adds_reciprocal_ranks_with_k_60_and_keeps_full_text_order_on_ties() {
     assert_eq!(fuse(&[1, 2, 3], &[3, 4]), [3, 1, 2, 4]);
     assert_eq!(fuse(&[1, 2], &[]), [1, 2]);

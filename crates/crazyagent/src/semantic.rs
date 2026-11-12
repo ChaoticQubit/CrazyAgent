@@ -312,6 +312,15 @@ pub fn embed_pending(connection: &mut Connection, root: &Path, project: &Project
     embedded
 }
 
+/// Takes the next waiting project after the one served last, wrapping to the first, so a
+/// project the tick queues again during its long turn waits for the others (rv-code2
+/// HYB2R2-L1). Inputs: the waiting projects and the last served. Output: the project, or
+/// none when none waits.
+pub(crate) fn take_next(wanted: &mut BTreeSet<String>, last: Option<&str>) -> Option<String> {
+    let _ = (wanted, last);
+    unimplemented!("rv-code2 HYB2R2-L1")
+}
+
 /// Queues a project for the HTTP embedding thread and starts the thread when none runs,
 /// unless the plugin is waiting after failed sends. Inputs: the engine root, the project
 /// and the plugin key. Output: none.
