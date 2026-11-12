@@ -230,7 +230,10 @@ fn an_owner_change_to_a_file_the_set_does_not_touch_lands_and_stays_uncommitted(
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     write(&case.repo.join("notes.txt"), "owner edit\n");
     write(&case.repo.join("scratch.txt"), "mine\n");
-    assert!(owner_dirty(&case.db, &id, None).unwrap().is_empty());
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap(),
+        OwnerDirty::default()
+    );
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
         panic!("the accept conflicted");
     };
@@ -261,7 +264,13 @@ fn an_owner_change_to_a_file_the_set_changes_is_listed_and_committed_first() {
     write(&case.repo.join("scratch.txt"), "mine\n");
     let before = case.tip();
     assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
-    assert_eq!(owner_dirty(&case.db, &id, None).unwrap(), ["README"]);
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap(),
+        OwnerDirty {
+            files: vec!["README".to_owned()],
+            untracked: Vec::new(),
+        }
+    );
 
     let (commit, branch) = commit_owner_files(
         &case.db,
@@ -282,7 +291,10 @@ fn an_owner_change_to_a_file_the_set_changes_is_listed_and_committed_first() {
         "README\n"
     );
     assert_eq!(case.owner(&["status", "--porcelain"]), "?? scratch.txt\n");
-    assert!(owner_dirty(&case.db, &id, None).unwrap().is_empty());
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap(),
+        OwnerDirty::default()
+    );
 
     let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&id).unwrap() else {
         panic!("the accept conflicted");
@@ -309,7 +321,10 @@ fn a_staged_owner_file_blocks_the_accept_until_it_is_committed_first() {
     write(&case.repo.join("staged.txt"), "staged\n");
     case.owner(&["add", "staged.txt"]);
     assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
-    assert_eq!(owner_dirty(&case.db, &id, None).unwrap(), ["staged.txt"]);
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap().files,
+        ["staged.txt"]
+    );
     commit_owner_files(
         &case.db,
         &case.home,
@@ -351,4 +366,126 @@ fn a_commit_first_of_a_file_not_in_the_way_or_without_a_message_commits_nothing(
         case.owner(&["status", "--porcelain"]),
         " M README\n?? scratch.txt\n"
     );
+}
+
+/// S3 r1 F1: a file the owner staged in part is committed as staged, not as the working copy;
+/// the owner's index keeps the staged version and the unstaged lines stay unstaged.
+#[test]
+fn a_partly_staged_file_is_committed_as_staged_and_keeps_its_unstaged_lines() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&case.repo.join("README"), "zero\none\ntwo\nthree\n");
+    case.owner(&["add", "README"]);
+    write(
+        &case.repo.join("README"),
+        "zero\none\ntwo\nthree\ndebug on\n",
+    );
+    assert_eq!(owner_dirty(&case.db, &id, None).unwrap().files, ["README"]);
+    let (commit, _) = commit_owner_files(
+        &case.db,
+        &case.home,
+        &id,
+        &["README".to_owned()],
+        "Add the top line",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "zero\none\ntwo\nthree\n"
+    );
+    assert_eq!(case.owner(&["show", ":README"]), "zero\none\ntwo\nthree\n");
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "zero\none\ntwo\nthree\ndebug on\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), " M README\n");
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap().files,
+        ["README"],
+        "the unstaged lines are still in the way, for the owner to decide"
+    );
+}
+
+/// S3 r1 F1: a file the owner stopped tracking with git rm --cached is committed as removed,
+/// never added back; it stays on disk, untracked, and the Accept then lands.
+#[test]
+fn a_file_untracked_with_rm_cached_is_committed_as_removed_and_never_added_back() {
+    let case = Case::new();
+    case.owner_commit("notes.txt", "secret\n", "Notes");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner(&["rm", "-q", "--cached", "notes.txt"]);
+    assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap().files,
+        ["notes.txt"]
+    );
+    let (commit, _) = commit_owner_files(
+        &case.db,
+        &case.home,
+        &id,
+        &["notes.txt".to_owned()],
+        "Stop tracking the notes",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\n"
+    );
+    assert_eq!(case.owner(&["ls-files"]), "README\n");
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("notes.txt")).unwrap(),
+        "secret\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "?? notes.txt\n");
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &landed]),
+        "README\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "?? notes.txt\n");
+}
+
+/// S3 r1 security M1: an untracked owner file where the set adds one, such as a .env with
+/// secrets, is listed apart and never committed: commit-first refuses it and nothing moves.
+#[test]
+fn an_untracked_owner_file_where_the_set_adds_one_is_never_committed() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.edit(".env", "AGENT=1\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    write(&case.repo.join(".env"), "SECRET=owner\n");
+    let before = case.tip();
+    assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
+    assert_eq!(
+        owner_dirty(&case.db, &id, None).unwrap(),
+        OwnerDirty {
+            files: Vec::new(),
+            untracked: vec![".env".to_owned()],
+        }
+    );
+    let commit = commit_owner_files(
+        &case.db,
+        &case.home,
+        &id,
+        &[".env".to_owned()],
+        "Save my changes",
+        None,
+    );
+    assert_eq!(refused(commit), "changes_owner_untracked");
+    assert_eq!(case.tip(), before);
+    assert_eq!(case.owner(&["ls-files"]), "README\n");
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join(".env")).unwrap(),
+        "SECRET=owner\n"
+    );
+    std::fs::remove_file(case.repo.join(".env")).unwrap();
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
 }

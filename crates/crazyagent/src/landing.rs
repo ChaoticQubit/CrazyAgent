@@ -1629,15 +1629,25 @@ pub fn owner_git_identity(
     }
 }
 
-/// Lists the files in the owner's checkout that keep a change set's Accept from landing
-/// (F21): staged files, and unstaged or untracked ones in the squash's way.
+/// The owner's files that keep an Accept from landing (F21): `files` are tracked and may be
+/// committed first, `untracked` are untracked or ignored files where the set adds one,
+/// which the owner moves or deletes and the engine never commits.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerDirty {
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub untracked: Vec<String>,
+}
+
+/// Lists the owner's files that keep a change set's Accept from landing (F21).
 /// Inputs: the store, the change set and the target branch, None for the Land on branch.
-/// Output: the files, empty when none blocks, or `changes_too_large`.
+/// Output: the tracked and untracked files, both empty when none blocks, or
+/// `changes_too_large`.
 pub fn owner_dirty(
     db: &Connection,
     id: &ChangeSetId,
     target: Option<&str>,
-) -> Result<Vec<String>, EngineError> {
+) -> Result<OwnerDirty, EngineError> {
     #[cfg(unix)]
     return owner::owner_dirty(db, id, target);
     #[cfg(not(unix))]

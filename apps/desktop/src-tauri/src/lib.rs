@@ -35,7 +35,7 @@ use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, TargetBranches};
+use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, OwnerDirty, TargetBranches};
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
 use crazyagent::memory::ReviewDecision;
@@ -3704,7 +3704,7 @@ async fn desktop_change_owner_dirty(
     state: State<'_, NativeState>,
     id: String,
     target: Option<String>,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<OwnerDirty, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.change_owner_dirty(id, target)?;
     call.await

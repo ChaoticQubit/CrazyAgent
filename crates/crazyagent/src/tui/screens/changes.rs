@@ -1526,6 +1526,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_owner_dirty" => {
             "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again."
         }
+        "changes_owner_untracked" => {
+            "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again."
+        }
         "changes_detached_head" => {
             "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again."
         }

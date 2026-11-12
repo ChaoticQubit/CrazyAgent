@@ -110,6 +110,7 @@ test("diff text is shown as plain text: markup stays text and control characters
 
 test("every refusal reads as a plain sentence, and a conflict names its files", () => {
   assert.equal(client.changesRefusal({ code: "changes_owner_dirty" }), "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again.");
+  assert.equal(client.changesRefusal({ code: "changes_owner_untracked" }), "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_detached_head" }), "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_git_busy" }), "Git is in the middle of a merge, rebase, cherry-pick or bisect in your project folder. Finish or stop it, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_conflict", files: ["a.ts", "b.ts"] }), "These files also changed on your branch: a.ts, b.ts. Ask the agent to update, or discard.");
@@ -182,16 +183,26 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
 });
 
 test("files in the way of an Accept are listed for a commit of only those files first, then the Accept runs again (F21)", () => {
-  const html = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: ["README", "src/<app>.ts"], pending: false, onCancel() {}, onCommit() {} }));
+  const html = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: ["README", "src/<app>.ts"], untracked: [], pending: false, onCancel() {}, onCommit() {} }));
   assert.match(html, /Commit your files first\?/);
-  assert.match(html, /Commit only these files, then the changes are accepted\. Nothing else in your folder is committed\./);
+  assert.match(html, /Commit only these files, then the changes are accepted\. A file you staged is committed as you staged it\. Nothing else in your folder is committed\./);
+  assert.doesNotMatch(html, /not tracked by Git/);
   assert.match(html, /<li>README<\/li><li>src\/&lt;app&gt;\.ts<\/li>/);
   assert.match(html, /<label for="[^"]+">Commit message for your files<\/label>/);
   assert.match(html, /<textarea[^>]*>Save my changes before accepting<\/textarea>/);
   assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Commit these files first/);
   assert.equal(model.committedFirstNote("c".repeat(40), "main"), "Committed your files as ccccccc on main. Accepting the changes now.");
+  const untracked = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: [], untracked: [".env"], pending: false, onCancel() {}, onCommit() {} }));
+  assert.match(untracked, /Move these files first/);
+  assert.match(untracked, /These files are not tracked by Git and sit where these changes add files\. CrazyAgent never commits them\. Move or delete them, then accept again\./);
+  assert.match(untracked, /aria-label="Untracked files in the way"><li>\.env<\/li>/);
+  assert.doesNotMatch(untracked, /Commit these files first|<textarea/, "an untracked file is never offered for a commit");
+  const both = renderToStaticMarkup(createElement(view.CommitFirstDialog, { files: ["README"], untracked: [".env"], pending: false, onCancel() {}, onCommit() {} }));
+  assert.match(both, /aria-label="Files in the way"><li>README<\/li><\/ul>/);
+  assert.match(both, /aria-label="Untracked files in the way"><li>\.env<\/li><\/ul>/);
   const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
   assert.match(source, /result\.code === "changes_owner_dirty"[\s\S]*loadOwnerDirty\(set\.id, target\)/);
+  assert.match(source, /commitOwnerFiles\(asked\.set\.id, asked\.files,/, "only the tracked list is sent for a commit");
   assert.match(source, /commitOwnerFiles\(asked\.set\.id, asked\.files, commit, asked\.target\)[\s\S]*await accept\(asked\.set, asked\.message, asked\.target\)/);
 });
 

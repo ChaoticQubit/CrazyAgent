@@ -1,7 +1,7 @@
 use super::*;
 use crate::landing::{
     self, AcceptOutcome, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeDiff, ChangeSetId, ChangeSetView,
-    DIRTY_FILES_MAX, DIRTY_PATH_BYTES_MAX, LIST_MAX, MESSAGE_BYTES_MAX, TargetBranches,
+    DIRTY_FILES_MAX, DIRTY_PATH_BYTES_MAX, LIST_MAX, MESSAGE_BYTES_MAX, OwnerDirty, TargetBranches,
     WaitingChanges,
 };
 use crate::protocol::encode_frame;
@@ -41,6 +41,7 @@ pub const CHANGES_CODES: &[&str] = &[
     "changes_owner_dirty",
     "changes_owner_identity_missing",
     "changes_owner_unavailable",
+    "changes_owner_untracked",
     "changes_reply_bounds",
     "changes_request_bounds",
     "changes_request_invalid",
@@ -132,16 +133,37 @@ struct Envelope {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
-    List { change_sets: Vec<ChangeSetView> },
-    Diff { diff: ChangeDiff },
-    Accepted { outcome: AcceptOutcome },
-    Branches { branches: TargetBranches },
-    Discarded { restorable_until_ms: u64 },
-    Waiting { waiting: WaitingChanges },
-    OwnerDirty { files: Vec<String> },
-    Committed { commit: String, branch: String },
+    List {
+        change_sets: Vec<ChangeSetView>,
+    },
+    Diff {
+        diff: ChangeDiff,
+    },
+    Accepted {
+        outcome: AcceptOutcome,
+    },
+    Branches {
+        branches: TargetBranches,
+    },
+    Discarded {
+        restorable_until_ms: u64,
+    },
+    Waiting {
+        waiting: WaitingChanges,
+    },
+    OwnerDirty {
+        files: Vec<String>,
+        #[serde(default)]
+        untracked: Vec<String>,
+    },
+    Committed {
+        commit: String,
+        branch: String,
+    },
     Done,
-    Rejected { code: String },
+    Rejected {
+        code: String,
+    },
 }
 
 /// Names the requests that only read, for the log of replies this client could not read.
@@ -300,18 +322,22 @@ impl OwnerClient {
 
     /// Lists the files in the owner's project folder that keep a change set's Accept from
     /// landing (F21), for the "commit these files first" box. Inputs: the change set and the
-    /// branch the owner picked, None for the Land on branch. Output: the files, empty when
-    /// none blocks; a reply past `DIRTY_FILES_MAX` is refused.
+    /// branch the owner picked, None for the Land on branch. Output: the tracked and the
+    /// untracked files, both empty when none blocks; a reply past `DIRTY_FILES_MAX` is refused.
     pub async fn owner_dirty(
         &self,
         id: ChangeSetId,
         target: Option<String>,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<OwnerDirty, EngineError> {
         match self
             .changes_exchange(Action::OwnerDirty { id, target })
             .await?
         {
-            Reply::OwnerDirty { files } if files.len() <= DIRTY_FILES_MAX => Ok(files),
+            Reply::OwnerDirty { files, untracked }
+                if files.len() + untracked.len() <= DIRTY_FILES_MAX =>
+            {
+                Ok(OwnerDirty { files, untracked })
+            }
             _ => Err(unknown()),
         }
     }
@@ -678,12 +704,11 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
             )
         }
         Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
-        Action::OwnerDirty { id, target } => (
-            Reply::OwnerDirty {
-                files: landing::owner_dirty(&db, &id, target.as_deref())?,
-            },
-            false,
-        ),
+        Action::OwnerDirty { id, target } => {
+            let OwnerDirty { files, untracked } =
+                landing::owner_dirty(&db, &id, target.as_deref())?;
+            (Reply::OwnerDirty { files, untracked }, false)
+        }
         Action::CommitOwnerFiles {
             id,
             files,

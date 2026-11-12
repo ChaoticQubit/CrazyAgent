@@ -1,7 +1,9 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{CHANGES_CODES, OwnerClient};
-use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
+use crazyagent::landing::{
+    AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, OwnerDirty, TargetBranches,
+};
 use crazyagent::protocol::ProjectId;
 use std::sync::Arc;
 
@@ -100,12 +102,12 @@ impl NativeBridge {
 
     /// Lists the files in the project folder that keep a change set's Accept from landing,
     /// run without the bridge lock. Inputs: the change set id and the target branch, None
-    /// for the Land on branch. Output: the files, empty when none does.
+    /// for the Land on branch. Output: the tracked and untracked files, empty when none does.
     pub fn change_owner_dirty(
         &self,
         id: String,
         target: Option<String>,
-    ) -> Result<Unlocked<Vec<String>>, BridgeError> {
+    ) -> Result<Unlocked<OwnerDirty>, BridgeError> {
         let id = change_set(id)?;
         let client = self.changes_client()?;
         Ok(Box::pin(async move {

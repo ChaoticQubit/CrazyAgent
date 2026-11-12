@@ -5,7 +5,7 @@ use super::git::{Repo, Writes, failure};
 use super::store::{self, Intent, Record};
 use super::{
     AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
-    LandingResult, MESSAGE_BYTES_MAX, TargetBranches,
+    LandingResult, MESSAGE_BYTES_MAX, OwnerDirty, TargetBranches,
 };
 use crate::activity::{ActivityKind, ENGINE_ACTOR, OWNER_ACTOR};
 use crate::agent_git::Layout;
@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
+/// The most bytes the owner's index entries of the chosen staged paths may print.
+const STAGED_LISTING_BYTES_MAX: usize = 128 * 1024;
 const IDENTITY_BYTES_MAX: usize = 256;
 const MAIN_PLACES_MAX: usize = 512;
 const JUDGED_MAX: usize = 256;
@@ -682,7 +684,8 @@ fn land_on_problem(db: &Connection, project: &ProjectId, error: &EngineError) ->
 /// finds it. Inputs: the checkout, its root, the tip and the squash tree. Output: Ok when
 /// Accept can write without touching the owner's work, else `changes_owner_dirty`.
 fn check_clean(owner: &Repo, repository: &Path, tip: &str, tree: &str) -> Result<(), EngineError> {
-    if dirty_paths(owner, repository, tip, tree)?.is_empty() {
+    let dirty = dirty_paths(owner, repository, tip, tree)?;
+    if dirty.files.is_empty() && dirty.untracked.is_empty() {
         return Ok(());
     }
     Err(failure("changes_owner_dirty"))
@@ -703,18 +706,10 @@ fn listed_names(owner: &Repo, args: &[&str]) -> Result<BTreeSet<String>, EngineE
     Ok(names)
 }
 
-/// The files of the owner's checkout in an Accept's way (F21): every path staged against the
-/// tip, every unstaged edit to a file the squash changes and every untracked file where it
-/// adds one; other unstaged edits stay, and submodules count by their recorded commit.
-/// Inputs: the checkout, its root, the tip and the squash tree.
-/// Output: the files, sorted, empty when Accept can write.
-fn dirty_paths(
-    owner: &Repo,
-    repository: &Path,
-    tip: &str,
-    tree: &str,
-) -> Result<Vec<String>, EngineError> {
-    let mut dirty = listed_names(
+/// The paths staged in the owner's index against the tip, renames split into a delete and
+/// an add. Inputs: the checkout and the tip. Output: the paths, sorted.
+fn staged_paths(owner: &Repo, tip: &str) -> Result<BTreeSet<String>, EngineError> {
+    listed_names(
         owner,
         &[
             "diff-index",
@@ -725,7 +720,21 @@ fn dirty_paths(
             tip,
             "--",
         ],
-    )?;
+    )
+}
+
+/// The owner's files in an Accept's way (F21): in `files` every path staged against the tip
+/// and every unstaged edit to a file the squash changes, in `untracked` every untracked or
+/// ignored file where the squash adds one; submodules count by their recorded commit.
+/// Inputs: the checkout, its root, the tip and the squash tree. Output: both lists, sorted.
+fn dirty_paths(
+    owner: &Repo,
+    repository: &Path,
+    tip: &str,
+    tree: &str,
+) -> Result<OwnerDirty, EngineError> {
+    let staged = staged_paths(owner, tip)?;
+    let mut tracked = staged.clone();
     let unstaged = listed_names(
         owner,
         &[
@@ -752,7 +761,7 @@ fn dirty_paths(
                 tree,
             ],
         )?;
-        dirty.extend(unstaged.into_iter().filter(|path| changed.contains(path)));
+        tracked.extend(unstaged.into_iter().filter(|path| changed.contains(path)));
     }
     let added = listed_names(
         owner,
@@ -767,15 +776,23 @@ fn dirty_paths(
             tree,
         ],
     )?;
+    let mut untracked = BTreeSet::new();
     for path in added {
+        if staged.contains(&path) {
+            continue;
+        }
         match std::fs::symlink_metadata(repository.join(&path)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             _ => {
-                dirty.insert(path);
+                untracked.insert(path);
             }
         }
     }
-    Ok(dirty.into_iter().collect())
+    assert!(untracked.iter().all(|path| !tracked.contains(path)));
+    Ok(OwnerDirty {
+        files: tracked.into_iter().collect(),
+        untracked: untracked.into_iter().collect(),
+    })
 }
 
 /// What an Accept onto a target would find in the owner's checkout (F21), its squash worked
@@ -786,7 +803,7 @@ fn blocking(
     db: &Connection,
     record: &Record,
     target: Option<&str>,
-) -> Result<Option<(String, String, Vec<String>)>, EngineError> {
+) -> Result<Option<(String, String, OwnerDirty)>, EngineError> {
     if !matches!(record.state, ChangeState::Pending | ChangeState::Conflict)
         || record.intent.is_some()
     {
@@ -814,39 +831,87 @@ fn blocking(
     if !conflicts.is_empty() {
         return Ok(None);
     }
-    let files = dirty_paths(&owner, repository, &tip, &tree)?;
-    if files.len() > super::DIRTY_FILES_MAX
-        || files
-            .iter()
-            .any(|file| file.len() > super::DIRTY_PATH_BYTES_MAX)
+    let dirty = dirty_paths(&owner, repository, &tip, &tree)?;
+    let all = || dirty.files.iter().chain(&dirty.untracked);
+    if all().count() > super::DIRTY_FILES_MAX
+        || all().any(|file| file.len() > super::DIRTY_PATH_BYTES_MAX)
     {
         return Err(failure("changes_too_large"));
     }
-    Ok(Some((reference, tip, files)))
+    Ok(Some((reference, tip, dirty)))
 }
 
-/// Lists the files in the owner's checkout that keep a change set's Accept from landing
-/// (F21), read under the repository's hold. Inputs: the store, the change set and the
-/// target branch, None for the Land on branch. Output: the files, empty when none does.
+/// Lists the owner's files that keep a change set's Accept from landing (F21), read under
+/// the repository's hold. Inputs: the store, the change set and the target branch, None for
+/// the Land on branch. Output: the tracked files commit-first may take and the untracked
+/// ones the owner moves or deletes, both empty when none blocks.
 pub(super) fn owner_dirty(
     db: &Connection,
     id: &ChangeSetId,
     target: Option<&str>,
-) -> Result<Vec<String>, EngineError> {
+) -> Result<OwnerDirty, EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
     let _held = flow::hold_unmoved(db, &repository)?;
     let record = settled(db, id)?;
     Ok(blocking(db, &record, target)?
-        .map(|(_, _, files)| files)
+        .map(|(_, _, dirty)| dirty)
         .unwrap_or_default())
 }
 
-/// Commits only the files [`blocking`] finds now (F21), as the checkout holds them, from a
-/// private index with the owner's message and identity, stages them in the owner's index and
-/// moves the branch by compare and swap. Inputs: the store, the owner's home, the change set,
+/// The owner's index entries of staged paths, as `ls-files -s -z` prints them, each with
+/// stage 0; a staged path with no entry is a staged deletion. Inputs: the checkout and the
+/// paths. Output: the entries' records and the deleted paths, or `changes_git_unsupported`
+/// for an unmerged entry.
+fn staged_entries(owner: &Repo, paths: &[&str]) -> Result<(Vec<u8>, Vec<String>), EngineError> {
+    assert!(paths.len() <= super::DIRTY_FILES_MAX);
+    if paths.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut arguments = vec!["ls-files", "-s", "-z", "--"];
+    arguments.extend_from_slice(paths);
+    let listed = owner.exec(
+        &arguments,
+        None,
+        &[("GIT_LITERAL_PATHSPECS", "1")],
+        STAGED_LISTING_BYTES_MAX,
+    )?;
+    if listed.code != 0 || listed.overflow {
+        return Err(failure("changes_git_failed"));
+    }
+    let mut records = Vec::new();
+    let mut found = BTreeSet::new();
+    for record in listed
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let text = std::str::from_utf8(record).map_err(|_| failure("changes_git_unsupported"))?;
+        let Some((head, path)) = text.split_once('\t') else {
+            return Err(failure("changes_git_failed"));
+        };
+        if !paths.contains(&path) {
+            continue;
+        }
+        if !head.ends_with(" 0") || !found.insert(path.to_owned()) {
+            return Err(failure("changes_git_unsupported"));
+        }
+        records.extend_from_slice(record);
+        records.push(0);
+    }
+    let deleted = paths
+        .iter()
+        .filter(|path| !found.contains(**path))
+        .map(|path| (*path).to_owned())
+        .collect();
+    Ok((records, deleted))
+}
+
+/// Commits only the tracked files [`blocking`] finds now (F21) and nothing else: a staged path
+/// as the owner staged it, a staged deletion as a deletion, an unstaged one from the working
+/// copy; untracked or ignored files are refused. Inputs: the store, the owner's home, the set,
 /// the files, the message and the target, None for the Land on branch. Output: the commit
-/// and branch, or `changes_stale`, `changes_message_invalid` or a git code.
+/// and branch, or `changes_owner_untracked`, `changes_stale` or another code.
 pub(super) fn commit_owner_files(
     db: &Connection,
     home: &Path,
@@ -871,7 +936,13 @@ pub(super) fn commit_owner_files(
     chosen.dedup();
     if chosen
         .iter()
-        .any(|file| !blocked.iter().any(|path| path == file))
+        .any(|file| blocked.untracked.iter().any(|path| path == file))
+    {
+        return Err(failure("changes_owner_untracked"));
+    }
+    if chosen
+        .iter()
+        .any(|file| !blocked.files.iter().any(|path| path == file))
     {
         return Err(failure("changes_stale"));
     }
@@ -888,6 +959,12 @@ pub(super) fn commit_owner_files(
     if uses_configured_commands(&owner, &named, &[&tip])? {
         return Err(failure("changes_git_unsupported"));
     }
+    let staged = staged_paths(&owner, &tip)?;
+    let (from_index, from_copy): (Vec<&str>, Vec<&str>) = chosen
+        .iter()
+        .copied()
+        .partition(|file| staged.contains(*file));
+    let (entries, deleted) = staged_entries(&owner, &from_index)?;
     let folder = git_dir.join(format!(
         "crazyagent-commit-first-{}",
         &crate::engine::owner::random_id()?[..24]
@@ -896,9 +973,29 @@ pub(super) fn commit_owner_files(
     let tree = Repo::open(&repository, &git_dir, Some(&repository)).and_then(|repo| {
         let repo = repo.private_index(&folder.join("index"));
         repo.run(&["read-tree", &tip])?;
-        let mut arguments = vec!["update-index", "--add", "--remove", "--"];
-        arguments.extend_from_slice(&chosen);
-        repo.run(&arguments)?;
+        if !entries.is_empty()
+            && repo
+                .exec(
+                    &["update-index", "-z", "--index-info"],
+                    Some(entries.as_slice()),
+                    &[],
+                    4096,
+                )?
+                .code
+                != 0
+        {
+            return Err(failure("changes_git_failed"));
+        }
+        if !deleted.is_empty() {
+            let mut arguments = vec!["update-index", "--force-remove", "--"];
+            arguments.extend(deleted.iter().map(String::as_str));
+            repo.run(&arguments)?;
+        }
+        if !from_copy.is_empty() {
+            let mut arguments = vec!["update-index", "--remove", "--"];
+            arguments.extend_from_slice(&from_copy);
+            repo.run(&arguments)?;
+        }
         super::git::object_id(&repo.run(&["write-tree"])?)
     });
     let _ = std::fs::remove_dir_all(&folder);
@@ -909,10 +1006,12 @@ pub(super) fn commit_owner_files(
     let identity = owner_identity(&repository, home)?;
     let identity = (identity.0.as_str(), identity.1.as_str());
     let commit = owner.commit_tree(&tree, &[&tip], &format!("{message}\n"), identity)?;
-    let mut arguments = vec!["update-index", "--add", "--remove", "--"];
-    arguments.extend_from_slice(&chosen);
-    if owner.exec(&arguments, None, &[], 4096)?.code != 0 {
-        return Err(failure("changes_git_busy"));
+    if !from_copy.is_empty() {
+        let mut arguments = vec!["update-index", "--remove", "--"];
+        arguments.extend_from_slice(&from_copy);
+        if owner.exec(&arguments, None, &[], 4096)?.code != 0 {
+            return Err(failure("changes_git_busy"));
+        }
     }
     let env = [
         ("GIT_COMMITTER_NAME", identity.0),

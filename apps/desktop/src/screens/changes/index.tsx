@@ -11,7 +11,7 @@ import type { Review } from "./model";
 import { useChangeList } from "./poll";
 import "./changes.css";
 
-type CommitFirst = { kind: "commit"; set: ChangeSet; files: string[]; message: string; target: string | null };
+type CommitFirst = { kind: "commit"; set: ChangeSet; files: string[]; untracked: string[]; message: string; target: string | null };
 type Asking = { kind: "accept" | "discard"; set: ChangeSet } | CommitFirst | null;
 
 /** Shows diff text as plain text in a preformatted block: markup stays text and control
@@ -78,12 +78,13 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   </Dialog>;
 }
 
-/** The "commit these files first" dialog (F21): lists the files in the project folder whose
- * uncommitted changes keep the Accept from landing and asks for a message to commit only
- * those files with; the Accept then runs again. Inputs: the files, whether it runs, and the
- * handlers; Commit gets the message. Output: the dialog. */
-export function CommitFirstDialog({ files, pending, onCancel, onCommit }: {
+/** The "commit these files first" dialog (F21): lists the tracked files whose uncommitted
+ * changes are in the Accept's way, to commit only those, as staged where staged, before the
+ * Accept runs again, and apart from them the untracked files to move or delete, never
+ * committed. Inputs: both lists, whether it runs, and the handlers. Output: the dialog. */
+export function CommitFirstDialog({ files, untracked, pending, onCancel, onCommit }: {
   files: string[];
+  untracked: string[];
   pending: boolean;
   onCancel: () => void;
   onCommit: (message: string) => void;
@@ -91,13 +92,20 @@ export function CommitFirstDialog({ files, pending, onCancel, onCommit }: {
   const [text, setText] = useState("Save my changes before accepting");
   const id = useId();
   const message = commitMessage(text);
-  return <Dialog open title="Commit your files first?" onClose={onCancel} busy={pending}
+  const committing = files.length > 0;
+  return <Dialog open title={committing ? "Commit your files first?" : "Move these files first"} onClose={onCancel} busy={pending}
     footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
-      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onCommit(message); }}>Commit these files first</Button></>}>
-    <p>These files in your project folder have changes that are not committed, and they are in the way of these changes. Commit only these files, then the changes are accepted. Nothing else in your folder is committed.</p>
-    <ul className="pj-rows" aria-label="Files in the way">{files.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
-    <TextArea id={id} label="Commit message for your files" value={text} onValue={setText} rows={3}
-      error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to commit." : undefined} />
+      {committing && <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onCommit(message); }}>Commit these files first</Button>}</>}>
+    {committing && <>
+      <p>These files in your project folder have changes that are not committed, and they are in the way of these changes. Commit only these files, then the changes are accepted. A file you staged is committed as you staged it. Nothing else in your folder is committed.</p>
+      <ul className="pj-rows" aria-label="Files in the way">{files.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+      <TextArea id={id} label="Commit message for your files" value={text} onValue={setText} rows={3}
+        error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to commit." : undefined} />
+    </>}
+    {untracked.length > 0 && <>
+      <p>These files are not tracked by Git and sit where these changes add files. CrazyAgent never commits them. Move or delete them, then accept again.</p>
+      <ul className="pj-rows" aria-label="Untracked files in the way">{untracked.map((file) => <li key={file}>{displayText(file)}</li>)}</ul>
+    </>}
   </Dialog>;
 }
 
@@ -228,10 +236,10 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     const result = await acceptChange(set.id, set.head, message, target);
     if (result.kind === "error" && result.code === "changes_owner_dirty") {
       const dirty = await loadOwnerDirty(set.id, target);
-      if (dirty.kind === "ok" && dirty.value.length > 0) {
+      if (dirty.kind === "ok" && dirty.value.files.length + dirty.value.untracked.length > 0) {
         setBusy(false);
         setNote(null);
-        setAsking({ kind: "commit", set, files: dirty.value, message, target });
+        setAsking({ kind: "commit", set, files: dirty.value.files, untracked: dirty.value.untracked, message, target });
         return;
       }
     }
@@ -280,7 +288,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
-    {asking?.kind === "commit" && <CommitFirstDialog key={`${asking.set.id}:${asking.set.head}`} files={asking.files} pending={busy}
+    {asking?.kind === "commit" && <CommitFirstDialog key={`${asking.set.id}:${asking.set.head}`} files={asking.files} untracked={asking.untracked} pending={busy}
       onCancel={() => setAsking(null)} onCommit={(commit) => void commitFirst(asking, commit)} />}
     <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
       onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
