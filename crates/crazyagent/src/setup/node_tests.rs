@@ -237,7 +237,7 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
 }
 
 #[test]
-fn a_failure_after_the_checked_node_is_moved_in_keeps_it_and_drops_the_earlier_one() {
+fn a_late_failure_puts_the_earlier_node_back_and_drops_the_new_tree() {
     let root = root();
     let work = tempfile::tempdir().unwrap();
     let source = work.path().join("source");
@@ -253,11 +253,15 @@ fn a_failure_after_the_checked_node_is_moved_in_keeps_it_and_drops_the_earlier_o
         install_pin(root.path(), &pin_for(&archive, &sha256)),
         Err(InstallError("setup_store_unavailable"))
     );
-    assert!(
-        kept.join("bin/node").is_file(),
-        "the checked new Node stays"
-    );
-    assert!(!kept.join("earlier").exists(), "the earlier Node is gone");
+    assert!(kept.join("earlier").is_file(), "the earlier Node is back");
+    let setup_bin = root.path().join("setup/bin");
+    for name in ["node", "npm", "npx"] {
+        assert_eq!(
+            std::fs::canonicalize(setup_bin.join(name)).unwrap(),
+            kept.canonicalize().unwrap().join("bin").join(name),
+            "{name} still runs the earlier Node"
+        );
+    }
     let hidden: Vec<String> = std::fs::read_dir(root.path().join("setup"))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -265,8 +269,32 @@ fn a_failure_after_the_checked_node_is_moved_in_keeps_it_and_drops_the_earlier_o
         .collect();
     assert!(
         hidden.is_empty(),
-        "the staging folder is removed: {hidden:?}"
+        "the new tree goes with the staging folder: {hidden:?}"
     );
+
+    let fresh = super::super::harness_prefix(work.path().join("fresh").as_path());
+    std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
+    std::fs::set_permissions(
+        fresh.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(&fresh, "not a folder").unwrap();
+    let fresh_root = work.path().join("fresh");
+    assert_eq!(
+        install_pin(&fresh_root, &pin_for(&archive, &sha256)),
+        Err(InstallError("setup_store_unavailable"))
+    );
+    assert!(
+        std::fs::symlink_metadata(folder(&fresh_root)).is_err(),
+        "no new tree is kept"
+    );
+    for name in ["node", "npm", "npx"] {
+        assert!(
+            std::fs::symlink_metadata(fresh_root.join("setup/bin").join(name)).is_err(),
+            "no {name} link is left pointing at nothing"
+        );
+    }
 }
 
 #[test]
