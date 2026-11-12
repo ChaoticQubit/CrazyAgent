@@ -23,6 +23,7 @@ const NODE_VERSION: &str = "v22.11.0";
 const CODEX_VERSION: &str = "codex-cli 0.167.1";
 const MARKER_FILE: &str = "clean-mac-marker";
 const MARKER_LINE: &[u8] = b"clean-mac stand-in ran";
+const FOLDER_KEY: &str = "clean-mac-folder=";
 const FINDER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 const MAPPED_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
 const SYSTEM_ROOT_VARIABLE: &str = "CRAZYAGENT_GATE_SYSTEM_ROOT";
@@ -32,7 +33,7 @@ const REFUSED: &str = "gate refused";
 const RESTARTS_ONLY: &str = "had to start";
 const READY_LINE: &[u8] = b"ready\n";
 const READY_TIME: Duration = Duration::from_secs(30);
-const SETTLE_TIME: Duration = Duration::from_secs(30);
+const SETTLE_TIME: Duration = Duration::from_secs(75);
 const LIVE_TIME: Duration = Duration::from_secs(90);
 const PANE_TIME: Duration = Duration::from_secs(5);
 const STOP_TIME: Duration = Duration::from_secs(40);
@@ -162,8 +163,8 @@ fn link(target: &str, at: &Path) {
 
 /// The node stand-in: answers `--version` for itself and for the Codex script it is
 /// handed, else leaves a marker naming the node and script it ran as, in the first of the
-/// agent's home, working or temp folder it may write (the first two sit inside the gate's
-/// private Mac, the agent's temp folder may not), says so on its pane and stays open.
+/// agent's home, working or temp folder it may write, names that folder and says it ran on
+/// its pane (the agent's temp folder sits outside the gate's private Mac) and stays open.
 fn node_text() -> String {
     format!(
         "#!/bin/sh\n\
@@ -178,6 +179,7 @@ fn node_text() -> String {
          done\n\
          for folder in \"$HOME\" \"$PWD\" \"$TMPDIR\"; do\n\
          \x20 if [ -n \"$folder\" ] && printf 'node=%s\\nscript=%s\\n' \"$0\" \"$1\" > \"$folder/{MARKER_FILE}\" 2>/dev/null; then\n\
+         \x20   printf '{FOLDER_KEY}%s\\n' \"$folder\"\n\
          \x20   break\n\
          \x20 fi\n\
          done\n\
@@ -672,22 +674,17 @@ fn marker_field(text: &str, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-async fn pane_says_ran(owner: &mut Owner, team: &TeamStatus) -> bool {
-    let Some(master) = team
+/// The live master's pane output up to the stand-in's ran line. Inputs: the owner and the
+/// team. Output: the bytes seen, or none when no master pane shows that line in time.
+async fn pane_run(owner: &mut Owner, team: &TeamStatus) -> Option<Vec<u8>> {
+    let master = team
         .agents
         .iter()
-        .find(|agent| agent.role == AgentRole::Master && agent.stopped_ms.is_none())
-    else {
-        return false;
-    };
-    let Ok(agent) = AgentId::team(master.id) else {
-        return false;
-    };
-    let Ok(mut session) = owner.controller.terminal_attach(agent).await else {
-        return false;
-    };
+        .find(|agent| agent.role == AgentRole::Master && agent.stopped_ms.is_none())?;
+    let agent = AgentId::team(master.id).ok()?;
+    let mut session = owner.controller.terminal_attach(agent).await.ok()?;
     let mut seen = Vec::new();
-    tokio::time::timeout(PANE_TIME, async {
+    let ran = tokio::time::timeout(PANE_TIME, async {
         while !seen
             .windows(MARKER_LINE.len())
             .any(|window| window == MARKER_LINE)
@@ -700,7 +697,32 @@ async fn pane_says_ran(owner: &mut Owner, team: &TeamStatus) -> bool {
         true
     })
     .await
-    .unwrap_or(false)
+    .unwrap_or(false);
+    ran.then_some(seen)
+}
+
+/// The folder the stand-in named on its pane for its marker. Input: the pane bytes.
+/// Output: the absolute folder, or none.
+fn pane_folder(seen: &[u8]) -> Option<PathBuf> {
+    let key = FOLDER_KEY.as_bytes();
+    let start = seen.windows(key.len()).position(|window| window == key)? + key.len();
+    let rest = &seen[start..];
+    let end = rest
+        .iter()
+        .position(|byte| matches!(byte, b'\r' | b'\n' | 0x1b))
+        .unwrap_or(rest.len());
+    let folder = PathBuf::from(std::str::from_utf8(&rest[..end]).ok()?.trim());
+    folder.is_absolute().then_some(folder)
+}
+
+/// Reads and removes the stand-in's marker in the folder its pane named, which may be the
+/// agent's temp folder outside the gate's Mac. Input: the pane bytes. Output: the marker
+/// text, or none when the pane named no folder or the marker is not there.
+fn pane_marker(seen: &[u8]) -> Option<String> {
+    let file = pane_folder(seen)?.join(MARKER_FILE);
+    let text = fs::read_to_string(&file).ok();
+    let _ = fs::remove_file(&file);
+    text
 }
 
 async fn live_outcome(owner: &mut Owner, mac: &Mac, refused: Option<String>) -> Live {
@@ -722,10 +744,13 @@ async fn live_outcome(owner: &mut Owner, mac: &Mac, refused: Option<String>) -> 
         {
             return Live::Stopped(problem.clone());
         }
-        if pane_says_ran(owner, &team).await {
+        if let Some(seen) = pane_run(owner, &team).await {
+            let text = pane_marker(&seen);
             return Live::Ran {
-                node: None,
-                script: None,
+                node: text.as_deref().and_then(|text| marker_field(text, "node")),
+                script: text
+                    .as_deref()
+                    .and_then(|text| marker_field(text, "script")),
             };
         }
         last.clone_from(&team.live_problem);
@@ -766,7 +791,9 @@ fn assert_ran_with(outcome: &Live, node: &Path, script: &Path) {
                 "{outcome:?}"
             );
         }
-        Live::Ran { .. } => {}
+        Live::Ran { .. } => {
+            panic!("the stand-in ran but left no marker naming its node and script: {outcome:?}")
+        }
         other => panic!("the live master never ran the stand-in Codex: {other:?}"),
     }
 }
