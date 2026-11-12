@@ -146,6 +146,7 @@ CREATE TABLE IF NOT EXISTS coord_lane (
     label TEXT NOT NULL,
     seq INTEGER NOT NULL,
     created_ms INTEGER NOT NULL,
+    seen_ms INTEGER NOT NULL,
     granted_ms INTEGER,
     PRIMARY KEY(agent, ticket)
 );

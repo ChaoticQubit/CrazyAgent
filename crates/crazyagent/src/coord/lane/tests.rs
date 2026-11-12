@@ -581,7 +581,7 @@ fn the_lane_table_goes_with_its_project() {
     let connection = db();
     connection
         .execute(
-            "INSERT INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms) VALUES (?1,1,'t','[]','make',1,1)",
+            "INSERT INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,seen_ms) VALUES (?1,1,'t','[]','make',1,1,1)",
             [PROJECT],
         )
         .unwrap();
@@ -753,6 +753,89 @@ fn removing_a_shared_resource_refuses_only_the_commands_that_wait_for_it() {
         (1, 0),
         "{shown:?}"
     );
+    first.leave();
+    second.leave();
+}
+
+/// F28 L5R1-L1: a running command whose lane folder is gone keeps its slot only until
+/// `SILENCE_MAX` after the engine last read it; then its row goes and the next command in
+/// the lane gets its go, so a removed folder never holds the lane until its agent stops.
+#[test]
+fn a_gone_lane_folder_holds_its_slot_no_longer_than_silence_max() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings::default();
+    let a = holder(root.path(), 1);
+    let b = holder(root.path(), 2);
+    let holders = [a.clone(), b.clone()];
+    let first = Entry::enter(&a.folder, &ticket(&[], "make")).unwrap();
+    tick(&connection, &project(), &holders, &settings, 1_000).unwrap();
+    assert!(has(&a, &first, GO));
+    let second = Entry::enter(&b.folder, &ticket(&[], "cargo")).unwrap();
+    std::fs::remove_dir_all(&a.folder).unwrap();
+    let silence = i64::try_from(SILENCE_MAX.as_millis()).unwrap();
+    tick(
+        &connection,
+        &project(),
+        &holders,
+        &settings,
+        1_000 + silence,
+    )
+    .unwrap();
+    assert!(!has(&b, &second, GO), "the slot is kept up to SILENCE_MAX");
+    assert_eq!(view(&connection, &project()).unwrap().running[0].agent, 1);
+    tick(
+        &connection,
+        &project(),
+        &holders,
+        &settings,
+        1_001 + silence,
+    )
+    .unwrap();
+    assert!(
+        has(&b, &second, GO),
+        "past SILENCE_MAX the next command runs"
+    );
+    let shown = view(&connection, &project()).unwrap();
+    assert_eq!(
+        (
+            shown.running.len(),
+            shown.waiting.len(),
+            shown.running[0].agent
+        ),
+        (1, 0, 2),
+        "{shown:?}"
+    );
+    second.leave();
+    drop(first);
+}
+
+/// F28 L5R1-L1: a command the engine keeps reading never loses its slot, however long it
+/// runs: its seen time moves with each heartbeat.
+#[test]
+fn a_long_running_command_that_is_read_keeps_its_slot_past_silence_max() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let settings = CoordSettings::default();
+    let a = holder(root.path(), 1);
+    let b = holder(root.path(), 2);
+    let holders = [a.clone(), b.clone()];
+    let first = Entry::enter(&a.folder, &ticket(&[], "make")).unwrap();
+    let second = Entry::enter(&b.folder, &ticket(&[], "cargo")).unwrap();
+    let heartbeat = i64::try_from(HEARTBEAT.as_millis()).unwrap();
+    let mut now = 1_000;
+    for _ in 0..20 {
+        tick(&connection, &project(), &holders, &settings, now).unwrap();
+        now += heartbeat;
+    }
+    let shown = view(&connection, &project()).unwrap();
+    assert_eq!(
+        (shown.running.len(), shown.waiting.len()),
+        (1, 1),
+        "{shown:?}"
+    );
+    assert_eq!((shown.running[0].agent, shown.waiting[0].agent), (1, 2));
+    assert!(has(&a, &first, GO) && !has(&b, &second, GO));
     first.leave();
     second.leave();
 }

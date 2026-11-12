@@ -56,6 +56,8 @@ const TICKET_BYTES_MAX: u64 = 2048;
 const LINE_BYTES_MAX: u64 = 512;
 const STORED_MAX: usize = 4 * TICKETS_PER_PROJECT_MAX;
 const POLLS_MAX: u64 = (WAIT_MAX.as_millis() / POLL.as_millis()) as u64;
+const SILENCE_MAX_MS: i64 = SILENCE_MAX.as_millis() as i64;
+const HEARTBEAT_MS: i64 = HEARTBEAT.as_millis() as i64;
 #[cfg(unix)]
 const TICKET: &str = ".lane";
 #[cfg(unix)]
@@ -81,6 +83,7 @@ const UNREADABLE: &str = "The heavy lane could not read this command's ticket.";
 const GRANTED: &[u8] = b"go\n";
 
 const _: () = assert!(SILENCE_MAX.as_secs() > 2 * HEARTBEAT.as_secs());
+const _: () = assert!(SILENCE_MAX_MS > 2 * HEARTBEAT_MS && HEARTBEAT_MS > 0);
 const _: () = assert!(POLL.as_millis() < HEARTBEAT.as_millis() && POLLS_MAX > 0);
 const _: () = assert!(TICKETS_PER_AGENT_MAX <= TICKETS_PER_PROJECT_MAX);
 const _: () = assert!(LABEL_BYTES_MAX < TICKET_BYTES_MAX as usize);
@@ -380,13 +383,14 @@ struct Stored {
     uses: Vec<String>,
     label: String,
     created_ms: i64,
+    seen_ms: i64,
     granted_ms: Option<i64>,
 }
 
 fn stored(db: &Connection, project: &ProjectId) -> Result<Vec<Stored>, EngineError> {
     let mut statement = db
         .prepare(
-            "SELECT agent,ticket,uses,label,created_ms,granted_ms FROM coord_lane
+            "SELECT agent,ticket,uses,label,created_ms,seen_ms,granted_ms FROM coord_lane
              WHERE project=?1 ORDER BY seq LIMIT ?2",
         )
         .map_err(state)?;
@@ -398,13 +402,14 @@ fn stored(db: &Connection, project: &ProjectId) -> Result<Vec<Stored>, EngineErr
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
-                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<i64>>(6)?,
             ))
         })
         .map_err(state)?;
     let mut found = Vec::new();
     for row in rows {
-        let (agent, ticket, uses, label, created_ms, granted_ms) = row.map_err(state)?;
+        let (agent, ticket, uses, label, created_ms, seen_ms, granted_ms) = row.map_err(state)?;
         let uses: Vec<String> =
             serde_json::from_str(&uses).map_err(|_| failure("coord_lane_invalid"))?;
         found.push(Stored {
@@ -413,6 +418,7 @@ fn stored(db: &Connection, project: &ProjectId) -> Result<Vec<Stored>, EngineErr
             uses,
             label,
             created_ms,
+            seen_ms,
             granted_ms,
         });
     }
@@ -557,11 +563,13 @@ struct Found {
 /// (its lock is gone) or whose agent the engine no longer reads, refuses a waiting ticket
 /// naming a shared resource the project lacks, keeps each new ticket's turn, lets the next
 /// ones run by `grant`, offers each running one its go again and tells each waiting one its
-/// place. A ticket whose folder or lock cannot be read this tick keeps its row and its slot,
-/// and only a ticket read this tick starts, so a passing read failure never lets more
-/// commands run than the lane allows. The store changes in one transaction; files are
-/// written after it commits. Takes the database, the project, the agents' folders, the
-/// project's settings and the time. Returns Ok or the SQLite failure.
+/// place. A ticket whose folder or lock cannot be read this tick keeps its row and its slot
+/// for at most `SILENCE_MAX` after it was last read (its seen time is refreshed each
+/// `HEARTBEAT`), and only a ticket read this tick starts, so a passing read failure never
+/// lets more commands run than the lane allows and a folder that is gone never holds the
+/// lane for longer than an absent engine holds a command. The store changes in one
+/// transaction; files are written after it commits. Takes the database, the project, the
+/// agents' folders, the project's settings and the time. Returns Ok or the SQLite failure.
 #[cfg(unix)]
 pub fn tick(
     db: &Connection,
@@ -625,9 +633,19 @@ pub fn tick(
     let tx = change.db();
     let before = stored(tx, project)?;
     for row in &before {
+        if read(row.agent, &row.ticket) {
+            if now_ms - row.seen_ms >= HEARTBEAT_MS {
+                tx.execute(
+                    "UPDATE coord_lane SET seen_ms=?3 WHERE agent=?1 AND ticket=?2",
+                    params![row.agent, row.ticket, now_ms],
+                )
+                .map_err(state)?;
+            }
+            continue;
+        }
         let unseen = unread.contains(&(row.agent, row.ticket.clone()))
             || (holding.contains(&row.agent) && !opened(row.agent));
-        if !read(row.agent, &row.ticket) && !unseen {
+        if !unseen || now_ms - row.seen_ms > SILENCE_MAX_MS {
             tx.execute(
                 "DELETE FROM coord_lane WHERE agent=?1 AND ticket=?2",
                 params![row.agent, row.ticket],
@@ -651,8 +669,8 @@ pub fn tick(
         }
         let uses = serde_json::to_string(&found.ticket.uses).map_err(state)?;
         tx.execute(
-            "INSERT INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,granted_ms)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,NULL)",
+            "INSERT INTO coord_lane(project,agent,ticket,uses,label,seq,created_ms,seen_ms,granted_ms)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?7,NULL)",
             params![
                 project.as_str(),
                 found.agent,
