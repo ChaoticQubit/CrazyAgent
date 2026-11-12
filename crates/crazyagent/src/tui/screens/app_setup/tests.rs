@@ -1774,3 +1774,31 @@ fn the_master_frame_size_ask_is_drawn_whole_at_the_smallest_and_odd_sizes() {
         ask_in_body(&mut shell, width, height, first, last);
     }
 }
+
+/// App settings keep every hint on the bar from 80x24 to 240 columns (backlog 27): the bar
+/// wraps to more rows instead of dropping `Esc Back` at 200-209 columns or half its keys
+/// at 80, and a bar that fits stays one row.
+#[test]
+fn every_app_settings_hint_stays_on_the_bar_from_80_by_24_to_240_columns() {
+    let mut shell = settings(240, 80);
+    let rows = render(&mut shell, 240, 80);
+    let wide = crate::tui::screens::settings_accounts::tests::bar_rows(&rows);
+    assert_eq!(wide.len(), 1, "{wide:?}");
+    let hints = crate::tui::screens::settings_accounts::tests::wide_hints(&wide[0]);
+    for needed in [
+        "Esc Back",
+        "z Master frame",
+        "g Sign out of GitHub",
+        "? Help",
+    ] {
+        assert!(hints.iter().any(|hint| hint == needed), "{hints:?}");
+    }
+    for (width, height) in [(200, 80), (209, 80), (80, 24)] {
+        let rows = render(&mut shell, width, height);
+        crate::tui::screens::settings_accounts::tests::every_hint_once(
+            &rows,
+            &hints,
+            &format!("{width}x{height}"),
+        );
+    }
+}
