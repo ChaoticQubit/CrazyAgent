@@ -119,7 +119,7 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
     setProblem("");
     const result = await installHarnesses(ids);
     setBusy(false);
-    if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? failure(result) : updateCopy(result.code)); return; }
+    if (result.kind !== "ok") { setProblem(result.kind === "error" && result.code.startsWith("harness_") ? updateCopy(result.code) : failure(result)); return; }
     setStarted(true);
     setPicks((old) => [...old, ...ids.filter((id) => !old.includes(id))]);
     setReads((count) => count + 1);
