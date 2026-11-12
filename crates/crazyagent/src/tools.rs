@@ -463,7 +463,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     let through_shim =
         shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
     let interpreter = match &shebang.by_name {
-        Some(name) => resolve_at(name, places, depth + 1),
+        Some(name) => named_interpreter(name, &program, places, depth + 1),
         None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
@@ -477,6 +477,27 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
             by_name: shebang.by_name.is_some() || through_shim,
         },
     })
+}
+
+/// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the
+/// one in the script's own npm prefix ([`crate::harnesses::node_prefix`]), so a harness
+/// installed under one Node starts under that Node, then the places in order. Inputs: the
+/// name, the script's real file, the places and the depth. Output: the interpreter, or why.
+fn named_interpreter(
+    name: &str,
+    script: &Path,
+    places: &Places,
+    depth: usize,
+) -> Result<Resolved, Missing> {
+    assert!(depth <= INTERPRETER_DEPTH_MAX);
+    let own = (name == "node")
+        .then(|| crate::harnesses::node_prefix(script))
+        .flatten()
+        .and_then(|prefix| entry_at(&prefix.join("bin").join(name), places, depth).ok());
+    match own {
+        Some(node) => Ok(node),
+        None => resolve_at(name, places, depth),
+    }
 }
 
 /// A script's first line: the absolute interpreter, or the program name `env` looks up,
