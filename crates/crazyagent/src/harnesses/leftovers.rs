@@ -1337,9 +1337,9 @@ fn carrying(
 }
 
 /// Reads the carriers out of what [`kept_lines`] kept, split by the same [`fields`] it
-/// split by: each line of `user`'s, not `own`, above 1 and not a zombie, whose id and user
-/// are plain digits. Inputs: the kept lines, the user id and the engine's id. Output: each
-/// carrier's id and start, at most `TABLE_ROWS_MAX`.
+/// split by: each line of `user`'s, not `own`, above 1 and not a zombie, whose id is plain
+/// digits and whose user [`user_id`] reads. Inputs: the kept lines, the user id and the
+/// engine's id. Output: each carrier's id and start, at most `TABLE_ROWS_MAX`.
 #[cfg(target_os = "macos")]
 fn carriers(kept: &[u8], user: u32, own: i32) -> Vec<(i32, String)> {
     let found: Vec<(i32, String)> = kept
@@ -1350,7 +1350,7 @@ fn carriers(kept: &[u8], user: u32, own: i32) -> Vec<(i32, String)> {
                 .collect::<Result<_, _>>()
                 .ok()?;
             let pid: i32 = number(parts.first()?.as_bytes())?;
-            let owner: u32 = number(parts.get(1)?.as_bytes())?;
+            let owner = user_id(parts.get(1)?)?;
             (parts.len() == KEPT_FIELDS
                 && owner == user
                 && pid != own
@@ -1385,18 +1385,18 @@ fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
 }
 
 /// Reads a `ps` user id field. macOS `ps` prints a user id above `i32::MAX` as a negative
-/// number, as `-2` for nobody's 4294967294, so a negative field is that id read back; a
-/// line of such a user is then left out as another user's, never refusing the table. Input:
-/// the field. Output: the user id, or none for any other text.
+/// number, as `-2` for nobody's 4294967294, so a `-` and plain digits from 1 to 2^31 read
+/// back as that id; a line of such a user is then left out as another user's, never refusing
+/// the table. Otherwise only plain digits, as [`number`] reads them. Input: the field.
+/// Output: the user id, or none for any other text.
 #[cfg(unix)]
 fn user_id(field: &str) -> Option<u32> {
-    field.parse::<u32>().ok().or_else(|| {
-        field
-            .parse::<i32>()
-            .ok()
-            .filter(|negative| *negative < 0)
-            .map(i32::cast_unsigned)
-    })
+    match field.strip_prefix('-') {
+        None => number(field.as_bytes()),
+        Some(magnitude) => number::<u32>(magnitude.as_bytes())
+            .filter(|magnitude| (1..=1u32 << 31).contains(magnitude))
+            .map(|magnitude| 0u32.wrapping_sub(magnitude)),
+    }
 }
 
 /// Finds no process by its environment where none is listed here: Linux reads no token yet.
@@ -1744,7 +1744,18 @@ pub(crate) mod tests {
         );
         assert_eq!(user_id("-2"), Some(u32::MAX - 1));
         assert_eq!(user_id("501"), Some(501));
-        for refused in ["", "-", "x", "-0", "2x", "4294967296", "-2147483649"] {
+        assert_eq!(user_id("-2147483648"), Some(1u32 << 31));
+        for refused in [
+            "",
+            "-",
+            "x",
+            "-0",
+            "+501",
+            " 501",
+            "2x",
+            "4294967296",
+            "-2147483649",
+        ] {
             assert_eq!(user_id(refused), None, "{refused}");
         }
         assert_eq!(
@@ -1766,10 +1777,10 @@ pub(crate) mod tests {
         let mut lineage = Lineage::of(leftover.id(), None).unwrap();
         assert!(!lineage.unchecked, "{lineage:?}");
         lineage.table = &["/usr/bin/false"];
-        let (held, _released) = std::sync::mpsc::channel::<()>();
+        let (account_held, _released) = std::sync::mpsc::channel::<()>();
         Leftovers(Box::new(lineage)).hold(
             None,
-            held,
+            account_held,
             by_in("project-unreadable-end"),
             LeftoverMode::End,
         );
