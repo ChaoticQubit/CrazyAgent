@@ -673,6 +673,61 @@ fn rejected(code: &str) -> OwnerResult {
     OwnerResult::Rejected { code: code.into() }
 }
 
+/// A project created with a team size the owner set keeps that number, while one created
+/// without a team gets the open default whatever research is on: no sub-agent harness named
+/// and any harness up to `TEAM_AGENTS_MAX` (DEC-147.1).
+#[tokio::test]
+async fn a_set_team_size_is_kept_and_an_unset_one_gets_no_limit() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let set = ProjectId::new("setup-sized").unwrap();
+    let sized = TeamPlan {
+        master: "codex".into(),
+        master_tools: true,
+        sub_harnesses: vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 2,
+            tools: true,
+        }],
+        min_agents: 1,
+        max_agents: 3,
+    };
+    let response = owner
+        .setup_project(
+            set.clone(),
+            spec("Sized team"),
+            ProjectSetup {
+                team: Some(sized.clone()),
+                ..pooled_setup(vec![])
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(owner.project_setup(set).await.unwrap().unwrap().team, sized);
+    let open = ProjectId::new("setup-open").unwrap();
+    let response = owner
+        .setup_project(
+            open.clone(),
+            spec("Open team"),
+            pooled_setup(vec![
+                ResearchKind::MarketResearch,
+                ResearchKind::TechStackResearch,
+                ResearchKind::DesignResearch,
+            ]),
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let team = owner.project_setup(open).await.unwrap().unwrap().team;
+    assert!(team.sub_harnesses.is_empty(), "{team:?}");
+    assert_eq!((team.min_agents, team.max_agents), (1, TEAM_AGENTS_MAX));
+    drop(owner);
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn owner_updates_a_project_setup_only_from_the_revision_it_read() {
     let engine = Engine::start().await;
@@ -2969,6 +3024,20 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
                 on: true,
             },
         ),
+        (
+            6,
+            crate::team::TeamAction::MasterRounds {
+                project_id: project.clone(),
+                max: Some(3),
+            },
+        ),
+        (
+            7,
+            crate::team::TeamAction::MasterRunTime {
+                project_id: project.clone(),
+                secs: None,
+            },
+        ),
     ] {
         let response = owner.team_action(action.clone(), generation).await.unwrap();
         assert_eq!(result(response), OwnerResult::Applied, "{action:?}");
@@ -2987,12 +3056,21 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
             [],
         )
         .unwrap();
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_master_clocks(project,agent,since_ms) VALUES ('setup-pooled',1,1)",
+            [],
+        )
+        .unwrap();
     let tables = [
         "team_status_log",
         "team_caps",
         "team_token_budgets",
         "team_account_spread",
         "team_teammates",
+        "team_master_limits",
+        "team_master_clocks",
     ];
     for table in tables {
         assert_eq!(
@@ -3004,7 +3082,7 @@ async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it
         );
     }
 
-    let removed = owner.remove_project(project.clone(), 6).await.unwrap();
+    let removed = owner.remove_project(project.clone(), 8).await.unwrap();
     assert_eq!(result(removed), OwnerResult::Applied);
     for table in tables {
         assert_eq!(

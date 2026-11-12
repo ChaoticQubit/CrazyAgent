@@ -29893,7 +29893,29 @@ fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
     );
 }
 
+#[cfg(target_os = "macos")]
 const RUN_DAY_MS: i64 = 86_400_000;
+
+/// Sends one owner message through the owner's team Message path, as the clients do.
+/// Inputs: the fixture and the text. Output: the message id.
+#[cfg(target_os = "macos")]
+fn owner_says(fixture: &Fixture, text: &str) -> i64 {
+    owner(
+        fixture,
+        &[crate::team::TeamAction::Message {
+            project_id: fixture.setup.project_id.clone(),
+            text: text.into(),
+        }],
+    );
+    fixture
+        .connection
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1 AND author='owner'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
 
 /// Saves the owner's Sub-agent rounds per message. Inputs: the fixture and the choice, none
 /// for Until the goal is done. Output: none.
@@ -29924,7 +29946,7 @@ fn choose_run_time(fixture: &Fixture, secs: Option<u32>) {
 /// Writes one message of the project's team conversation. Inputs: the fixture, its author,
 /// its text and its state. Output: the message id.
 #[cfg(target_os = "macos")]
-fn owner_goal(fixture: &Fixture, author: MessageAuthor, text: &str, state: MessageState) -> i64 {
+fn team_message(fixture: &Fixture, author: MessageAuthor, text: &str, state: MessageState) -> i64 {
     let tx = fixture.connection.unchecked_transaction().unwrap();
     let id = append_message(
         &tx,
@@ -29959,12 +29981,7 @@ fn rounds_row(max: Option<u8>) {
     choose_rounds(&fixture, max);
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
-    let mut answering = owner_goal(
-        &fixture,
-        MessageAuthor::Owner,
-        "Build the page",
-        MessageState::Pending,
-    );
+    let mut answering = owner_says(&fixture, "Build the page");
     let replies = max.map_or(25, |max| u32::from(max) + 1);
     for round in 0..replies {
         team.finish_message(
@@ -29985,7 +30002,7 @@ fn rounds_row(max: Option<u8>) {
             assert_eq!(noted(&fixture, &rounds.limit_note()), 1);
             assert!(!rounds.open());
         }
-        answering = owner_goal(
+        answering = team_message(
             &fixture,
             MessageAuthor::Engine,
             &format!(
@@ -30058,12 +30075,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     choose_rounds(&fixture, Some(1));
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
-    let first = owner_goal(
-        &fixture,
-        MessageAuthor::Owner,
-        "Build the page",
-        MessageState::Pending,
-    );
+    let first = owner_says(&fixture, "Build the page");
     team.finish_message(
         &project,
         first,
@@ -30073,7 +30085,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
         vec![],
     )
     .unwrap();
-    let results = owner_goal(
+    let results = team_message(
         &fixture,
         MessageAuthor::Engine,
         "Results one",
@@ -30089,12 +30101,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     )
     .unwrap();
     assert_eq!(handed_over(&fixture), 1, "the limit held the second round");
-    let kept = owner_goal(
-        &fixture,
-        MessageAuthor::Owner,
-        "Keep going.",
-        MessageState::Pending,
-    );
+    let kept = owner_says(&fixture, "Keep going.");
     let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
     assert!(rounds.kept_going && rounds.open());
     assert!(
@@ -30112,7 +30119,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     )
     .unwrap();
     for round in 2..6 {
-        let results = owner_goal(
+        let results = team_message(
             &fixture,
             MessageAuthor::Engine,
             "Results",
@@ -30134,12 +30141,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
         "keep going lifted the limit for the goal"
     );
     assert!(fixture.status().rounds_kept_going);
-    let next = owner_goal(
-        &fixture,
-        MessageAuthor::Owner,
-        "Now the footer",
-        MessageState::Pending,
-    );
+    let next = owner_says(&fixture, "Now the footer");
     team.finish_message(
         &project,
         next,
@@ -30149,7 +30151,7 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
         vec![],
     )
     .unwrap();
-    let results = owner_goal(
+    let results = team_message(
         &fixture,
         MessageAuthor::Engine,
         "Results",
@@ -30268,6 +30270,10 @@ fn run_time_row(choice: Option<u32>) {
     let status = fixture.status();
     assert_eq!(status.live_problem.as_deref(), Some(line.as_str()));
     assert_eq!(status.master_deadline_ms, None);
+    assert!(
+        status.live_idle_stopped,
+        "the master view offers Start again"
+    );
     team.shutdown().unwrap();
 }
 
@@ -30413,11 +30419,21 @@ fn a_restarted_engine_gives_the_adopted_live_master_a_fresh_run_time() {
     assert!(fixture.status().master_deadline_ms.unwrap() < now_ms());
     assert_eq!(team.shutdown().unwrap(), names(&[id]));
     assert_eq!(host.alive().unwrap(), names(&[id]));
+    let kept: String = fixture
+        .connection
+        .query_row(
+            "SELECT record FROM team_panes WHERE agent=?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut record = PaneRecord::decode(&kept).unwrap();
+    record.since_ms -= 25 * 3_600_000;
     fixture
         .connection
         .execute(
-            "UPDATE team_panes SET record=json_set(record,'$.since_ms',json_extract(record,'$.since_ms')-?2) WHERE agent=?1",
-            params![id, 25 * 3_600_000_i64],
+            "UPDATE team_panes SET record=?2 WHERE agent=?1",
+            params![id, record.encode().unwrap()],
         )
         .unwrap();
     owner_last_seen(&fixture, now_ms() - 2 * RUN_DAY_MS);

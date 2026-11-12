@@ -2077,6 +2077,10 @@ fn delegate(
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(state)?;
+    let rounds = super::master_limits::rounds(&tx, project)?;
+    if !rounds.open() {
+        return Ok((rounds.refusal(), true));
+    }
     let admitted = super::admit(
         &tx,
         answering.access,

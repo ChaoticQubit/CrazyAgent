@@ -5141,8 +5141,10 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
-    let live_idle_stopped =
-        live_master == Some(false) && live_problem.as_deref().is_some_and(master::idle_stopped);
+    let live_idle_stopped = live_master == Some(false)
+        && live_problem
+            .as_deref()
+            .is_some_and(|line| master::idle_stopped(line) || master_limits::run_stopped(line));
     let limits = time_limits(connection, project)?;
     let nested = nesting(connection, project)?;
     let limited = caps::read(connection, project)?;

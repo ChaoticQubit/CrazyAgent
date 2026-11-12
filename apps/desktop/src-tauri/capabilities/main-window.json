@@ -76,6 +76,8 @@
     "allow-desktop-coord-send",
     "allow-desktop-team-max-harnesses",
     "allow-desktop-team-max-teammates",
+    "allow-desktop-team-master-rounds",
+    "allow-desktop-team-master-run-time",
     "allow-desktop-team-spread-accounts",
     "allow-desktop-team-token-budget",
     "allow-desktop-team-graph",

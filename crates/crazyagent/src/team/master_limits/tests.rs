@@ -404,6 +404,33 @@ fn the_limit_note_tells_the_owner_how_to_go_on() {
 }
 
 #[test]
+fn the_masters_own_call_past_the_limit_is_refused_in_words_that_name_keep_going() {
+    let three = Rounds {
+        used: 3,
+        max: Some(3),
+        kept_going: false,
+    };
+    assert_eq!(
+        three.refusal(),
+        "Not handed off: the owner's current goal used all 3 sub-agent rounds the owner allows for one message. Tell the owner what was done; a reply of keep going lets you finish the goal."
+    );
+}
+
+#[test]
+fn only_the_run_time_stop_line_reads_as_a_run_time_stop() {
+    for secs in RUN_CHOICES_SECS {
+        assert!(run_stopped(&run_stopped_line(secs)));
+    }
+    assert!(!run_stopped(&crate::team::master::idle_stopped_line(
+        "15 min"
+    )));
+    assert!(!run_stopped("it ran 7 days without a message from you"));
+    assert!(!crate::team::master::idle_stopped(&run_stopped_line(
+        RUN_DEFAULT_SECS
+    )));
+}
+
+#[test]
 fn the_master_view_words_the_time_left_and_the_rounds() {
     let now = START;
     let rounds = Rounds {

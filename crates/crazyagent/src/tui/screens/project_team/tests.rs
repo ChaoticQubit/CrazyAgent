@@ -4620,3 +4620,70 @@ fn every_harness_kind_says_what_its_delivery_choices_do() {
         assert!(said.contains(native), "{kind:?}: {said}");
     }
 }
+
+/// Sub-agent rounds per message (O) and Master run time (D) each step through every choice
+/// and back (F09, F01): each key sends its change, the engine's answer says the new choice
+/// and the team rows show what the engine stored.
+#[test]
+fn master_rounds_and_run_time_step_through_every_choice() {
+    let shows =
+        |view: &TeamView, text: &str| frame(view, 120, 60).iter().any(|row| row.contains(text));
+    let mut view = loaded();
+    let mut stored = team();
+    let mut at = NOW;
+    assert!(shows(&view, "Sub-agent rounds  Until the goal is done"));
+    for max in [Some(1), Some(2), Some(3), Some(5), Some(10), Some(20), None] {
+        let reply = view.key(press(KeyCode::Char('O')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterRounds {
+                project_id: project(),
+                max,
+            }),
+            "{max:?}"
+        );
+        stored.master_rounds = max;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(format!(
+                "Sub-agent rounds per message is now {}.",
+                rounds_choice(max)
+            )))
+        );
+        assert!(
+            shows(&view, &format!("Sub-agent rounds  {}", rounds_choice(max))),
+            "{max:?}"
+        );
+    }
+
+    assert!(shows(&view, "Master run time  7 days"));
+    for (secs, words) in [
+        (Some(1_209_600), "14 days"),
+        (Some(2_592_000), "30 days"),
+        (None, "No limit"),
+        (Some(86_400), "1 day"),
+        (Some(259_200), "3 days"),
+        (Some(604_800), "7 days"),
+    ] {
+        let reply = view.key(press(KeyCode::Char('D')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::MasterRunTime {
+                project_id: project(),
+                secs,
+            }),
+            "{secs:?}"
+        );
+        stored.master_run_secs = secs;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(format!("Master run time is now {words}.")))
+        );
+        assert!(
+            shows(&view, &format!("Master run time  {words}")),
+            "{secs:?}"
+        );
+    }
+}

@@ -20,6 +20,9 @@ pub const ROUND_LINE_BYTES_MAX: usize = 192;
 /// `KEEP_GOING`, as SQLite's `trim` takes them.
 const KEEP_GOING_TRIM: &str = " .!\t\r\n";
 const SECS_PER_DAY: u32 = 86_400;
+/// What follows `master::LIVE_STOPPED` on the line a live master stopped at its run time
+/// leaves.
+const RUN_WHY: &str = ": it ran ";
 
 const _: () = assert!(RUN_DEFAULT_SECS == 7 * SECS_PER_DAY);
 const _: () = assert!(ROUND_CHOICES[0] >= 1);
@@ -92,6 +95,17 @@ impl Rounds {
             rounds_words(Some(max))
         )
     }
+
+    /// What the master's own team call to hand work over reads past the limit, so a live
+    /// master stops there too. Takes rounds that are not open. Output: one plain line.
+    pub fn refusal(self) -> String {
+        assert!(!self.open());
+        let max = self.max.expect("a closed round count has a limit");
+        format!(
+            "Not handed off: the owner's current goal used all {} the owner allows for one message. Tell the owner what was done; a reply of keep going lets you finish the goal.",
+            rounds_words(Some(max))
+        )
+    }
 }
 
 /// What a master view shows about a project's master limits, read from its team status:
@@ -138,7 +152,8 @@ pub fn time_left_words(left: i64) -> String {
     if left <= 0 {
         return "Time is up; it stops if it works on without you".to_owned();
     }
-    let minutes = left.div_ceil(60_000);
+    let minutes = left.saturating_add(59_999) / 60_000;
+    assert!(minutes >= 1);
     let (days, hours) = (minutes / 1440, (minutes % 1440) / 60);
     assert!(days >= 0 && (0..24).contains(&hours));
     if days > 0 {
@@ -390,11 +405,21 @@ pub fn run_words(secs: Option<u32>) -> String {
 /// owner and continues the same conversation on its next start. Input: the run time in
 /// seconds. Output: the line.
 pub(crate) fn run_stopped_line(secs: u32) -> String {
-    format!(
-        "{}: it ran {} without a message from you. It continues the same conversation when you start it again.",
+    let line = format!(
+        "{}{RUN_WHY}{} without a message from you. It continues the same conversation when you start it again.",
         super::master::LIVE_STOPPED,
         run_words(Some(secs))
-    )
+    );
+    assert!(run_stopped(&line));
+    line
+}
+
+/// Whether a problem line is the one `run_stopped_line` leaves, so the master view offers
+/// Start again as it does after an idle stop. Input: the line. Output: the answer.
+pub(crate) fn run_stopped(problem: &str) -> bool {
+    problem
+        .strip_prefix(super::master::LIVE_STOPPED)
+        .is_some_and(|rest| rest.starts_with(RUN_WHY))
 }
 
 #[cfg(test)]

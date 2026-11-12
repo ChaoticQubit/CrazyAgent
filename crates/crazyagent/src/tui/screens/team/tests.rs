@@ -2339,6 +2339,16 @@ fn team_read(status: crate::team::TeamStatus) -> Arrival {
 /// one runs, uses `running`. Inputs: the switch, the saved and the running harness ids.
 /// Output: the arrival.
 fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
+    team_read(harnessed_status(on, saved, running))
+}
+
+/// The team status `harnessed` reads. Inputs: the switch, the saved and the running
+/// harness ids. Output: the status.
+fn harnessed_status(
+    on: Option<bool>,
+    saved: &str,
+    running: Option<&str>,
+) -> crate::team::TeamStatus {
     use crate::team::{AgentRole, TeamAgent, TeamHarness};
     let mut status = master_status(on, None, None);
     status.harnesses = vec![TeamHarness {
@@ -2384,7 +2394,7 @@ fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
             message_note: None,
         })
         .collect();
-    team_read(status)
+    status
 }
 
 /// The master view's header names the harness the running live master uses, the saved one
@@ -5173,4 +5183,42 @@ fn every_code_a_check_keeps_an_agent_with_has_its_own_reason() {
         super::cleanup::kept_reason("cleanup_new_check"),
         "a check keeps it (cleanup_new_check)"
     );
+}
+
+/// While a live master runs, the master view's header ends with the time it has left
+/// under Master run time and the sub-agent rounds of the owner's current goal (F01, F09);
+/// a switch that is on with no master running shows neither.
+#[test]
+fn the_master_view_head_ends_with_the_time_left_and_the_rounds_while_the_master_runs() {
+    let mut shell = master_view(160, 24);
+    requests(&mut shell);
+    let mut status = harnessed_status(Some(true), "codex", Some("codex"));
+    status.master_rounds = Some(3);
+    status.rounds_used = 2;
+    status.master_run_secs = None;
+    status.master_deadline_ms = None;
+    shell.arrive(team_read(status));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains(
+            "Live master on. Harness: Codex. It starts when you open this view. No time limit. Sub-agent rounds: 2 of 3."
+        ),
+        "{}",
+        rows[2]
+    );
+    let mut kept = harnessed_status(Some(true), "codex", Some("codex"));
+    kept.master_rounds = Some(1);
+    kept.rounds_used = 4;
+    kept.rounds_kept_going = true;
+    kept.master_deadline_ms = Some(crate::team::now_ms() + 3 * 86_400_000 + 1_800_000);
+    shell.arrive(team_read(kept));
+    let rows = render(&mut shell);
+    assert!(
+        rows[2].contains("3 d 0 h left. Sub-agent rounds: 4, no limit for this goal."),
+        "{}",
+        rows[2]
+    );
+    shell.arrive(harnessed(Some(true), "codex", None));
+    let rows = render(&mut shell);
+    assert!(!rows[2].contains("Sub-agent rounds"), "{}", rows[2]);
 }

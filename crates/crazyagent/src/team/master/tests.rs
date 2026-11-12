@@ -6229,3 +6229,49 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
         "{seen}"
     );
 }
+
+/// The owner's Sub-agent rounds per message bind the master's own team calls too: past the
+/// limit its spawn is refused in words that name keep going and hands nothing over, and
+/// the owner's keep going lets it hand work over again (F09).
+#[test]
+fn a_masters_spawn_past_the_round_limit_waits_for_the_owners_keep_going() {
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::team::master_limits::set_rounds(&fixture.connection, &project, Some(1)).unwrap();
+    typed_turn(&fixture.connection, "Build the page");
+    chat(
+        &fixture.connection,
+        crate::team::MessageAuthor::Engine,
+        "Results from your sub-agents:\n\nTask 1 (codex): Done",
+    );
+    let spawn = || {
+        tool_call(
+            1,
+            tool::SPAWN_TOOL,
+            json!({"task": "Write page.md", "harness": "codex"}),
+        )
+    };
+    let refused = serve_while(&mut fixture, &mailbox, vec![spawn()]);
+    let closed = crate::team::master_limits::Rounds {
+        used: 1,
+        max: Some(1),
+        kept_going: false,
+    };
+    assert_eq!(text(&refused[0]), (closed.refusal().as_str(), true));
+    let tasks = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master'",
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(tasks(&fixture.connection), 0);
+    typed_turn(&fixture.connection, "keep going");
+    let handed = serve_while(&mut fixture, &mailbox, vec![spawn()]);
+    assert!(!text(&handed[0]).1, "{handed:#?}");
+    assert_eq!(tasks(&fixture.connection), 1);
+}
