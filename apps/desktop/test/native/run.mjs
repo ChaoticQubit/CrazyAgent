@@ -23,10 +23,10 @@ const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
 const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
-assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "first-run-guide", "first-run-skip-guide",
+assert(["model-access", "model-access-read-only", "native-auth", "pools-screen", "pools-spend", "first-run-guide", "first-run-skip-guide",
   "learning-replay-guide", "learning-replay-first-run"].includes(suite),
   "closed native suite required");
-const WEBDRIVER_SECONDS = suite === "pools-screen" ? 900 : 300;
+const WEBDRIVER_SECONDS = suite === "pools-screen" || suite === "pools-spend" ? 900 : 300;
 let interrupted = false;
 
 function interrupt() {

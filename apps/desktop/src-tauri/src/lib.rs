@@ -26,9 +26,10 @@ use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
+use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
-    NativeAuthMethod,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
+    ModelAccessCollection, NativeAuthMethod,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -65,6 +66,7 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
+use crazyagent::usage::spend::SpendSettings;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -2201,6 +2203,26 @@ async fn desktop_remove_project(
 }
 
 #[tauri::command]
+async fn desktop_project_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<DemoView, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.project_demo().await
+}
+
+#[tauri::command]
+async fn desktop_create_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    pool: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.create_demo(pool, generation).await
+}
+
+#[tauri::command]
 async fn desktop_project_removal(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3594,6 +3616,17 @@ async fn desktop_usage_metrics(
 }
 
 #[tauri::command]
+async fn desktop_usage_extras(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    detail: bool,
+) -> Result<Vec<AccountExtras>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_extras(detail)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_refresh(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3617,6 +3650,29 @@ async fn desktop_usage_set_money(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.usage_set_money(settings)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    account: String,
+    confirmed: bool,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_spend(account, confirmed)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_set_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: SpendSettings,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_set_spend(settings)?;
     call.await
 }
 
@@ -4855,6 +4911,8 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_project_demo,
+    desktop_create_demo,
     desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
@@ -5043,10 +5101,13 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_extras,
     desktop_usage_notices,
     desktop_usage_set_money,
     desktop_usage_decide_recount,
     desktop_usage_set_reset,
+    desktop_usage_spend,
+    desktop_usage_set_spend,
     desktop_ide_extension_asks,
     desktop_ide_extension_approve,
     desktop_ide_extension_decline,

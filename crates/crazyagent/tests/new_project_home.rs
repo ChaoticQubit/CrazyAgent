@@ -690,3 +690,181 @@ fn a_home_folder_holding_a_set_up_project_cannot_be_deleted() {
     );
     assert_eq!(names(&home), ["org", "org-tools"]);
 }
+
+#[cfg(target_os = "macos")]
+const DEMO_POOL: &str = r#"timeout_ms = 5000
+[model_access]
+accounts = ["account-codex"]
+[[model_access.connections]]
+id = "m-codex"
+provider = "openai"
+harness = "codex"
+protocol = "native"
+account_ref = "account-codex"
+endpoint = { kind = "native" }
+model = { id = "native-default", author = "openai" }
+auth = { method = "native_managed", profile_ref = "profile-codex" }
+[[model_access.pools]]
+id = "pool-codex"
+members = ["m-codex"]
+projects = []
+roles = []
+fallback_allowed = false
+"#;
+
+/// The pending questions the engine raised for a project, read from the
+/// database in the runtime folder `root`, as (asker, source, question) rows.
+#[cfg(target_os = "macos")]
+fn questions(root: &Path, project: &str) -> Vec<(String, String, String)> {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let mut statement = db
+        .prepare(
+            "SELECT asker, source, question FROM questions_log
+             WHERE project=?1 AND status='pending' ORDER BY id",
+        )
+        .unwrap();
+    statement
+        .query_map([project], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// Records the managed profile `profile` as signed in, the way a finished sign-in
+/// leaves it, in the database in the runtime folder `root`.
+#[cfg(target_os = "macos")]
+fn sign_in(root: &Path, profile: &str) {
+    use sha2::Digest;
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    let key = format!("{:x}", sha2::Sha256::digest(profile.as_bytes()));
+    db.execute(
+        "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact)
+         VALUES('demo-sign-in',?1,1,'authenticated_observed',X'7B7D',X'7B7D')",
+        [key],
+    )
+    .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question() {
+    use crazyagent::demo::{NAME, PROJECT_ID, QUESTION};
+    use crazyagent::protocol::CredentialRef;
+    let engine = Engine::with_settings(DEMO_POOL).await;
+    let place = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let home = place.path().canonicalize().unwrap().join("projects");
+    fs::create_dir(&home).unwrap();
+    let mut owner = OwnerController::attach(
+        engine.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    let mut generation = 0;
+    let mut next = || {
+        generation += 1;
+        generation
+    };
+    let pool = CredentialRef::new("pool-codex").unwrap();
+
+    let before = owner.project_demo().await.unwrap();
+    assert_eq!(before.project_id, None);
+    assert!(!before.steps.created && before.created_ms.is_none());
+    assert_eq!(before.name, NAME);
+    let offered = |view: &crazyagent::demo::DemoView| {
+        view.pools
+            .iter()
+            .find(|item| item.pool == pool)
+            .map(|item| item.unavailable.clone())
+    };
+    assert_eq!(offered(&before), Some(Some("demo_pool_not_ready".into())));
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), rejected("demo_pool_not_ready"));
+
+    sign_in(engine.root.path(), "profile-codex");
+    assert_eq!(offered(&owner.project_demo().await.unwrap()), Some(None));
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), rejected("projects_home_unset"));
+    let response = owner
+        .set_projects_home(home.to_str().unwrap().into(), next())
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let gone = CredentialRef::new("pool-gone").unwrap();
+    let response = owner.create_demo(gone, next()).await.unwrap();
+    assert_eq!(result(response), rejected("demo_pool_missing"));
+    assert!(names(&home).is_empty());
+
+    let response = owner.create_demo(pool.clone(), next()).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(names(&home), ["crazyagent-demo"]);
+    let folder = home.join("crazyagent-demo");
+    for file in ["index.html", "style.css", "app.js", "README.md"] {
+        assert!(folder.join(file).is_file(), "{file}");
+    }
+    assert!(folder.join("test").join("app.test.js").is_file());
+    assert_eq!(git(&folder, &["rev-list", "--count", "HEAD"]).trim(), "2");
+    assert_eq!(
+        git(&folder, &["log", "-1", "--format=%s"]).trim(),
+        "Add the demo web page"
+    );
+    assert_eq!(git(&folder, &["remote"]), "");
+    assert_eq!(
+        git(&folder, &["status", "--porcelain", "--untracked-files=all"]),
+        ""
+    );
+    assert!(
+        !folder
+            .join(CRAZYAGENT_DIRECTORY)
+            .join("demo-git-home")
+            .exists()
+    );
+    let demo = ProjectId::new(PROJECT_ID).unwrap();
+    let policy = owner.project_agent_policy(demo.clone()).await.unwrap();
+    assert_eq!(
+        policy.access,
+        crazyagent::sandbox::policy::AgentAccess::Sandboxed
+    );
+    assert!(
+        owner
+            .project_read_paths(demo.clone())
+            .await
+            .unwrap()
+            .paths
+            .is_empty()
+    );
+    assert!(owner.project_hidden_paths(demo).await.unwrap().is_empty());
+
+    let after = owner.project_demo().await.unwrap();
+    assert_eq!(
+        after.project_id.as_ref().map(ProjectId::as_str),
+        Some(PROJECT_ID)
+    );
+    assert!(after.steps.created && after.created_ms.is_some());
+    assert!(!after.steps.goal_sent && !after.steps.question_answered);
+    assert_eq!(
+        questions(engine.root.path(), PROJECT_ID),
+        [(
+            "engine:demo".to_owned(),
+            "engine".to_owned(),
+            QUESTION.to_owned()
+        )]
+    );
+
+    let response = owner.create_demo(pool, next()).await.unwrap();
+    assert_eq!(result(response), rejected("demo_exists"));
+    assert_eq!(names(&home), ["crazyagent-demo"]);
+    assert_eq!(questions(engine.root.path(), PROJECT_ID).len(), 1);
+    drop(owner);
+    engine.stop().await;
+}

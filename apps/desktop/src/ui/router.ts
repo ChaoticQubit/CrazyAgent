@@ -27,6 +27,7 @@ export type Route =
   | { name: "new-project"; step: NewProjectStep }
   | { name: "project"; id: string; tab: ProjectTab; section?: string }
   | { name: "add-project"; way: AddProjectWay }
+  | { name: "demo" }
   | { name: "onboarding"; id: string }
   | { name: "metrics" }
   | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string };
@@ -52,6 +53,7 @@ export function parseRoute(hash: string): Route {
   const params = new URLSearchParams(query);
   if (parts[0] === "welcome" && parts.length === 1) return { name: "welcome" };
   if (parts[0] === "metrics" && parts.length === 1) return { name: "metrics" };
+  if (parts[0] === "demo" && parts.length === 1) return { name: "demo" };
   if (parts[0] === "settings" && parts[1] === "usage") return { name: "metrics" };
   if (parts[0] === "settings" && parts.length <= 2) {
     const tab = pick(SETTINGS_TABS, parts[1], "accounts");
@@ -89,6 +91,7 @@ export function formatRoute(route: Route): string {
     case "new-project": return `#/projects/new?step=${route.step}`;
     case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}${route.section ? `?section=${encodeURIComponent(route.section)}` : ""}`;
     case "add-project": return `#/projects/add/${route.way}`;
+    case "demo": return "#/demo";
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
     case "metrics": return "#/metrics";
     case "settings": {

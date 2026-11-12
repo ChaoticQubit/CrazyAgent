@@ -35,6 +35,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::scheduling::ScheduleChange;
     use crazyagent::team::TerminalsPerWindow;
     use crazyagent::usage::money::MoneySettings;
+    use crazyagent::usage::spend::SpendSettings;
     match command {
         "desktop_connect" => {
             let result: Result<_, BridgeError> = async { let mut bridge = lock(state).await?; bridge.connect().await }.await;
@@ -1579,6 +1580,24 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .remove_project(&id, generation, delete_name) .await }.await;
             routed(result)
         }
+        "desktop_project_demo" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.project_demo().await }.await;
+            routed(result)
+        }
+        "desktop_create_demo" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                pool: String,
+                generation: u64,
+            }
+            let Args { pool, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.create_demo(pool, generation).await }.await;
+            routed(result)
+        }
         "desktop_project_removal" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -2917,6 +2936,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_metrics(project_id, since_ms)?; call.await }.await;
             routed(result)
         }
+        "desktop_usage_extras" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                detail: bool,
+            }
+            let Args { detail } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_extras(detail)?; call.await }.await;
+            routed(result)
+        }
         "desktop_usage_refresh" => {
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_refresh()?; call.await }.await;
             routed(result)
@@ -2936,6 +2968,33 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_set_money(settings)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_usage_spend" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                account: String,
+                confirmed: bool,
+            }
+            let Args { account, confirmed } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_spend(account, confirmed)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_usage_set_spend" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: SpendSettings,
+            }
+            let Args { settings } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_set_spend(settings)?; call.await }.await;
             routed(result)
         }
         "desktop_usage_decide_recount" => {
