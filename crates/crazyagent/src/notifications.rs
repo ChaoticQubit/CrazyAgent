@@ -534,11 +534,13 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
 
-/// Item text as every client shows it: hidden characters escaped, local paths cut to their
-/// last part, one line of at most `TEXT_BYTES_MAX` bytes. Input: the text. Output: the
-/// line, maybe empty.
+/// Item text as it is stored and as every client and banner gets it: one line with hidden
+/// characters escaped and local paths cut to their last part, then credential-like words
+/// and lines hidden by `project_setup::redact`, at most `TEXT_BYTES_MAX` bytes. Showing it
+/// again changes nothing. Input: the text. Output: the line, maybe empty.
 pub(crate) fn shown(text: &str) -> String {
-    let words = crate::landing::scrubbed(text, &[]);
+    let words = crate::project_setup::redact(&crate::landing::scrubbed(text, &[]));
+    assert!(!words.contains('\n'));
     let mut end = words.len().min(TEXT_BYTES_MAX);
     while !words.is_char_boundary(end) {
         end -= 1;
@@ -768,8 +770,9 @@ fn stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored> {
     ))
 }
 
-/// One stored row as a single item. A row of a kind, project or target this engine does
-/// not read is skipped. Input: the values. Output: the item, or none.
+/// One stored row as a single item, its text through `shown` again so a row stored before
+/// redaction never serves a credential. A row of a kind, project or target this engine
+/// does not read is skipped. Input: the values. Output: the item, or none.
 fn item(row: Stored) -> Option<Notice> {
     let (id, kind, action, project, text, target, created_ms, read_ms, resolved_ms) = row;
     let kind = NoticeKind::parse(&kind)?;
@@ -787,7 +790,7 @@ fn item(row: Stored) -> Option<Notice> {
         kind,
         class,
         project_id,
-        text,
+        text: shown(&text),
         target,
         created_ms,
         read_ms,
