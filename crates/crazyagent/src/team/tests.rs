@@ -6255,6 +6255,71 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
     );
 }
 
+/// End a turn after done is 10 min for a project with no choice saved; the team status keeps
+/// each owner choice, Off, 2 min, 10 min and 1 h; a time outside the choices is refused; and
+/// the choice is per project (F15).
+#[test]
+fn end_a_turn_after_done_keeps_every_owner_choice_and_refuses_any_other() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-done-quiet",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-done-quiet", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().done_quiet_secs,
+        Some(DONE_QUIET_DEFAULT_SECS),
+        "10 min is the default"
+    );
+    for secs in [None, Some(120), Some(600), Some(3600)] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::DoneQuiet {
+                    project_id: project.clone(),
+                    secs,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().done_quiet_secs, secs);
+    }
+    for secs in [Some(0), Some(1), Some(300)] {
+        let action = TeamAction::DoneQuiet {
+            project_id: project.clone(),
+            secs,
+        };
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "team_done_quiet_invalid",
+            "{secs:?}"
+        );
+    }
+    assert_eq!(
+        done_quiet(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        Some(DONE_QUIET_DEFAULT_SECS),
+        "the choice is per project"
+    );
+}
+
 /// Each "Stop the master when idle after" choice gives its own time against the engine's
 /// bound, and with no choice each kind of master keeps what it did (DEC-117 Q4).
 #[test]

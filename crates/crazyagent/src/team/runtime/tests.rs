@@ -3249,6 +3249,23 @@ fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
 /// stop. Output: the runtime and the agent's id, once the agent is stopped.
 #[cfg(target_os = "macos")]
 fn stopped_page_writer(fixture: &Fixture, before_stop: &dyn Fn()) -> (TeamRuntime, i64) {
+    let (mut team, member, agents) = page_writer(fixture);
+    before_stop();
+    let listed = agents
+        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+        .unwrap();
+    agents.stop(&listed[0].id).unwrap();
+    fixture.until(&mut team, "the stopped sub-agent's task ends", |f| {
+        f.agent_status(member).0 == AgentStatus::Stopped
+    });
+    (team, member)
+}
+
+/// Starts one sub-agent on "Write page.md" whose stand-in writes page.md in its worktree and
+/// then keeps its turn open. Takes the fixture. Returns the runtime, the agent's id and the
+/// agent register, once page.md is written.
+#[cfg(target_os = "macos")]
+fn page_writer(fixture: &Fixture) -> (TeamRuntime, i64, Arc<Agents>) {
     let host = fixture.host();
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -3312,15 +3329,232 @@ fn stopped_page_writer(fixture: &Fixture, before_stop: &dyn Fn()) -> (TeamRuntim
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    before_stop();
-    let listed = agents
-        .list(Some(&fixture.setup.project_id), 0, crate::agents::LIST_MAX)
+    (team, member.id, agents)
+}
+
+/// Runs git in an agent worktree as the agent's own commit would, with no owner config,
+/// hooks or signing. Takes the fixture, the worktree folder and the arguments. Returns once
+/// git succeeded.
+#[cfg(target_os = "macos")]
+fn agent_git(fixture: &Fixture, worktree: &Path, arguments: &[&str]) {
+    let status = crate::spawn_gate::spawn(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &fixture.base)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args([
+                "-c",
+                "user.name=Agent",
+                "-c",
+                "user.email=agent@crazyagent.invalid",
+            ])
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(arguments)
+            .current_dir(worktree)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap()
+    .wait()
+    .unwrap();
+    assert!(status.success(), "git {arguments:?}");
+}
+
+/// The id of the task "Write page.md" and the note its landing leaves. Takes the fixture and
+/// the agent. Returns both.
+#[cfg(target_os = "macos")]
+fn page_task(fixture: &Fixture, member: i64) -> (i64, String) {
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md'",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
-    agents.stop(&listed[0].id).unwrap();
-    fixture.until(&mut team, "the stopped sub-agent's task ends", |f| {
-        f.agent_status(member.id).0 == AgentStatus::Stopped
+    let note = format!(
+        "The edits from task {task} (codex, sub-agent {member}) are waiting for you in Changes."
+    );
+    (task, note)
+}
+
+/// F15: a sub-agent's accepted done report posts its task's change set while the turn is
+/// still open, with the team note, and the task keeps running until its turn ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_done_report_posts_the_change_set_before_the_turn_ends() {
+    let fixture = Fixture::new(1);
+    let (mut team, member, _agents) = page_writer(&fixture);
+    let project = fixture.setup.project_id.clone();
+    let (_, note) = page_task(&fixture, member);
+    assert_eq!(noted(&fixture, &note), 0, "nothing is posted before done");
+
+    team.reported_done(member, &project).unwrap();
+    assert_eq!(noted(&fixture, &note), 1);
+    assert_eq!(task_of(&fixture, "Write page.md").0, "running");
+    idle_ticks(&mut team);
+    assert_eq!(
+        noted(&fixture, &note),
+        1,
+        "a look that finds nothing new posts nothing"
+    );
+    team.shutdown().unwrap();
+}
+
+/// F15: a commit the agent makes in its worktree while its turn is open posts the change set
+/// at the next look, with no done report and no turn end.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_commit_posts_the_change_set_before_the_turn_ends() {
+    let fixture = Fixture::new(1);
+    let (mut team, member, _agents) = page_writer(&fixture);
+    let (_, note) = page_task(&fixture, member);
+    let worktree: String = fixture
+        .connection
+        .query_row(
+            "SELECT worktree FROM team_agents WHERE id=?1",
+            [member],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let worktree = fixture.base.join("project").join(worktree);
+    idle_ticks(&mut team);
+    assert_eq!(
+        noted(&fixture, &note),
+        0,
+        "nothing is posted before the commit"
+    );
+
+    agent_git(&fixture, &worktree, &["add", "page.md"]);
+    agent_git(&fixture, &worktree, &["commit", "-qm", "Write the page"]);
+    fixture.until(&mut team, "the commit posts the change set", |f| {
+        noted(f, &note) == 1
     });
-    (team, member.id)
+    assert_eq!(task_of(&fixture, "Write page.md").0, "running");
+    team.shutdown().unwrap();
+}
+
+/// Starts a sub-agent on a task whose stand-in turn stays open with no output, stores the
+/// owner's End a turn after done choice as `secs` (0 for Off) and reports the task done.
+/// Takes the fixture. Returns the runtime, the task and the agent.
+#[cfg(target_os = "macos")]
+fn quiet_after_done(fixture: &Fixture, secs: u32) -> (TeamRuntime, i64) {
+    let host = fixture.host();
+    let mut team = limited_runtime(fixture, &host, WORKING_CODEX, TeamLimits::default());
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_done_quiet(project,secs) VALUES (?1,?2)",
+            params![PROJECT, secs],
+        )
+        .unwrap();
+    owner(fixture, &[hand_off(fixture, QUIET_TASK)]);
+    fixture.until(&mut team, "the sub-agent works on the task", |f| {
+        task_of(f, QUIET_TASK).0 == "running"
+    });
+    let (agent, task): (i64, i64) = fixture
+        .connection
+        .query_row(
+            "SELECT agent,id FROM team_tasks WHERE prompt=?1",
+            [QUIET_TASK],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    team.reported_done(agent, &fixture.setup.project_id)
+        .unwrap();
+    (team, task)
+}
+
+/// The task prompt `WORKING_CODEX` keeps a turn open for with no output.
+#[cfg(target_os = "macos")]
+const QUIET_TASK: &str = "Work on it for a long time";
+
+/// F15: with End a turn after done at 1 s, stored past the choices as a shorter bound, a
+/// task turn its agent reported done and that stays quiet is ended as a success: the task is
+/// done, its result says why first, and one team note names the time.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_reported_done_ends_once_its_turn_stays_quiet_for_the_after_done_time() {
+    let fixture = Fixture::new(1);
+    let (mut team, task) = quiet_after_done(&fixture, 1);
+    fixture.until(&mut team, "the quiet turn ends", |f| {
+        task_of(f, QUIET_TASK).0 == "done"
+    });
+    let result: String = fixture
+        .connection
+        .query_row("SELECT result FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(result.starts_with(DONE_QUIET_ENDED), "{result}");
+    assert_eq!(
+        noted(
+            &fixture,
+            &format!("Task {task} ended 1 s after its agent said it was done and went quiet.")
+        ),
+        1
+    );
+    team.shutdown().unwrap();
+}
+
+/// F15, one row per owner choice of End a turn after done: Off, 2 min, 10 min (default) and
+/// 1 h each keep a task turn its agent reported done running past a short quiet time, and
+/// the engine reads the chosen bound.
+#[cfg(target_os = "macos")]
+fn a_quiet_turn_after_done_runs_on_under(secs: u32, read: Option<u32>) {
+    let fixture = Fixture::new(1);
+    let (mut team, task) = quiet_after_done(&fixture, secs);
+    assert_eq!(
+        crate::team::done_quiet(&fixture.connection, &fixture.setup.project_id).unwrap(),
+        read
+    );
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(task_of(&fixture, QUIET_TASK).0, "running");
+    assert_eq!(
+        fixture
+            .status()
+            .messages
+            .iter()
+            .filter(|message| message.text.starts_with(&format!("Task {task} ended")))
+            .count(),
+        0
+    );
+    team.shutdown().unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_end_a_turn_after_done_off_a_quiet_turn_runs_on() {
+    a_quiet_turn_after_done_runs_on_under(0, None);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_end_a_turn_after_done_at_2_min_a_short_quiet_turn_runs_on() {
+    a_quiet_turn_after_done_runs_on_under(120, Some(120));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_end_a_turn_after_done_at_10_min_a_short_quiet_turn_runs_on() {
+    a_quiet_turn_after_done_runs_on_under(600, Some(600));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn with_end_a_turn_after_done_at_1_h_a_short_quiet_turn_runs_on() {
+    a_quiet_turn_after_done_runs_on_under(3600, Some(3600));
 }
 
 /// A sub-agent edits a file in its worktree and the owner stops it before it finishes:
@@ -15722,6 +15956,7 @@ fn between_turns(
         reask: None,
         reasked: None,
         starts: crate::coord::relay::TaskStarts::default(),
+        after_done: AfterDone::default(),
     }
 }
 
@@ -22319,6 +22554,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         );
         assert_eq!(problem, Some(expected));
         assert!(!host.alive().unwrap().contains(&agent));
@@ -22381,6 +22617,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(leave),
+            &AtomicBool::new(false),
         );
         drop(reports);
         let reports: Vec<Report> = reported.iter().collect();
@@ -22616,6 +22853,7 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
+            &AtomicBool::new(false),
         );
         drop(reports);
         assert_eq!(
@@ -22641,6 +22879,7 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
             &home,
             &ordered,
             &reports,
+            &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),
             &AtomicBool::new(false),

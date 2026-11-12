@@ -68,6 +68,8 @@ const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
 const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// How often a busy sub-agent's worktree is looked at for a new commit (F15).
+const HEAD_LOOK_EVERY: Duration = Duration::from_secs(5);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
@@ -632,6 +634,26 @@ struct Worker {
     reask: Option<i64>,
     reasked: Option<i64>,
     starts: crate::coord::relay::TaskStarts,
+    after_done: AfterDone,
+}
+
+/// The lstat size and modification time of an agent worktree's HEAD file and of its own
+/// branch's loose ref, read without opening either, so a commit the agent makes shows as a
+/// change (F15).
+type HeadMark = [(u64, i64, i64); 2];
+
+/// What the engine watches of a sub-agent's task turn so the turn's change set is posted
+/// when its agent reports done or commits, not only at the turn end (F15): the task the
+/// rest belongs to, the flag that ends the turn after done, when done was reported, when
+/// the turn's output last grew, and the worktree's head mark at the last look.
+#[derive(Default)]
+struct AfterDone {
+    task: Option<i64>,
+    wrap: Arc<AtomicBool>,
+    done_at: Option<Instant>,
+    output: Option<(usize, Instant)>,
+    mark: Option<HeadMark>,
+    looked: Option<Instant>,
 }
 
 impl Worker {
@@ -2729,6 +2751,7 @@ impl TeamRuntime {
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.serve_agent_calls(&stored, access);
+        self.watch_done(project)?;
         self.serve_relays(project);
         self.tell_agent_answers(project);
         self.feed_master(&stored, access, &paused)?;
@@ -4562,6 +4585,7 @@ impl TeamRuntime {
             .map(|(id, _)| *id)
             .collect();
         let host = self.terminal.as_deref();
+        let mut done = Vec::new();
         for id in subs {
             let label = super::events::label(&self.connection, id)
                 .unwrap_or_else(|_| AgentRole::Sub.agent_label(id));
@@ -4594,11 +4618,133 @@ impl TeamRuntime {
                     )
                 },
                 &mut |connection, caller, call| {
-                    super::master::answer_sub(connection, &answering, caller, call)
-                        .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+                    let finished = caller == id
+                        && matches!(
+                            &call,
+                            tool::Call::FinishWork {
+                                outcome: crate::coord::Finish::Complete
+                                    | crate::coord::Finish::ReviewReady,
+                                ..
+                            }
+                        );
+                    let answer = super::master::answer_sub(connection, &answering, caller, call)
+                        .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)));
+                    if finished && answer.as_ref().is_some_and(|(_, refused)| !refused) {
+                        done.push(id);
+                    }
+                    answer
                 },
             );
         }
+        for id in done {
+            if let Err(problem) = self.reported_done(id, project) {
+                eprintln!(
+                    "team_done_landing_failed cause={}",
+                    bound_text(&problem.0, 120)
+                );
+            }
+        }
+    }
+
+    /// Takes a sub-agent's accepted `finish_work` done report on its task (F15): posts or
+    /// updates the turn's change set now, and starts the quiet time after which the owner's
+    /// "End a turn after done" ends the turn. Takes the agent and its project. Returns any
+    /// SQLite failure.
+    fn reported_done(&mut self, id: i64, project: &ProjectId) -> Result<(), EngineError> {
+        let Some(worker) = self.workers.get_mut(&id) else {
+            return Ok(());
+        };
+        let Some(Busy::Task(task)) = worker.busy else {
+            return Ok(());
+        };
+        watch_task(&mut worker.after_done, task);
+        worker.after_done.done_at = Some(Instant::now());
+        self.land_now(id, project, task, true)
+    }
+
+    /// Watches each busy sub-agent task turn of a project after its agent reported done or
+    /// committed (F15): a new commit in its worktree, seen by `head_mark` at most once per
+    /// `HEAD_LOOK_EVERY`, posts or updates the turn's change set, and a turn that stayed
+    /// quiet for the owner's "End a turn after done" time since its done report is ended as
+    /// a success with one team note. Takes the project. Returns any SQLite failure.
+    fn watch_done(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        let now = Instant::now();
+        let busy: Vec<(i64, i64)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project && worker.role == AgentRole::Sub && !worker.stopping
+            })
+            .filter_map(|(id, worker)| match worker.busy {
+                Some(Busy::Task(task)) => Some((*id, task)),
+                _ => None,
+            })
+            .take(PANES_PER_PROJECT_MAX)
+            .collect();
+        if busy.is_empty() {
+            return Ok(());
+        }
+        let quiet = super::done_quiet(&self.connection, project)?
+            .map(|secs| Duration::from_secs(secs.into()));
+        for (id, task) in busy {
+            let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
+            watch_task(watch, task);
+            if watch
+                .looked
+                .is_none_or(|at| now.duration_since(at) >= HEAD_LOOK_EVERY)
+            {
+                watch.looked = Some(now);
+                let mark = self.head_mark(id, project)?;
+                let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
+                let before = std::mem::replace(&mut watch.mark, mark);
+                if before.is_some() && mark.is_some() && before != mark {
+                    self.land_now(id, project, task, false)?;
+                }
+            }
+            let watch = &self.workers[&id].after_done;
+            let (Some(quiet), Some(done_at)) = (quiet, watch.done_at) else {
+                continue;
+            };
+            let since = watch.output.map_or(done_at, |(_, at)| at.max(done_at));
+            if now.duration_since(since) < quiet {
+                continue;
+            }
+            let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
+            watch.done_at = None;
+            watch.wrap.store(true, Ordering::SeqCst);
+            self.note(
+                project,
+                &format!(
+                    "Task {task} ended {} after its agent said it was done and went quiet.",
+                    super::span_words(quiet.as_secs())
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Reads a sub-agent worktree's `HeadMark` without opening a file it could have swapped:
+    /// lstat of its git folder's HEAD and of its own branch's loose ref in the shared git
+    /// folder (F15). Takes the agent and its project. Returns the mark, none for an agent with
+    /// no worktree row or a HEAD that cannot be read, or any SQLite failure.
+    fn head_mark(&self, id: i64, project: &ProjectId) -> Result<Option<HeadMark>, EngineError> {
+        let row: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![id, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((repository, worktree, git_dir)) = row else {
+            return Ok(None);
+        };
+        Ok(head_mark(
+            Path::new(&repository),
+            Path::new(&worktree),
+            Path::new(&git_dir),
+        ))
     }
 
     /// Keeps the caller socket of each native lead of a project bound and answered (DEC-111
@@ -6740,6 +6886,8 @@ impl TeamRuntime {
         let cancel = Arc::new(AtomicBool::new(false));
         let leave = Arc::new(AtomicBool::new(false));
         let (flag, kept) = (cancel.clone(), leave.clone());
+        let after_done = AfterDone::default();
+        let wrap = after_done.wrap.clone();
         let managed = match &launch {
             Launch::Fresh(_, mode) => matches!(**mode, Mode::PerTurn { .. }),
             Launch::Adopt(adoption) => adoption.managed.is_some(),
@@ -6768,7 +6916,7 @@ impl TeamRuntime {
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
-            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept))
+            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap))
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
@@ -6838,6 +6986,7 @@ impl TeamRuntime {
                 reask: None,
                 reasked: None,
                 starts,
+                after_done,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -8763,6 +8912,14 @@ impl TeamRuntime {
                 Ok(false)
             }
             Report::Progress { bytes } => {
+                let watch = &mut self
+                    .workers
+                    .get_mut(&id)
+                    .expect("a reporting worker exists")
+                    .after_done;
+                if watch.output.is_none_or(|(seen, _)| seen != bytes) {
+                    watch.output = Some((bytes, Instant::now()));
+                }
                 if let Some(Busy::Task(task)) = self.workers[&id].busy {
                     self.connection
                         .execute(
@@ -9242,6 +9399,52 @@ impl TeamRuntime {
         what: &str,
         end: TurnEnd,
     ) -> Result<bool, EngineError> {
+        self.land_turn_as(id, project, (turn, line), what, end, true)
+    }
+
+    /// Posts or updates the change set of a sub-agent's task turn that is still open, once
+    /// its agent reported done or committed (F15). The record compares heads, so a look that
+    /// finds nothing new adds nothing, and the turn end lands again whatever came after. A
+    /// commit's look is quiet about a refusal, which the turn end still tells. Inputs: the
+    /// agent, its project, the task and whether a refusal is told. Output: any SQLite failure.
+    fn land_now(
+        &mut self,
+        id: i64,
+        project: &ProjectId,
+        task: i64,
+        loud: bool,
+    ) -> Result<(), EngineError> {
+        let line: String = self
+            .connection
+            .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?
+            .unwrap_or_default();
+        self.land_turn_as(
+            id,
+            project,
+            (format!("task-{task}"), line),
+            &format!("task {task}"),
+            TurnEnd::Success,
+            loud,
+        )?;
+        Ok(())
+    }
+
+    /// `land_turn` with the choice to stay quiet about a refusal. Inputs: the agent, its
+    /// project, the turn key with its prompt line, what ended for the note, how it ended and
+    /// whether a refusal is told. Output: whether the record was kept, or any SQLite failure.
+    fn land_turn_as(
+        &mut self,
+        id: i64,
+        project: &ProjectId,
+        (turn, line): (String, String),
+        what: &str,
+        end: TurnEnd,
+        loud: bool,
+    ) -> Result<bool, EngineError> {
         type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
             .connection
@@ -9350,6 +9553,7 @@ impl TeamRuntime {
                 }
                 note
             }
+            Err(_) if !loud => return Ok(false),
             Err(problem) => {
                 if let Some(text) = crate::landing::refusal_for_agent(&problem) {
                     self.note_lead(project, id, text)?;
@@ -9842,6 +10046,7 @@ fn work(
     cancel: Arc<AtomicBool>,
     interrupt: Arc<AtomicBool>,
     leave: Arc<AtomicBool>,
+    wrap: Arc<AtomicBool>,
 ) {
     let _proxy = launch.proxy();
     let _relay = launch.relay();
@@ -9857,7 +10062,9 @@ fn work(
             return;
         }
         Launch::Adopt(adoption) if adoption.managed.is_some() => {
-            let problem = native_adopted(*adoption, &orders, &reports, &cancel, &interrupt, &leave);
+            let problem = native_adopted(
+                *adoption, &orders, &reports, &cancel, &interrupt, &leave, &wrap,
+            );
             let _ = reports.send(Report::Ended { problem });
             return;
         }
@@ -9884,13 +10091,14 @@ fn work(
                 })
             }
             Mode::PerTurn { home } if plan.native => {
-                let problem =
-                    native_session(&plan, &home, &orders, &reports, &cancel, &interrupt, &leave);
+                let problem = native_session(
+                    &plan, &home, &orders, &reports, &cancel, &interrupt, &leave, &wrap,
+                );
                 let _ = reports.send(Report::Ended { problem });
                 return;
             }
             Mode::PerTurn { home } => {
-                let problem = per_turn(&plan, &home, &orders, &reports, &cancel, &interrupt);
+                let problem = per_turn(&plan, &home, &orders, &reports, &cancel, &interrupt, &wrap);
                 let _ = reports.send(Report::Ended { problem });
                 return;
             }
@@ -9927,7 +10135,7 @@ fn work(
             live_serve(*session, &orders, &reports, &cancel, &leave, true, None)
         }
         Ok(session) => serve(
-            session, None, &orders, &reports, &cancel, &interrupt, &leave,
+            session, None, &orders, &reports, &cancel, &interrupt, &leave, &wrap,
         ),
         Err(problem) => Some(problem),
     };
@@ -10348,6 +10556,7 @@ fn turn_closed(reports: &Sender<Report>, taken: bool, cause: Option<String>) {
 /// session, so its pane record, server and teammates outlive a turn. Later turns carry no
 /// account. Takes the plan, the lead's home and the worker's channels and flags. Returns the
 /// problem that ended it, if any.
+#[allow(clippy::too_many_arguments)]
 fn native_session(
     plan: &Plan,
     home: &Path,
@@ -10356,6 +10565,7 @@ fn native_session(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     assert!(plan.native && !plan.live && plan.pane.is_some());
     let (first, grant) = match next_turn(orders, cancel, None) {
@@ -10413,6 +10623,7 @@ fn native_session(
             cancel,
             interrupt,
             leave,
+            wrap,
         ),
         Err(problem) => {
             if resume.is_some() && problem.0 == RESUME_REFUSED {
@@ -10439,6 +10650,7 @@ fn native_adopted(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     let Adoption {
         host,
@@ -10508,6 +10720,7 @@ fn native_adopted(
             cancel,
             interrupt,
             leave,
+            wrap,
         ),
         Err(problem) => {
             let cause = Some(with_code(
@@ -10697,6 +10910,7 @@ fn next_lead_turn(
 /// left. A stop its warden did not confirm keeps both for the engine's life and ends the
 /// agent with that problem; a Full access stop that left processes running keeps both
 /// until they end, names them and ends the agent.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     mut session: AgentSession,
     kept: Option<Kept>,
@@ -10705,6 +10919,7 @@ fn serve(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     let lead = kept.is_some();
     let (mut first, held) = kept.map_or((None, None), |kept| (kept.first, Some(kept.held)));
@@ -10745,7 +10960,13 @@ fn serve(
         assert!(grant.is_none());
         latest = rules;
         let prompt = told(prompt, rules, session.reports_background());
-        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
+        let (text, end, cause) = turn(
+            &mut session,
+            &prompt,
+            reports,
+            (cancel, interrupt, wrap),
+            rules,
+        );
         let reusable = matches!(
             end,
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
@@ -10788,6 +11009,7 @@ fn per_turn(
     reports: &Sender<Report>,
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant, rules) = next_turn(orders, cancel, None) {
@@ -10865,7 +11087,13 @@ fn per_turn(
             pane: session.pane_record().map(Box::new),
         });
         let prompt = told(prompt, rules, true);
-        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
+        let (text, end, cause) = turn(
+            &mut session,
+            &prompt,
+            reports,
+            (cancel, interrupt, wrap),
+            rules,
+        );
         if let Some(recorded) = session
             .conversation()
             .filter(|c| plan.continues && resume.as_ref() != Some(c))
@@ -10897,6 +11125,9 @@ const PROCESS_CLOSED: &str = "The agent process closed";
 const BACKGROUND_INTERRUPTED: &str = "The owner's interrupt ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// What a task cut by a time limit says when commands its agent started still ran.
 const BACKGROUND_CUT: &str = "The time limit ended this task while a command it started in the background still ran; that command was stopped with it.";
+/// What a task turn the engine ended after its agent reported done and stayed quiet says
+/// first (F15), so the reply is never empty and the task reads as the agent's own finish.
+const DONE_QUIET_ENDED: &str = "The agent reported this task done and then stayed quiet, so CrazyAgent ended its turn, as End a turn after done in Team settings says.";
 /// What a task the owner's background grace time ended says (DEC-111 Q13).
 const BACKGROUND_GRACE_ENDED: &str = "The background grace time in Team settings ended this task while a command it started in the background still ran; that command was stopped.";
 /// What a task that ended with its turn under the owner's Stop setting says (DEC-111 Q13).
@@ -11451,6 +11682,53 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
     }
 }
 
+/// Starts the watch of a sub-agent's task turn afresh when its task changed, keeping the
+/// wrap flag the agent's thread holds (F15). Takes the watch and the task.
+fn watch_task(watch: &mut AfterDone, task: i64) {
+    if watch.task == Some(task) {
+        return;
+    }
+    watch.task = Some(task);
+    watch.done_at = None;
+    watch.output = None;
+    watch.mark = None;
+    watch.looked = None;
+}
+
+/// Reads the `HeadMark` of an agent worktree (F15): the lstat of its git folder's HEAD, and
+/// of the loose ref of the engine branch HEAD names, in its own clone's git folder or, for a
+/// linked worktree, the owner repository's, zeros when HEAD is detached or the ref is
+/// packed. HEAD is read only as a plain file, never through a link or from a pipe, and a
+/// branch the engine did not name is not looked up. Takes the repository, the worktree and
+/// its git folder. Returns the mark, or none when HEAD cannot be read.
+fn head_mark(repository: &Path, worktree: &Path, git_dir: &Path) -> Option<HeadMark> {
+    use std::os::unix::fs::MetadataExt;
+    let mark = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .filter(|meta| meta.file_type().is_file())
+            .map(|meta| (meta.len(), meta.mtime(), meta.mtime_nsec()))
+    };
+    let head_file = git_dir.join("HEAD");
+    let head = mark(&head_file)?;
+    let text = plain_text(&head_file)?;
+    let own = crate::agent_git::branch(worktree);
+    let common = if git_dir == crate::agent_git::git_dir(worktree) {
+        git_dir.to_path_buf()
+    } else {
+        repository.join(".git")
+    };
+    let branch = text
+        .strip_prefix("ref: refs/heads/")
+        .map(str::trim_end)
+        .filter(|branch| {
+            crate::agent_git::is_agent_branch(branch) || own.as_deref() == Some(*branch)
+        })
+        .and_then(|branch| mark(&common.join("refs/heads").join(branch)))
+        .unwrap_or((0, 0, 0));
+    Some([head, branch])
+}
+
 /// The team note when a saved master harness with no live terminal, such as RCLI, takes
 /// over and the live master turns off (F06). Takes the harness. Returns the note.
 pub(super) fn live_gone(harness: &str) -> String {
@@ -11687,18 +11965,20 @@ fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
 /// choice: at once under Stop, after the grace time under Grace (DEC-111 Q13). A turn ended
 /// for its background commands is still held, so its caller stops the agent and them with
 /// it. Each change between held and running is reported, so a message can be typed into a
-/// held agent while it shows working on its task (DEC-119). Takes the session, the prompt, the reports
-/// channel, the cancel and interrupt flags and the turn's rules. Returns the turn's text,
-/// its end and the end's cause.
+/// held agent while it shows working on its task (DEC-119). The wrap flag, set once its agent
+/// reported done and stayed quiet for the owner's "End a turn after done" time, ends the turn
+/// as a success with `DONE_QUIET_ENDED` before its text (F15). Takes the session, the prompt,
+/// the reports channel, the cancel, interrupt and wrap flags and the turn's rules. Returns
+/// the turn's text, its end and the end's cause.
 fn turn(
     session: &mut AgentSession,
     prompt: &str,
     reports: &Sender<Report>,
-    cancel: &AtomicBool,
-    interrupt: &AtomicBool,
+    (cancel, interrupt, wrap): (&AtomicBool, &AtomicBool, &AtomicBool),
     rules: TurnRules,
 ) -> (String, TurnEnd, Option<String>) {
     interrupt.store(false, Ordering::SeqCst);
+    wrap.store(false, Ordering::SeqCst);
     if let Err(problem) = session.send_or_cancel(prompt, cancel) {
         if problem.0 == "launch_cancelled" {
             return (String::new(), TurnEnd::Cancelled, None);
@@ -11714,12 +11994,17 @@ fn turn(
     let mut held_since = None;
     let mut released = None;
     let mut shown_held = false;
+    let mut wrapped = false;
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
         }
         if interrupt.swap(false, Ordering::SeqCst) {
             let _ = session.interrupt();
+        }
+        if wrap.swap(false, Ordering::SeqCst) {
+            wrapped = true;
+            break TurnEnd::Success;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             cause = Some(TURN_LIMIT.to_owned());
@@ -11783,7 +12068,10 @@ fn turn(
         }
     };
     assert!(released.is_none() || (end == TurnEnd::Success && session.held()));
-    if session.background_running() > 0 {
+    assert!(!wrapped || (end == TurnEnd::Success && released.is_none()));
+    if wrapped {
+        text = format!("{DONE_QUIET_ENDED}\n{text}");
+    } else if session.background_running() > 0 {
         match (end, released) {
             (TurnEnd::TimedOut, _) => text = format!("{BACKGROUND_CUT}\n{text}"),
             (TurnEnd::Interrupted, _) => text = format!("{BACKGROUND_INTERRUPTED}\n{text}"),
@@ -11799,6 +12087,7 @@ fn turn(
                     .max(BACKGROUND_INTERRUPTED.len())
                     .max(BACKGROUND_GRACE_ENDED.len())
                     .max(BACKGROUND_STOPPED.len())
+                    .max(DONE_QUIET_ENDED.len())
                 + 1
     );
     (text, end, cause)

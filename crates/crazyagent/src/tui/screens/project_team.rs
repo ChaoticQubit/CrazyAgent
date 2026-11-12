@@ -748,6 +748,7 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
+            KeyCode::Char('D') => self.done_quiet(),
             KeyCode::Char('I') => self.master_idle_stop(),
             KeyCode::Char('V') => self.live_terminal(),
             KeyCode::Char('F') => self.new_folder_limit(),
@@ -2098,6 +2099,35 @@ impl TeamView {
         })
     }
 
+    /// Moves "End a turn after done" to its next choice: 2 min, 10 min, 1 h, Off and back to
+    /// 2 min (F15): how long a task turn may stay quiet after its agent reported done before
+    /// the engine ends it. Output: the change to send, or Handled with a notice while loading
+    /// or saving.
+    fn done_quiet(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let secs = done_quiet_next(status.done_quiet_secs);
+        self.changing = Some(match secs {
+            Some(secs) => format!(
+                "A task turn now ends {} after its agent says done and goes quiet.",
+                crate::team::span_words(secs.into())
+            ),
+            None => "A task turn now ends only when its agent ends it.".to_owned(),
+        });
+        TeamReply::Change(TeamAction::DoneQuiet {
+            project_id: self.project.clone(),
+            secs,
+        })
+    }
+
     /// Moves "Stop the master when idle after" to its next choice: 15 min, 1 h, Off and back
     /// to 15 min (DEC-117 Q4). Output: the change to send, or Handled with a notice while
     /// loading or saving.
@@ -3260,6 +3290,10 @@ impl TeamView {
                 .to_owned(),
             ),
             setting(
+                "End a turn after done",
+                done_quiet_words(status.done_quiet_secs),
+            ),
+            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -3637,6 +3671,7 @@ impl TeamView {
             ("g", "Ask before merge"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
+            ("D", "End a turn after done"),
             ("I", "Stop the master when idle after"),
             ("V", "Live terminal"),
             ("F", "New folder limit"),
@@ -3685,6 +3720,27 @@ fn master_runs_live(status: &TeamStatus) -> bool {
             crate::harnesses::interactive::support(&harness.harness)
                 == crate::harnesses::interactive::Support::Terminal
         })
+}
+
+/// The "End a turn after done" choice after `secs`: each of `IDLE_CHOICES_SECS` in turn,
+/// then Off, then the first again (F15). Input: the saved choice, none for Off. Output: the
+/// next choice.
+fn done_quiet_next(secs: Option<u32>) -> Option<u32> {
+    let choices = crate::team::IDLE_CHOICES_SECS;
+    match secs.and_then(|secs| choices.iter().position(|choice| *choice == secs)) {
+        Some(at) => choices.get(at + 1).copied(),
+        None if secs.is_none() => Some(choices[0]),
+        None => Some(crate::team::DONE_QUIET_DEFAULT_SECS),
+    }
+}
+
+/// How the Team settings list shows the "End a turn after done" choice. Input: the saved
+/// choice, none for Off. Output: the words.
+fn done_quiet_words(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "Off".to_owned(),
+        |secs| crate::team::span_words(secs.into()),
+    )
 }
 
 /// Which cap on running agents a key moves.

@@ -71,6 +71,10 @@ const _: () = assert!(MASTER_IDLE_STOP_SECS * MASTER_IDLE_HOUR_BOUNDS == 3600);
 pub const MASTER_BRANCH_BYTES_MAX: usize = 255;
 /// The idle stop a team starts with: 10 minutes.
 pub const IDLE_STOP_DEFAULT_SECS: u32 = 600;
+/// How long a sub-agent's task turn may stay quiet after its agent reported the work done
+/// with `finish_work` before the engine ends the turn (F15): the owner picks one of
+/// `IDLE_CHOICES_SECS` or Off. The default is 10 minutes.
+pub const DONE_QUIET_DEFAULT_SECS: u32 = 600;
 
 /// A prompt the owner sent straight to one team sub-agent with an explicit send. It is kept
 /// on the agent's task until the master hears a short note of it on its next turn.
@@ -753,6 +757,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    DoneQuiet {
+        project_id: ProjectId,
+        secs: Option<u32>,
+    },
     MasterIdleStop {
         project_id: ProjectId,
         choice: MasterIdleStop,
@@ -962,6 +970,10 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_time_limits_invalid"))
             }
+            Self::DoneQuiet { secs, .. } => secs
+                .is_none_or(|secs| IDLE_CHOICES_SECS.contains(&secs))
+                .then_some(())
+                .ok_or_else(|| failure("team_done_quiet_invalid")),
             Self::WakeAgent { agent, .. } | Self::StopAgent { agent, .. } => {
                 if *agent <= 0 {
                     return Err(failure("team_agent_not_found"));
@@ -1067,6 +1079,7 @@ impl TeamAction {
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
+            | Self::DoneQuiet { project_id, .. }
             | Self::MasterIdleStop { project_id, .. }
             | Self::MasterLiveTerminal { project_id, .. }
             | Self::CatchUpMain { project_id, .. }
@@ -1585,6 +1598,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_reask_empty (
                 project TEXT PRIMARY KEY,
                 reask INTEGER NOT NULL CHECK(reask IN (0,1))
+            );
+            CREATE TABLE IF NOT EXISTS team_done_quiet (
+                project TEXT PRIMARY KEY,
+                secs INTEGER NOT NULL CHECK(secs BETWEEN 0 AND 86400)
             );
             CREATE TABLE IF NOT EXISTS team_master_idle_stop (
                 project TEXT PRIMARY KEY,
@@ -2639,6 +2656,15 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::DoneQuiet { secs, .. } => {
+            tx.execute(
+                "INSERT INTO team_done_quiet(project,secs) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET secs=excluded.secs",
+                params![project.as_str(), secs.unwrap_or(0)],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::MasterIdleStop { choice, .. } => {
             set_master_idle_stop(tx, project, *choice)?;
             Ok(Outcome::Applied)
@@ -3417,6 +3443,11 @@ fn reask_default() -> bool {
     true
 }
 
+/// The "End a turn after done" choice a team status read without one shows: 10 minutes.
+fn done_quiet_default() -> Option<u32> {
+    Some(DONE_QUIET_DEFAULT_SECS)
+}
+
 /// The "Live terminal" setting a team status read without one shows: on (DEC-117 Q4).
 /// Output: the default.
 fn live_terminal_default() -> bool {
@@ -3462,6 +3493,8 @@ pub struct TeamStatus {
     pub access_unreadable: bool,
     #[serde(default = "reask_default")]
     pub reask_empty_reply: bool,
+    #[serde(default = "done_quiet_default")]
+    pub done_quiet_secs: Option<u32>,
     #[serde(default)]
     pub master_idle_stop: MasterIdleStop,
     #[serde(default = "live_terminal_default")]
@@ -4171,6 +4204,33 @@ pub fn reask_empty_reply(
         .optional()
         .map_err(error)?;
     Ok(reask.unwrap_or_else(reask_default))
+}
+
+/// Reads how long a sub-agent's task turn may stay quiet after its agent reported done
+/// before the engine ends it (F15). Takes a connection and the project. Returns the
+/// seconds, 10 minutes until the owner saves a choice, none for Off, or
+/// `team_done_quiet_invalid` for a stored bound outside 1 s to 24 h.
+pub fn done_quiet(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<u32>, EngineError> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT secs FROM team_done_quiet WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match stored {
+        None => Ok(done_quiet_default()),
+        Some(0) => Ok(None),
+        Some(secs) => u32::try_from(secs)
+            .ok()
+            .filter(|secs| (1..=86_400).contains(secs))
+            .map(Some)
+            .ok_or_else(|| failure("team_done_quiet_invalid")),
+    }
 }
 
 /// The owner's "Stop the master when idle after" setting, per project (DEC-117 Q4). With no
@@ -5301,6 +5361,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         master_lands,
         access_unreadable,
         reask_empty_reply: reask_empty_reply(connection, project)?,
+        done_quiet_secs: done_quiet(connection, project)?,
         master_idle_stop: MasterIdleStop::effective(
             master_idle_stop(connection, project)?,
             master::live(connection, project)?,
