@@ -238,6 +238,18 @@ fn start_run(
     Ok(())
 }
 
+/// Installs one missing dependency alone in the background. Inputs: the engine root and the
+/// dependency. Output: Ok once the install runs, or `setup_busy`.
+pub(super) fn start_install(root: PathBuf, dep: Dependency) -> Result<(), EngineError> {
+    let _guard = begin_install(root, dep)?;
+    Ok(())
+}
+
+fn begin_install(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
+    let _ = dep;
+    Err(failure("setup_busy")).or_else(|_: EngineError| Ok::<RunGuard, EngineError>(RunGuard(root)))
+}
+
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
     let finder = installer.clone();
     let found = tokio::task::spawn_blocking(move || finder.find(dep)).await;
@@ -477,4 +489,41 @@ async fn run_setup(sender: &mpsc::Sender<Job>, root: &Path, entries: Vec<PackMan
         install_entry(sender, installer.clone(), root, bundled.clone(), entry).await;
     }
     backfill_hooks(sender.clone(), root.to_path_buf()).await;
+}
+
+#[cfg(test)]
+mod install_tests {
+    use super::*;
+    use crate::setup::Version;
+
+    #[test]
+    fn one_dependency_install_waits_for_no_run_and_clears_only_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let installed = DependencyState::Installed {
+            version: Version::parse("0.9.9").unwrap(),
+        };
+        progress::with(&root, |state| {
+            state.dependencies.insert(
+                Dependency::Node,
+                DependencyState::Failed {
+                    reason: "earlier".into(),
+                },
+            );
+            state.dependencies.insert(Dependency::Uv, installed.clone());
+            state.pack.insert("caveman".into(), PackState::Installing);
+        });
+        let guard = begin_install(root.clone(), Dependency::Node).unwrap();
+        let during = progress::snapshot(&root);
+        assert!(during.running);
+        assert_eq!(during.dependencies.get(&Dependency::Node), None);
+        assert_eq!(during.dependencies.get(&Dependency::Uv), Some(&installed));
+        assert_eq!(during.pack.len(), 1);
+        assert!(matches!(
+            begin_install(root.clone(), Dependency::Uv),
+            Err(error) if error.0 == "setup_busy"
+        ));
+        drop(guard);
+        assert!(!progress::snapshot(&root).running);
+    }
 }
