@@ -136,8 +136,9 @@ impl EventKind {
 
 /// Where an event is on its way to the master: waiting in the queue, typed into the master,
 /// muted by a wake rule that has its kind off, carried by the master's own results
-/// message because the master delegated that task, or dropped from a full queue for newer
-/// events.
+/// message because the master delegated that task, dropped from a full queue for newer
+/// events, or settled: a change set ready event whose set landed, was discarded or went back
+/// to its agent before the master heard of it (F20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventState {
@@ -146,15 +147,17 @@ pub enum EventState {
     Muted,
     Carried,
     Dropped,
+    Settled,
 }
 
 impl EventState {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Queued,
         Self::Delivered,
         Self::Muted,
         Self::Carried,
         Self::Dropped,
+        Self::Settled,
     ];
 
     fn name(self) -> &'static str {
@@ -164,6 +167,7 @@ impl EventState {
             Self::Muted => "muted",
             Self::Carried => "carried",
             Self::Dropped => "dropped",
+            Self::Settled => "settled",
         }
     }
 
@@ -1243,6 +1247,7 @@ pub fn forward_to_parents(
     project: &ProjectId,
     now: i64,
 ) -> Result<(), EngineError> {
+    settle_landed(connection, project)?;
     let queued: Vec<(i64, i64, i64)> = {
         let mut statement = connection
             .prepare(
@@ -2492,6 +2497,7 @@ pub fn due(
     project: &ProjectId,
     now: i64,
 ) -> Result<Option<Wake>, EngineError> {
+    settle_landed(tx, project)?;
     let since = now.saturating_sub(HOUR_MS);
     tx.execute(
         "DELETE FROM team_event_wakes WHERE project=?1 AND at_ms<?2",
@@ -2640,6 +2646,36 @@ pub fn woke(tx: &Transaction<'_>, wake: &Wake, cold: bool, now: i64) -> Result<i
     )
     .map_err(error)?;
     Ok(id)
+}
+
+/// Settles a project's queued change set ready events that no longer say anything true
+/// (F20): the agent has no pending or conflicting change set made at or before the event,
+/// because the set landed, was discarded or went back to its agent, or a newer set replaced
+/// it. A database without the change set table settles none. Takes the connection and the
+/// project. Returns how many it settled, or the SQLite failure.
+fn settle_landed(connection: &Connection, project: &ProjectId) -> Result<usize, EngineError> {
+    let landing: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='landing_change_sets')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !landing {
+        return Ok(0);
+    }
+    let settled = connection
+        .execute(
+            "UPDATE team_events SET state='settled' WHERE project=?1 AND state='queued'
+             AND kind='change_set_ready' AND NOT EXISTS (
+                 SELECT 1 FROM landing_change_sets c WHERE c.project=team_events.project
+                 AND c.agent_kind='sub' AND c.agent_id=CAST(team_events.agent AS TEXT)
+                 AND c.state IN ('pending','conflict') AND c.created_ms<=team_events.created_ms)",
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    assert!(i64::try_from(settled).is_ok_and(|settled| settled <= EVENTS_PER_PROJECT_MAX));
+    Ok(settled)
 }
 
 /// Delivers due events through the engine-driven master: once nothing else waits for the

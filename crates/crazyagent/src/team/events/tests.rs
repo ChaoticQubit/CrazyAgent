@@ -1684,6 +1684,89 @@ fn a_question_muted_by_the_rule_starts_no_master_for_the_other_events() {
     );
 }
 
+/// F20: a queued change set ready event whose set landed before the master heard of it is
+/// settled, never delivered, and so is one older than its agent's newer open set; the wake
+/// carries only the event of the set that still waits for the master.
+#[test]
+fn a_change_set_ready_event_whose_set_already_landed_is_settled_not_delivered() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    drop(crate::landing::open(&fixture.base).unwrap());
+    let grace = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let barbara = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let ada = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let set = |id: &str, agent: i64, state: &str, created: i64| {
+        connection
+            .execute(
+                "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+                 VALUES (?1,?2,'sub',?3,'label','/repo',?4,'/repo/.git','b','h',?5,'succeeded','task-1','line',1,1,0,'[]',?6,?6)",
+                params![id, PROJECT, agent.to_string(), format!("/worktrees/{id}"), state, created],
+            )
+            .unwrap();
+    };
+    set("grace-1", grace, "accepted", 10);
+    set("barbara-1", barbara, "pending", 10);
+    set("ada-1", ada, "accepted", 10);
+    set("ada-2", ada, "pending", 30);
+    let ready = |agent: i64, task: i64, at: i64| {
+        record(
+            connection,
+            &project(),
+            agent,
+            Some(task),
+            EventKind::ChangeSetReady,
+            "The edits wait in Changes.",
+            at,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    ready(grace, 279, 11);
+    ready(barbara, 283, 12);
+    ready(ada, 278, 13);
+
+    assert!(deliver_by_message(connection, &project(), true, 100).unwrap());
+    assert_eq!(
+        wakes(connection),
+        [format!(
+            "[team] Sub-agent {barbara} has changes ready: The edits wait in Changes. [task 283]"
+        )]
+    );
+    assert_eq!(
+        event_states(connection),
+        [
+            (EventState::Settled, None),
+            (EventState::Delivered, Some(100)),
+            (EventState::Settled, None),
+        ]
+    );
+}
+
+/// F20: without the change set table, as in a database the landing store never opened, a
+/// change set ready event is delivered as before.
+#[test]
+fn a_change_set_ready_event_is_delivered_when_no_change_set_table_exists() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let ada = fixture.agent(PROJECT, "sub", "codex", "idle");
+    record(
+        connection,
+        &project(),
+        ada,
+        Some(7),
+        EventKind::ChangeSetReady,
+        "The edits wait in Changes.",
+        5,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(deliver_by_message(connection, &project(), true, 100).unwrap());
+    assert_eq!(
+        event_states(connection),
+        [(EventState::Delivered, Some(100))]
+    );
+}
+
 #[test]
 fn wakes_that_start_a_master_that_is_not_running_have_their_own_smaller_cap() {
     let fixture = Fixture::new();
