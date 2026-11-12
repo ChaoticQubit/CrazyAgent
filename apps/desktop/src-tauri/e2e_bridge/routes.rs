@@ -504,7 +504,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.move_memory(&id, &project, generation).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .move_memory(&id, &project, generation) .await }.await;
             routed(result)
         }
         "desktop_set_agent_memory_scope" => {
@@ -518,7 +518,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state).await?.set_agent_memory_scope(scope, generation).await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_agent_memory_scope(scope, generation) .await }.await;
             routed(result)
         }
         "desktop_forget_memory" => {
