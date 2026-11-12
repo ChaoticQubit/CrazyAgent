@@ -1531,4 +1531,124 @@ mod tests {
         assert!(matches!(shell.ctx.store.profile, Load::Ready(Some(_))));
         assert!(drain(&mut shell).contains(&"Projects".to_owned()));
     }
+
+    fn extras_arrival(account: &str, count: u32, gained_ms: i64) -> Arrival {
+        use crate::usage::extras::{Adapter, LimitExtras, Resets, Spend};
+        let extras = LimitExtras {
+            harness: "Codex".into(),
+            adapter: Adapter::Codex,
+            may_break: true,
+            resets: Some(Resets {
+                count,
+                kinds: vec![],
+                next_expiry_ms: None,
+            }),
+            credits: None,
+            spend: Spend::InApp,
+            not_reported: "not reported by Codex".into(),
+            resets_checked_ms: Some(gained_ms),
+            credits_checked_ms: None,
+            resets_gained_ms: Some(gained_ms),
+        };
+        Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+            SettingsEvent::Extras(Ok(vec![crate::engine::owner::AccountExtras {
+                account: crate::protocol::CredentialRef::new(account).unwrap(),
+                extras,
+            }])),
+        ))))
+    }
+
+    fn watch_asks(shell: &mut Shell) -> (usize, usize) {
+        use crate::tui::client::settings::SettingsJob;
+        let mut asks = (0, 0);
+        while let Some(request) = shell.ctx.next_request() {
+            if let Request::Settings(job) = request {
+                match *job {
+                    SettingsJob::Extras { detail: false } => asks.0 += 1,
+                    SettingsJob::AllAccounts => asks.1 += 1,
+                    _ => {}
+                }
+            }
+        }
+        asks
+    }
+
+    /// DEC-154: the shell reads the stored extras at most once a minute from its 5 s tick,
+    /// never the detail rows, and says a new free reset once, naming the account.
+    #[test]
+    fn the_shell_reads_the_stored_extras_once_a_minute_and_says_a_new_free_reset_once() {
+        let mut ctx = ctx();
+        ctx.store.accounts = Load::Ready(vec![crate::tui::seam::AccountRow {
+            id: crate::protocol::CredentialRef::new("acct-a").unwrap(),
+            name: "Work".into(),
+            provider: "OpenAI".into(),
+            status: "Ready".into(),
+            no_window: None,
+        }]);
+        let mut shell = at(Place::Home, ctx);
+        drain(&mut shell);
+        shell.tick();
+        assert_eq!(
+            watch_asks(&mut shell),
+            (1, 0),
+            "names already loaded are not read again"
+        );
+        shell.tick();
+        assert_eq!(
+            watch_asks(&mut shell),
+            (0, 0),
+            "the 5 s tick never asks again so soon"
+        );
+
+        let gained = clock::now_ms() - 60_000;
+        shell.arrive(extras_arrival("acct-a", 2, gained));
+        let said = shell.ctx.message().expect("a new free reset is said");
+        assert_eq!(
+            (said.tone, said.lead.as_str()),
+            (
+                super::super::frame::Tone::Success,
+                "Work has a new free reset. 2 free resets now."
+            )
+        );
+        assert_eq!(said.rest, "See it in Settings, Pools.");
+
+        shell.ctx.say(Message::success("Saved.", ""));
+        shell.arrive(extras_arrival("acct-a", 2, gained));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Saved."),
+            "the same arrival is never said twice"
+        );
+        shell.arrive(extras_arrival("acct-a", 3, clock::now_ms()));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("Work has a new free reset. 3 free resets now.")
+        );
+    }
+
+    /// The first watch read also asks for the account names when none are loaded, and an
+    /// account with no name yet is said as "An account", never by its id.
+    #[test]
+    fn the_reset_watch_asks_for_the_account_names_once_and_never_shows_an_id() {
+        let mut shell = at(Place::Home, ctx());
+        drain(&mut shell);
+        shell.tick();
+        assert_eq!(watch_asks(&mut shell), (1, 1));
+        shell.arrive(extras_arrival("acct-a", 1, clock::now_ms()));
+        assert_eq!(
+            shell.ctx.message().map(|said| said.lead.as_str()),
+            Some("An account has a new free reset. 1 free reset now.")
+        );
+    }
+
+    /// A shell not yet connected asks for nothing.
+    #[test]
+    fn the_reset_watch_waits_for_the_engine() {
+        let mut ctx = ctx();
+        ctx.link = Link::Connecting;
+        let mut shell = at(Place::Home, ctx);
+        drain(&mut shell);
+        shell.tick();
+        assert_eq!(watch_asks(&mut shell), (0, 0));
+    }
 }

@@ -278,4 +278,98 @@ mod tests {
             "Work has a new free reset. 3 free resets now."
         );
     }
+
+    fn row(account: &str, count: Option<u32>, gained: Option<i64>) -> AccountExtras {
+        AccountExtras {
+            account: crate::protocol::CredentialRef::new(account).unwrap(),
+            extras: LimitExtras {
+                resets: count.map(|count| Resets {
+                    count,
+                    kinds: vec![],
+                    next_expiry_ms: None,
+                }),
+                resets_gained_ms: gained,
+                ..extras()
+            },
+        }
+    }
+
+    #[test]
+    fn a_new_free_reset_is_told_once_per_arrival_and_never_an_old_or_unreported_one() {
+        let mut watch = ResetWatch::default();
+        let rows = [
+            row("acct-a", Some(2), Some(NOW - 60_000)),
+            row("acct-b", Some(1), None),
+        ];
+        assert_eq!(
+            watch.look(&rows, NOW),
+            [("acct-a".to_owned(), 2)],
+            "a gain from the last poll is told on the first look"
+        );
+        assert!(
+            watch.look(&rows, NOW + 60_000).is_empty(),
+            "the same gain is never told twice"
+        );
+        assert_eq!(
+            watch.look(
+                &[row("acct-a", Some(3), Some(NOW + 120_000))],
+                NOW + 180_000
+            ),
+            [("acct-a".to_owned(), 3)]
+        );
+        assert!(
+            watch
+                .look(&[row("acct-a", None, Some(NOW + 240_000))], NOW + 300_000)
+                .is_empty(),
+            "a count that is not reported now is never told as new"
+        );
+        let old = [row("acct-a", Some(2), Some(NOW - 2 * 3_600_000))];
+        assert!(
+            ResetWatch::default().look(&old, NOW).is_empty(),
+            "a gain from long before the first look is not new"
+        );
+        let many: Vec<AccountExtras> = (0..NOTICES_PER_LOOK_MAX + 2)
+            .map(|index| row(&format!("acct-{index}"), Some(1), Some(NOW)))
+            .collect();
+        assert_eq!(
+            ResetWatch::default().look(&many, NOW).len(),
+            NOTICES_PER_LOOK_MAX
+        );
+    }
+
+    #[test]
+    fn the_reset_notice_names_each_account_by_its_label_and_joins_one_looks_arrivals() {
+        let labels = HashMap::from([
+            ("acct-a".to_owned(), "Work".to_owned()),
+            ("acct-b".to_owned(), "Home".to_owned()),
+        ]);
+        assert_eq!(reset_notice(&[], &labels), None);
+        assert_eq!(
+            reset_notice(&[("acct-a".into(), 1)], &labels).as_deref(),
+            Some("Work has a new free reset. 1 free reset now.")
+        );
+        assert_eq!(
+            reset_notice(&[("acct-a".into(), 2), ("acct-b".into(), 1)], &labels).as_deref(),
+            Some(
+                "Work has a new free reset. 2 free resets now. Home has a new free reset. 1 free reset now."
+            )
+        );
+        assert_eq!(
+            reset_notice(&[("acct-gone".into(), 1)], &labels).as_deref(),
+            Some("An account has a new free reset. 1 free reset now."),
+            "an account with no row is never named by its id"
+        );
+    }
+
+    #[test]
+    fn the_reset_watch_asks_once_a_minute_and_again_after_a_clock_that_went_back() {
+        let mut watch = ResetWatch::default();
+        assert!(watch.due(NOW));
+        assert!(
+            !watch.due(NOW + 5_000),
+            "the shell's 5 s tick never asks so soon"
+        );
+        assert!(watch.due(NOW + RESET_WATCH_MS));
+        assert!(watch.due(NOW), "a clock that went back asks again");
+    }
 }
