@@ -95,6 +95,38 @@ fn the_wake_tool_records_a_wake_beside_the_delegations_and_the_engine_takes_both
     assert!(take_proposals(&drop).is_empty(), "taken once");
 }
 
+/// A conversation master's server leaves `wake` out, as `MasterTools::server_args` asks: it
+/// is not listed, a call to it is an unknown tool and nothing reaches the drop file, so no
+/// wake is recorded that the conversation master would never act on (L6).
+#[test]
+fn a_server_told_to_leave_wake_out_neither_lists_nor_records_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let drop = directory.path().join(DROP_FILE);
+    let input = requests(&[
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": WAKE_TOOL, "arguments": {"agent": "Ada", "task": "Add the footer"}}}),
+    ]);
+    let mut output = Vec::new();
+    serve(input, &mut output, &drop, None, &[WAKE_TOOL.to_owned()]).unwrap();
+    let answers: Vec<Value> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let answers = by_id(&answers);
+    let listed: Vec<&str> = answers["1"]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [TOOL_NAME, ASK_TOOL, RECORD_TOOL]);
+    assert_eq!(answers["2"]["error"]["code"], -32602, "{}", answers["2"]);
+    assert!(!drop.exists());
+    assert!(take_proposals(&drop).is_empty());
+}
+
 /// A master without team tools hands out work only through `crazyagent-task` blocks (L6,
 /// F16): a fence line exactly at the start of a line, one JSON object with no unknown
 /// field, every text within its bound, at most eight. Free lines, quoted or indented
@@ -1269,8 +1301,10 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
-    assert!(known_tools(&names(&[STOP_TOOL; 15])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 16])));
+    assert!(known_tools(&names(&[WAKE_TOOL])));
+    assert!(!known_tools(&names(&["Wake"])));
+    assert!(known_tools(&names(&[STOP_TOOL; 16])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 17])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.

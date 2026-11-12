@@ -357,7 +357,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                 "team-mcp",
                 record.to_str().unwrap(),
                 mailbox.to_str().unwrap(),
-                "recall"
+                "recall",
+                "wake"
             ],
         }}})
     );
@@ -441,7 +442,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             "team-mcp",
             record.to_str().unwrap(),
             mailbox.to_str().unwrap(),
-            "recall"
+            "recall",
+            "wake"
         ]),
     );
     assert_eq!(
@@ -459,7 +461,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -472,7 +475,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -485,7 +489,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -498,7 +503,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     "team-mcp",
                     other_drop.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],
@@ -512,6 +518,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                     record.to_str().unwrap(),
                     mailbox.to_str().unwrap(),
                     "recall",
+                    "wake",
                     "--verbose"
                 ]),
             ),
@@ -528,7 +535,8 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
                         .with_file_name(crate::team::tool::MAILBOX_FOLDER)
                         .to_str()
                         .unwrap(),
-                    "recall"
+                    "recall",
+                    "wake"
                 ]),
             ),
             vec![],

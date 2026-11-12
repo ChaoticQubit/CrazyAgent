@@ -377,13 +377,11 @@ pub enum Proposal {
     Wake(WakeLine),
 }
 
-/// Serves the master's `delegate`, `wake` and `ask` tools as an MCP server over stdio until its client
-/// closes input, and with a mailbox also its `MEMORY_TOOLS` less the ones switched off, each
-/// answered by the engine through the mailbox. Takes the client's input and output, the absolute
-/// drop file in the master's private temporary folder, the mailbox folder the engine made for a
-/// team master without its live terminal, and the tools left out. Returns an input or output
-/// failure, or a refusal when the mailbox is not a plain folder; a `delegate`, `wake` or `ask` call only
-/// records a proposal or question, which the engine takes after the turn.
+/// Serves the master's `delegate`, `ask`, `record_answer` and `wake` tools, with a mailbox its
+/// `MEMORY_TOOLS`, less the ones left out, over stdio until the client closes input. Takes the
+/// client's input and output, the absolute drop file and optional mailbox folder in the
+/// master's private temporary folder, and the tools left out. Returns an input or output
+/// failure or a refusal of a mailbox that is not a plain folder; drop calls are taken after the turn.
 pub fn serve(
     input: impl BufRead,
     output: impl Write,
@@ -430,12 +428,15 @@ pub fn serve_live(
     rpc(input, output, |request| answer_live(request, mailbox, off))
 }
 
-/// Says whether every name is one of the team tools, as the engine subcommands check the
-/// tools they are told to leave out. Takes the names. Returns the answer.
+/// Says whether every name is one of the team tools or the configured master's `wake`, as
+/// the engine subcommands check the tools they are told to leave out. Takes the names.
+/// Returns the answer.
 pub fn known_tools(names: &[String]) -> bool {
-    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len()
+    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + 1
         && names.iter().all(|name| {
-            TEAM_TOOLS.contains(&name.as_str()) || QUESTION_TOOLS.contains(&name.as_str())
+            TEAM_TOOLS.contains(&name.as_str())
+                || QUESTION_TOOLS.contains(&name.as_str())
+                || name == WAKE_TOOL
         })
 }
 
@@ -504,6 +505,7 @@ fn tool_result(text: &str, error: bool) -> Value {
 }
 
 fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) -> Option<Value> {
+    let waking = !off.iter().any(|tool| tool == WAKE_TOOL);
     let method = request.get("method")?.as_str();
     let id = request.get("id")?.clone();
     let params = request.get("params");
@@ -528,11 +530,10 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                     "additionalProperties": false,
                 },
             })];
-            tools.extend([
-                questions::ask_listing(),
-                questions::record_listing(),
-                wake_listing(),
-            ]);
+            tools.extend([questions::ask_listing(), questions::record_listing()]);
+            if waking {
+                tools.push(wake_listing());
+            }
             if mailbox.is_some() {
                 tools.extend(
                     MEMORY_TOOLS
@@ -552,7 +553,7 @@ fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) 
                 }
             }
             _ => match call(params, drop)
-                .or_else(|| wake_call(params, drop))
+                .or_else(|| waking.then(|| wake_call(params, drop)).flatten())
                 .map(|(text, error)| (text.to_owned(), error))
                 .or_else(|| questions::drop_call(params, drop))
             {
