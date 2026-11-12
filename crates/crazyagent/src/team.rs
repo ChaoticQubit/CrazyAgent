@@ -5341,7 +5341,7 @@ fn fit_status(
 }
 
 /// Cuts every free-form text of a status to `cap` bytes with `cut_text`: task prompts,
-/// results and problems, messages, agent problems, plan prompts, the live master problem,
+/// results, problems and model pick reasons, messages, agent problems, plan prompts, the live master problem,
 /// events, waiting questions and notifications. Takes the status and the cap.
 fn cut_texts(status: &mut TeamStatus, cap: usize) {
     let cut = move |text: &mut String| *text = cut_text(text, cap);
@@ -5350,6 +5350,7 @@ fn cut_texts(status: &mut TeamStatus, cap: usize) {
         task.result
             .iter_mut()
             .chain(task.problem.iter_mut())
+            .chain(task.pick.iter_mut().map(|pick| &mut pick.reason))
             .for_each(cut);
     }
     status.messages.iter_mut().for_each(|m| cut(&mut m.text));
