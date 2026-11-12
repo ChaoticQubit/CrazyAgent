@@ -1239,6 +1239,22 @@ mod tests {
                 format!("Codex stopped: {refused} (repository_config_refused:core_hookspath) Press r to try again."),
             ),
         ];
+        let unserved: MasterReason =
+            serde_json::from_value(serde_json::json!("model_unserved")).unwrap();
+        let named = "No account in this master's pool can run claude-opus-5-5. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models.";
+        let mut cases = cases.to_vec();
+        cases.push((
+            unserved,
+            Some(named),
+            "master_model_unserved",
+            format!("{named} (master_model_unserved) Press r to try again."),
+        ));
+        cases.push((
+            unserved,
+            None,
+            "master_model_unserved",
+            "Codex stopped: no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models. (master_model_unserved) Press r to try again.".to_owned(),
+        ));
         for (reason, detail, cause, line) in cases {
             let mut stopped = turn(1, 3, MasterTurnPhase::Blocked, Some(reason));
             stopped.detail = detail.map(str::to_owned);

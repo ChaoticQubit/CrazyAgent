@@ -171,6 +171,18 @@ test("a master turn names its account, and a turn no account could run names eac
   assert.ok(![...told, ...research.accountLines(blocked)].some((line) => /work-claude|home-claude|spare-claude|work-codex/u.test(line)), "no line shows a sign-in reference");
 });
 
+test("a turn no pool account can run on the RCLI master model shows the engine's line naming the model (DEC-150 M-5)", () => {
+  const line = "No account in this master's pool can run claude-opus-5-5. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models.";
+  const blocked = {
+    id: "t4", ordinal: 4, phase: "blocked", reason: "model_unserved", cause: "master_model_unserved", detail: line, reply: null, attempt: null,
+    accounts: [{ account_ref: "home-local", connection: "local-a", harness: "rcli", reason: "model_unserved" }],
+  };
+  assert.equal(research.turnLine(blocked), `${line} (master_model_unserved)`);
+  assert.deepEqual(research.accountLines(blocked), ["local-a: its provider does not serve the master model"]);
+  assert.equal(research.turnLine({ ...blocked, detail: null }),
+    "The master stopped: no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models. (master_model_unserved)");
+});
+
 test("two accounts with the same name show their ids, an account with its own name does not (OB4-F1)", async () => {
   const { accountLabels } = await import("../src/api.ts");
   const accounts = [

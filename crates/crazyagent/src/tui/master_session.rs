@@ -3632,6 +3632,49 @@ mod turn_line_tests {
             "two accounts of one name carry their ids; a name used once stays plain (OB4-F1)"
         );
     }
+
+    /// DEC-150 M-5: a turn blocked because no pool account serves the RCLI master model
+    /// lists each account and why, then the engine's line naming the model, the same line
+    /// the desktop shows (DEC-141).
+    #[test]
+    fn a_turn_blocked_on_an_unserved_master_model_names_the_model_and_each_account_why() {
+        let unserved: MasterReason =
+            serde_json::from_value(serde_json::json!("model_unserved")).unwrap();
+        let line = "No account in this master's pool can run claude-opus-5-5. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models.";
+        let blocked = MasterTurnView {
+            id: RequestId::new("turn-3").unwrap(),
+            session_id: SessionId::new("session-1").unwrap(),
+            ordinal: 3,
+            input_cursor: Cursor::new(3),
+            phase: MasterTurnPhase::Blocked,
+            reason: Some(unserved),
+            attempt: None,
+            runtime: None,
+            reply: None,
+            accounts: vec![MasterAccountState {
+                account_ref: CredentialRef::new("login-of-local-a").unwrap(),
+                connection: CredentialRef::new("local-a").unwrap(),
+                harness: CredentialRef::new("rcli").unwrap(),
+                reason: Some(unserved),
+            }],
+            tasks: Vec::new(),
+            changes: None,
+            engine_request: None,
+            activity: Vec::new(),
+            detail: Some(line.to_owned()),
+            cause: Some("master_model_unserved".to_owned()),
+        };
+        let mut lines = Vec::new();
+        turn_lines(&blocked, &[], &mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "Turn 3: Blocked | No account in this master's pool can run it now: (master_model_unserved)".to_string(),
+                "  local-a: Its provider does not serve the master model".to_string(),
+                line.to_string(),
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
