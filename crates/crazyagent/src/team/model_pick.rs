@@ -29,6 +29,32 @@ pub(crate) fn pin(
     harness: &str,
     pick: Option<&ModelPick>,
 ) -> Result<Result<String, String>, EngineError> {
+    Ok(
+        pin_or_refuse(tx, project, task, harness, pick)?.map_err(|refused| {
+            assert!(refused.sentence.ends_with(&format!("({}).", refused.code)));
+            refused.sentence
+        }),
+    )
+}
+
+/// A pick the owner's choices refused: the code an owner action answers with and the
+/// sentence a master reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    pub(crate) code: &'static str,
+    pub(crate) sentence: String,
+}
+
+/// Checks and pins a pick as [`pin`] does, keeping the refusal's code beside its sentence
+/// for an owner action (DEC-150 addendum 7). Takes what [`pin`] takes. Returns the text a
+/// reply adds after the harness, or the refusal, or a SQLite failure.
+pub(crate) fn pin_or_refuse(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    task: i64,
+    harness: &str,
+    pick: Option<&ModelPick>,
+) -> Result<Result<String, Refused>, EngineError> {
     assert!(task > 0);
     let catalog = crate::model_choice::catalog(harness);
     let picked = pick.map(|pick| pick.model.as_str());
@@ -45,9 +71,12 @@ pub(crate) fn pin(
             )));
         }
         Pick::Unsupported => {
-            return Ok(Err(format!(
-                "CrazyAgent does not choose the model of a {shown} agent; leave model out (model_not_supported)."
-            )));
+            return Ok(Err(Refused {
+                code: "model_not_supported",
+                sentence: format!(
+                    "CrazyAgent does not choose the model of a {shown} agent; leave model out (model_not_supported)."
+                ),
+            }));
         }
         Pick::Refused { allowed, default } => {
             let fallback = match default {
@@ -55,7 +84,7 @@ pub(crate) fn pin(
                 None => "the account's own model".to_owned(),
             };
             let model = picked.expect("only a pick is refused");
-            return Ok(Err(if allowed.is_empty() {
+            let sentence = if allowed.is_empty() {
                 format!(
                     "the owner allows no other model for {shown} agents than {fallback}; leave model out (model_not_allowed)."
                 )
@@ -64,6 +93,10 @@ pub(crate) fn pin(
                     "{model} is not on the owner's list for {shown} agents: pick one of {}, or leave model out to run {fallback} (model_not_allowed).",
                     allowed.join(", ")
                 )
+            };
+            return Ok(Err(Refused {
+                code: "model_not_allowed",
+                sentence,
             }));
         }
     };
