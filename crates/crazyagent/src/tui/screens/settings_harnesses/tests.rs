@@ -606,7 +606,7 @@ fn a_job_started_somewhere_else_is_read_until_it_ends_and_holds_a_second_one() {
     deliver(&mut shell, ended(Some("2.1.309"), Some("2.1.322")));
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Other],
+        vec![Sent::Catalog],
         "the catalog is read again"
     );
     assert!(!frame(&mut shell).contains("Updating..."));
@@ -884,7 +884,7 @@ fn a_running_update_is_read_again_on_each_refresh_until_it_ends() {
     deliver(&mut shell, done);
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Other],
+        vec![Sent::Catalog],
         "the catalog is read again"
     );
     assert!(
@@ -1039,7 +1039,7 @@ fn a_finished_install_names_its_version_and_reads_the_catalog_again() {
     );
     assert_eq!(
         sent(&mut shell.ctx),
-        vec![Sent::Other],
+        vec![Sent::Catalog],
         "the catalog is read again"
     );
     assert!(

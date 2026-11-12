@@ -551,14 +551,20 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
                 return None;
             }
         };
-        match crazyagent::harnesses::finding::pick(id, &search, path.as_deref(), space) {
-            Some(Ok(entry)) => Some(entry),
-            Some(Err((_, error))) => {
-                eprintln!("the found {id} file is not used ({})", error.0);
-                None
-            }
-            None => None,
-        }
+        crazyagent::harnesses::finding::pick_noting(
+            id,
+            &search,
+            path.as_deref(),
+            space,
+            |file, error| {
+                eprintln!(
+                    "the found {id} file {} is not used ({})",
+                    file.display(),
+                    error.0
+                );
+            },
+        )?
+        .ok()
     };
     let harnesses = crazyagent::paths::Harnesses {
         codex: explicit.codex.or(chosen.codex).or_else(|| found("codex")),

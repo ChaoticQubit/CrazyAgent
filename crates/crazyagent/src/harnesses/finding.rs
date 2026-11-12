@@ -388,11 +388,25 @@ pub fn pick(
     path: Option<&OsStr>,
     space: &AgentSpace,
 ) -> Option<Result<PathBuf, (PathBuf, EngineError)>> {
+    pick_noting(id, search, path, space, |_, _| {})
+}
+
+/// Picks as [`pick`] does and hands each candidate it passes over, with the refusal, to
+/// `passed`, so engine start names every found file it does not use, even when a later one
+/// is used. Inputs: as for [`pick`], and the callback. Output: as for [`pick`].
+pub fn pick_noting(
+    id: &str,
+    search: &Search,
+    path: Option<&OsStr>,
+    space: &AgentSpace,
+    mut passed: impl FnMut(&Path, &EngineError),
+) -> Option<Result<PathBuf, (PathBuf, EngineError)>> {
     let mut refused = None;
     for candidate in crate::paths::harness_candidates(id, search, path) {
         match check(id, &candidate, space, search.home()) {
             Ok(entry) => return Some(Ok(entry)),
             Err(error) => {
+                passed(&candidate, &error);
                 refused.get_or_insert((candidate, error));
             }
         }
