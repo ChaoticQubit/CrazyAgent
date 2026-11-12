@@ -3285,6 +3285,15 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::InstructionsTooLarge => {
             "App and project instructions are too long for a Claude master: shorten them on the Process page"
         }
+        MasterReason::ProtocolFault => {
+            "The harness sent a message out of order: send again to start a fresh turn"
+        }
+        MasterReason::FrameLimit => {
+            "One message was larger than the master frame size limit: raise it in Settings, then send again"
+        }
+        MasterReason::WorktreeUncertain => {
+            "Its copy of the project could not be checked: close it (F4), open it again (F2, Enter), then send again"
+        }
         MasterReason::Cancelled => "Cancelled",
         MasterReason::Unknown => "Something went wrong",
     }

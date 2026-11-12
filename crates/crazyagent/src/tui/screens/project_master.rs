@@ -401,6 +401,15 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::InstructionsTooLarge) => {
             "the app and project instructions are too long for a Claude master. Shorten them on the Process page."
         }
+        Some(MasterReason::ProtocolFault) => {
+            "it sent a message out of order. Send again to start a fresh turn."
+        }
+        Some(MasterReason::FrameLimit) => {
+            "one message was larger than the master frame size limit. Raise it in Settings, then send again."
+        }
+        Some(MasterReason::WorktreeUncertain) => {
+            "its copy of the project could not be checked. Close the master and open it again, then send again."
+        }
         Some(MasterReason::Cancelled) => "you stopped this turn.",
         Some(MasterReason::ApprovalRequired) | Some(MasterReason::Unknown) | None => {
             if turn.phase == MasterTurnPhase::Cancelled {

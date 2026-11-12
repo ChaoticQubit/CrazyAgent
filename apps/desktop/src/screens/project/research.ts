@@ -588,6 +588,9 @@ const STOPPED_WHY = new Map<string, string>([
   ["output_limit", "this turn's output was too large to keep"],
   ["unsupported_capability", "it cannot lead a project yet"],
   ["instructions_too_large", "the app and project instructions are too long for a Claude master. Shorten them on the Process page, then send again"],
+  ["protocol_fault", "it sent a message out of order. Send again to start a fresh turn"],
+  ["frame_limit", "one message was larger than the frame size limit. Raise it in Settings, Master, then send again"],
+  ["worktree_uncertain", "its copy of the project could not be checked. End the conversation, then send again"],
   ["cancelled", "you stopped this turn"],
 ]);
 

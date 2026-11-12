@@ -1473,6 +1473,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         "master_runtime_scope_revoked" | "owner_runtime_stale" => MasterReason::ScopeRevoked,
         "codex_host_output_limit"
         | "codex_host_protocol_capacity"
+        | "claude_host_protocol_capacity"
         | "claude_host_stdout_limit"
         | "claude_host_stderr_limit"
         | "claude_host_output_limit"
@@ -1491,6 +1492,24 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
         "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
+        "codex_host_protocol_invalid_state"
+        | "codex_host_protocol_invalid_input"
+        | "codex_host_protocol_invalid_message"
+        | "codex_host_protocol_stale_message"
+        | "codex_host_protocol_disconnected"
+        | "claude_host_protocol_invalid_state"
+        | "claude_host_protocol_invalid_input"
+        | "claude_host_protocol_invalid_message"
+        | "claude_host_protocol_stale_message"
+        | "claude_host_protocol_disconnected"
+        | "claude_host_protocol_unsupported" => MasterReason::ProtocolFault,
+        "codex_host_protocol_frame_too_large"
+        | "claude_host_protocol_frame_too_large"
+        | "codex_host_input_limit" => MasterReason::FrameLimit,
+        "master_session_scope_conflict"
+        | "master_project_scope_conflict"
+        | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
+        "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
