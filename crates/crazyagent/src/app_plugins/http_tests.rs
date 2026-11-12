@@ -108,7 +108,10 @@ fn the_key_url_and_headers_go_only_to_curl_stdin_never_to_its_arguments_or_envir
         ["--max-redirs", "0"],
         ["--config", "-"],
     ] {
-        assert!(arguments.windows(2).any(|window| window == pair), "{pair:?}");
+        assert!(
+            arguments.windows(2).any(|window| window == pair),
+            "{pair:?}"
+        );
     }
     assert!(arguments.iter().any(|argument| argument == "-q"));
     for argument in &arguments {
@@ -136,7 +139,11 @@ fn a_loopback_plugin_uses_plain_http_and_pins_localhost_to_127_0_0_1() {
     assert!(config.contains("resolve = \"localhost:9000:127.0.0.1\"\n"));
     assert!(!config.contains("Authorization"));
     let arguments = arguments(&command(spec(&plugin)));
-    assert!(arguments.windows(2).any(|window| window == ["--proto", "=http"]));
+    assert!(
+        arguments
+            .windows(2)
+            .any(|window| window == ["--proto", "=http"])
+    );
     let plain = loaded(&near("http://127.0.0.1:9000/embed", "127.0.0.1"));
     let config = String::from_utf8(
         config(spec(&plain), &[], std::path::Path::new("/tmp/x/request")).unwrap(),
@@ -155,12 +162,18 @@ fn a_reply_gives_one_normalized_vector_per_input_at_the_declared_size() {
     assert!((got[0][0] - 0.6).abs() < 1e-6 && (got[0][1] - 0.8).abs() < 1e-6);
     assert!(got[1].iter().all(|value| *value == 0.0));
     let refused = |bytes: &[u8], count: usize| vectors(bytes, spec, count).unwrap_err().0;
-    assert_eq!(refused(&reply(&[vector(&[1.0])]), 2), "app_plugin_reply_invalid");
+    assert_eq!(
+        refused(&reply(&[vector(&[1.0])]), 2),
+        "app_plugin_reply_invalid"
+    );
     assert_eq!(
         refused(&reply(&[vec![1.0; 63], vector(&[1.0])]), 2),
         "app_plugin_reply_invalid"
     );
-    assert_eq!(refused(&reply(&[vector(&[1e40])]), 1), "app_plugin_reply_invalid");
+    assert_eq!(
+        refused(&reply(&[vector(&[1e40])]), 1),
+        "app_plugin_reply_invalid"
+    );
     assert_eq!(refused(b"{\"data\": 1}", 1), "app_plugin_reply_invalid");
     assert_eq!(
         refused(b"{\"data\": [{\"embedding\": [\"a\"]}]}", 1),
@@ -216,12 +229,18 @@ fn serve_once(status: &'static str, body: Vec<u8>) -> (u16, std::thread::JoinHan
 #[test]
 fn embed_posts_the_inputs_to_a_loopback_plugin_and_reads_its_vectors() {
     let root = tempfile::tempdir().unwrap();
-    let (port, served) = serve_once(
-        "200 OK",
-        reply(&[vector(&[0.0, 2.0]), vector(&[1.0, 0.0])]),
-    );
-    let plugin = loaded(&near(&format!("http://127.0.0.1:{port}/embed"), "127.0.0.1"));
-    let got = embed(root.path(), &plugin, &["first text", "second text"], Purpose::Query).unwrap();
+    let (port, served) = serve_once("200 OK", reply(&[vector(&[0.0, 2.0]), vector(&[1.0, 0.0])]));
+    let plugin = loaded(&near(
+        &format!("http://127.0.0.1:{port}/embed"),
+        "127.0.0.1",
+    ));
+    let got = embed(
+        root.path(),
+        &plugin,
+        &["first text", "second text"],
+        Purpose::Query,
+    )
+    .unwrap();
     assert_eq!(got.len(), 2);
     assert!((got[0][1] - 1.0).abs() < 1e-6 && (got[1][0] - 1.0).abs() < 1e-6);
     let served = served.join().unwrap();
@@ -237,7 +256,10 @@ fn a_host_that_fails_or_redirects_is_a_failed_call() {
     let root = tempfile::tempdir().unwrap();
     for status in ["500 Internal Server Error", "302 Found"] {
         let (port, served) = serve_once(status, reply(&[vector(&[1.0])]));
-        let plugin = loaded(&near(&format!("http://127.0.0.1:{port}/embed"), "127.0.0.1"));
+        let plugin = loaded(&near(
+            &format!("http://127.0.0.1:{port}/embed"),
+            "127.0.0.1",
+        ));
         assert_eq!(
             embed(root.path(), &plugin, &["text"], Purpose::Document)
                 .unwrap_err()
@@ -250,7 +272,10 @@ fn a_host_that_fails_or_redirects_is_a_failed_call() {
     let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = closed.local_addr().unwrap().port();
     drop(closed);
-    let plugin = loaded(&near(&format!("http://127.0.0.1:{port}/embed"), "127.0.0.1"));
+    let plugin = loaded(&near(
+        &format!("http://127.0.0.1:{port}/embed"),
+        "127.0.0.1",
+    ));
     assert_eq!(
         embed(root.path(), &plugin, &["text"], Purpose::Document)
             .unwrap_err()

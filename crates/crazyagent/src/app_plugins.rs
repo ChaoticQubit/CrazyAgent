@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod http;
 pub mod manifest;
 pub mod store;
 pub mod yaml;
@@ -430,6 +431,14 @@ const PLAIN: &[(&str, &str)] = &[
     (
         "app_plugin_key_store_unavailable",
         "the key could not be saved; nothing was changed.",
+    ),
+    (
+        "app_plugin_call_failed",
+        "the plugin's host did not answer with vectors; search uses full text for now.",
+    ),
+    (
+        "app_plugin_reply_invalid",
+        "the plugin's reply was not the vectors its file declares.",
     ),
     (
         "app_plugin_request_invalid",
