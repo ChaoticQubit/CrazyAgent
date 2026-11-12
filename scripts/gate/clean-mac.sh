@@ -35,7 +35,7 @@ log="$gate/cargo-test.log"
 CRAZYAGENT_CLEAN_MAC_DIR="$gate" "${tests[@]}" -- --include-ignored --test-threads=1 > "$log" 2>&1
 rc=$?
 
-pass=$(grep -c ': PASS$' "$summary")
+pass=$(grep -c ': PASS' "$summary")
 fail=$(grep -c ': FAIL' "$summary")
 {
   printf 'rc=%s pass=%s fail=%s shapes=4\n' "$rc" "$pass" "$fail"

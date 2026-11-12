@@ -80,11 +80,13 @@ fn gate_dir() -> PathBuf {
 }
 
 /// One summary line per shape in `<gate dir>/summary.txt`: PASS once the shape's checks
-/// all held, else FAIL with the last step reached, written even when a check panics.
+/// all held, else FAIL with the last step reached, written even when a check panics, each
+/// followed by what every live master start came to.
 struct Report {
     shape: Shape,
     step: String,
     passed: bool,
+    seen: Vec<String>,
 }
 
 impl Report {
@@ -93,7 +95,12 @@ impl Report {
             shape,
             step: "start".into(),
             passed: false,
+            seen: Vec::new(),
         }
+    }
+
+    fn saw(&mut self, outcome: &Live) {
+        self.seen.push(format!("{outcome:?}"));
     }
 
     fn step(&mut self, step: &str) {
@@ -104,10 +111,19 @@ impl Report {
 
 impl Drop for Report {
     fn drop(&mut self) {
-        let line = if self.passed {
-            format!("{}: PASS\n", self.shape.name())
+        let verdict = if self.passed {
+            "PASS".to_owned()
         } else {
-            format!("{}: FAIL during {}\n", self.shape.name(), self.step)
+            format!("FAIL during {}", self.step)
+        };
+        let line = if self.seen.is_empty() {
+            format!("{}: {verdict}\n", self.shape.name())
+        } else {
+            format!(
+                "{}: {verdict}, live starts: {}\n",
+                self.shape.name(),
+                self.seen.join("; ")
+            )
         };
         let Some(dir) = gate_dir_set() else {
             return;
@@ -778,7 +794,9 @@ async fn a_nothing_installed_mac_says_what_is_missing_and_never_waits_forever() 
     assert_eq!(codex.status, HarnessStatus::NotInstalled, "{codex:?}");
     report.step("live master start");
     let refused = owner.live_on().await;
-    match live_outcome(&mut owner, &mac, refused).await {
+    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    report.saw(&outcome);
+    match outcome {
         Live::Stopped(line) => assert!(
             typed_reason(&line, &["tmux", "codex"]),
             "the stop line is not a typed missing-tool line: {line}"
@@ -813,6 +831,7 @@ async fn a_homebrew_mac_with_npm_codex_runs_the_live_master_through_the_found_no
     report.step("live master start");
     let refused = owner.live_on().await;
     let outcome = live_outcome(&mut owner, &mac, refused).await;
+    report.saw(&outcome);
     assert_ran_with(
         &outcome,
         &mac.brew().join("Cellar/node/22.11.0/bin/node"),
@@ -837,6 +856,7 @@ async fn an_nvm_mac_with_npm_codex_runs_the_live_master_through_the_nvm_node() {
     report.step("live master start");
     let refused = owner.live_on().await;
     let outcome = live_outcome(&mut owner, &mac, refused).await;
+    report.saw(&outcome);
     assert_ran_with(&outcome, &mac.nvm().join("bin/node"), &script);
     report.passed = true;
 }
@@ -854,7 +874,9 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
     assert_eq!(codex.status, HarnessStatus::Ready, "{codex:?}");
     report.step("live master start before tmux");
     let refused = owner.live_on().await;
-    match live_outcome(&mut owner, &mac, refused).await {
+    let outcome = live_outcome(&mut owner, &mac, refused).await;
+    report.saw(&outcome);
+    match outcome {
         Live::Stopped(line) => assert!(
             typed_reason(&line, &["tmux"]),
             "the stop line is not the typed tmux line: {line}"
@@ -874,6 +896,7 @@ async fn tmux_installed_after_the_engine_started_is_used_without_an_engine_resta
     report.step("live master start after tmux");
     let refused = owner.live_on().await;
     let outcome = live_outcome(&mut owner, &mac, refused).await;
+    report.saw(&outcome);
     assert_ran_with(
         &outcome,
         &mac.brew().join("Cellar/node/22.11.0/bin/node"),
