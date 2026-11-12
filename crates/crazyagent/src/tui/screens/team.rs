@@ -382,12 +382,11 @@ impl Team {
     }
 
     /// Whether keys go to a terminal: the terminal has focus and, in the master view, one is
-    /// attached or coming within the limit; a stopped, refused, switched-off or overdue
-    /// master keeps the view keys.
+    /// attached or coming, overdue included, so a typed stream never turns into view keys
+    /// at the limit; a stopped, refused or switched-off master with none keeps the view keys.
     /// Input: none. Output: true while every key but Ctrl-] goes to the terminal.
     fn terminal_keys(&self) -> bool {
-        self.focus == Focus::Terminal
-            && (!self.master || (self.attached.is_some() && !self.overdue()) || self.starting())
+        self.focus == Focus::Terminal && (!self.master || self.attached.is_some() || self.waiting())
     }
 
     /// Keeps one key typed while the master's terminal starts, up to `HELD_KEYS_MAX` keys
@@ -1079,8 +1078,9 @@ impl Team {
 
     /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
     /// master view, any other key goes to the open terminal. While the master's terminal
-    /// starts, keys wait for it and Esc goes back; past the limit, or with no terminal
-    /// coming, the master view has the keys, so s tries again. A terminal that closed, or
+    /// starts, keys wait for it and Esc goes back; past the limit Esc still goes back, s tries
+    /// again and every other key is dropped, so a typed stream never acts on the view; with
+    /// no terminal coming the master view has the keys. A terminal that closed, or
     /// that the engine stopped before it opened, keeps the keys and drops them until Ctrl-],
     /// so keys typed then never act on the view, but for s after a stop with a line, which
     /// starts the master again.
@@ -1106,7 +1106,16 @@ impl Team {
             return Flow::Handled;
         }
         if self.overdue() {
-            return self.master_key(key, ctx);
+            match key {
+                Key::Esc => {
+                    self.held.clear();
+                    self.detach(ctx);
+                    return Flow::Back;
+                }
+                Key::Char('s') => self.start_live(ctx),
+                _ => {}
+            }
+            return Flow::Handled;
         }
         let stopped = self.stop_line().is_some();
         let again = self.idle_stopped() || self.try_again();
@@ -1512,13 +1521,17 @@ impl Screen for Team {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         if self.terminal_keys() && self.master {
-            let mut hints = vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+            let overdue = self.overdue();
+            let mut hints = vec![hint("Ctrl-]", "Leave terminal")];
+            if !overdue {
+                hints.push(hint("Ctrl-J", "New line"));
+            }
             if self.idle_stopped() {
                 hints.insert(0, hint("s", "Start again"));
             } else if self.try_again() {
                 hints.insert(0, hint("s", "Try again"));
             }
-            if self.starting() {
+            if self.starting() || overdue {
                 hints.push(hint("Esc", "Back"));
             }
             if ctx.shift_arrows == ShiftArrows::SwitchTabs {
