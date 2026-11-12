@@ -303,7 +303,8 @@ pub struct Claim {
 }
 
 /// Two active claims of different agents that may touch the same thing, with the plain
-/// reasons (same file, same folder, shared module or domain). `left_out` marks a start's
+/// reasons (same file, a file inside a folder or glob, nested folders, shared module or
+/// domain), never two different files of one folder (F31). `left_out` marks a start's
 /// file that a cycle of waits under Wait left out of its work, so its holder keeps it (OS-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Overlap {

@@ -967,10 +967,11 @@ fn active(
     Ok(claims)
 }
 
-/// The plain reason two stored claims may touch the same thing, after Concord: the same
-/// file, files in the same folder, a file inside a folder or glob, nested folders, globs
-/// whose fixed beginnings meet, or modules or domains sharing a word. Takes both claims.
-/// Returns the reason, or None when they cannot overlap.
+/// The plain reason two stored claims may touch the same thing, after Concord, at file
+/// level (F31): the same file, a file inside a folder or glob, nested folders, globs whose
+/// fixed beginnings meet, or modules or domains sharing a word. Two different files never
+/// overlap, even in one folder. Takes both claims. Returns the reason, or None when they
+/// cannot overlap.
 fn reason(mine: &str, theirs: &str) -> Option<String> {
     let place = |folder: &str| {
         if folder.is_empty() {
@@ -980,11 +981,7 @@ fn reason(mine: &str, theirs: &str) -> Option<String> {
         }
     };
     match (Scope::of(mine), Scope::of(theirs)) {
-        (Scope::File(a), Scope::File(b)) if a == b => Some(format!("same file {a}")),
-        (Scope::File(a), Scope::File(b)) => {
-            let folder = parent(a);
-            (!folder.is_empty() && folder == parent(b)).then(|| format!("same folder {folder}"))
-        }
+        (Scope::File(a), Scope::File(b)) => (a == b).then(|| format!("same file {a}")),
         (Scope::File(file), other @ (Scope::Folder(_) | Scope::Glob(_)))
         | (other @ (Scope::Folder(_) | Scope::Glob(_)), Scope::File(file)) => {
             other.covers(file).then(|| match other {
@@ -1024,11 +1021,6 @@ fn reason(mine: &str, theirs: &str) -> Option<String> {
         }
         _ => None,
     }
-}
-
-/// The folder of a file path, empty at the repository root.
-fn parent(file: &str) -> &str {
-    file.rfind('/').map_or("", |at| &file[..at])
 }
 
 /// The folder part of a glob before its first wildcard, which every path it matches
