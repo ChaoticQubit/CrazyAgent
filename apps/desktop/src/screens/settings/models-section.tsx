@@ -184,7 +184,7 @@ export function ModelRulesView({ rules, busy, note, onRule, onRetry }: {
 /** The note after a change that did not store. Input: the result. Output: the line, or "". */
 export function modelNote(result: Result<unknown>): string {
   if (result.kind === "ok") return "";
-  if (modelsNotReady(result)) return "Not ready yet: model choice isn't in this build.";
+  if (result.kind === "not_ready" || modelsNotReady(result)) return "Not ready yet: model choice isn't in this build.";
   if (modelsStale(result)) return MODEL_STALE_LINE;
   return modelChoiceRefusal(result);
 }
