@@ -308,7 +308,11 @@ async fn handle(
 /// Finds the engine-verified executable whose version decides qualification: the
 /// registered Claude Code or Codex executable. Inputs: the engine, its authority and the
 /// harness. Output: the path, or none for another harness or when none is registered.
-fn registered(engine: &Arc<Engine>, authority: &Arc<Authority>, harness: &str) -> Option<PathBuf> {
+pub(super) fn registered(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    harness: &str,
+) -> Option<PathBuf> {
     let runtime = OwnerRuntimeHandle {
         engine: engine.clone(),
         authority: authority.clone(),

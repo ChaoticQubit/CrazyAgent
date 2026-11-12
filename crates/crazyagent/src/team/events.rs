@@ -255,8 +255,7 @@ pub enum RuleLevel {
 /// auto-wake stopped at its hourly cap, the event queue filled, or the project's token
 /// budget stopped its team; or an agent asked the owner an urgent (High) or a Normal
 /// question, an `ask` question among them that waits in the Questions view, or waits on
-/// the owner in its own terminal; or no pool account could run the model chosen for an
-/// agent, so it ran on the default (DEC-150).
+/// the owner in its own terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
@@ -267,11 +266,10 @@ pub enum NotificationKind {
     UrgentQuestion,
     Question,
     WaitingOnYou,
-    ModelFallback,
 }
 
 impl NotificationKind {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 7] = [
         Self::Escalation,
         Self::WakePaused,
         Self::QueueFull,
@@ -279,7 +277,6 @@ impl NotificationKind {
         Self::UrgentQuestion,
         Self::Question,
         Self::WaitingOnYou,
-        Self::ModelFallback,
     ];
 
     fn name(self) -> &'static str {
@@ -291,7 +288,6 @@ impl NotificationKind {
             Self::UrgentQuestion => "urgent_question",
             Self::Question => "question",
             Self::WaitingOnYou => "waiting_on_you",
-            Self::ModelFallback => "model_fallback",
         }
     }
 

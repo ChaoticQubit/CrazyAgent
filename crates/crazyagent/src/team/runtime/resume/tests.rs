@@ -1219,7 +1219,7 @@ done
             Begun::Pending
         );
         store::custom_checked(&fixture.connection, "codex", "gpt-a", true).unwrap();
-        let version = store::values(&fixture.connection, "codex", &catalog, &scope)
+        let version = store::values(&fixture.connection, "codex", &catalog, &scope, None)
             .unwrap()
             .rows
             .iter()
@@ -1298,6 +1298,7 @@ mod live {
             entry: plan.entry.clone(),
             working_dir: plan.working_dir.clone(),
             model: plan.model.clone(),
+            chosen: plan.chosen.clone(),
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
             access: plan.access,

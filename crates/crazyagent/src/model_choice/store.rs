@@ -54,15 +54,17 @@ pub enum Begun {
     Verified,
 }
 
-/// Builds a harness's Models section at one scope, read in one snapshot. Inputs: the
-/// engine database, the harness name, its model catalog and the scope. Output: the
-/// section, or `model_choice_harness_unknown`, `model_choice_project_unknown` or
-/// `model_choice_unavailable`.
+/// Builds a harness's Models section at one scope, read in one snapshot, saying whether
+/// the shipped catalog was checked on the installed version (DEC-150 G1). Inputs: the
+/// engine database, the harness name, its model catalog, the scope and the installed
+/// version, none when unknown. Output: the section, or `model_choice_harness_unknown`,
+/// `model_choice_project_unknown` or `model_choice_unavailable`.
 pub fn values(
     db: &Connection,
     harness: &str,
     catalog: &[String],
     scope: &Scope,
+    installed: Option<&str>,
 ) -> Result<Models, EngineError> {
     let harness = known(harness)?;
     assert_catalog(harness, catalog);
@@ -76,10 +78,13 @@ pub fn values(
         rows.push(row(tx, harness, scope, slot, &usable)?);
     }
     assert_eq!(rows.len(), Slot::ALL.len());
+    let reason = super::unqualified(harness, installed);
     Ok(Models {
         harness: harness.to_owned(),
         rows,
         candidates,
+        qualified: reason.is_none(),
+        reason,
     })
 }
 
@@ -156,11 +161,80 @@ pub fn pick(
     project: &ProjectId,
     picked: Option<&str>,
 ) -> Result<Pick, EngineError> {
-    let Some(harness) = harness_id(harness).filter(|id| supported(id, Slot::Agent)) else {
+    let Some(Terms {
+        default,
+        allowed,
+        usable,
+        rule,
+    }) = terms(db, harness, catalog, project)?
+    else {
         return Ok(match picked {
             None => Pick::Run(None),
             Some(_) => Pick::Unsupported,
         });
+    };
+    let offered = picked.is_some_and(|model| usable.iter().any(|id| id == model));
+    let model = match picked {
+        None => return Ok(Pick::Run(default)),
+        Some(model) if default.as_deref() == Some(model) => return Ok(Pick::Run(default)),
+        Some(model) => model,
+    };
+    Ok(match rule {
+        PickRule::Default => Pick::Overruled(default),
+        PickRule::Strict if allowed.iter().any(|id| id == model) => {
+            Pick::Run(Some(model.to_owned()))
+        }
+        PickRule::Hint if offered => Pick::Run(Some(model.to_owned())),
+        PickRule::Strict | PickRule::Hint => Pick::Refused { allowed, default },
+    })
+}
+
+/// What a spawn may pick for a harness's agents in one project (DEC-150 F9): the agent
+/// default, none for the account's own, and the ids the owner's pick rule lists, as
+/// `pick` judges a pick; Default lists none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub default: Option<String>,
+    pub allowed: Vec<String>,
+}
+
+/// Reads what a spawn may pick for a harness's agents in a project, as `pick` judges it
+/// (DEC-150 F9). Inputs: the engine database, the harness name, its model catalog and the
+/// project. Output: the offer, none for a harness whose model CrazyAgent does not choose,
+/// or `model_choice_unavailable`.
+pub fn offer(
+    db: &Connection,
+    harness: &str,
+    catalog: &[String],
+    project: &ProjectId,
+) -> Result<Option<Offer>, EngineError> {
+    Ok(terms(db, harness, catalog, project)?.map(|terms| Offer {
+        default: terms.default,
+        allowed: terms.allowed,
+    }))
+}
+
+/// The terms a pick is judged by: the agent default, the ids the pick rule lists, every
+/// usable id and the rule.
+struct Terms {
+    default: Option<String>,
+    allowed: Vec<String>,
+    usable: Vec<String>,
+    rule: PickRule,
+}
+
+/// Reads the terms a pick for a harness's agents in a project is judged by, in one read
+/// snapshot. Inputs: the engine database, the harness name, its catalog and the project.
+/// Output: the terms, none for a harness whose model CrazyAgent does not choose, or
+/// `model_choice_unavailable`.
+fn terms(
+    db: &Connection,
+    harness: &str,
+    catalog: &[String],
+    project: &ProjectId,
+) -> Result<Option<Terms>, EngineError> {
+    let Some(harness) = harness_id(harness).filter(|id| supported(id, Slot::Agent)) else {
+        return Ok(None);
     };
     assert_catalog(harness, catalog);
     let own = snapshot(db)?;
@@ -180,25 +254,18 @@ pub fn pick(
         .unwrap_or_default();
     assert!(allowed.iter().all(|id| usable.contains(id)));
     let rule = super::rules::rules(tx)?.pick;
-    let offered = picked.is_some_and(|model| usable.iter().any(|id| id == model));
     let allowed: Vec<String> = match rule {
         PickRule::Strict => allowed,
-        PickRule::Hint => usable.into_iter().take(super::ALLOWED_MAX).collect(),
+        PickRule::Hint => usable.iter().take(super::ALLOWED_MAX).cloned().collect(),
         PickRule::Default => Vec::new(),
     };
-    let model = match picked {
-        None => return Ok(Pick::Run(default)),
-        Some(model) if default.as_deref() == Some(model) => return Ok(Pick::Run(default)),
-        Some(model) => model,
-    };
-    Ok(match rule {
-        PickRule::Default => Pick::Overruled(default),
-        PickRule::Strict if allowed.iter().any(|id| id == model) => {
-            Pick::Run(Some(model.to_owned()))
-        }
-        PickRule::Hint if offered => Pick::Run(Some(model.to_owned())),
-        PickRule::Strict | PickRule::Hint => Pick::Refused { allowed, default },
-    })
+    assert!(allowed.len() <= super::ALLOWED_MAX);
+    Ok(Some(Terms {
+        default,
+        allowed,
+        usable,
+        rule,
+    }))
 }
 
 /// Adds one model id the owner typed for a harness, waiting for its test launch, unless
@@ -557,6 +624,74 @@ fn columns(scope: &Scope) -> (&'static str, &str) {
         Scope::App => ("app", ""),
         Scope::Project(project) => ("project", project.as_str()),
     }
+}
+
+/// The most harnesses one removed project may hold model choices for; more means a
+/// broken store.
+const FORGOTTEN_HARNESSES_MAX: usize = 64;
+
+/// Clears a removed project's model choices (DEC-150 F6): its project-scope values go and
+/// every slot item of each harness it ever saved moves on a version, so a project added
+/// again under the same id inherits nothing and a screen read before cannot save onto it.
+/// Takes the removal's immediate transaction and the project. Returns
+/// `model_choice_unavailable` when the store cannot be read or written.
+pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    if exists(tx)? {
+        tx.execute(
+            "DELETE FROM model_choices WHERE scope = 'project' AND project = ?1",
+            [project.as_str()],
+        )
+        .map_err(unavailable)?;
+    }
+    let versions: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table'
+             AND name = 'versioned_items')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !versions {
+        return Ok(());
+    }
+    let marker = format!(":project:{}:", project.as_str());
+    let items: Vec<String> = tx
+        .prepare(
+            "SELECT item FROM versioned_items
+             WHERE substr(item, 1, length(?1)) = ?1 AND instr(item, ?2) > 0",
+        )
+        .and_then(|mut statement| {
+            statement
+                .query_map(params![format!("{}:", super::ITEM_PREFIX), marker], |row| {
+                    row.get(0)
+                })?
+                .collect()
+        })
+        .map_err(unavailable)?;
+    let scope = Scope::Project(project.clone());
+    let mut harnesses = std::collections::BTreeSet::new();
+    for item in &items {
+        let Some((harness, tail)) = item
+            .strip_prefix(super::ITEM_PREFIX)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            continue;
+        };
+        if Slot::ALL
+            .iter()
+            .any(|slot| tail == format!("project:{}:{}", project.as_str(), slot.as_str()))
+        {
+            harnesses.insert(harness.to_owned());
+        }
+    }
+    assert!(harnesses.len() <= FORGOTTEN_HARNESSES_MAX);
+    for harness in &harnesses {
+        for slot in Slot::ALL {
+            versioned::retire(tx, &item(harness, &scope, slot)?)?;
+        }
+    }
+    Ok(())
 }
 
 fn exists(db: &Connection) -> Result<bool, EngineError> {

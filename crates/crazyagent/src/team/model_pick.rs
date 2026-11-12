@@ -1,7 +1,7 @@
 use super::tool::ModelPick;
 use crate::engine::EngineError;
 use crate::model_choice::store::{self, Pick};
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS team_task_models (
@@ -116,7 +116,22 @@ CREATE TABLE IF NOT EXISTS team_model_fallbacks (
     model TEXT NOT NULL,
     noticed_ms INTEGER NOT NULL,
     PRIMARY KEY (project, harness, model)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS team_model_refusals (
+    project TEXT NOT NULL,
+    connection TEXT NOT NULL,
+    model TEXT NOT NULL,
+    until_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, connection, model)
 ) WITHOUT ROWID;";
+
+/// How long a harness's refusal of a model keeps an account from starts on that model
+/// (DEC-150 F8): a plan seldom gains a model sooner, and a refusal told wrongly passes.
+pub(crate) const MODEL_REFUSAL_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// The most model refusals one project keeps, as an agent's transcript can tell any
+/// number (DEC-150 F8); a new one past it drops the one closest to its end.
+pub(crate) const REFUSALS_MAX: usize = 64;
 
 /// Reads the model a task's agent should start on (DEC-150): the spawn's pinned pick
 /// while the owner's choices still allow it (`still_allowed`), else the project's agent
@@ -170,6 +185,62 @@ pub(crate) fn start_model(
         Some(project),
         crate::model_choice::Slot::Master,
     )
+}
+
+/// The line that heads the master's list of models a task may name (DEC-150 F9).
+pub(crate) const MODELS_HEAD: &str = "Models a task may name, by harness:";
+
+/// Writes the master's list of the models a spawn may name for each harness the plan uses
+/// (DEC-150 F9), as the owner's pick rule offers them, so the master picks only from the
+/// allowed list. Takes the database, the project and the harnesses, repeats allowed.
+/// Returns the head and one line per harness whose model CrazyAgent chooses, empty when
+/// none is, or a store or SQLite failure.
+pub(crate) fn master_lines(
+    db: &Connection,
+    project: &ProjectId,
+    harnesses: &[&str],
+) -> Result<String, EngineError> {
+    let mut seen: Vec<&str> = Vec::with_capacity(harnesses.len());
+    let mut lines = String::new();
+    for harness in harnesses {
+        if seen.contains(harness) {
+            continue;
+        }
+        seen.push(harness);
+        let catalog = crate::model_choice::catalog(harness);
+        let Some(offer) = store::offer(db, harness, &catalog, project)? else {
+            continue;
+        };
+        let default = match offer.default.as_deref() {
+            Some(model) => format!("the default, {model}"),
+            None => "the account's own model".to_owned(),
+        };
+        let line = if offer.allowed.is_empty() {
+            format!("- {harness}: leave model out; tasks run {default}\n")
+        } else {
+            let ids = offer.allowed.join(", ");
+            format!("- {harness}: {ids}; leave model out for {default}\n")
+        };
+        lines.push_str(&line);
+    }
+    if lines.is_empty() {
+        return Ok(lines);
+    }
+    Ok(format!("{MODELS_HEAD}\n{lines}"))
+}
+
+/// Writes the master's list of models a task may name for the harnesses a team plan hands
+/// work to (DEC-150 F9), as `master_lines` does. Takes the database, the project and the
+/// plan. Returns the text, empty when no harness's model is chosen, or a store or SQLite
+/// failure.
+pub(crate) fn plan_lines(
+    db: &Connection,
+    project: &ProjectId,
+    plan: &crate::project_setup::TeamPlan,
+) -> Result<String, EngineError> {
+    let harnesses = super::plan_harnesses(plan);
+    let names: Vec<&str> = harnesses.iter().map(String::as_str).collect();
+    master_lines(db, project, &names)
 }
 
 /// Checks a model a task was pinned to or an agent was started on against the owner's
@@ -259,10 +330,11 @@ pub(crate) enum Fallen {
 }
 
 /// Tells the owner and the master once that no pool account could run a model chosen for
-/// a harness's agents or master, so a start runs on the default (DEC-150): one owner
-/// notification and one engine message to the master, then nothing more for that project,
-/// harness and model until it runs again (`ran`). Takes the transaction, the project, the
-/// harness, the model, who falls back and the time. Returns whether this call told them.
+/// a harness's agents or master, so a start runs on the default (DEC-150): one owner Pool
+/// failover notification (DEC-136a) and one engine message to the master, then nothing
+/// more for that project, harness and model until it runs again (`ran`). Takes the
+/// transaction, the project, the harness, the model, who falls back and the time. Returns
+/// whether this call told them.
 pub(crate) fn fell_back(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -298,13 +370,29 @@ pub(crate) fn fell_back(
     let text = format!(
         "No account in this project's pool can run {model} for {whom} now, so {who} runs on the default model. You are told again only after {model} runs once more."
     );
-    super::events::notify(
+    let prefix = format!("model_fallback:{}:{harness}:{now}:", project.as_str());
+    let room = crate::notifications::SUBJECT_BYTES_MAX.saturating_sub(prefix.len());
+    let cut = model
+        .char_indices()
+        .map(|(at, one)| at + one.len_utf8())
+        .take_while(|end| *end <= room)
+        .last()
+        .unwrap_or(0);
+    let subject = format!("{prefix}{}", &model[..cut]);
+    assert!(subject.len() <= crate::notifications::SUBJECT_BYTES_MAX);
+    crate::notifications::note(
         tx,
-        project,
-        super::events::NotificationKind::ModelFallback,
-        &text,
+        &crate::notifications::InfoNotice {
+            kind: crate::notifications::NoticeKind::PoolFailover,
+            project_id: Some(project),
+            subject: &subject,
+            text: &text,
+            target: crate::notifications::NoticeTarget::Conversation {
+                project_id: project.clone(),
+            },
+        },
         now,
-    )?;
+    );
     let _ = super::append_message(
         tx,
         project,
@@ -332,6 +420,98 @@ pub(crate) fn ran(
         params![project.as_str(), harness, model],
     )
     .map_err(super::error)?;
+    Ok(())
+}
+
+/// Records that an account's harness refused a model for one project (DEC-150 F8), until
+/// `MODEL_REFUSAL_MS` from now: the project's expired refusals go, and past `REFUSALS_MAX`
+/// the one closest to its end does. Takes the database, outside a transaction, the
+/// project, the account, the model and the time. Returns a SQLite failure.
+pub(crate) fn refuse(
+    db: &Connection,
+    project: &ProjectId,
+    connection: &CredentialRef,
+    model: &str,
+    now: i64,
+) -> Result<(), EngineError> {
+    assert!(!model.is_empty() && model.len() <= crate::model_choice::MODEL_BYTES_MAX);
+    let tx = db.unchecked_transaction().map_err(super::error)?;
+    tx.execute_batch(RUN_SCHEMA).map_err(super::error)?;
+    tx.execute(
+        "DELETE FROM team_model_refusals WHERE project=?1 AND until_ms<=?2",
+        params![project.as_str(), now],
+    )
+    .map_err(super::error)?;
+    tx.execute(
+        "INSERT INTO team_model_refusals(project,connection,model,until_ms) VALUES (?1,?2,?3,?4)
+         ON CONFLICT(project,connection,model) DO UPDATE SET until_ms=excluded.until_ms",
+        params![
+            project.as_str(),
+            connection.as_str(),
+            model,
+            now + MODEL_REFUSAL_MS
+        ],
+    )
+    .map_err(super::error)?;
+    tx.execute(
+        "DELETE FROM team_model_refusals WHERE project=?1 AND (connection, model) IN (
+             SELECT connection, model FROM team_model_refusals WHERE project=?1
+             ORDER BY until_ms DESC, connection, model LIMIT -1 OFFSET ?2)",
+        params![project.as_str(), REFUSALS_MAX as i64],
+    )
+    .map_err(super::error)?;
+    let kept: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM team_model_refusals WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(super::error)?;
+    assert!(kept >= 1 && kept <= REFUSALS_MAX as i64);
+    tx.commit().map_err(super::error)
+}
+
+/// Tells whether an account's harness refused a model for a project and the refusal still
+/// holds (DEC-150 F8). Takes the database, the project, the account, the model and the
+/// time. Returns the answer, or a SQLite failure.
+pub(crate) fn refused(
+    db: &Connection,
+    project: &ProjectId,
+    connection: &CredentialRef,
+    model: &str,
+    now: i64,
+) -> Result<bool, EngineError> {
+    if !table(db, "team_model_refusals")? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_model_refusals
+         WHERE project=?1 AND connection=?2 AND model=?3 AND until_ms>?4)",
+        params![project.as_str(), connection.as_str(), model, now],
+        |row| row.get(0),
+    )
+    .map_err(super::error)
+}
+
+/// Drops a removed project's model records (DEC-150 F6): its tasks' pinned picks, its
+/// agents' started models, its told fallbacks and its accounts' model refusals, so a
+/// project added again under the same id starts from none. Takes the removal's
+/// transaction and the project. Returns a SQLite failure.
+pub(crate) fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    for name in [
+        "team_task_models",
+        "team_agent_models",
+        "team_model_fallbacks",
+        "team_model_refusals",
+    ] {
+        if table(tx, name)? {
+            tx.execute(
+                &format!("DELETE FROM {name} WHERE project=?1"),
+                [project.as_str()],
+            )
+            .map_err(super::error)?;
+        }
+    }
     Ok(())
 }
 

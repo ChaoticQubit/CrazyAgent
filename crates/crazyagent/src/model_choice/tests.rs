@@ -54,7 +54,7 @@ fn set(
     slot: Slot,
     value: Value,
 ) -> Result<Written, crate::engine::EngineError> {
-    let models = store::values(db, harness, &catalog(ids), scope).unwrap();
+    let models = store::values(db, harness, &catalog(ids), scope, None).unwrap();
     let version = row(&models, slot).version;
     store::set(db, harness, &catalog(ids), scope, slot, &value, version)
 }
@@ -97,7 +97,7 @@ fn a_model_id_is_checked_before_it_reaches_a_command_line() {
 fn with_nothing_set_every_slot_leaves_the_model_to_the_account() {
     let (_tmp, db) = engine();
     for scope in [Scope::App, alpha()] {
-        let models = store::values(&db, "codex", &catalog(&["a", "b"]), &scope).unwrap();
+        let models = store::values(&db, "codex", &catalog(&["a", "b"]), &scope, None).unwrap();
         assert_eq!(models.harness, "codex");
         assert_eq!(models.rows.len(), 3);
         for slot in [Slot::Master, Slot::Agent] {
@@ -141,10 +141,10 @@ fn a_project_override_beats_the_app_value_and_a_reset_falls_back() {
     assert_eq!(here.source, Source::Project);
     assert_eq!(here.version, 1);
 
-    let app = store::values(&db, "codex", &catalog(&ids), &Scope::App).unwrap();
+    let app = store::values(&db, "codex", &catalog(&ids), &Scope::App, None).unwrap();
     assert_eq!(row(&app, Slot::Agent).effective, json!("gpt-a"));
     assert_eq!(row(&app, Slot::Agent).source, Source::App);
-    let mine = store::values(&db, "codex", &catalog(&ids), &alpha()).unwrap();
+    let mine = store::values(&db, "codex", &catalog(&ids), &alpha(), None).unwrap();
     assert_eq!(row(&mine, Slot::Master).here, None);
     assert_eq!(row(&mine, Slot::Master).effective, json!("gpt-c"));
     assert_eq!(row(&mine, Slot::Master).source, Source::App);
@@ -200,7 +200,7 @@ fn a_value_outside_the_harness_models_or_its_shape_is_refused() {
     )
     .unwrap_err();
     assert_eq!(refused.0, "model_choice_value_invalid");
-    let models = store::values(&db, "codex", &catalog(&ids), &Scope::App).unwrap();
+    let models = store::values(&db, "codex", &catalog(&ids), &Scope::App, None).unwrap();
     assert!(
         models
             .rows
@@ -263,7 +263,7 @@ fn a_stale_set_is_refused_with_the_current_row() {
 #[test]
 fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
     let (_tmp, db) = engine();
-    let models = store::values(&db, "rcli", &catalog(&["local"]), &Scope::App).unwrap();
+    let models = store::values(&db, "rcli", &catalog(&["local"]), &Scope::App, None).unwrap();
     for slot in [Slot::Master, Slot::Agent, Slot::Allowed] {
         assert_eq!(
             row(&models, slot).access,
@@ -282,9 +282,9 @@ fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
             other => panic!("not refused: {other:?}"),
         }
     }
-    let unknown = store::values(&db, "nope", &catalog(&["a"]), &Scope::App).unwrap_err();
+    let unknown = store::values(&db, "nope", &catalog(&["a"]), &Scope::App, None).unwrap_err();
     assert_eq!(unknown.0, "model_choice_harness_unknown");
-    let alias = store::values(&db, "claude", &catalog(&["sonnet"]), &Scope::App).unwrap();
+    let alias = store::values(&db, "claude", &catalog(&["sonnet"]), &Scope::App, None).unwrap();
     assert_eq!(alias.harness, "claude-code");
 }
 
@@ -292,7 +292,7 @@ fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
 fn an_unknown_project_is_refused() {
     let (_tmp, db) = engine();
     let other = Scope::Project(ProjectId::new("beta").unwrap());
-    let refused = store::values(&db, "codex", &catalog(&["a"]), &other).unwrap_err();
+    let refused = store::values(&db, "codex", &catalog(&["a"]), &other, None).unwrap_err();
     assert_eq!(refused.0, "model_choice_project_unknown");
     let refused = store::set(
         &db,
@@ -325,7 +325,7 @@ fn an_added_model_is_usable_only_after_its_test_launch_passes() {
         store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
         Begun::Pending
     );
-    let models = store::values(&db, "codex", &ids, &Scope::App).unwrap();
+    let models = store::values(&db, "codex", &ids, &Scope::App, None).unwrap();
     let mine = models
         .candidates
         .iter()
@@ -345,7 +345,7 @@ fn an_added_model_is_usable_only_after_its_test_launch_passes() {
     assert_eq!(refused.0, "model_choice_value_invalid");
 
     store::custom_checked(&db, "codex", "my-model", false).unwrap();
-    let models = store::values(&db, "codex", &ids, &Scope::App).unwrap();
+    let models = store::values(&db, "codex", &ids, &Scope::App, None).unwrap();
     let mine = models
         .candidates
         .iter()
@@ -381,12 +381,13 @@ fn an_added_model_is_usable_only_after_its_test_launch_passes() {
         store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
         Some("my-model".to_owned())
     );
-    let other = store::values(&db, "claude-code", &catalog(&["sonnet"]), &Scope::App).unwrap();
+    let other =
+        store::values(&db, "claude-code", &catalog(&["sonnet"]), &Scope::App, None).unwrap();
     assert!(other.candidates.iter().all(|c| c.id != "my-model"));
 
     assert!(store::custom_remove(&db, "codex", "my-model").unwrap());
     assert!(!store::custom_remove(&db, "codex", "my-model").unwrap());
-    let models = store::values(&db, "codex", &ids, &Scope::App).unwrap();
+    let models = store::values(&db, "codex", &ids, &Scope::App, None).unwrap();
     assert_eq!(row_here(&models, Slot::Agent), Some(json!("my-model")));
     assert_eq!(
         super::store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
@@ -445,7 +446,7 @@ fn a_stored_model_the_harness_no_longer_lists_is_passed_over() {
         )
         .unwrap(),
     );
-    let models = store::values(&db, "codex", &catalog(&["new"]), &Scope::App).unwrap();
+    let models = store::values(&db, "codex", &catalog(&["new"]), &Scope::App, None).unwrap();
     let agent = row(&models, Slot::Agent);
     assert_eq!(agent.here, Some(json!("old")));
     assert_eq!(agent.effective, Value::Null);
@@ -537,21 +538,33 @@ fn a_spawn_pick_runs_only_from_the_allowed_list_or_the_default() {
 #[should_panic(expected = "codex: bad id")]
 fn a_catalog_with_an_id_no_launch_accepts_is_a_broken_caller() {
     let (_tmp, db) = engine();
-    let _ = store::values(&db, "codex", &catalog(&["gpt-a", "bad id"]), &Scope::App);
+    let _ = store::values(
+        &db,
+        "codex",
+        &catalog(&["gpt-a", "bad id"]),
+        &Scope::App,
+        None,
+    );
 }
 
 #[test]
 #[should_panic(expected = "codex: gpt-a")]
 fn a_catalog_with_a_repeated_id_is_a_broken_caller() {
     let (_tmp, db) = engine();
-    let _ = store::values(&db, "codex", &catalog(&["gpt-a", "gpt-a"]), &Scope::App);
+    let _ = store::values(
+        &db,
+        "codex",
+        &catalog(&["gpt-a", "gpt-a"]),
+        &Scope::App,
+        None,
+    );
 }
 
 #[test]
 fn every_refusal_code_is_listed() {
     let (_tmp, db) = engine();
     let codes = [
-        store::values(&db, "nope", &catalog(&["a"]), &Scope::App)
+        store::values(&db, "nope", &catalog(&["a"]), &Scope::App, None)
             .unwrap_err()
             .0,
         store::values(
@@ -559,6 +572,7 @@ fn every_refusal_code_is_listed() {
             "codex",
             &catalog(&["a"]),
             &Scope::Project(ProjectId::new("beta").unwrap()),
+            None,
         )
         .unwrap_err()
         .0,
@@ -742,4 +756,158 @@ fn a_claude_code_id_holds_brackets_only_as_the_catalog_s_1m_suffix() {
     for model in catalog("claude-code") {
         assert!(model_valid("claude-code", &model), "{model}");
     }
+}
+
+/// Removing a project clears its model choices and the team's model records for it, and
+/// moves its choices' versions on (DEC-150 F6), so a project added again under the same
+/// id inherits nothing and a screen read before the removal cannot save onto it.
+#[test]
+fn removing_a_project_clears_its_model_choices_so_a_reused_id_inherits_nothing() {
+    let (_tmp, db) = engine();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let ids = catalog(&["gpt-a", "gpt-b"]);
+    let version = row(
+        &store::values(&db, "codex", &ids, &alpha(), None).unwrap(),
+        Slot::Master,
+    )
+    .version;
+    let written = store::set(
+        &db,
+        "codex",
+        &ids,
+        &alpha(),
+        Slot::Master,
+        &json!("gpt-b"),
+        version,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    let saw = row(
+        &store::values(&db, "codex", &ids, &alpha(), None).unwrap(),
+        Slot::Master,
+    )
+    .version;
+    crate::team::model_pick::record_agent(&db, &project, 7, Some("gpt-a")).unwrap();
+    db.execute(
+        "INSERT INTO team_model_fallbacks(project,harness,model,noticed_ms) VALUES (?1,'codex','gpt-a',1)",
+        [PROJECT],
+    )
+    .unwrap();
+    let account = crate::protocol::CredentialRef::new("account-a").unwrap();
+    crate::team::model_pick::refuse(&db, &project, &account, "gpt-a", 1).unwrap();
+
+    let config = crate::config::resolve_config_bytes("", "").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    let outcome = crate::project_setup::execute(
+        &tx,
+        &config,
+        &crate::project_setup::SetupAction::Remove {
+            project_id: project.clone(),
+        },
+        2,
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome, crate::protocol::Outcome::Applied),
+        "{outcome:?}"
+    );
+    tx.commit().unwrap();
+    db.execute("INSERT INTO projects(id, body) VALUES(?1,'{}')", [PROJECT])
+        .unwrap();
+
+    let after = store::values(&db, "codex", &ids, &alpha(), None).unwrap();
+    assert_eq!(row(&after, Slot::Master).here, None, "nothing inherited");
+    assert!(row(&after, Slot::Master).version > saw);
+    let stale = store::set(
+        &db,
+        "codex",
+        &ids,
+        &alpha(),
+        Slot::Master,
+        &json!("gpt-a"),
+        saw,
+    )
+    .unwrap();
+    assert!(matches!(stale, Written::Stale { .. }), "{stale:?}");
+    for table in [
+        "team_agent_models",
+        "team_model_fallbacks",
+        "team_model_refusals",
+    ] {
+        let left: i64 = db
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE project=?1"),
+                [PROJECT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "{table}");
+    }
+}
+
+/// A shipped catalog names the harness versions it was checked on, and an installed
+/// version it does not name, or one the engine could not read, shows why on the Models
+/// section without taking the catalog ids away (DEC-150 G1).
+#[test]
+fn a_shipped_catalog_names_the_versions_it_was_checked_on_and_an_unchecked_install_shows_why() {
+    for harness in ["claude-code", "codex"] {
+        let shipped = shipped(harness).unwrap();
+        let name = crate::harnesses::spec(harness).unwrap().name;
+        let listed = shipped.qualified_versions.join(", ");
+        for version in &shipped.qualified_versions {
+            assert_eq!(unqualified(harness, Some(version)), None, "{harness}");
+        }
+        assert_eq!(
+            unqualified(harness, Some("999.0.0")),
+            Some(format!(
+                "listed for {name} {listed}; installed 999.0.0 not yet checked"
+            ))
+        );
+        assert_eq!(
+            unqualified(harness, None),
+            Some(format!(
+                "listed for {name} {listed}; installed version unknown"
+            ))
+        );
+    }
+}
+
+/// The Models section says whether the installed version was checked, and a catalog id
+/// still saves and stays usable on a version the catalog does not name: qualification is
+/// recorded, not enforced (DEC-150 G1).
+#[test]
+fn the_models_section_says_whether_the_installed_version_was_checked_and_still_saves_a_listed_id() {
+    let (_tmp, db) = engine();
+    let shipped = shipped("codex").unwrap();
+    let ids = shipped.models.clone();
+    let checked = shipped.qualified_versions[0].as_str();
+    let models = store::values(&db, "codex", &ids, &Scope::App, Some(checked)).unwrap();
+    assert!(models.qualified && models.reason.is_none(), "{models:?}");
+
+    let models = store::values(&db, "codex", &ids, &Scope::App, Some("999.0.0")).unwrap();
+    assert!(!models.qualified, "{models:?}");
+    assert_eq!(models.reason, unqualified("codex", Some("999.0.0")));
+    assert!(
+        models
+            .candidates
+            .iter()
+            .all(|candidate| candidate.origin == Origin::Catalog),
+        "{models:?}"
+    );
+    let version = row(&models, Slot::Agent).version;
+    let written = store::set(
+        &db,
+        "codex",
+        &ids,
+        &Scope::App,
+        Slot::Agent,
+        &json!(ids[0]),
+        version,
+    )
+    .unwrap();
+    assert_eq!(saved(written).effective, json!(ids[0]));
+    assert_eq!(
+        store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
+        Some(ids[0].clone())
+    );
 }

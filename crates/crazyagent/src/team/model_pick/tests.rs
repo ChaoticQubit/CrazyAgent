@@ -194,14 +194,14 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     };
     assert!(master);
     let notices: Vec<(String, String)> = db
-        .prepare("SELECT kind,text FROM team_notifications WHERE project=?1 ORDER BY id")
+        .prepare("SELECT kind,text FROM owner_notices WHERE project=?1 AND subject LIKE 'model_fallback:%' ORDER BY id")
         .unwrap()
         .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(notices.len(), 3);
-    assert!(notices.iter().all(|(kind, _)| kind == "model_fallback"));
+    assert!(notices.iter().all(|(kind, _)| kind == "pool_failover"));
     assert_eq!(
         notices[0].1,
         "No account in this project's pool can run gpt-a for codex agents now, so task 1 runs on the default model. You are told again only after gpt-a runs once more."
@@ -358,7 +358,7 @@ fn a_pin_or_record_the_owner_since_took_off_the_list_starts_on_the_default() {
     assert_eq!(starts(&db), (on("gpt-a"), on("gpt-a")));
     let catalog = crate::model_choice::catalog("codex");
     let scope = crate::harness_settings::Scope::App;
-    let version = crate::model_choice::store::values(&db, "codex", &catalog, &scope)
+    let version = crate::model_choice::store::values(&db, "codex", &catalog, &scope, None)
         .unwrap()
         .rows
         .iter()
@@ -411,4 +411,35 @@ fn a_model_refusal_holds_for_its_project_connection_and_model_until_it_expires()
     let last = format!("m-{}", REFUSALS_MAX + extra - 1);
     assert!(refused(&db, &project(), &a, &last, 3_000).unwrap());
     assert!(!refused(&db, &project(), &a, "m-0", 3_000).unwrap());
+}
+
+#[test]
+fn the_master_is_told_each_harness_s_models_as_the_pick_rule_offers_them() {
+    use crate::model_choice::rules::{self, PickRule, Rule, RuleWritten};
+    let (_tmp, db) = engine();
+    owner_models(&db, &["gpt-a", "gpt-b"], &["gpt-a"], Some("gpt-b"));
+    let lines = || master_lines(&db, &project(), &["codex", "rcli", "codex"]).unwrap();
+    assert_eq!(
+        lines(),
+        format!("{MODELS_HEAD}\n- codex: gpt-a; leave model out for the default, gpt-b\n")
+    );
+    let rule = |pick: PickRule| {
+        let version = rules::rules(&db).unwrap().pick_version;
+        let written = rules::set_rule(&db, Rule::Pick(pick), version).unwrap();
+        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+    };
+    rule(PickRule::Hint);
+    let catalog = crate::model_choice::catalog("codex").join(", ");
+    assert_eq!(
+        lines(),
+        format!(
+            "{MODELS_HEAD}\n- codex: {catalog}, gpt-a, gpt-b; leave model out for the default, gpt-b\n"
+        )
+    );
+    rule(PickRule::Default);
+    assert_eq!(
+        lines(),
+        format!("{MODELS_HEAD}\n- codex: leave model out; tasks run the default, gpt-b\n")
+    );
+    assert_eq!(master_lines(&db, &project(), &["rcli"]).unwrap(), "");
 }

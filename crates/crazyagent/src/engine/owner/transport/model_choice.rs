@@ -1,5 +1,5 @@
 use super::*;
-use crate::harness_settings::Scope;
+use crate::harness_settings::{Scope, installed};
 use crate::model_choice::rules::{self, Rule, RuleWritten, Rules};
 use crate::model_choice::store::{self, Begun};
 use crate::model_choice::{MODEL_BYTES_MAX, Models, Row, Slot, VALUE_JSON_MAX, Written};
@@ -354,9 +354,20 @@ async fn handle(
         }
     }
     let root = super::changes::engine_root(authority)?;
-    tokio::task::spawn_blocking(move || run(&root, action))
-        .await
-        .map_err(|_| failure("model_choice_unavailable"))?
+    let executable = match &action {
+        Action::Values { harness, .. }
+        | Action::Add { harness, .. }
+        | Action::Remove { harness, .. } => crate::model_choice::harness_id(harness)
+            .and_then(|id| super::harness_settings::registered(engine, authority, id)),
+        _ => None,
+    };
+    tokio::task::spawn_blocking(move || {
+        let installed =
+            executable.and_then(|path| installed::version_cached(&path, installed::LIMIT));
+        run(&root, action, installed.as_deref())
+    })
+    .await
+    .map_err(|_| failure("model_choice_unavailable"))?
 }
 
 /// Reads one model choice request from an owner frame body, at most `REQUEST_BYTES_MAX`
@@ -372,9 +383,10 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 }
 
 /// Runs one authenticated model choice action against the engine database in the engine
-/// root, with the harness's model catalog. Inputs: the engine root and the action. Output:
-/// the reply, or the store's refusal.
-fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
+/// root, with the harness's model catalog. Inputs: the engine root, the action and the
+/// harness's installed version, none when unknown or not read. Output: the reply, or the
+/// store's refusal.
+fn run(root: &Path, action: Action, installed: Option<&str>) -> Result<Reply, EngineError> {
     let db = versioned::open(root)?;
     let app = |harness: &str| -> Result<Models, EngineError> {
         store::values(
@@ -382,6 +394,7 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
             harness,
             &crate::model_choice::catalog(harness),
             &Scope::App,
+            installed,
         )
     };
     match action {
@@ -391,6 +404,7 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
                 &harness,
                 &crate::model_choice::catalog(&harness),
                 &scope(project),
+                installed,
             )?,
         }),
         Action::Set {

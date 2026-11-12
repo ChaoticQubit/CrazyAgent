@@ -508,7 +508,7 @@ fn error_notification_reports_retry_without_a_terminal_transition() {
     let mut protocol = active();
     assert_eq!(protocol.receive(&wire(json!({"method":"error","params":{
         "threadId":"thread-unit","turnId":"turn-unit","error":{"message":"unit error"},"willRetry":false
-    }}))).unwrap(), vec![Event::TurnError { turn_id:"turn-unit".into(), message:"unit error".into(), will_retry:false }]);
+    }}))).unwrap(), vec![Event::TurnError { turn_id:"turn-unit".into(), message:"unit error".into(), will_retry:false, model_refused:false }]);
     assert_eq!(protocol.state(), State::Active);
     assert_eq!(
         protocol

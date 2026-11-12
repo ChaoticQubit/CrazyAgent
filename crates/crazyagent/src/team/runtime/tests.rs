@@ -29425,7 +29425,7 @@ fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
     let notices = || -> Vec<String> {
         fixture
             .connection
-            .prepare("SELECT text FROM team_notifications WHERE project=?1 AND kind='model_fallback' ORDER BY id")
+            .prepare("SELECT text FROM owner_notices WHERE project=?1 AND kind='pool_failover' AND subject LIKE 'model_fallback:%' ORDER BY id")
             .unwrap()
             .query_map([PROJECT], |row| row.get(0))
             .unwrap()
@@ -29437,7 +29437,7 @@ fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
     let catalog = crate::model_choice::catalog("codex");
     let set_master = |model: &str| {
         let scope = crate::harness_settings::Scope::App;
-        let models = store::values(&fixture.connection, "codex", &catalog, &scope).unwrap();
+        let models = store::values(&fixture.connection, "codex", &catalog, &scope, None).unwrap();
         let version = models
             .rows
             .iter()
@@ -29508,7 +29508,7 @@ fn codex_model(fixture: &Fixture, model: &str, slot: crate::model_choice::Slot) 
     {
         store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
     }
-    let version = store::values(&fixture.connection, "codex", &catalog, &scope)
+    let version = store::values(&fixture.connection, "codex", &catalog, &scope, None)
         .unwrap()
         .rows
         .iter()
@@ -29561,7 +29561,7 @@ fn the_fallback_rule_starts_the_master_silently_or_stops_it_with_the_reason() {
     let told: i64 = fixture
         .connection
         .query_row(
-            "SELECT (SELECT COUNT(*) FROM team_notifications WHERE project=?1 AND kind='model_fallback')
+            "SELECT (SELECT COUNT(*) FROM owner_notices WHERE project=?1 AND kind='pool_failover' AND subject LIKE 'model_fallback:%')
                   + (SELECT COUNT(*) FROM team_messages WHERE project=?1 AND text LIKE '%(model_fallback)')",
             [PROJECT],
             |row| row.get(0),

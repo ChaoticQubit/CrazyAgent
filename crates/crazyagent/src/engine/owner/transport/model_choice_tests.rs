@@ -32,7 +32,7 @@ fn send(root: &Path, body: Value) -> Result<Reply, EngineError> {
         super::super::protocol(&bytes).unwrap(),
         super::super::Protocol::ModelChoice
     ));
-    run(root, parse(&bytes)?)
+    run(root, parse(&bytes)?, None)
 }
 
 fn values(root: &Path, project: Option<&str>) -> Models {
@@ -317,6 +317,8 @@ fn the_largest_models_section_fits_one_owner_frame() {
         harness: "claude-code".into(),
         rows,
         candidates,
+        qualified: false,
+        reason: Some("r".repeat(crate::model_choice::UNQUALIFIED_REASON_BYTES_MAX)),
     };
     for reply in [
         Reply::Values {

@@ -1,5 +1,7 @@
 use super::interactive::Transcript;
-use super::launch::{LaunchError, failure, rate_limited};
+use super::launch::{
+    CLAUDE_MODEL_REFUSED, CODEX_MODEL_REFUSED, LaunchError, failure, rate_limited,
+};
 use serde_json::Value;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -104,6 +106,7 @@ pub enum TranscriptEvent {
     Interrupted,
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
+    ModelRefused,
     BackgroundStarted { id: String },
     BackgroundEnded { id: String },
 }
@@ -647,9 +650,16 @@ fn codex_facts(value: &Value, exec: bool) -> Vec<TranscriptEvent> {
             facts.push(TranscriptEvent::TurnFinished { success: false });
             facts
         }
-        (Some("event_msg"), Some("error" | "stream_error")) => vec![TranscriptEvent::TurnError {
-            rate_limited: rate_limited(payload["message"].as_str().unwrap_or_default()),
-        }],
+        (Some("event_msg"), Some("error" | "stream_error")) => {
+            let error = TranscriptEvent::TurnError {
+                rate_limited: rate_limited(payload["message"].as_str().unwrap_or_default()),
+            };
+            if payload["codex_error_info"] == CODEX_MODEL_REFUSED {
+                vec![TranscriptEvent::ModelRefused, error]
+            } else {
+                vec![error]
+            }
+        }
         (Some("response_item"), Some("message")) if payload["role"] == "assistant" => {
             payload["content"]
                 .as_array()
@@ -905,12 +915,17 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
         }
         Some("assistant") if value["isApiErrorMessage"] == true => {
             let code = value["error"].as_str().unwrap_or_default();
-            vec![
+            let mut facts = Vec::new();
+            if code == CLAUDE_MODEL_REFUSED {
+                facts.push(TranscriptEvent::ModelRefused);
+            }
+            facts.extend([
                 TranscriptEvent::TurnError {
                     rate_limited: rate_limited(code),
                 },
                 TranscriptEvent::TurnFinished { success: false },
-            ]
+            ]);
+            facts
         }
         Some("assistant") => {
             let mut facts = Vec::new();
