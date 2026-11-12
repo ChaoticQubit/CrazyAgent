@@ -1832,7 +1832,6 @@ mod models {
     const HARNESS: &str = "claude-code";
     const CLAUDE_CODE: &str = "Claude Code";
     const OPENCODE: &str = "OpenCode";
-    const QUALIFIED: &str = "2.1.309 (Claude Code)";
 
     /// A TUI on Home with the engine it talks to, the runtime the owner reads run on and the
     /// scratch folders that hold the stand-ins, HOME and the projects home.
@@ -1841,6 +1840,14 @@ mod models {
         pty: Pty,
         runtime: tokio::runtime::Runtime,
         _disk: tempfile::TempDir,
+    }
+
+    /// The Claude Code versions the shipped model catalog lists; the stand-in answers the
+    /// first, so it reads as checked whichever versions the catalog qualifies.
+    fn qualified_versions() -> Vec<String> {
+        crazyagent::model_choice::shipped(HARNESS)
+            .expect("Claude Code ships a model catalog")
+            .qualified_versions
     }
 
     fn project_id() -> ProjectId {
@@ -1886,7 +1893,10 @@ mod models {
             for folder in [&bin, &home, &projects] {
                 std::fs::create_dir(folder).unwrap();
             }
-            stand_in(&bin.join("claude"), QUALIFIED);
+            stand_in(
+                &bin.join("claude"),
+                &format!("{} (Claude Code)", qualified_versions()[0]),
+            );
             stand_in(&bin.join("opencode"), "1.0.0");
             let inherited = std::env::var_os("PATH").unwrap_or_default();
             let mut engine = Engine::new(prefix);
@@ -2083,7 +2093,10 @@ mod models {
     fn the_tui_models_page_saves_a_master_model_app_wide() {
         let tui = Tui::start("ca-e2e-m01-");
         tui.app_page(CLAUDE_CODE, "Claude Code models");
-        let screen = tui.says("Checked against 2.1.309");
+        let screen = tui.says(&format!(
+            "Checked against {}",
+            qualified_versions().join(", ")
+        ));
         assert!(screen.contains("Account's own model"), "{screen}");
         tui.pty.keys(&["Enter", "Right", "Enter"]);
         tui.says("Saved.");
