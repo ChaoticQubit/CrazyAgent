@@ -755,6 +755,7 @@ pub struct TeamRuntime {
     unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
     settled: bool,
+    notices: crate::notifications::reconcile::Ticker,
     naming: Option<i64>,
     fresh_start: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
@@ -1032,6 +1033,7 @@ impl TeamRuntime {
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
+        crate::notifications::initialize(&connection)?;
         if let Err(problem) = crate::usage::initialize(&connection) {
             eprintln!(
                 "team usage is not counted: {}",
@@ -1095,6 +1097,7 @@ impl TeamRuntime {
             unread: BTreeMap::new(),
             resuming: None,
             settled: false,
+            notices: crate::notifications::reconcile::Ticker::default(),
             naming: None,
             fresh_start: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
@@ -1511,8 +1514,9 @@ impl TeamRuntime {
     /// register, sends pending messages to the master, delivers finished results, starts or
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
-    /// the questions masters' harnesses ask the owner in their own terminals, then alerts the
-    /// owner to new questions and terminal waits by severity.
+    /// the questions masters' harnesses ask the owner in their own terminals, alerts the
+    /// owner to new questions and terminal waits by severity, then brings the notification
+    /// store in step (DEC-136a).
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -1533,8 +1537,12 @@ impl TeamRuntime {
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
+        let notices = self
+            .notices
+            .tick(&mut self.connection, &access, now_ms())
+            .map(|_ran| ());
         let lanes = self.lanes();
-        questions.and(lanes)
+        questions.and(notices).and(lanes)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's

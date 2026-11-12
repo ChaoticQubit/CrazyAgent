@@ -43,6 +43,7 @@ pub mod master_step_limit;
 pub mod master_time_limit;
 pub mod memory;
 pub mod model_gateway;
+pub mod notifications;
 pub mod onboarding;
 pub mod owner_profile;
 pub mod paths;

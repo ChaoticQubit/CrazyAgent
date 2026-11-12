@@ -111,7 +111,11 @@ fn a_new_action_condition_opens_one_pending_unread_item() {
     synced(
         &mut connection,
         &[NoticeKind::Question],
-        &[question("p1", "question:c7", "Master asks: which database?")],
+        &[question(
+            "p1",
+            "question:c7",
+            "Master asks: which database?",
+        )],
         NOW_MS,
     );
     let page = listed(&connection, &query(NoticeFilter::All));
@@ -126,7 +130,13 @@ fn a_new_action_condition_opens_one_pending_unread_item() {
     assert_eq!(item.resolved_ms, None);
     assert_eq!((item.unread, item.pending, item.folded), (1, 1, 1));
     assert_eq!(item.ids, vec![item.id]);
-    assert_eq!(page.counts, NoticeCounts { unread: 1, pending: 1 });
+    assert_eq!(
+        page.counts,
+        NoticeCounts {
+            unread: 1,
+            pending: 1
+        }
+    );
     assert_eq!(page.newest, item.id);
 }
 
@@ -134,9 +144,19 @@ fn a_new_action_condition_opens_one_pending_unread_item() {
 fn a_condition_seen_again_while_open_keeps_its_one_item_and_takes_the_new_text() {
     let (_folder, mut connection) = store();
     let kinds = [NoticeKind::MemoryReview];
-    synced(&mut connection, &kinds, &[memories("p1", "2 suggested memories to review.")], NOW_MS);
+    synced(
+        &mut connection,
+        &kinds,
+        &[memories("p1", "2 suggested memories to review.")],
+        NOW_MS,
+    );
     let first = listed(&connection, &query(NoticeFilter::All)).items[0].id;
-    synced(&mut connection, &kinds, &[memories("p1", "3 suggested memories to review.")], NOW_MS + 1);
+    synced(
+        &mut connection,
+        &kinds,
+        &[memories("p1", "3 suggested memories to review.")],
+        NOW_MS + 1,
+    );
     let page = listed(&connection, &query(NoticeFilter::All));
     assert_eq!(texts(&page), ["3 suggested memories to review."]);
     assert_eq!(page.items[0].id, first);
@@ -148,22 +168,47 @@ fn a_condition_seen_again_while_open_keeps_its_one_item_and_takes_the_new_text()
 fn a_cleared_condition_resolves_its_item_marks_it_read_and_lists_it_under_done() {
     let (_folder, mut connection) = store();
     let kinds = [NoticeKind::Question];
-    synced(&mut connection, &kinds, &[question("p1", "question:q1", "Which port?")], NOW_MS);
+    synced(
+        &mut connection,
+        &kinds,
+        &[question("p1", "question:q1", "Which port?")],
+        NOW_MS,
+    );
     synced(&mut connection, &kinds, &[], NOW_MS + 5);
     let done = listed(&connection, &query(NoticeFilter::Done));
     assert_eq!(texts(&done), ["Which port?"]);
     assert_eq!(done.items[0].resolved_ms, Some(NOW_MS + 5));
     assert_eq!(done.items[0].read_ms, Some(NOW_MS + 5));
     assert_eq!(done.items[0].pending, 0);
-    assert!(listed(&connection, &query(NoticeFilter::Pending)).items.is_empty());
-    assert_eq!(done.counts, NoticeCounts { unread: 0, pending: 0 });
+    assert!(
+        listed(&connection, &query(NoticeFilter::Pending))
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        done.counts,
+        NoticeCounts {
+            unread: 0,
+            pending: 0
+        }
+    );
 }
 
 #[test]
 fn a_kind_whose_source_could_not_be_read_resolves_none_of_its_items() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Which port?")], NOW_MS);
-    synced(&mut connection, &[NoticeKind::MemoryReview], &[], NOW_MS + 5);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Which port?")],
+        NOW_MS,
+    );
+    synced(
+        &mut connection,
+        &[NoticeKind::MemoryReview],
+        &[],
+        NOW_MS + 5,
+    );
     let pending = listed(&connection, &query(NoticeFilter::Pending));
     assert_eq!(texts(&pending), ["Which port?"]);
     assert_eq!(pending.counts.pending, 1);
@@ -182,7 +227,13 @@ fn a_condition_that_breaks_again_after_it_cleared_opens_a_new_item() {
     assert!(all.items[0].id > all.items[1].id);
     assert_eq!(all.items[0].resolved_ms, None);
     assert_eq!(all.items[1].resolved_ms, Some(NOW_MS + 1));
-    assert_eq!(all.counts, NoticeCounts { unread: 1, pending: 1 });
+    assert_eq!(
+        all.counts,
+        NoticeCounts {
+            unread: 1,
+            pending: 1
+        }
+    );
 }
 
 #[test]
@@ -192,15 +243,32 @@ fn deleting_a_pending_action_hides_it_until_its_state_clears_and_breaks_again() 
     let live = [question("p1", "question:q1", "Which port?")];
     synced(&mut connection, &kinds, &live, NOW_MS);
     let id = listed(&connection, &query(NoticeFilter::All)).items[0].id;
-    assert_eq!(act(&mut connection, NoticeAction::Delete { ids: vec![id] }, NOW_MS + 1), Outcome::Applied);
+    assert_eq!(
+        act(
+            &mut connection,
+            NoticeAction::Delete { ids: vec![id] },
+            NOW_MS + 1
+        ),
+        Outcome::Applied
+    );
     synced(&mut connection, &kinds, &live, NOW_MS + 2);
     let hidden = listed(&connection, &query(NoticeFilter::All));
     assert!(hidden.items.is_empty());
-    assert_eq!(hidden.counts, NoticeCounts { unread: 0, pending: 0 });
+    assert_eq!(
+        hidden.counts,
+        NoticeCounts {
+            unread: 0,
+            pending: 0
+        }
+    );
     assert_eq!(rows(&connection), 1);
     synced(&mut connection, &kinds, &[], NOW_MS + 3);
     assert_eq!(rows(&connection), 0);
-    assert!(listed(&connection, &query(NoticeFilter::Done)).items.is_empty());
+    assert!(
+        listed(&connection, &query(NoticeFilter::Done))
+            .items
+            .is_empty()
+    );
     synced(&mut connection, &kinds, &live, NOW_MS + 4);
     let again = listed(&connection, &query(NoticeFilter::Pending));
     assert_eq!(texts(&again), ["Which port?"]);
@@ -211,11 +279,22 @@ fn deleting_a_pending_action_hides_it_until_its_state_clears_and_breaks_again() 
 fn deleting_an_info_item_or_a_resolved_action_removes_its_row() {
     let (_folder, mut connection) = store();
     let kinds = [NoticeKind::Question];
-    synced(&mut connection, &kinds, &[question("p1", "question:q1", "Which port?")], NOW_MS);
+    synced(
+        &mut connection,
+        &kinds,
+        &[question("p1", "question:q1", "Which port?")],
+        NOW_MS,
+    );
     synced(&mut connection, &kinds, &[], NOW_MS + 1);
     let info = finished(&mut connection, "p1", "activity:4:1", NOW_MS + 2).unwrap();
     let resolved = listed(&connection, &query(NoticeFilter::Done)).items[0].id;
-    let outcome = act(&mut connection, NoticeAction::Delete { ids: vec![info, resolved] }, NOW_MS + 3);
+    let outcome = act(
+        &mut connection,
+        NoticeAction::Delete {
+            ids: vec![info, resolved],
+        },
+        NOW_MS + 3,
+    );
     assert_eq!(outcome, Outcome::Applied);
     assert_eq!(rows(&connection), 0);
 }
@@ -227,13 +306,25 @@ fn resolved_actions_and_read_info_past_the_retention_go_while_unread_and_pending
     synced(
         &mut connection,
         &kinds,
-        &[question("p1", "question:q1", "Old"), question("p1", "question:q2", "Open")],
+        &[
+            question("p1", "question:q1", "Old"),
+            question("p1", "question:q2", "Open"),
+        ],
         NOW_MS,
     );
-    synced(&mut connection, &kinds, &[question("p1", "question:q2", "Open")], NOW_MS + 1);
+    synced(
+        &mut connection,
+        &kinds,
+        &[question("p1", "question:q2", "Open")],
+        NOW_MS + 1,
+    );
     let read = finished(&mut connection, "p1", "activity:1:1", NOW_MS).unwrap();
     finished(&mut connection, "p1", "activity:2:1", NOW_MS).unwrap();
-    act(&mut connection, NoticeAction::Read { ids: vec![read] }, NOW_MS + 2);
+    act(
+        &mut connection,
+        NoticeAction::Read { ids: vec![read] },
+        NOW_MS + 2,
+    );
     let tx = connection.transaction().unwrap();
     prune(&tx, &NoticeSettings::default(), NOW_MS + 30 * DAY_MS).unwrap();
     tx.commit().unwrap();
@@ -242,15 +333,29 @@ fn resolved_actions_and_read_info_past_the_retention_go_while_unread_and_pending
     prune(&tx, &NoticeSettings::default(), NOW_MS + 31 * DAY_MS).unwrap();
     tx.commit().unwrap();
     let all = listed(&connection, &query(NoticeFilter::All));
-    assert_eq!(texts(&all), ["Sub-agent 2 finished Add the login form", "Open"]);
-    assert_eq!(all.counts, NoticeCounts { unread: 2, pending: 1 });
+    assert_eq!(
+        texts(&all),
+        ["Sub-agent 2 finished Add the login form", "Open"]
+    );
+    assert_eq!(
+        all.counts,
+        NoticeCounts {
+            unread: 2,
+            pending: 1
+        }
+    );
 }
 
 #[test]
 fn a_shorter_retention_setting_removes_done_items_sooner() {
     let (_folder, mut connection) = store();
     let kinds = [NoticeKind::Question];
-    synced(&mut connection, &kinds, &[question("p1", "question:q1", "Old")], NOW_MS);
+    synced(
+        &mut connection,
+        &kinds,
+        &[question("p1", "question:q1", "Old")],
+        NOW_MS,
+    );
     synced(&mut connection, &kinds, &[], NOW_MS);
     let settings = NoticeSettings {
         retention_days: 1,
@@ -265,7 +370,12 @@ fn a_shorter_retention_setting_removes_done_items_sooner() {
 #[test]
 fn the_row_cap_drops_the_oldest_finished_rows_and_never_a_pending_action() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Open")], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Open")],
+        NOW_MS,
+    );
     let tx = connection.transaction().unwrap();
     for at in 0..ROWS_MAX {
         let subject = format!("activity:{at}:1");
@@ -286,7 +396,12 @@ fn the_row_cap_drops_the_oldest_finished_rows_and_never_a_pending_action() {
     prune(&tx, &NoticeSettings::default(), NOW_MS + ROWS_MAX).unwrap();
     tx.commit().unwrap();
     assert_eq!(rows(&connection), ROWS_MAX);
-    finished(&mut connection, "p1", "activity:last:1", NOW_MS + ROWS_MAX + 1);
+    finished(
+        &mut connection,
+        "p1",
+        "activity:last:1",
+        NOW_MS + ROWS_MAX + 1,
+    );
     assert_eq!(rows(&connection), ROWS_MAX);
     let pending = listed(&connection, &query(NoticeFilter::Pending));
     assert_eq!(texts(&pending), ["Open"]);
@@ -307,26 +422,53 @@ fn each_filter_lists_its_items_and_the_counts_never_depend_on_the_page() {
     synced(
         &mut connection,
         &kinds,
-        &[question("p1", "question:q1", "Done one"), question("p1", "question:q2", "Open one")],
+        &[
+            question("p1", "question:q1", "Done one"),
+            question("p1", "question:q2", "Open one"),
+        ],
         NOW_MS,
     );
-    synced(&mut connection, &kinds, &[question("p1", "question:q2", "Open one")], NOW_MS + 1);
+    synced(
+        &mut connection,
+        &kinds,
+        &[question("p1", "question:q2", "Open one")],
+        NOW_MS + 1,
+    );
     let read = finished(&mut connection, "p1", "activity:1:1", NOW_MS + 2).unwrap();
-    act(&mut connection, NoticeAction::Read { ids: vec![read] }, NOW_MS + 3);
+    act(
+        &mut connection,
+        NoticeAction::Read { ids: vec![read] },
+        NOW_MS + 3,
+    );
     connection
-        .execute("UPDATE owner_notices SET text='Read info' WHERE id=?1", [read])
+        .execute(
+            "UPDATE owner_notices SET text='Read info' WHERE id=?1",
+            [read],
+        )
         .unwrap();
     finished(&mut connection, "p1", "activity:2:1", NOW_MS + 4);
     connection
-        .execute("UPDATE owner_notices SET text='Unread info' WHERE subject='activity:2:1'", [])
+        .execute(
+            "UPDATE owner_notices SET text='Unread info' WHERE subject='activity:2:1'",
+            [],
+        )
         .unwrap();
     assert_eq!(
         texts(&listed(&connection, &query(NoticeFilter::All))),
         ["Unread info", "Read info", "Open one", "Done one"]
     );
-    assert_eq!(texts(&listed(&connection, &query(NoticeFilter::Unread))), ["Unread info", "Open one"]);
-    assert_eq!(texts(&listed(&connection, &query(NoticeFilter::Pending))), ["Open one"]);
-    assert_eq!(texts(&listed(&connection, &query(NoticeFilter::Done))), ["Done one"]);
+    assert_eq!(
+        texts(&listed(&connection, &query(NoticeFilter::Unread))),
+        ["Unread info", "Open one"]
+    );
+    assert_eq!(
+        texts(&listed(&connection, &query(NoticeFilter::Pending))),
+        ["Open one"]
+    );
+    assert_eq!(
+        texts(&listed(&connection, &query(NoticeFilter::Done))),
+        ["Done one"]
+    );
     let one = NoticeQuery {
         limit: 1,
         ..query(NoticeFilter::All)
@@ -334,7 +476,13 @@ fn each_filter_lists_its_items_and_the_counts_never_depend_on_the_page() {
     let first = listed(&connection, &one);
     assert_eq!(texts(&first), ["Unread info"]);
     assert!(first.more);
-    assert_eq!(first.counts, NoticeCounts { unread: 2, pending: 1 });
+    assert_eq!(
+        first.counts,
+        NoticeCounts {
+            unread: 2,
+            pending: 1
+        }
+    );
     let next = listed(
         &connection,
         &NoticeQuery {
@@ -351,7 +499,10 @@ fn a_project_scope_lists_and_counts_only_that_projects_items() {
     synced(
         &mut connection,
         &[NoticeKind::Question],
-        &[question("p1", "question:q1", "In one"), question("p2", "question:q2", "In two")],
+        &[
+            question("p1", "question:q1", "In one"),
+            question("p2", "question:q2", "In two"),
+        ],
         NOW_MS,
     );
     let scoped = listed(
@@ -362,8 +513,19 @@ fn a_project_scope_lists_and_counts_only_that_projects_items() {
         },
     );
     assert_eq!(texts(&scoped), ["In two"]);
-    assert_eq!(scoped.counts, NoticeCounts { unread: 1, pending: 1 });
-    assert_eq!(listed(&connection, &query(NoticeFilter::Pending)).counts.pending, 2);
+    assert_eq!(
+        scoped.counts,
+        NoticeCounts {
+            unread: 1,
+            pending: 1
+        }
+    );
+    assert_eq!(
+        listed(&connection, &query(NoticeFilter::Pending))
+            .counts
+            .pending,
+        2
+    );
 }
 
 #[test]
@@ -381,7 +543,11 @@ fn same_kind_items_in_one_project_fold_into_one_row_with_their_counts_and_ids() 
     );
     let first = finished(&mut connection, "p1", "activity:1:1", NOW_MS + 1).unwrap();
     let second = finished(&mut connection, "p1", "activity:2:1", NOW_MS + 2).unwrap();
-    act(&mut connection, NoticeAction::Read { ids: vec![first] }, NOW_MS + 3);
+    act(
+        &mut connection,
+        NoticeAction::Read { ids: vec![first] },
+        NOW_MS + 3,
+    );
     let folded = listed(
         &connection,
         &NoticeQuery {
@@ -398,8 +564,17 @@ fn same_kind_items_in_one_project_fold_into_one_row_with_their_counts_and_ids() 
     assert_eq!(folded.items[1].folded, 1);
     let questions = &folded.items[2];
     assert_eq!(questions.text, "Second");
-    assert_eq!((questions.folded, questions.unread, questions.pending), (2, 2, 2));
-    assert_eq!(folded.counts, NoticeCounts { unread: 4, pending: 3 });
+    assert_eq!(
+        (questions.folded, questions.unread, questions.pending),
+        (2, 2, 2)
+    );
+    assert_eq!(
+        folded.counts,
+        NoticeCounts {
+            unread: 4,
+            pending: 3
+        }
+    );
 }
 
 #[test]
@@ -408,7 +583,10 @@ fn a_kind_and_project_query_without_folding_opens_one_fold() {
     synced(
         &mut connection,
         &[NoticeKind::Question],
-        &[question("p1", "question:q1", "First"), question("p1", "question:q2", "Second")],
+        &[
+            question("p1", "question:q1", "First"),
+            question("p1", "question:q2", "Second"),
+        ],
         NOW_MS,
     );
     finished(&mut connection, "p1", "activity:1:1", NOW_MS + 1);
@@ -428,7 +606,12 @@ fn a_kind_and_project_query_without_folding_opens_one_fold() {
 fn a_fold_lists_at_most_its_id_bound() {
     let (_folder, mut connection) = store();
     for at in 0..(FOLD_IDS_MAX as i64 + 3) {
-        finished(&mut connection, "p1", &format!("activity:{at}:1"), NOW_MS + at);
+        finished(
+            &mut connection,
+            "p1",
+            &format!("activity:{at}:1"),
+            NOW_MS + at,
+        );
     }
     let folded = listed(
         &connection,
@@ -446,16 +629,47 @@ fn a_fold_lists_at_most_its_id_bound() {
 #[test]
 fn reading_an_action_item_keeps_it_pending_and_unread_puts_it_back() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Which port?")], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Which port?")],
+        NOW_MS,
+    );
     let id = listed(&connection, &query(NoticeFilter::All)).items[0].id;
-    assert_eq!(act(&mut connection, NoticeAction::Read { ids: vec![id] }, NOW_MS + 1), Outcome::Applied);
+    assert_eq!(
+        act(
+            &mut connection,
+            NoticeAction::Read { ids: vec![id] },
+            NOW_MS + 1
+        ),
+        Outcome::Applied
+    );
     let read = listed(&connection, &query(NoticeFilter::All));
     assert_eq!(read.items[0].read_ms, Some(NOW_MS + 1));
-    assert_eq!(read.counts, NoticeCounts { unread: 0, pending: 1 });
-    assert_eq!(act(&mut connection, NoticeAction::Unread { ids: vec![id] }, NOW_MS + 2), Outcome::Applied);
+    assert_eq!(
+        read.counts,
+        NoticeCounts {
+            unread: 0,
+            pending: 1
+        }
+    );
+    assert_eq!(
+        act(
+            &mut connection,
+            NoticeAction::Unread { ids: vec![id] },
+            NOW_MS + 2
+        ),
+        Outcome::Applied
+    );
     let unread = listed(&connection, &query(NoticeFilter::Unread));
     assert_eq!(unread.items[0].read_ms, None);
-    assert_eq!(unread.counts, NoticeCounts { unread: 1, pending: 1 });
+    assert_eq!(
+        unread.counts,
+        NoticeCounts {
+            unread: 1,
+            pending: 1
+        }
+    );
 }
 
 #[test]
@@ -464,32 +678,56 @@ fn read_all_marks_one_projects_items_or_every_item_read() {
     synced(
         &mut connection,
         &[NoticeKind::Question],
-        &[question("p1", "question:q1", "One"), question("p2", "question:q2", "Two")],
+        &[
+            question("p1", "question:q1", "One"),
+            question("p2", "question:q2", "Two"),
+        ],
         NOW_MS,
     );
     let one = NoticeAction::ReadAll {
         project_id: Some(project("p1")),
     };
     assert_eq!(act(&mut connection, one, NOW_MS + 1), Outcome::Applied);
-    assert_eq!(texts(&listed(&connection, &query(NoticeFilter::Unread))), ["Two"]);
+    assert_eq!(
+        texts(&listed(&connection, &query(NoticeFilter::Unread))),
+        ["Two"]
+    );
     let every = NoticeAction::ReadAll { project_id: None };
     assert_eq!(act(&mut connection, every, NOW_MS + 2), Outcome::Applied);
-    assert!(listed(&connection, &query(NoticeFilter::Unread)).items.is_empty());
-    assert_eq!(listed(&connection, &query(NoticeFilter::All)).counts.pending, 2);
+    assert!(
+        listed(&connection, &query(NoticeFilter::Unread))
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        listed(&connection, &query(NoticeFilter::All))
+            .counts
+            .pending,
+        2
+    );
 }
 
 #[test]
 fn an_empty_or_too_long_id_list_is_refused_and_nothing_changes() {
     let (_folder, mut connection) = store();
     let id = finished(&mut connection, "p1", "activity:1:1", NOW_MS).unwrap();
-    let empty = act(&mut connection, NoticeAction::Read { ids: vec![] }, NOW_MS + 1);
+    let empty = act(
+        &mut connection,
+        NoticeAction::Read { ids: vec![] },
+        NOW_MS + 1,
+    );
     assert_eq!(empty, rejected("notification_ids_invalid"));
     let mut ids = vec![id; ACTION_IDS_MAX];
     ids.push(id);
     let long = act(&mut connection, NoticeAction::Delete { ids }, NOW_MS + 1);
     assert_eq!(long, rejected("notification_ids_invalid"));
     assert_eq!(rows(&connection), 1);
-    assert_eq!(listed(&connection, &query(NoticeFilter::Unread)).items.len(), 1);
+    assert_eq!(
+        listed(&connection, &query(NoticeFilter::Unread))
+            .items
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -501,7 +739,12 @@ fn a_fresh_engine_has_every_kind_on_thirty_days_and_all_banners() {
     assert_eq!(settings.banners, Banners::All);
     let kinds: Vec<NoticeKind> = settings.kinds.iter().map(|item| item.kind).collect();
     assert_eq!(kinds, NoticeKind::ALL);
-    assert!(settings.kinds.iter().all(|item| item.delivery == Delivery::On));
+    assert!(
+        settings
+            .kinds
+            .iter()
+            .all(|item| item.delivery == Delivery::On)
+    );
 }
 
 #[test]
@@ -509,12 +752,26 @@ fn each_delivery_option_of_an_info_kind_is_saved_and_read_back() {
     let (_folder, mut connection) = store();
     for delivery in [Delivery::BellOnly, Delivery::Off, Delivery::On] {
         let mut chosen = NoticeSettings::default();
-        chosen.kinds[NoticeKind::ALL.iter().position(|kind| *kind == NoticeKind::AgentFailed).unwrap()]
-            .delivery = delivery;
-        let saved = act(&mut connection, NoticeAction::SaveSettings { settings: chosen.clone() }, NOW_MS);
+        chosen.kinds[NoticeKind::ALL
+            .iter()
+            .position(|kind| *kind == NoticeKind::AgentFailed)
+            .unwrap()]
+        .delivery = delivery;
+        let saved = act(
+            &mut connection,
+            NoticeAction::SaveSettings {
+                settings: chosen.clone(),
+            },
+            NOW_MS,
+        );
         assert_eq!(saved, Outcome::Applied);
         assert_eq!(settings(&connection).unwrap(), chosen);
-        assert_eq!(settings(&connection).unwrap().delivery(NoticeKind::AgentFailed), delivery);
+        assert_eq!(
+            settings(&connection)
+                .unwrap()
+                .delivery(NoticeKind::AgentFailed),
+            delivery
+        );
     }
 }
 
@@ -524,11 +781,21 @@ fn an_action_kind_can_be_bell_only_but_never_off() {
     let mut silent = NoticeSettings::default();
     silent.kinds[0].delivery = Delivery::BellOnly;
     assert_eq!(silent.kinds[0].kind, NoticeKind::Question);
-    let saved = act(&mut connection, NoticeAction::SaveSettings { settings: silent.clone() }, NOW_MS);
+    let saved = act(
+        &mut connection,
+        NoticeAction::SaveSettings {
+            settings: silent.clone(),
+        },
+        NOW_MS,
+    );
     assert_eq!(saved, Outcome::Applied);
     let mut off = silent.clone();
     off.kinds[0].delivery = Delivery::Off;
-    let refused = act(&mut connection, NoticeAction::SaveSettings { settings: off }, NOW_MS);
+    let refused = act(
+        &mut connection,
+        NoticeAction::SaveSettings { settings: off },
+        NOW_MS,
+    );
     assert_eq!(refused, rejected("notification_settings_invalid"));
     assert_eq!(settings(&connection).unwrap(), silent);
 }
@@ -549,7 +816,11 @@ fn settings_with_a_missing_or_repeated_kind_or_retention_out_of_bounds_are_refus
         ..NoticeSettings::default()
     };
     for settings in [missing, repeated, short, long] {
-        let outcome = act(&mut connection, NoticeAction::SaveSettings { settings }, NOW_MS);
+        let outcome = act(
+            &mut connection,
+            NoticeAction::SaveSettings { settings },
+            NOW_MS,
+        );
         assert_eq!(outcome, rejected("notification_settings_invalid"));
     }
     assert_eq!(settings(&connection).unwrap(), NoticeSettings::default());
@@ -558,12 +829,22 @@ fn settings_with_a_missing_or_repeated_kind_or_retention_out_of_bounds_are_refus
 #[test]
 fn each_retention_bound_is_saved_and_read_back() {
     let (_folder, mut connection) = store();
-    for days in [RETENTION_DAYS_MIN, RETENTION_DAYS_MAX, RETENTION_DAYS_DEFAULT] {
+    for days in [
+        RETENTION_DAYS_MIN,
+        RETENTION_DAYS_MAX,
+        RETENTION_DAYS_DEFAULT,
+    ] {
         let chosen = NoticeSettings {
             retention_days: days,
             ..NoticeSettings::default()
         };
-        let saved = act(&mut connection, NoticeAction::SaveSettings { settings: chosen.clone() }, NOW_MS);
+        let saved = act(
+            &mut connection,
+            NoticeAction::SaveSettings {
+                settings: chosen.clone(),
+            },
+            NOW_MS,
+        );
         assert_eq!(saved, Outcome::Applied);
         assert_eq!(settings(&connection).unwrap().retention_days, days);
     }
@@ -577,57 +858,117 @@ fn banner_of(connection: &mut Connection, banners: Banners, delivery: Delivery) 
     for item in &mut chosen.kinds {
         item.delivery = delivery;
     }
-    let saved = act(connection, NoticeAction::SaveSettings { settings: chosen }, NOW_MS);
+    let saved = act(
+        connection,
+        NoticeAction::SaveSettings { settings: chosen },
+        NOW_MS,
+    );
     assert_eq!(saved, Outcome::Applied);
     let page = listed(connection, &query(NoticeFilter::All));
-    let action = page.items.iter().find(|item| item.class == NoticeClass::Action).unwrap();
-    let info = page.items.iter().find(|item| item.class == NoticeClass::Info).unwrap();
+    let action = page
+        .items
+        .iter()
+        .find(|item| item.class == NoticeClass::Action)
+        .unwrap();
+    let info = page
+        .items
+        .iter()
+        .find(|item| item.class == NoticeClass::Info)
+        .unwrap();
     (action.banner, info.banner)
 }
 
 #[test]
 fn banners_all_shows_action_and_info_kinds_that_are_on() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Q")], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Q")],
+        NOW_MS,
+    );
     finished(&mut connection, "p1", "activity:1:1", NOW_MS);
-    assert_eq!(banner_of(&mut connection, Banners::All, Delivery::On), (true, true));
+    assert_eq!(
+        banner_of(&mut connection, Banners::All, Delivery::On),
+        (true, true)
+    );
 }
 
 #[test]
 fn banners_action_only_shows_only_action_kinds() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Q")], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Q")],
+        NOW_MS,
+    );
     finished(&mut connection, "p1", "activity:1:1", NOW_MS);
-    assert_eq!(banner_of(&mut connection, Banners::ActionOnly, Delivery::On), (true, false));
+    assert_eq!(
+        banner_of(&mut connection, Banners::ActionOnly, Delivery::On),
+        (true, false)
+    );
 }
 
 #[test]
 fn banners_off_shows_none() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Q")], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Q")],
+        NOW_MS,
+    );
     finished(&mut connection, "p1", "activity:1:1", NOW_MS);
-    assert_eq!(banner_of(&mut connection, Banners::Off, Delivery::On), (false, false));
+    assert_eq!(
+        banner_of(&mut connection, Banners::Off, Delivery::On),
+        (false, false)
+    );
 }
 
 #[test]
 fn a_bell_only_kind_shows_in_the_bell_with_no_banner() {
     let (_folder, mut connection) = store();
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", "Q")], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Q")],
+        NOW_MS,
+    );
     finished(&mut connection, "p1", "activity:1:1", NOW_MS);
-    assert_eq!(banner_of(&mut connection, Banners::All, Delivery::BellOnly), (false, false));
+    assert_eq!(
+        banner_of(&mut connection, Banners::All, Delivery::BellOnly),
+        (false, false)
+    );
 }
 
 #[test]
 fn an_info_kind_set_off_is_not_stored_and_one_set_bell_only_is() {
     let (_folder, mut connection) = store();
     let mut chosen = NoticeSettings::default();
-    let at = NoticeKind::ALL.iter().position(|kind| *kind == NoticeKind::AgentFinished).unwrap();
+    let at = NoticeKind::ALL
+        .iter()
+        .position(|kind| *kind == NoticeKind::AgentFinished)
+        .unwrap();
     chosen.kinds[at].delivery = Delivery::Off;
-    act(&mut connection, NoticeAction::SaveSettings { settings: chosen.clone() }, NOW_MS);
-    assert_eq!(finished(&mut connection, "p1", "activity:1:1", NOW_MS), None);
+    act(
+        &mut connection,
+        NoticeAction::SaveSettings {
+            settings: chosen.clone(),
+        },
+        NOW_MS,
+    );
+    assert_eq!(
+        finished(&mut connection, "p1", "activity:1:1", NOW_MS),
+        None
+    );
     assert_eq!(rows(&connection), 0);
     chosen.kinds[at].delivery = Delivery::BellOnly;
-    act(&mut connection, NoticeAction::SaveSettings { settings: chosen }, NOW_MS);
+    act(
+        &mut connection,
+        NoticeAction::SaveSettings { settings: chosen },
+        NOW_MS,
+    );
     assert!(finished(&mut connection, "p1", "activity:1:1", NOW_MS).is_some());
     assert!(!listed(&connection, &query(NoticeFilter::All)).items[0].banner);
 }
@@ -636,7 +977,10 @@ fn an_info_kind_set_off_is_not_stored_and_one_set_bell_only_is() {
 fn the_same_info_event_is_stored_once() {
     let (_folder, mut connection) = store();
     assert!(finished(&mut connection, "p1", "activity:1:1", NOW_MS).is_some());
-    assert_eq!(finished(&mut connection, "p1", "activity:1:1", NOW_MS + 1), None);
+    assert_eq!(
+        finished(&mut connection, "p1", "activity:1:1", NOW_MS + 1),
+        None
+    );
     assert_eq!(rows(&connection), 1);
 }
 
@@ -648,15 +992,30 @@ fn an_app_update_is_reported_once_per_version_and_the_engine_lost_once_a_minute(
             version: version.into(),
         },
     };
-    assert_eq!(act(&mut connection, update("2.4.1"), NOW_MS), Outcome::Applied);
-    assert_eq!(act(&mut connection, update("2.4.1"), NOW_MS + 1), Outcome::Applied);
-    assert_eq!(act(&mut connection, update("2.5.0-dev.3"), NOW_MS + 2), Outcome::Applied);
+    assert_eq!(
+        act(&mut connection, update("2.4.1"), NOW_MS),
+        Outcome::Applied
+    );
+    assert_eq!(
+        act(&mut connection, update("2.4.1"), NOW_MS + 1),
+        Outcome::Applied
+    );
+    assert_eq!(
+        act(&mut connection, update("2.5.0-dev.3"), NOW_MS + 2),
+        Outcome::Applied
+    );
     let lost = || NoticeAction::Report {
         report: NoticeReport::EngineLost,
     };
     assert_eq!(act(&mut connection, lost(), NOW_MS), Outcome::Applied);
-    assert_eq!(act(&mut connection, lost(), NOW_MS + 59_000), Outcome::Applied);
-    assert_eq!(act(&mut connection, lost(), NOW_MS + 61_000), Outcome::Applied);
+    assert_eq!(
+        act(&mut connection, lost(), NOW_MS + 59_000),
+        Outcome::Applied
+    );
+    assert_eq!(
+        act(&mut connection, lost(), NOW_MS + 61_000),
+        Outcome::Applied
+    );
     let page = listed(&connection, &query(NoticeFilter::All));
     let kinds: Vec<NoticeKind> = page.items.iter().map(|item| item.kind).collect();
     assert_eq!(
@@ -676,7 +1035,12 @@ fn an_app_update_is_reported_once_per_version_and_the_engine_lost_once_a_minute(
 #[test]
 fn a_reported_version_that_is_not_a_plain_version_is_refused() {
     let (_folder, mut connection) = store();
-    for version in ["", "2.4.1 now", "2.4.1\n", &"9".repeat(VERSION_BYTES_MAX + 1)] {
+    for version in [
+        "",
+        "2.4.1 now",
+        "2.4.1\n",
+        &"9".repeat(VERSION_BYTES_MAX + 1),
+    ] {
         let outcome = act(
             &mut connection,
             NoticeAction::Report {
@@ -695,7 +1059,12 @@ fn a_reported_version_that_is_not_a_plain_version_is_refused() {
 fn item_text_is_one_line_cut_to_its_bound_with_hidden_characters_shown() {
     let (_folder, mut connection) = store();
     let long = format!("Asks\nabout \u{202e}this {}", "x".repeat(TEXT_BYTES_MAX));
-    synced(&mut connection, &[NoticeKind::Question], &[question("p1", "question:q1", &long)], NOW_MS);
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", &long)],
+        NOW_MS,
+    );
     let text = &listed(&connection, &query(NoticeFilter::All)).items[0].text;
     assert!(text.len() <= TEXT_BYTES_MAX);
     assert!(text.starts_with("Asks about \\u202e"));
@@ -707,7 +1076,13 @@ fn item_text_is_one_line_cut_to_its_bound_with_hidden_characters_shown() {
 fn a_full_page_of_the_longest_items_stays_under_its_byte_bound() {
     let (_folder, mut connection) = store();
     let live: Vec<Condition> = (0..i64::from(PAGE_MAX) + 5)
-        .map(|at| question(&format!("p{at}"), &format!("question:q{at}"), &"w ".repeat(TEXT_BYTES_MAX)))
+        .map(|at| {
+            question(
+                &format!("p{at}"),
+                &format!("question:q{at}"),
+                &"w ".repeat(TEXT_BYTES_MAX),
+            )
+        })
         .collect();
     synced(&mut connection, &[NoticeKind::Question], &live, NOW_MS);
     let page = listed(&connection, &query(NoticeFilter::All));
@@ -728,7 +1103,10 @@ fn after_lists_only_items_newer_than_a_seen_id() {
             ..query(NoticeFilter::All)
         },
     );
-    assert_eq!(page.items.iter().map(|item| item.id).collect::<Vec<_>>(), [newer]);
+    assert_eq!(
+        page.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+        [newer]
+    );
     assert_eq!(page.newest, newer);
 }
 
@@ -740,7 +1118,10 @@ fn a_page_limit_outside_one_to_its_bound_is_refused() {
             limit,
             ..query(NoticeFilter::All)
         };
-        assert_eq!(page(&connection, &wrong).unwrap_err().0, "notification_query_invalid");
+        assert_eq!(
+            page(&connection, &wrong).unwrap_err().0,
+            "notification_query_invalid"
+        );
     }
 }
 
