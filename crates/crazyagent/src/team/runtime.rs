@@ -7786,6 +7786,17 @@ impl TeamRuntime {
             private_directory(directory)
                 .map_err(|e| with_code("the agent folder could not be made private", Some(&e.0)))?;
         }
+        #[cfg(target_os = "macos")]
+        if launch == "claude-code" && matches!(account.reach, TeamReach::Endpoint { .. }) {
+            crate::engine::keychain::fresh_profile_keychain(&self.state, &own_home, &[]).map_err(
+                |_| {
+                    with_code(
+                        "the agent's own keychain could not be made",
+                        Some("agent_keychain_unavailable"),
+                    )
+                },
+            )?;
+        }
         let relay = match &account.reach {
             TeamReach::Endpoint {
                 base_url,

@@ -134,6 +134,44 @@ fn the_agents_copy_is_replaced_during_the_turn_once_the_account_is_renewed() {
 }
 
 #[test]
+fn the_keeper_clears_a_stale_agent_keychain_record_when_it_replaces_a_claude_copy() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let lapsing = (now() + 4 * 60 + 8) * 1000;
+    let (keychain, service) = claude_keychain(&home, &claude_record(lapsing));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    let path = agent.join(".credentials.json");
+    assert_eq!(read_json(&path)["claudeAiOauth"]["expiresAt"], lapsing);
+    let stale = TestKeychain::adopt(&agent, only_keychain(&agent));
+    let agent_record = agent_service(&agent);
+    stale.add(CLAUDE_ACCOUNT, &agent_record, "stale");
+    let renewed = (now() + 3 * 86_400) * 1000;
+    keychain.add(
+        CLAUDE_ACCOUNT,
+        &service,
+        &claude_record(renewed).to_string(),
+    );
+    let deadline = Instant::now() + COPY_WAIT;
+    while read_json(&path)["claudeAiOauth"]["expiresAt"] != renewed || stale.holds(&agent_record) {
+        assert!(
+            Instant::now() < deadline,
+            "the keeper never replaced the copy and cleared the stale record"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(
+        read_json(&path)["claudeAiOauth"]["refreshToken"],
+        Value::Null
+    );
+    drop(copy);
+    drop(guard);
+}
+
+#[test]
 fn an_account_check_runs_beside_agents_but_never_beside_a_renewal() {
     let mut case = UseCase::new();
     let agent = execution(&mut case);

@@ -7,6 +7,8 @@ use serde_json::{Map, Value, json};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub(super) const CODEX_RECORD: &str = "auth.json";
@@ -45,6 +47,11 @@ fn unsafe_home() -> EngineError {
 
 fn wide_scope() -> EngineError {
     failure("native_profile_scope_too_wide")
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_unavailable() -> EngineError {
+    failure("native_profile_agent_keychain_unavailable")
 }
 
 /// The Claude OAuth scope prefix an agent's copy may never carry. A Console sign-in holds
@@ -94,11 +101,115 @@ pub(super) struct Record {
 
 /// An account credential copied into one agent's own home for one turn, with the keeper
 /// that renews it when the turn may outlast it. Dropping it stops the keeper and then
-/// removes the copy, so nothing outlives the turn that needed it.
+/// removes the copy and any record of it in the agent's own keychain, so nothing outlives
+/// the turn that needed it.
 pub(crate) struct AgentCredential {
     home: File,
     name: &'static str,
+    keychain: Option<AgentKeychain>,
     keeper: Option<Keeper>,
+}
+
+/// The keychain a Claude Code agent's own home holds, the default and only one there, and
+/// the item Claude Code would file the agent's copy under in it (DEC-146). Each handoff
+/// starts the agent on a newly created keychain under a new name, and the engine deletes
+/// that item from exactly that keychain whenever the keeper replaces the copy or the copy
+/// is removed, so the harness reads the copy the engine wrote, never a stale one, and an
+/// earlier copy never reaches a later handoff's keychain. Codex keeps its sign-in only in
+/// its file.
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub(super) struct AgentKeychain {
+    home: PathBuf,
+    keychain: PathBuf,
+    service: String,
+}
+
+/// No agent keychain exists off macOS, where Claude Code keeps its sign-in in its file.
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone)]
+pub(super) enum AgentKeychain {}
+
+#[cfg(target_os = "macos")]
+impl AgentKeychain {
+    /// Gives a Claude Code agent's home a newly created, empty-password, unlocked keychain
+    /// that never locks itself as that home's default and only search-list keychain, and
+    /// only then deletes any an earlier launch left, so the harness, even one still running
+    /// there, stores its sign-in there instead of asking macOS to create a login keychain.
+    /// A native lead's teammates' home, when there is one beside it, gets the same keychain
+    /// as its default, since teammates file the lead's sign-in under the lead's item name.
+    /// The home must lie below the engine's own folder and outside the account profiles,
+    /// see [`crate::engine::keychain::fresh_profile_keychain`]. Every call names the
+    /// keychain or runs with `HOME` set to an agent home, so the owner's keychain settings
+    /// are untouched. Inputs: the engine folder and the agent home. Output: the keychain,
+    /// or `native_profile_agent_keychain_unavailable`.
+    fn prepare(engine: &Path, home: &Path) -> Result<Self, EngineError> {
+        let text = home
+            .to_str()
+            .filter(|text| text.is_ascii())
+            .ok_or_else(keychain_unavailable)?;
+        if std::fs::canonicalize(engine.join(super::ROOT))
+            .map_or(true, |profiles| home.starts_with(profiles))
+        {
+            return Err(keychain_unavailable());
+        }
+        let mates = crate::launch_context::mates_home(home);
+        let sharers: Vec<&Path> =
+            if std::fs::symlink_metadata(&mates).is_ok_and(|metadata| metadata.is_dir()) {
+                vec![mates.as_path()]
+            } else {
+                Vec::new()
+            };
+        let keychain = crate::engine::keychain::fresh_profile_keychain(engine, home, &sharers)
+            .map_err(|_| keychain_unavailable())?;
+        assert_eq!(
+            keychain.parent(),
+            Some(home.join("Library/Keychains").as_path())
+        );
+        Ok(Self {
+            home: home.to_path_buf(),
+            keychain,
+            service: claude_service(text),
+        })
+    }
+
+    /// Deletes the item Claude Code filed the agent's copy under from the keychain this
+    /// handoff created, naming that keychain and following no link to it; one a later
+    /// handoff already replaced is fine. Input: the keychain. Output: done, or
+    /// `native_profile_agent_keychain_unavailable`.
+    pub(super) fn forget(&self) -> Result<(), EngineError> {
+        crate::engine::keychain::forget_record(&self.home, &self.keychain, &self.service)
+            .map_err(|_| keychain_unavailable())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl AgentKeychain {
+    /// Never runs: no agent keychain exists off macOS. Input: the keychain. Output: done.
+    pub(super) fn forget(&self) -> Result<(), EngineError> {
+        match *self {}
+    }
+}
+
+/// The keychain the agent's harness keeps its sign-in in, given before its copy is written:
+/// one for Claude Code on macOS and none for Codex, which runs with its file store. Inputs:
+/// the harness, the agent home and the engine folder agent homes lie below. Output: the
+/// keychain or none, or the refusal.
+fn agent_keychain(
+    harness: Harness,
+    home: &Path,
+    engine: &Path,
+) -> Result<Option<AgentKeychain>, EngineError> {
+    match harness {
+        #[cfg(target_os = "macos")]
+        Harness::Claude => AgentKeychain::prepare(engine, home).map(Some),
+        #[cfg(not(target_os = "macos"))]
+        Harness::Claude => {
+            let _ = (home, engine);
+            Ok(None)
+        }
+        Harness::Codex => Ok(None),
+    }
 }
 
 impl AgentCredential {
@@ -121,11 +232,15 @@ impl AgentCredential {
 }
 
 impl Drop for AgentCredential {
-    /// Stops the keeper, then removes the copy beneath the agent home's descriptor.
-    /// Input: the credential being dropped. Output: none; a copy already gone is fine.
+    /// Stops the keeper, then removes the copy beneath the agent home's descriptor and its
+    /// record in the agent's keychain. Input: the credential being dropped. Output: none; a
+    /// copy or record already gone is fine.
     fn drop(&mut self) {
         drop(self.keeper.take());
         let _ = rustix::fs::unlinkat(&self.home, self.name, AtFlags::empty());
+        if let Some(keychain) = &self.keychain {
+            let _ = keychain.forget();
+        }
     }
 }
 
@@ -140,6 +255,18 @@ pub(super) fn account_record(
         Harness::Codex => codex_copy(&read_record(home, CODEX_RECORD)?),
         Harness::Claude => claude_copy(&claude_source(home, path)?),
     }
+}
+
+/// The keychain item name Claude Code files a sign-in under for the secure storage folder
+/// it is given, which the engine sets to the harness's own home. Input: the folder's ASCII
+/// path. Output: the service name.
+#[cfg(target_os = "macos")]
+fn claude_service(folder: &str) -> String {
+    assert!(folder.is_ascii());
+    format!(
+        "Claude Code-credentials-{}",
+        &super::digest(folder.as_bytes())[..8]
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -159,6 +286,9 @@ impl NativeProfileUse {
     /// `.credentials.json` holding only its OAuth record, with no refresh token. When the
     /// access token lapses within the turn, the harness first renews the account in the
     /// managed home, and a keeper renews it again and replaces the copy while the turn runs.
+    /// On macOS a Claude Code agent's home first gets its own newly created keychain, from
+    /// which any record of the copy is deleted whenever the keeper replaces the copy or the
+    /// copy is removed (DEC-146).
     /// Inputs: the agent's private home, the turn's time bound and the harness executable.
     /// Output: the copy, removed when dropped; `native_profile_renewal_failed`, a transient
     /// refusal, when the token still lapses within a minute after a renewal that ended
@@ -166,7 +296,8 @@ impl NativeProfileUse {
     /// Claude Code ended the sign-in after its provider refused a refresh;
     /// `native_profile_codex_api_key` or `native_profile_codex_token_unreadable` for a
     /// Codex record without usable ChatGPT tokens; `native_profile_credential_unavailable`,
-    /// `native_profile_renewal_busy` or `native_profile_agent_home_unsafe`.
+    /// `native_profile_renewal_busy`, `native_profile_agent_home_unsafe` or
+    /// `native_profile_agent_keychain_unavailable`.
     pub(crate) fn hand_to_agent(
         &self,
         agent_home: &Path,
@@ -216,19 +347,31 @@ impl NativeProfileUse {
             None
         };
         let name = harness.copy_name();
+        let keychain = agent_keychain(harness, agent_home, &self.custody.anchor.path)?;
         place(&home, name, &record.copy)?;
         let mut credential = AgentCredential {
             home,
             name,
+            keychain,
             keeper: None,
         };
+        assert_eq!(
+            credential.keychain.is_some(),
+            cfg!(target_os = "macos") && harness == Harness::Claude
+        );
         if turn.is_none() || (renewal.is_some() && record.expires <= turn_end) {
             let renewal = match renewal {
                 Some(renewal) => renewal,
                 None => self.renewal(harness, executable)?,
             };
             let agent = credential.home.try_clone().map_err(|_| unavailable())?;
-            credential.keeper = Some(Keeper::start(renewal, agent, name, record.expires)?);
+            credential.keeper = Some(Keeper::start(
+                renewal,
+                agent,
+                name,
+                credential.keychain.clone(),
+                record.expires,
+            )?);
         }
         Ok(credential)
     }
@@ -580,10 +723,7 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
     {
         return Err(unavailable());
     }
-    let service = format!(
-        "Claude Code-credentials-{}",
-        &super::digest(text.as_bytes())[..8]
-    );
+    let service = claude_service(text);
     let keychain = path.join("Library/Keychains/login.keychain-db");
     let mut child = crate::spawn_gate::spawn(
         Command::new(SECURITY)
