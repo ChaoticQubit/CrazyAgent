@@ -69,9 +69,7 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                 (None, Some(Some(Ok(Some(version))))) => DependencyState::Found {
                     version: version.clone(),
                 },
-                (None, Some(Some(Err(code)))) => DependencyState::Failed {
-                    reason: super::plain_reason(code.0).to_owned(),
-                },
+                (None, Some(Some(Err(code)))) => DependencyState::refused(code.0),
                 (None, Some(Some(Ok(None)) | None)) => DependencyState::Missing,
             };
             DependencyStatus {

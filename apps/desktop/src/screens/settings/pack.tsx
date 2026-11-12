@@ -7,7 +7,7 @@ import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, Dialog, Icon, LoadError, NotReady, SettingSection, Skeleton, StatusBadge, Switch } from "../../ui";
 import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
-import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, rowInstall, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
+import { SETUP_POLL_MS, dependencyView, entryIcon, entryName, installed, packGroups, packStateView, rowInstall, setupBusy, toolsChecking, toolsOffer, toolsStep } from "../intake/intake";
 import { SkillTag, skillEntries } from "../skill-tag";
 import "../project/projects.css";
 
@@ -35,8 +35,7 @@ export function packConfirm(ask: PackAsk): { title: string; body: string; confir
  * Inputs: the setup status, the change in flight and the Install tools and row Install handlers. */
 function ToolsSection({ status, busy, onInstallTools, onInstall }: { status: SetupStatus; busy: string | null; onInstallTools: () => void; onInstall?: (dependency: Dependency) => void }) {
   const step = toolsStep({ kind: "ok", value: status });
-  const wanted = status.dependencies.some((item) => item.state.state === "missing" || item.state.state === "failed");
-  const offer = wanted && !setupBusy(status) && !toolsChecking(status);
+  const offer = toolsOffer(status);
   return <SettingSection title="Tools" about={step.body} actions={offer ? <Button variant="primary" size="small" icon="wrench" disabled={busy !== null && busy !== TOOLS_BUSY} pending={busy === TOOLS_BUSY}
     pendingLabel="Starting..." onClick={onInstallTools}>Install tools</Button> : undefined}>
     {status.dependencies.map((dependency) => {

@@ -234,6 +234,7 @@ pub enum Pin {
 
 /// Where one dependency stands on the setup screen. `Checking` means its version check
 /// is still running in the background; the screen reads the status again to see it.
+/// `Unsupported` means setup cannot install it on this system, so no Install is offered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
@@ -244,6 +245,20 @@ pub enum DependencyState {
     Installed { version: Version },
     Failed { reason: String },
     Unsupported,
+}
+
+impl DependencyState {
+    /// The state of a dependency setup could not find or install: unsupported for
+    /// [`PLATFORM_UNSUPPORTED`], else failed with the code's plain reason. Input: the setup
+    /// code. Output: the state.
+    pub fn refused(code: &str) -> Self {
+        if code == PLATFORM_UNSUPPORTED {
+            return Self::Unsupported;
+        }
+        Self::Failed {
+            reason: plain_reason(code).to_owned(),
+        }
+    }
 }
 
 /// One dependency as the setup screen lists it: which tool, its plain name and its state.
