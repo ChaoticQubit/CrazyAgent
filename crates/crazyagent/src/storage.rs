@@ -2821,6 +2821,9 @@ fn owner_read(
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },
+        OwnerRead::LearningProgress => OwnerData::LearningProgress {
+            progress: crate::learning::progress(&tx)?,
+        },
         OwnerRead::Memories {
             scope,
             search,

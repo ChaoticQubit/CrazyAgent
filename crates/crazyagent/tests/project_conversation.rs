@@ -1190,3 +1190,53 @@ async fn full_project_history_drops_the_oldest_message_keeps_the_brief_and_exact
     assert_eq!(counts(root.path()), before_replay);
     service.stop().await;
 }
+
+/// The Learn CrazyAgent read through the real owner sockets (DEC-153): a fresh engine has
+/// nothing done, a project and one owner message tick Create a project and Talk to the
+/// master on both clients, and a brief alone does not count as a message.
+#[tokio::test]
+async fn learning_progress_ticks_a_project_and_a_message_to_the_master_on_both_clients() {
+    use crazyagent::learning::{LearningProgress, StepId};
+    let root = private_root();
+    let service = Service::start(root.path()).await;
+    let read = |kind| {
+        let client = service.owner(kind);
+        let service = &service;
+        async move {
+            let OwnerData::LearningProgress { progress } = service
+                .read(&client, OwnerRead::LearningProgress)
+                .await
+                .data
+            else {
+                panic!("missing learning progress");
+            };
+            progress
+        }
+    };
+    let done = |progress: &LearningProgress, id: StepId| {
+        progress
+            .steps
+            .iter()
+            .find(|step| step.id == id)
+            .unwrap()
+            .done()
+    };
+    let fresh = read(OwnerClientKind::Desktop).await;
+    assert!(fresh.steps.iter().all(|step| !step.done()), "{fresh:?}");
+    service.create("p").await;
+    let writer = service.owner(OwnerClientKind::Tui);
+    service
+        .apply(&writer, "brief-1", brief("p", 0, "Goal."))
+        .await;
+    let briefed = read(OwnerClientKind::Desktop).await;
+    assert!(done(&briefed, StepId::Project));
+    assert!(!done(&briefed, StepId::Master), "a brief is not a message");
+    service
+        .apply(&writer, "message-1", append("p", "Plan the page."))
+        .await;
+    let desktop = read(OwnerClientKind::Desktop).await;
+    assert!(done(&desktop, StepId::Master));
+    assert!(!done(&desktop, StepId::ChangeSet));
+    assert_eq!(read(OwnerClientKind::Tui).await, desktop);
+    service.stop().await;
+}
