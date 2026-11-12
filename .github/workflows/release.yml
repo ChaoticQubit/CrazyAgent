@@ -357,7 +357,13 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
-          if [ "$(uname -m)" = arm64 ]; then sudo softwareupdate --install-rosetta --agree-to-license; fi
+          if [ "$(uname -m)" = arm64 ] && ! /usr/bin/arch -x86_64 /usr/bin/true 2> /dev/null; then
+            if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
+              echo "::error::x86_64 cannot run on this Mac and CI installs nothing on a self-hosted runner; install Rosetta on the runner (softwareupdate --install-rosetta)"
+              exit 1
+            fi
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
           /usr/bin/arch -x86_64 /usr/bin/true
       - name: Build bundled tmux
         if: matrix.os != 'windows'
@@ -564,7 +570,7 @@ jobs:
           free_gib() { df -Pk "$RUNNER_TOOL_CACHE" | awk 'NR == 2 { print int($4 / 1048576) }'; }
           echo "runner tool cache volume: $(free_gib) GiB free after the build"
           tools=(crazyagent-release)
-          temp=(crazyagent-release node-arm64 bun-arm64 bun-x64 rust rcli apple macos-tmp)
+          temp=(crazyagent-release node-arm64 bun-arm64 bun-x64 rust rcli apple macos-tmp crazyagent-tmux)
           made=()
           for name in "${tools[@]}"; do made+=("$RUNNER_TOOL_CACHE/$name"); done
           for name in "${temp[@]}"; do made+=("$RUNNER_TEMP/$name"); done
