@@ -185,7 +185,7 @@ pub(crate) fn append(
         }
     }
     let mut statement = connection
-        .prepare_cached(
+        .prepare(
             "INSERT OR IGNORE INTO search_chunks(project,source,key,ordinal,text,at_ms)
              VALUES (?1,?2,?3,?4,?5,?6)",
         )
