@@ -374,10 +374,15 @@ fn a_memory_review_notice_opens_the_first_suggestion_once_the_suggestions_arrive
             .any(|line| line.contains("From research in Tidepool."))
     );
 
-    let mut screen = Memory::for_project(tidepool, "Tidepool".into());
-    screen.open_at(&review, &mut ctx);
+    let mut screen = Memory::for_project(tidepool.clone(), "Tidepool".into());
     screen.shown(&mut ctx);
     while ctx.next_request().is_some() {}
+    screen.open_at(&review, &mut ctx);
+    let asked = job(&mut ctx);
+    assert!(
+        matches!(&asked, SettingsJob::Suggestions { projects } if *projects == vec![tidepool]),
+        "the shell shows a pushed screen before open_at, which then asks for the suggestions"
+    );
     screen.arrive(
         &settings(SettingsEvent::Suggestions(Ok(Vec::new()))),
         &mut ctx,
