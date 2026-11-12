@@ -1319,6 +1319,7 @@ fn answer(
             options,
             recommended,
             context,
+            replaces,
         } => {
             let ask = crate::questions::Ask {
                 question,
@@ -1327,13 +1328,24 @@ fn answer(
                 recommended,
                 context,
             };
-            ask_owner(connection, project, &ask)?
+            match replaces {
+                Some(old) => reask_owner(connection, project, &ask, old)?,
+                None => ask_owner(connection, project, &ask)?,
+            }
         }
         Call::RecordAnswer {
             question,
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        Call::RelayAnswer {
+            question,
+            version,
+            answer,
+        } => relay_answer(connection, project, question, version, &answer)?,
+        Call::Withdraw { question, version } => {
+            withdraw_question(connection, project, question, version)?
+        }
         call => return answer_work(connection, answering, master, true, call),
     })
 }
@@ -1367,7 +1379,10 @@ pub(super) fn answer_sub(
         )?,
         Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
         Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
-        call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
+        call @ (Call::Ask { .. }
+        | Call::RecordAnswer { .. }
+        | Call::RelayAnswer { .. }
+        | Call::Withdraw { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
         Call::Sessions { .. }
@@ -2037,6 +2052,141 @@ fn record_answer(
             }
             _ => (unlogged(&problem), true),
         },
+    })
+}
+
+/// Asks a live master's choice question in place of an old free-text one, its own or an
+/// engine step's (F14): the old one leaves the owner's list as asked again. Takes the
+/// database, the master's project, the new question and the old one's id. Returns the
+/// sentence the master reads, or a SQLite failure.
+fn reask_owner(
+    connection: &Connection,
+    project: &ProjectId,
+    ask: &crate::questions::Ask,
+    old: u64,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::Asker;
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    Ok(
+        match crate::questions::reask(connection, project, &Asker::Master(master), ask, old) {
+            Ok(id) => (
+                format!(
+                    "Question {id} is logged in place of question {old}, and the owner is notified. Their answer or dismissal comes to you once as a message from the owner, so do not ask it again."
+                ),
+                false,
+            ),
+            Err(problem) => match problem.0.as_str() {
+                "questions_replace_invalid" => (
+                    format!(
+                        "Not asked: question {old} is not an open free-text question of this project asked by you or by an engine step, or the new one is not of kind single or multi."
+                    ),
+                    true,
+                ),
+                "questions_full" => (QUESTIONS_FULL.to_owned(), true),
+                "questions_asker_full" => (ASKER_FULL.to_owned(), true),
+                "questions_ask_invalid" | "questions_text_invalid" => {
+                    (ASK_REFUSED.to_owned(), true)
+                }
+                _ => (unlogged(&problem), true),
+            },
+        },
+    )
+}
+
+/// Records the answer the owner typed into a live master's own terminal, as the master
+/// reports it (F12): taken only after the owner typed there since the question was asked,
+/// one question per owner answer. Takes the database, the master's project, the question
+/// id, the version the master read and the answer. Returns the sentence the master reads,
+/// or a SQLite failure.
+fn relay_answer(
+    connection: &Connection,
+    project: &ProjectId,
+    id: u64,
+    version: u64,
+    answer: &str,
+) -> Result<(String, bool), EngineError> {
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    let typed = owner_key_ms(connection, None, master)?;
+    let relayed = crate::questions::relay(connection, project, master, id, version, answer, typed);
+    Ok(match relayed {
+        Ok(crate::questions::Settlement::Settled) => (
+            format!("Recorded your report of the owner's answer to question {id}."),
+            false,
+        ),
+        Ok(crate::questions::Settlement::Stale) => (
+            format!(
+                "Not recorded: question {id} is already answered or dismissed, or changed since version {version}."
+            ),
+            true,
+        ),
+        Err(problem) => match problem.0.as_str() {
+            "questions_not_found" => (
+                format!("Not recorded: this project has no question {id}."),
+                true,
+            ),
+            "questions_in_terminal" => (
+                format!(
+                    "Not recorded: question {id} waits in an agent's terminal, so the owner answers it there."
+                ),
+                true,
+            ),
+            "questions_owner_not_typed" => (
+                format!(
+                    "Not recorded: the owner has not typed in your terminal since question {id} was asked. Record an answer only after the owner gives it to you."
+                ),
+                true,
+            ),
+            "questions_owner_turn_used" => (
+                "Not recorded: the owner's last answer in your terminal already answered another question. Ask the owner, or wait for their answer in the Questions view.".to_owned(),
+                true,
+            ),
+            "questions_answer_invalid" | "questions_text_invalid" => (
+                "Not recorded: the answer is blank, longer than 4096 bytes or holds hidden characters.".to_owned(),
+                true,
+            ),
+            _ => (unlogged(&problem), true),
+        },
+    })
+}
+
+/// Takes a question a live master no longer needs off the owner's list (F12): its own, or
+/// one a sub-agent of the project asked. Takes the database, the master's project, the
+/// question id and the version the master read. Returns the sentence the master reads, or
+/// a SQLite failure.
+fn withdraw_question(
+    connection: &Connection,
+    project: &ProjectId,
+    id: u64,
+    version: u64,
+) -> Result<(String, bool), EngineError> {
+    use crate::questions::{Asker, Settlement};
+    let Some(master) = live_master(connection, project)? else {
+        return Ok((NO_MASTER.to_owned(), true));
+    };
+    let withdrawn =
+        crate::questions::withdraw(connection, project, &Asker::Master(master), id, version);
+    Ok(match withdrawn {
+        Ok(Settlement::Settled) => (
+            format!("Question {id} is withdrawn and off the owner's list."),
+            false,
+        ),
+        Ok(Settlement::Stale) => (
+            format!(
+                "Not withdrawn: question {id} is already answered or dismissed, or changed since version {version}."
+            ),
+            true,
+        ),
+        Err(problem) if problem.0 == "questions_not_found" => (
+            format!(
+                "Not withdrawn: question {id} is not a question of this project asked by you or by a sub-agent."
+            ),
+            true,
+        ),
+        Err(problem) => (unlogged(&problem), true),
     })
 }
 

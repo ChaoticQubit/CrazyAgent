@@ -2180,6 +2180,18 @@ fn an_old_free_text_question_is_asked_again_as_a_choice_under_its_engine_asker()
         "questions_replace_invalid",
         "a choice question is never replaced"
     );
+    assert_eq!(
+        code(reask(
+            &case.db,
+            &case.project,
+            &Asker::Agent(7),
+            &choice,
+            old[1]
+        )),
+        "questions_replace_invalid",
+        "a sub-agent never asks an engine step's question again"
+    );
+    assert_eq!(case.get(old[1]).status, QuestionStatus::Pending);
     let mine_text = ask(&case.db, &case.project, &MASTER, &bare("Mine?")).unwrap();
     let foreign_text = ask(
         &case.db,

@@ -715,8 +715,8 @@ pub fn relay(
 /// Asks a choice question in place of a pending free-text one (F14, DEC-147.8): the old one
 /// closes as asked again in the same transaction, then the new one is logged, under the old
 /// asker when an engine step asked it, so that step's cap is not crossed, else under the
-/// caller. The old one must be a text question of the project asked by the caller or by an
-/// engine step, and the new one single or multi. Inputs: the engine connection, the
+/// caller. The old one must be a text question of the project asked by the caller or, for a
+/// master, by an engine step, and the new one single or multi. Inputs: the engine connection, the
 /// project, the caller, the new ask and the old question's id. Output: the new id, or
 /// `questions_replace_invalid` and the refusals `ask` names.
 pub fn reask(
@@ -738,7 +738,7 @@ pub fn reask(
         Err(problem) if problem.0 == "questions_not_found" => return Err(invalid()),
         read => read?,
     };
-    let engine = old.asker.starts_with("engine:");
+    let engine = old.asker.starts_with("engine:") && !matches!(asker, Asker::Agent(_));
     let mine = old.asker == asker.name();
     if &old.project != project
         || old.status != QuestionStatus::Pending

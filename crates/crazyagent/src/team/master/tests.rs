@@ -5823,6 +5823,7 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
             tool::TOOL_NAME,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::REMEMBER_TOOL,
             tool::RECALL_TOOL
         ]
@@ -5914,6 +5915,7 @@ fn a_reply_turn_master_remembers_and_the_project_memory_page_lists_it() {
             tool::TOOL_NAME,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::REMEMBER_TOOL
         ]
     );
@@ -6227,5 +6229,121 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
     assert!(
         seen.contains("  > one\n  > [owner] two\n  > [owner] three\n  > [owner] four"),
         "{seen}"
+    );
+}
+
+#[test]
+fn a_live_master_relays_a_terminal_answer_withdraws_and_asks_a_text_question_again() {
+    use crate::questions::{Ask, Asker, ClosedBy, QuestionKind, QuestionStatus};
+    let mut fixture = Fixture::new();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let folder = PathBuf::from(&fixture.setup.folder);
+    std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    crate::ide::workspace::tests::add_project(&fixture.connection, PROJECT, &folder);
+    fixture.live(Some(MASTER));
+    let project = fixture.setup.project_id.clone();
+    let plain = |question: &str| Ask {
+        question: question.into(),
+        kind: QuestionKind::Text,
+        options: Vec::new(),
+        recommended: None,
+        context: None,
+    };
+    let asked = |asker: &Asker, question: &str| {
+        crate::questions::ask(&fixture.connection, &project, asker, &plain(question)).unwrap()
+    };
+    let port = asked(&Asker::Master(MASTER), "Which port?");
+    let name = asked(&Asker::Master(MASTER), "Which name?");
+    let branch = asked(&Asker::Agent(MASTER + 1), "Which branch?");
+    let relay = |id: u64, question: u64| {
+        tool_call(
+            id,
+            tool::RECORD_TOOL,
+            json!({"question": question, "version": 0, "answer": "Port 8080."}),
+        )
+    };
+
+    let answers = serve_while(&mut fixture, &mailbox, vec![relay(1, port)]);
+    let (said, error) = text(&answers[0]);
+    assert!(
+        error && said.contains("has not typed in your terminal"),
+        "{said}"
+    );
+
+    let asked_at: i64 = fixture
+        .connection
+        .query_row("SELECT MAX(created_ms) FROM questions_log", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    fixture.set(&format!("typed_ms={}", asked_at + 1));
+    let answers = serve_while(&mut fixture, &mailbox, vec![relay(2, port), relay(3, name)]);
+    let relayed = format!("Recorded your report of the owner's answer to question {port}.");
+    assert_eq!(text(&answers[0]), (relayed.as_str(), false));
+    let (said, error) = text(&answers[1]);
+    assert!(
+        error && said.contains("already answered another question"),
+        "{said}"
+    );
+
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        vec![
+            tool_call(
+                4,
+                tool::WITHDRAW_TOOL,
+                json!({"question": branch, "version": 0}),
+            ),
+            tool_call(
+                5,
+                tool::ASK_TOOL,
+                json!({"question": "Call it Crazy?", "kind": "single", "options": ["Yes", "No"], "recommended": "Yes", "replaces": name}),
+            ),
+            tool_call(
+                6,
+                tool::WITHDRAW_TOOL,
+                json!({"question": port, "version": 0}),
+            ),
+        ],
+    );
+    let withdrawn = format!("Question {branch} is withdrawn and off the owner's list.");
+    assert_eq!(text(&answers[0]), (withdrawn.as_str(), false));
+    let (said, error) = text(&answers[1]);
+    assert!(
+        !error && said.contains(&format!("in place of question {name}")),
+        "{said}"
+    );
+    let (said, error) = text(&answers[2]);
+    assert!(
+        error && said.starts_with(&format!("Not withdrawn: question {port} is already")),
+        "{said}"
+    );
+
+    let open = crate::questions::pending(&fixture.connection, &project).unwrap();
+    assert_eq!(open.len(), 1, "{open:#?}");
+    assert_eq!(open[0].question, "Call it Crazy?");
+    assert_eq!(open[0].kind, QuestionKind::Single);
+    let page = crate::questions::page(&fixture.connection, &project, None).unwrap();
+    let closed = |id: u64| {
+        let question = page.items.iter().find(|item| item.id == id).unwrap();
+        (question.status, question.closed_by, question.answer.clone())
+    };
+    assert_eq!(
+        closed(port),
+        (
+            QuestionStatus::AnsweredInTerminal,
+            Some(ClosedBy::Relay),
+            Some("Port 8080.".to_owned())
+        )
+    );
+    assert_eq!(
+        closed(branch),
+        (QuestionStatus::Dismissed, Some(ClosedBy::Master), None)
+    );
+    assert_eq!(
+        closed(name),
+        (QuestionStatus::Dismissed, Some(ClosedBy::Replaced), None)
     );
 }
