@@ -582,3 +582,134 @@ fn a_request_reason_is_stripped_cut_and_quoted_and_the_question_names_the_port()
         Err("grant_reason_invalid".to_owned())
     );
 }
+
+/// L2 r1 F1: a socket that drives the owner's terminal or editor (Emacs, Neovim, screen,
+/// Zellij, kitty, WezTerm, Alacritty, iTerm2, VS Code-family IPC, Cursor, Hammerspoon, or
+/// tmux started with -S anywhere) runs commands as the owner, so it is refused by name even
+/// when it exists and is the user's own; plain names that only look alike stay allowed.
+#[cfg(target_os = "macos")]
+#[test]
+fn editor_and_terminal_control_sockets_are_refused_by_class() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-gc-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let data = Path::new("/nonexistent");
+    let rows: [&str; 17] = [
+        "emacs501/server",
+        "nvim.me/a1b2/nvim.4242.0",
+        "uscreens/S-me/4242.main",
+        ".screen/4242.main",
+        "zellij-501/0.41.2/main",
+        "kitty-4242",
+        "wezterm/gui-sock-4242",
+        "Alacritty-4242.sock",
+        "iTerm2/private/socket",
+        "vscode-ipc-0a1b.sock",
+        "vscode-git-0a1b.sock",
+        "Code/1.95-main.sock",
+        "VSCodium/1.95-main.sock",
+        "Cursor/0.42-main.sock",
+        "Hammerspoon/ipc.sock",
+        "vim/server.sock",
+        "pair/work.tmux",
+    ];
+    for relative in rows {
+        let path = base.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(
+            checked(&AccessGrant::Socket { path }, data),
+            Err("grant_socket_agent"),
+            "{relative}"
+        );
+    }
+    for plain in ["screenshots/app.sock", "unicode/app.sock", "codec.sock"] {
+        assert_eq!(escape_class(&base.join(plain)), None, "{plain}");
+    }
+}
+
+/// L2 r1 F1 (hard link): a socket with a second name is refused at both names, so a hard
+/// link to a refused socket at a plain name never passes; a socket with one name is kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_socket_with_a_second_name_is_refused_at_both_names() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-gl-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let data = Path::new("/nonexistent");
+    let lone = base.join("lone.sock");
+    let _lone = std::os::unix::net::UnixListener::bind(&lone).unwrap();
+    assert_eq!(
+        checked(&AccessGrant::Socket { path: lone.clone() }, data),
+        Ok(AccessGrant::Socket { path: lone })
+    );
+    let first = base.join("first.sock");
+    let _first = std::os::unix::net::UnixListener::bind(&first).unwrap();
+    let second = base.join("second.sock");
+    std::fs::hard_link(&first, &second).unwrap();
+    for path in [first, second] {
+        assert_eq!(
+            checked(&AccessGrant::Socket { path: path.clone() }, data),
+            Err("grant_socket_owner"),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+/// L2 r1 F1 (ports): Docker's TCP API (2375, 2376) and the Chrome DevTools and Node
+/// inspector ports (9222, 9229) run anything as the owner, so a port grant never reaches
+/// them.
+#[test]
+fn a_port_grant_never_reaches_docker_s_api_or_a_browser_or_node_debugger() {
+    let data = Path::new("/nonexistent-engine-data");
+    for port in [2375, 2376, 9222, 9229] {
+        assert_eq!(
+            checked(&AccessGrant::Port { port }, data),
+            Err("grant_port_reserved"),
+            "port {port}"
+        );
+    }
+    assert_eq!(
+        checked(&AccessGrant::Port { port: 9_223 }, data),
+        Ok(AccessGrant::Port { port: 9_223 })
+    );
+}
+
+/// L2 r1 F2: a request the questions cap refuses leaves no row behind, so an agent that
+/// fills the project's questions and keeps asking cannot grow the requests table.
+#[test]
+fn a_request_the_questions_cap_refuses_leaves_no_row() {
+    let case = Case::new();
+    for n in 0..crate::questions::PENDING_PER_PROJECT_MAX {
+        let ask = Ask {
+            question: format!("Filler {n}?"),
+            kind: QuestionKind::Single,
+            options: vec!["Yes".to_owned(), "No".to_owned()],
+            recommended: None,
+            context: None,
+        };
+        crate::questions::raise(
+            &case.db,
+            &case.project,
+            &EngineSource::Research(format!("fill{n}")),
+            &ask,
+        )
+        .unwrap();
+    }
+    for port in 40_001..=40_010 {
+        let refused = request(
+            &case.db,
+            &case.project,
+            &Asker::Agent(3),
+            &AccessGrant::Port { port },
+            "the gateway",
+        );
+        assert_eq!(refused, Err("questions_full".to_owned()), "port {port}");
+    }
+    assert!(case.status().is_empty(), "{:?}", case.status());
+}
