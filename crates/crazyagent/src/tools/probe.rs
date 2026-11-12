@@ -106,6 +106,14 @@ pub(crate) fn refresh_now() {
     refreshed(|probes, _| probes.start_now());
 }
 
+/// The last finished folder run, so a caller's row can check that an explicit retry
+/// recorded a new one; unit tests never start a real run, so each recorded run is a failed
+/// one. Output: the last run, none before the first.
+#[cfg(test)]
+pub(crate) fn last_run() -> Option<Run> {
+    lock(&FOLDERS).last
+}
+
 /// Starts a background folder run when the given rule marks one as going, recording a run
 /// that could not start as failed so it is retried. Input: the rule, given the cache and
 /// now. Output: the cached folders.

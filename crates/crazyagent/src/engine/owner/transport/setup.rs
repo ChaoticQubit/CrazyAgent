@@ -214,7 +214,24 @@ fn start_run(
         .into_iter()
         .filter(|entry| ticked.contains(&entry.id))
         .collect();
-    let begun = progress::with(&root, |state| {
+    if !begin_run(&root, &entries) {
+        return Err(failure("setup_busy"));
+    }
+    let guard = RunGuard(root);
+    tokio::spawn(async move {
+        let root = guard.0.clone();
+        run_setup(&sender, &root, entries).await;
+        drop(guard);
+    });
+    Ok(())
+}
+
+/// Marks a setup run as going for the owner's explicit Set up tools, Install missing or a
+/// tool row's Try again, unless one is going: every tool and the ticked pack entries start
+/// over as installing. Inputs: the engine root and the ticked pack entries. Output: whether
+/// this run begins.
+pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
+    progress::with(root, |state| {
         if state.running {
             return false;
         }
@@ -225,17 +242,7 @@ fn start_run(
             .map(|entry| (entry.id.clone(), PackState::Installing))
             .collect();
         true
-    });
-    if !begun {
-        return Err(failure("setup_busy"));
-    }
-    let guard = RunGuard(root);
-    tokio::spawn(async move {
-        let root = guard.0.clone();
-        run_setup(&sender, &root, entries).await;
-        drop(guard);
-    });
-    Ok(())
+    })
 }
 
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
