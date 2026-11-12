@@ -147,12 +147,11 @@ check_macos() {
     fail "build_tmux_minimum_wrong: not macOS $minimum"
   fi
   check_weak_imports "$binary" "$minimum"
-  if /usr/bin/arch "-$arch" /usr/bin/true 2> /dev/null; then
-    check_version /usr/bin/arch "-$arch" "$binary"
-    check_start /usr/bin/arch "-$arch" "$binary"
-  else
-    echo "build-tmux: $arch cannot run on this Mac, so tmux -V and the server start were not checked" >&2
+  if ! /usr/bin/arch "-$arch" /usr/bin/true 2> /dev/null; then
+    fail "build_tmux_cannot_run: $arch cannot run on this Mac, so tmux -V and the server start cannot be checked (x86_64 on Apple silicon needs Rosetta)"
   fi
+  check_version /usr/bin/arch "-$arch" "$binary"
+  check_start /usr/bin/arch "-$arch" "$binary"
 }
 
 check_linux() {

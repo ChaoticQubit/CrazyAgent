@@ -352,6 +352,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rcli"
           node scripts/release/rcli.mjs --sdk "$GITHUB_WORKSPACE/.local-state/tools/rcli-source" --bun "$BUN_PATH" --output "$RUNNER_TEMP/rcli/crazyagent-rcli$exe"
           echo "RCLI_HOST=$RUNNER_TEMP/rcli/crazyagent-rcli$exe" >> "$GITHUB_ENV"
+      - name: Install Rosetta for the x86_64 tmux start check
+        if: matrix.target == 'x86_64-apple-darwin'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          if [ "$(uname -m)" = arm64 ]; then sudo softwareupdate --install-rosetta --agree-to-license; fi
+          /usr/bin/arch -x86_64 /usr/bin/true
       - name: Build bundled tmux
         if: matrix.os != 'windows'
         timeout-minutes: 20
