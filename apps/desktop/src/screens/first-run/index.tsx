@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { saveProfile, type OwnerProfile, type Result } from "../../api";
+import { setLearningMark } from "../../api-learning";
 import { BrandMark, Button, Checkbox, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
@@ -148,11 +149,12 @@ export function skipGuideNote(result: Result<void>): string | undefined {
 
 /** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
- * to Home or to Add account. Inputs: the saved handler, an optional skip handler used when the
- * engine has no profile support yet, and the step to start on. */
+ * to Home or to Add account, first skipping the guide when its box is unticked; the handlers get
+ * the skip note when that did not save. Inputs: the saved handler, an optional skip handler used
+ * when the engine has no profile support yet, and the step to start on. */
 export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
-  onSaved: (profile: OwnerProfile, next?: Route) => void;
-  onSkip?: (next?: Route) => void;
+  onSaved: (profile: OwnerProfile, next?: Route, note?: string) => void;
+  onSkip?: (next?: Route, note?: string) => void;
   initialStep?: FirstRunStep;
 }) {
   const [step, setStep] = useState<FirstRunStep>(initialStep);
@@ -162,6 +164,7 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ message: string; notReady: boolean }>();
   const [guide, setGuide] = useState(true);
+  const [leaving, setLeaving] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
@@ -178,9 +181,12 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
     if ("failure" in result) setFailure({ message: result.failure, notReady: result.notReady });
     else { setSaved(result.saved); setStep("home"); }
   }
-  const finish = (next: Route) => {
-    if (saved) onSaved(saved, next);
-    else onSkip?.(next);
+  const finish = async (next: Route) => {
+    if (leaving) return;
+    setLeaving(true);
+    const note = guide ? undefined : skipGuideNote(await setLearningMark("skipped", true));
+    if (saved) onSaved(saved, next, note);
+    else onSkip?.(next, note);
   };
   const current = FIRST_RUN_STEPS.find((item) => item.id === step) ?? FIRST_RUN_STEPS[0];
   return <main id="main" className="welcome">
@@ -208,13 +214,13 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
     </section>}
     {step === "accounts" && <section className="form" aria-label="Accounts">
       <div className="row">
-        <Button variant="primary" size="large" icon="key-round" onClick={() => finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
-        <Button variant="quiet" onClick={() => finish({ name: "home" })}>Skip for now</Button>
+        <Button variant="primary" size="large" icon="key-round" disabled={leaving} onClick={() => void finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
+        <Button variant="quiet" disabled={leaving} onClick={() => void finish({ name: "home" })}>Skip for now</Button>
       </div>
       <section className="stack-small" aria-labelledby="learn-offer-title">
         <h2 id="learn-offer-title">{LEARN_OFFER.title}</h2>
         <p>{LEARN_OFFER.text}</p>
-        <Checkbox label={LEARN_OFFER.tick} checked={guide} onChecked={setGuide} />
+        <Checkbox label={LEARN_OFFER.tick} checked={guide} onChecked={setGuide} disabled={leaving} />
       </section>
     </section>}
   </main>;
