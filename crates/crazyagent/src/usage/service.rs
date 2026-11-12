@@ -550,12 +550,7 @@ impl Usage {
                 .connections
                 .iter()
                 .find(|connection| connection.id == attempt.account);
-            let refused = match connection.map(MemberKind::of) {
-                None => Some("usage_spend_no_account"),
-                Some(MemberKind::Claude | MemberKind::Chatgpt) => None,
-                Some(_) => Some("usage_spend_not_in_app"),
-            };
-            if let Some(code) = refused {
+            if let Some(code) = spend::not_spendable(connection) {
                 spend::not_sent(&self.db, &attempt, Some(&failure(code)), now_ms)?;
                 continue;
             }

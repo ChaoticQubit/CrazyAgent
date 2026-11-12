@@ -1,7 +1,7 @@
 use super::extras::extras_of;
 use super::poll::{PollCredential, Provider};
 use super::{AccountLimits, LimitWindow, all_limits, failure, storage};
-use crate::config::ModelAccess;
+use crate::config::{ModelAccess, ModelConnection};
 use crate::engine::EngineError;
 use crate::pools::MemberKind;
 use crate::protocol::CredentialRef;
@@ -477,6 +477,17 @@ pub fn settle_sent(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
         settle(db, id, Outcome::Unknown.code(), now_ms)?;
     }
     Ok(())
+}
+
+/// Why a queued spend cannot go to its account's connection: gone from the settings, or
+/// not a Claude or Codex sign-in. Input: the connection, none when it was removed. Output:
+/// the code, none when the spend may be sent.
+pub fn not_spendable(connection: Option<&ModelConnection>) -> Option<&'static str> {
+    match connection.map(MemberKind::of) {
+        None => Some("usage_spend_no_account"),
+        Some(MemberKind::Claude | MemberKind::Chatgpt) => None,
+        Some(_) => Some("usage_spend_not_in_app"),
+    }
 }
 
 /// Sends one queued spend with its stored key: marks it sent first, makes the provider's

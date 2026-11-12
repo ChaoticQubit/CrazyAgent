@@ -6,6 +6,7 @@ use crazyagent::usage::WindowKind;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
+use crazyagent::usage::spend::SpendSettings;
 use std::sync::Arc;
 
 pub(super) fn usage_error(error: EngineError) -> BridgeError {
@@ -106,6 +107,25 @@ impl NativeBridge {
                 .usage_decide_recount(use_new)
                 .await
                 .map_err(usage_error)
+        }))
+    }
+
+    /// Asks the engine to spend one free reset on an account, run without the bridge lock.
+    /// Input: the account id. Output: done once queued.
+    pub fn usage_spend(&self, account: String) -> Result<Unlocked<()>, BridgeError> {
+        let account = CredentialRef::new(account).map_err(|_| failure("usage_request_invalid"))?;
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_spend(account).await.map_err(usage_error)
+        }))
+    }
+
+    /// Stores the owner's spend settings, run without the bridge lock. Input: the settings.
+    /// Output: done once they are stored.
+    pub fn usage_set_spend(&self, settings: SpendSettings) -> Result<Unlocked<()>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_set_spend(settings).await.map_err(usage_error)
         }))
     }
 

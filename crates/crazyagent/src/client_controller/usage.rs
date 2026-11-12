@@ -1,7 +1,8 @@
 use super::*;
-use crate::protocol::ProjectId;
+use crate::protocol::{CredentialRef, ProjectId};
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
+use crate::usage::spend::SpendSettings;
 
 impl OwnerController {
     fn usage_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -33,6 +34,18 @@ impl OwnerController {
     /// Stores the owner's main number and price source. Input: the settings. Output: done.
     pub async fn usage_set_money(&self, settings: MoneySettings) -> Result<(), EngineError> {
         self.usage_client()?.usage_set_money(settings).await
+    }
+
+    /// Asks the engine to spend one free reset on an account; its outcome appears in the
+    /// report's spend view. Input: the account. Output: done once queued, or
+    /// `usage_spend_off`.
+    pub async fn usage_spend(&self, account: CredentialRef) -> Result<(), EngineError> {
+        self.usage_client()?.usage_spend(account).await
+    }
+
+    /// Stores the owner's spend settings. Input: the settings. Output: done.
+    pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
+        self.usage_client()?.usage_set_spend(settings).await
     }
 
     /// Applies the owner's choice of the recount, once. Input: whether to use the new numbers.
