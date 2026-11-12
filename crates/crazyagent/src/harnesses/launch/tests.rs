@@ -783,3 +783,46 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
     toolchains::remove_tmp(&home).unwrap();
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
 }
+
+/// A launch checks its model with the same rule the owner's model store saves by, so a
+/// Claude Code id such as `opus[1m]` the store accepts also starts, while Codex, whose
+/// model goes into a `-c model="..."` line, still refuses brackets (DEC-150 MS-2).
+#[cfg(unix)]
+#[test]
+fn a_launch_takes_the_model_ids_the_owner_s_store_accepts_for_its_harness() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-launch-model-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = folder.path().canonicalize().unwrap();
+    let home = base.join("home");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let request = |harness: &str, model: &str| {
+        let mut request = codex_request(crate::trust::Trust::Reviewed, base.clone());
+        request.harness = harness.into();
+        request.account = AccountBinding::Subscription { home: home.clone() };
+        request.model = Some(model.into());
+        request
+    };
+    for (harness, model, code) in [
+        ("claude-code", "opus[1m]", "launch_sandbox_required"),
+        ("claude-code", "claude-opus-5-5", "launch_sandbox_required"),
+        ("codex", "gpt-6.1-sol", "launch_sandbox_required"),
+        ("codex", "opus[1m]", "launch_model_invalid"),
+        ("claude-code", "-opus", "launch_model_invalid"),
+        ("claude-code", "opus 1m", "launch_model_invalid"),
+    ] {
+        assert_eq!(
+            crate::model_choice::model_valid(harness, model),
+            code != "launch_model_invalid",
+            "{harness} {model}"
+        );
+        assert_eq!(
+            super::validate(&request(harness, model)).unwrap_err().0,
+            code,
+            "{harness} {model}"
+        );
+    }
+}
