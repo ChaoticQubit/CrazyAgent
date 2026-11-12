@@ -11783,6 +11783,46 @@ fn under_stop_a_kept_codex_agent_is_told_its_background_commands_stop() {
     assert!(text.contains(BACKGROUND_STOPS_LINE), "{text}");
 }
 
+/// Under Stop, a sub-agent kept on pipes, a headless Claude Code session on a local endpoint
+/// account, is not told that its background commands stop when its turn ends: a piped
+/// session reports none of them, so the engine cannot stop them and they keep running
+/// (rv-audit S3 F2). Its task still reaches it and ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_piped_agent_is_not_told_its_background_commands_stop() {
+    let fixture = Fixture::new(1);
+    let mut setup = fixture.setup.clone();
+    setup.team.sub_harnesses = vec![HarnessSlot {
+        harness: "claude-code".into(),
+        agents: 1,
+        tools: false,
+    }];
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    let mut team = piped_runtime(&fixture);
+    delegate_claude(&fixture, "Run the compile check.");
+    fixture.until(&mut team, "the task is done", |f| {
+        task_of(f, "Run the compile check.").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    let turns = std::fs::read_to_string(stand_in_file(&fixture, agent, "turns")).unwrap();
+    team.shutdown().unwrap();
+    assert_eq!(
+        serde_json::to_string(BACKGROUND_STOPS_LINE).unwrap(),
+        format!("\"{BACKGROUND_STOPS_LINE}\""),
+        "the line reads the same inside the piped turn's JSON, so its absence below is real"
+    );
+    assert_eq!(turns.lines().count(), 1, "{turns}");
+    assert!(turns.contains("Run the compile check."), "{turns}");
+    assert!(!turns.contains(BACKGROUND_STOPS_LINE), "{turns}");
+}
+
 /// Under Stop, an agent whose harness starts for each turn on a signed-in account is told
 /// that its background commands stop when its turn ends, whatever its harness: the engine
 /// stops that harness after every turn (rv-audit S3 F2).
