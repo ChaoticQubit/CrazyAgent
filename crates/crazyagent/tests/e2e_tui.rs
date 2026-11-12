@@ -1777,3 +1777,33 @@ fn settings_tickets_opens_from_go_to_with_the_desktop_words() {
     drop(pty);
     engine.stop();
 }
+
+/// DEC-155 step 3: the go/no-go scorecard is reached from Usage on a real engine and reads
+/// in the desktop's words. A scratch engine has no tickets, so it shows the honest zeros,
+/// the empty task line and the daily question off.
+#[test]
+fn the_scorecard_opens_from_usage_with_the_desktop_words() {
+    let (mut engine, pty, _home) = tui_at_home("ca-e2e-scorecard-");
+    go_to(&pty, "Usage", "Usage");
+    pty.until("Usage shows its scorecard key", |screen| {
+        screen.contains("g Scorecard")
+    });
+    pty.keys(&["g"]);
+    let screen = pty.until("the scorecard reads its numbers", |screen| {
+        screen.contains("Go/no-go scorecard") && screen.contains("Target 10 done tickets")
+    });
+    for words in [
+        "Whether CrazyAgent earns its place over",
+        "Real tasks 0  Target 10 done tickets you accepted",
+        "The daily question is off",
+        "Real tasks behind the numbers",
+        "No real tasks in this window yet.",
+        "w Window",
+        "g Usage",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(!screen.contains("Could not read the scorecard"), "{screen}");
+    drop(pty);
+    engine.stop();
+}

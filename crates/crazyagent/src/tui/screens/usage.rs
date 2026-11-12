@@ -865,6 +865,10 @@ impl UsagePage {
 }
 
 impl Screen for UsagePage {
+    fn wraps_hints(&self) -> bool {
+        true
+    }
+
     fn crumbs(&self) -> Vec<String> {
         vec!["Usage".into()]
     }
