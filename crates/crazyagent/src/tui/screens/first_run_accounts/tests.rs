@@ -112,7 +112,10 @@ fn the_learn_offer_shows_ticked_under_the_buttons_and_space_unticks_it() {
             .iter()
             .position(|row| row.trim() == "Learn CrazyAgent")
             .unwrap_or_else(|| panic!("{rows:#?}"));
-        assert!(buttons < heading, "the offer sits under the buttons: {rows:#?}");
+        assert!(
+            buttons < heading,
+            "the offer sits under the buttons: {rows:#?}"
+        );
         assert!(words(&rows).contains(LEARN), "{rows:#?}");
         assert!(shows(&rows, "[x] Show the guide on Home"), "{rows:#?}");
         assert!(bar(&rows).contains("Space Untick"), "{}", bar(&rows));

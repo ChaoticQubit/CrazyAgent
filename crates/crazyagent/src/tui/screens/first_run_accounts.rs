@@ -4,7 +4,7 @@ use crate::tui::frame::{Hint, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::text::{join, styled, wrap};
 use crate::tui::theme::Role;
-use crate::tui::widgets::buttons;
+use crate::tui::widgets::{buttons, checkbox};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
@@ -14,6 +14,9 @@ const TITLE: &str = "Add an account";
 const INTRO: &str = "Agents need a model account to work. Sign in with ChatGPT or Claude, or add an API key or a local model.";
 const ADD: &str = "Add account";
 const SKIP: &str = "Skip for now";
+const LEARN_TITLE: &str = "Learn CrazyAgent";
+const LEARN: &str = "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.";
+const LEARN_TICK: &str = "Show the guide on Home";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Choice {
@@ -39,16 +42,26 @@ impl Choice {
 }
 
 /// The first-run Accounts step, after Setup: Add account or Skip for now, the
-/// same words as the desktop first run. Add account ends first run with Home
-/// under Add account; Skip for now ends it on Home. Esc does nothing here.
-/// Input: keys. Output: the step, the focused button marked.
-#[derive(Default)]
+/// same words as the desktop first run, and under them the Learn CrazyAgent
+/// offer with its ticked "Show the guide on Home" box. Add account ends first
+/// run with Home under Add account; Skip for now ends it on Home. Esc does
+/// nothing here. Input: keys. Output: the step, the focused button marked.
 pub struct FirstRunAccounts {
     choice: Choice,
+    guide: bool,
+}
+
+impl Default for FirstRunAccounts {
+    fn default() -> Self {
+        Self {
+            choice: Choice::Add,
+            guide: true,
+        }
+    }
 }
 
 impl FirstRunAccounts {
-    /// A new Accounts step with Add account focused.
+    /// A new Accounts step with Add account focused and the guide ticked.
     /// Input: none. Output: the screen.
     pub fn new() -> Self {
         Self::default()
@@ -65,6 +78,7 @@ impl Screen for FirstRunAccounts {
         vec![
             hint("Enter", self.choice.label()),
             hint(&arrows, "Choose"),
+            hint("Space", if self.guide { "Untick" } else { "Tick" }),
             hint("Ctrl-Q", "Quit"),
         ]
     }
@@ -79,6 +93,10 @@ impl Screen for FirstRunAccounts {
                 Choice::Add => Flow::Go(Place::AddAccount),
                 Choice::Skip => Flow::Replace(open(&Place::Home, ctx)),
             },
+            Key::Char(' ') => {
+                self.guide = !self.guide;
+                Flow::Handled
+            }
             Key::Esc => Flow::Handled,
             _ => Flow::Ignored,
         }
@@ -95,6 +113,10 @@ impl Screen for FirstRunAccounts {
             Choice::Skip => 1,
         };
         lines.push(buttons(&[ADD, SKIP], Some(focused), theme));
+        lines.push(Line::default());
+        lines.push(styled(LEARN_TITLE, Role::Heading, theme));
+        lines.extend(wrap(LEARN, limit).into_iter().map(Line::raw));
+        lines.push(Line::raw(checkbox(self.guide, LEARN_TICK)));
         let lines: Vec<Line<'static>> = lines
             .into_iter()
             .map(|line| join([Line::raw("  "), line]))
