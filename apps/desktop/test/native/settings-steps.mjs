@@ -248,7 +248,7 @@ export async function observeModelChoice(harness, project) {
   assert.equal(result.stderr, "", "the model choice observation ran without diagnostics");
   assert(Buffer.byteLength(result.stdout) <= OBSERVATION_BYTES_MAX, "the model choice observation stays bounded");
   const { rows, own, rules } = JSON.parse(result.stdout);
-  assert.deepEqual(rows.map((row) => row.slot), ["master", "agent", "allowed"], "the engine read every slot in page order");
+  assert.deepEqual(rows.map((row) => row.slot), ["master", "agent", "allowed", "native"], "the engine read every slot in page order");
   assert(Array.isArray(own), "the engine listed the owner's ids");
   return { rows: Object.fromEntries(rows.map((row) => [row.slot, row])), own, rules };
 }

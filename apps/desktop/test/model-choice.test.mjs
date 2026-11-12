@@ -10,13 +10,14 @@ const view = await import("../src/screens/settings/models-section.tsx");
 
 const CATALOG = ["opus", "sonnet", "haiku"];
 const candidates = (extra = []) => [...CATALOG.map((id) => ({ id, origin: "catalog" })), ...extra];
+const EMPTY = { allowed: [], native: "follow" };
 const row = (slot, extra = {}) => ({
-  slot, here: null, effective: slot === "allowed" ? [] : null, source: "default", version: 2, access: { kind: "editable" }, ...extra,
+  slot, here: null, effective: EMPTY[slot] ?? null, source: "default", version: 2, access: { kind: "editable" }, ...extra,
 });
 const page = (rows = {}, extra = {}) => ({
   models: {
     harness: "claude-code",
-    rows: ["master", "agent", "allowed"].map((slot) => row(slot, rows[slot])),
+    rows: ["master", "agent", "allowed", "native"].map((slot) => row(slot, rows[slot])),
     candidates: candidates(extra.owned ?? []),
     qualified: extra.qualified ?? true,
     reason: extra.reason ?? null,
@@ -152,8 +153,8 @@ test("pending and failed owner ids show their state and stay unticked and disabl
 
 test("a harness whose model CrazyAgent does not choose shows the reason and no control", () => {
   const unsupported = { access: { kind: "read_only", reason: "Not supported by this harness" }, source: "not_applied" };
-  const markup = section(ok({ ...page({ master: unsupported, agent: unsupported, allowed: unsupported }), qualified_versions: [], sources: [] }), { name: "OpenCode" });
-  assert.equal((markup.match(/Not supported by this harness/g) ?? []).length >= 3, true);
+  const markup = section(ok({ ...page({ master: unsupported, agent: unsupported, allowed: unsupported, native: unsupported }), qualified_versions: [], sources: [] }), { name: "OpenCode" });
+  assert.equal((markup.match(/Not supported by this harness/g) ?? []).length >= 4, true);
   assert.doesNotMatch(markup, /<select|type="checkbox"|aria-label="Save /);
   assert.match(markup, /CrazyAgent has no model list for OpenCode\./);
   const stored = section(ok(page({ master: { ...unsupported, here: "opus" } })));
@@ -227,4 +228,84 @@ test("the Models section mounts once on the app and the project harness page", (
   const project = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.equal((app.match(/<ModelsSection harness=\{entry\.id\} name=\{entry\.name\} projectId=\{null\} \/>/g) ?? []).length, 1);
   assert.equal((project.match(/<ModelsSection key=\{current\.id\} harness=\{current\.id\} name=\{current\.name\} projectId=\{data\.id\} \/>/g) ?? []).length, 1);
+});
+
+const FOLLOW = "Follow the agent's model";
+const HARNESS_PICKS = "Let the harness choose";
+
+test("the Native sub-agent model offers both options and starts on Follow the agent's model", () => {
+  assert.deepEqual(client.NATIVE_OPTIONS, [
+    { value: "follow", label: FOLLOW },
+    { value: "harness", label: HARNESS_PICKS },
+  ]);
+  assert.equal(client.SLOT_LABELS.native, "Native sub-agent model");
+  assert.equal(client.SLOT_HELP.native, "What the sub-agents a native lead starts itself run on.");
+  assert.match(client.NATIVE_HELP.follow, /lead's model/);
+  assert.match(client.NATIVE_HELP.harness, /allowed list/);
+  const fresh = row("native");
+  assert.equal(client.nativeDraft(fresh, "app"), "follow");
+  assert.deepEqual(client.nativeOptions("app"), client.NATIVE_OPTIONS);
+  assert.equal(client.modelSourceLine(fresh, "app"), "Nothing set: native sub-agents follow the agent's model.");
+  assert.equal(client.canResetModel(fresh), false);
+});
+
+test("Follow the agent's model saves as its own choice after Let the harness choose", () => {
+  const saved = row("native", { here: "harness", effective: "harness", source: "app" });
+  assert.equal(client.nativeDraft(saved, "app"), "harness");
+  assert.deepEqual(client.nativeChange(saved, "follow", "app"), { kind: "set", value: "follow" });
+  assert.deepEqual(client.nativeChange(saved, "harness", "app"), { kind: "none" });
+  assert.equal(client.resetModelLabel(saved, "app"), "Use the default");
+  assert.equal(client.passedOverLine(saved, candidates()), "");
+});
+
+test("Let the harness choose saves from a fresh app page", () => {
+  const fresh = row("native");
+  assert.deepEqual(client.nativeChange(fresh, "harness", "app"), { kind: "set", value: "harness" });
+  assert.deepEqual(client.nativeChange(fresh, "follow", "app"), { kind: "none" }, "Follow is already in force");
+  assert.equal(client.valueText("harness"), "harness", "a model id stays as it is");
+  assert.equal(client.nativeText("harness"), HARNESS_PICKS);
+  assert.equal(client.nativeText("follow"), FOLLOW);
+});
+
+test("a project page's Native sub-agent model offers the app value, and a project choice clears back to it", () => {
+  const inherit = row("native", { effective: "harness", source: "app" });
+  assert.deepEqual(client.nativeOptions("project"), [{ value: "", label: client.APP_VALUE }, ...client.NATIVE_OPTIONS]);
+  assert.equal(client.nativeDraft(inherit, "project"), "");
+  assert.equal(client.modelSourceLine(inherit, "project"), `Uses the app value: ${HARNESS_PICKS}.`);
+  assert.deepEqual(client.nativeChange(inherit, "follow", "project"), { kind: "set", value: "follow" });
+  const own = row("native", { here: "follow", effective: "follow", source: "project" });
+  assert.deepEqual(client.nativeChange(own, "", "project"), { kind: "reset" });
+  assert.equal(client.resetModelLabel(own, "project"), client.APP_VALUE);
+});
+
+test("the Models section shows the Native sub-agent model with both options and the help of the one in force", () => {
+  const markup = section(ok(page()));
+  assert.match(markup, />Native sub-agent model</);
+  assert.match(markup, /<select id="models-native"/);
+  assert.match(markup, /<option value="follow" selected="">Follow the agent&#x27;s model<\/option>/);
+  assert.match(markup, /<option value="harness">Let the harness choose<\/option>/);
+  assert.match(markup, /Nothing set: native sub-agents follow the agent&#x27;s model\./);
+  assert.doesNotMatch(markup, /aria-label="Save Native sub-agent model"/);
+  const changed = section(ok(page()), { drafts: { native: "harness" } });
+  assert.match(changed, /aria-label="Save Native sub-agent model"/);
+  assert.match(changed, /allowed list/, "the help of the picked option shows");
+});
+
+test("RCLI's Native sub-agent model is read-only with Not supported by this harness and no raw value", () => {
+  const unsupported = { access: { kind: "read_only", reason: "Not supported by this harness" }, source: "not_applied" };
+  const markup = section(ok({ ...page({ master: unsupported, agent: unsupported, allowed: unsupported, native: unsupported }), qualified_versions: [], sources: [] }), { name: "RCLI" });
+  assert.match(markup, />Native sub-agent model</);
+  assert.doesNotMatch(markup, /<select id="models-native"/);
+  assert.doesNotMatch(markup, />follow</, "the stored word never shows");
+});
+
+test("the TUI Models page uses the desktop's Native sub-agent model words (DEC-141 parity)", () => {
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/settings/models_page.rs", import.meta.url), "utf8");
+  for (const words of [
+    client.SLOT_LABELS.native, client.SLOT_HELP.native, FOLLOW, HARNESS_PICKS,
+    client.NATIVE_HELP.follow, client.NATIVE_HELP.harness,
+    "Nothing set: native sub-agents follow the agent's model.",
+  ]) {
+    assert(tui.includes(JSON.stringify(words)), `the TUI says ${words}`);
+  }
 });
