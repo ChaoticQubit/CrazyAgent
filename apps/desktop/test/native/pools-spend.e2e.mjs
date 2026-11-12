@@ -121,6 +121,8 @@ describe("Settings, Pools: the two spend settings and the free reset spend on th
 
   it("Spend confirmation, Confirm each (the default), asks first and then queues one spend", async () => {
     assert.equal(await (await $(option(CONFIRM, "Confirm each"))).getAttribute("aria-checked"), "true");
+    await assert.rejects(command("desktop_usage_spend", { account: ids[BRAVO], confirmed: false }), /usage_spend_unconfirmed/);
+    assert.deepEqual(attempts(), [], "the engine refuses a spend nobody confirmed");
     await click(`main .notice .spend-reset button`);
     await until(() => says("dialog[open] h2", `${SPEND} on ${BRAVO}?`), UI_MS, "the confirm did not open");
     assert.deepEqual(attempts(), [], "nothing is asked before the confirm");
@@ -147,7 +149,7 @@ describe("Settings, Pools: the two spend settings and the free reset spend on th
     await choose(CONFIRM, "Off", "confirm", "off");
     await until(async () => (await texts("main .set-help")).includes(OFF_HELP), UI_MS, "the Off help line did not show");
     await until(async () => !(await shown("main .spend-reset")), UI_MS, "a Spend control stayed while spending is off");
-    await assert.rejects(command("desktop_usage_spend", { account: ids[BRAVO] }), /usage_spend_off/);
+    await assert.rejects(command("desktop_usage_spend", { account: ids[BRAVO], confirmed: true }), /usage_spend_off/);
     assert.equal(attempts().length, 2, "nothing more was queued");
     await shot("spend-off");
   });

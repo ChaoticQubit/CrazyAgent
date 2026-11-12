@@ -110,3 +110,14 @@ test("the window may call both spend commands", () => {
   const allowed = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8")).permissions;
   for (const permission of ["allow-desktop-usage-spend", "allow-desktop-usage-set-spend"]) assert.ok(allowed.includes(permission), permission);
 });
+
+test("a spend says whether the owner confirmed it, and only the confirm dialog says yes", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  assert.match(read("../src/api-usage.ts"), /call<void>\("desktop_usage_spend", \{ account, confirmed \}\)/);
+  assert.match(read("../src-tauri/src/lib.rs"), /fn desktop_usage_spend\([^)]*account: String,\s*confirmed: bool/);
+  const control = read("../src/screens/settings/spend-reset.tsx");
+  assert.match(control, /onConfirm=\{\(\) => go\(true\)\}/);
+  assert.equal((control.match(/go\(true\)/g) ?? []).length, 1, "only the dialog confirms");
+  assert.match(control, /setAsking\(true\) : go\(false\)/);
+  assert.equal(client.usageRefusal({ code: "usage_spend_unconfirmed" }), "Spend confirmation now asks first. Use a free reset again and confirm it.");
+});

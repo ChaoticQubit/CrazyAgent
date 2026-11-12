@@ -181,7 +181,7 @@ fn refresh_asked(db: &Connection) -> bool {
 
 fn spends_one_reset_over_the_loopback_usage_server(confirm: SpendConfirm) {
     let case = Case::new(confirm, AllLimited::Notice);
-    request(&case.db, &r("codex-a"), NOW).unwrap();
+    request(&case.db, &r("codex-a"), true, NOW).unwrap();
     let key = queued(&case.db).unwrap()[0].key.clone();
     assert_eq!(case.send_queued(NOW + 1), 1);
     let consumes = case.consumes();
@@ -213,7 +213,7 @@ fn option_spend_confirmation_one_click_spends_one_reset_over_the_loopback_usage_
 #[test]
 fn option_spend_confirmation_off_refuses_and_sends_nothing_to_the_loopback_usage_server() {
     let case = Case::new(SpendConfirm::ConfirmEach, AllLimited::Notice);
-    request(&case.db, &r("codex-a"), NOW).unwrap();
+    request(&case.db, &r("codex-a"), true, NOW).unwrap();
     write(
         &case.db,
         SpendSettings {
@@ -223,7 +223,7 @@ fn option_spend_confirmation_off_refuses_and_sends_nothing_to_the_loopback_usage
     )
     .unwrap();
     assert_eq!(
-        request(&case.db, &r("codex-b"), NOW).unwrap_err().0,
+        request(&case.db, &r("codex-b"), true, NOW).unwrap_err().0,
         "usage_spend_off"
     );
     assert_eq!(case.send_queued(NOW + 1), 1);
@@ -298,14 +298,14 @@ fn a_second_spend_after_an_unclear_reply_sends_the_same_key(first: Answer) {
         (0, Some(answer)) => answer,
         _ => Answer::json(200, serde_json::json!({"outcome": "reset"})),
     });
-    request(&case.db, &r("codex-a"), NOW).unwrap();
+    request(&case.db, &r("codex-a"), true, NOW).unwrap();
     assert_eq!(case.send_queued(NOW + 1), 1);
     assert!(refresh_asked(&case.db), "a poll is asked after any reply");
     let shown = view(&case.db).unwrap();
     assert_eq!(shown.attempts[0].state, AttemptState::Sent);
     assert_eq!(shown.attempts[0].outcome, None);
     assert_eq!(case.send_queued(NOW + 2), 0, "never re-sent on its own");
-    request(&case.db, &r("codex-a"), NOW + 3).unwrap();
+    request(&case.db, &r("codex-a"), true, NOW + 3).unwrap();
     assert_eq!(case.send_queued(NOW + 4), 1);
     let consumes = case.consumes();
     assert_eq!(consumes.len(), 2);
@@ -346,7 +346,7 @@ fn a_refusal_on_the_first_send_settles_and_asks_for_a_poll() {
     let case = Case::answering(SpendConfirm::OneClick, AllLimited::Notice, |_| {
         Answer::json(404, serde_json::json!({}))
     });
-    request(&case.db, &r("codex-a"), NOW).unwrap();
+    request(&case.db, &r("codex-a"), true, NOW).unwrap();
     assert_eq!(case.send_queued(NOW + 1), 1);
     assert!(refresh_asked(&case.db));
     let shown = view(&case.db).unwrap();
@@ -360,7 +360,7 @@ fn a_refusal_on_the_first_send_settles_and_asks_for_a_poll() {
 #[test]
 fn the_report_and_spend_view_carry_no_key() {
     let case = Case::new(SpendConfirm::OneClick, AllLimited::Notice);
-    request(&case.db, &r("codex-a"), NOW).unwrap();
+    request(&case.db, &r("codex-a"), true, NOW).unwrap();
     let key = queued(&case.db).unwrap()[0].key.clone();
     case.send_queued(NOW + 1);
     let report =

@@ -127,7 +127,9 @@ fn option_spend_confirmation_confirm_each_asks_first_then_sends_the_spend() {
     spend.key(&Key::Char('u'), &mut ctx);
     spend.key(&Key::Right, &mut ctx);
     spend.key(&Key::Enter, &mut ctx);
-    assert!(matches!(job(&mut ctx), Some(SettingsJob::Spend(account)) if account == r("codex-b")));
+    assert!(
+        matches!(job(&mut ctx), Some(SettingsJob::Spend { account, confirmed: true }) if account == r("codex-b"))
+    );
     assert!(!spend.asking());
 }
 
@@ -139,7 +141,9 @@ fn option_spend_confirmation_one_click_sends_the_spend_at_once() {
     ));
     spend.key(&Key::Char('u'), &mut ctx);
     assert!(spend.modal(&ctx).is_none(), "no confirm on one click");
-    assert!(matches!(job(&mut ctx), Some(SettingsJob::Spend(account)) if account == r("codex-b")));
+    assert!(
+        matches!(job(&mut ctx), Some(SettingsJob::Spend { account, confirmed: false }) if account == r("codex-b"))
+    );
 }
 
 #[test]

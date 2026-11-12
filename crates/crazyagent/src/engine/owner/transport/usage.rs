@@ -579,3 +579,22 @@ mod extras_request_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod spend_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_spend_request_must_say_whether_the_owner_confirmed_it() {
+        let bare = json!({ "usage": { "kind": "spend", "account": "codex-a" } });
+        assert!(serde_json::from_value::<Envelope>(bare).is_err());
+        let asked =
+            json!({ "usage": { "kind": "spend", "account": "codex-a", "confirmed": true } });
+        let Envelope { usage: action } = serde_json::from_value(asked).unwrap();
+        assert!(
+            matches!(action, Action::Spend { ref account, confirmed: true } if account.as_str() == "codex-a")
+        );
+        assert!(USAGE_CODES.contains(&"usage_spend_unconfirmed"));
+    }
+}

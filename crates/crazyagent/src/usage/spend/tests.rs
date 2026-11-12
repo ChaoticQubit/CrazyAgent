@@ -153,7 +153,7 @@ fn spend_off_means_the_app_never_spends_even_with_auto_spend_chosen() {
     let (_root, db) = store();
     write(&db, off).unwrap();
     assert_eq!(
-        request(&db, &r("codex-a"), NOW).unwrap_err().0,
+        request(&db, &r("codex-a"), true, NOW).unwrap_err().0,
         "usage_spend_off"
     );
     assert!(open_attempts(&db).is_empty());
@@ -162,9 +162,9 @@ fn spend_off_means_the_app_never_spends_even_with_auto_spend_chosen() {
 #[test]
 fn an_owner_spend_is_queued_once_per_account_with_one_engine_made_key() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
-    request(&db, &r("codex-a"), NOW + 1).unwrap();
-    request(&db, &r("claude-a"), NOW + 2).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW + 1).unwrap();
+    request(&db, &r("claude-a"), true, NOW + 2).unwrap();
     let open = open_attempts(&db);
     assert_eq!(open.len(), 2);
     assert_eq!(open[0].0, "codex-a");
@@ -179,9 +179,42 @@ fn an_owner_spend_is_queued_once_per_account_with_one_engine_made_key() {
 }
 
 #[test]
+fn an_unconfirmed_spend_is_refused_while_each_spend_asks_first() {
+    let (_root, db) = store();
+    assert_eq!(read(&db).unwrap().confirm, SpendConfirm::ConfirmEach);
+    assert_eq!(
+        request(&db, &r("codex-a"), false, NOW).unwrap_err().0,
+        "usage_spend_unconfirmed"
+    );
+    assert!(open_attempts(&db).is_empty(), "nothing is queued");
+    request(&db, &r("codex-a"), true, NOW + 1).unwrap();
+    let attempt = queued(&db).unwrap().remove(0);
+    mark_sent(&db, attempt.id, NOW + 2).unwrap();
+    assert_eq!(
+        request(&db, &r("codex-a"), false, NOW + 3).unwrap_err().0,
+        "usage_spend_unconfirmed",
+        "a re-ask of a sent spend needs the confirm too"
+    );
+    assert!(queued(&db).unwrap().is_empty());
+    write(&db, settings(SpendConfirm::OneClick, AllLimited::Notice)).unwrap();
+    request(&db, &r("codex-b"), false, NOW + 4).unwrap();
+    request(&db, &r("codex-c"), true, NOW + 5).unwrap();
+    assert_eq!(queued(&db).unwrap().len(), 2, "one click takes either");
+    write(&db, settings(SpendConfirm::Off, AllLimited::Notice)).unwrap();
+    for confirmed in [false, true] {
+        assert_eq!(
+            request(&db, &r("codex-d"), confirmed, NOW + 6)
+                .unwrap_err()
+                .0,
+            "usage_spend_off"
+        );
+    }
+}
+
+#[test]
 fn a_spend_not_yet_sent_is_tried_again_with_the_same_key_up_to_a_bound() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let first = queued(&db).unwrap().remove(0);
     let mut latest = first.clone();
     for n in 1..TRIES_MAX {
@@ -197,7 +230,7 @@ fn a_spend_not_yet_sent_is_tried_again_with_the_same_key_up_to_a_bound() {
         shown.attempts[0].outcome.as_deref(),
         Some("usage_spend_not_signed_in")
     );
-    request(&db, &r("codex-b"), NOW).unwrap();
+    request(&db, &r("codex-b"), true, NOW).unwrap();
     let refused = queued(&db).unwrap().remove(0);
     not_sent(
         &db,
@@ -212,7 +245,7 @@ fn a_spend_not_yet_sent_is_tried_again_with_the_same_key_up_to_a_bound() {
 #[test]
 fn a_sent_attempt_is_never_sent_again_by_the_engine_even_after_a_restart() {
     let (root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(
@@ -238,10 +271,10 @@ fn a_sent_attempt_is_never_sent_again_by_the_engine_even_after_a_restart() {
 #[test]
 fn an_owner_retry_of_a_sent_attempt_carries_the_same_key() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
-    request(&db, &r("codex-a"), NOW + 60_000).unwrap();
+    request(&db, &r("codex-a"), true, NOW + 60_000).unwrap();
     let retry = queued(&db).unwrap();
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].id, attempt.id);
@@ -277,7 +310,7 @@ fn a_definite_reply_settles_the_attempt_with_its_fixed_code() {
     .enumerate()
     {
         let account = format!("codex-{n}");
-        request(&db, &r(&account), NOW).unwrap();
+        request(&db, &r(&account), true, NOW).unwrap();
         let attempt = queued(&db).unwrap().remove(0);
         assert!(!attempt.resend);
         mark_sent(&db, attempt.id, NOW + 1).unwrap();
@@ -307,7 +340,7 @@ fn a_reply_that_may_have_used_a_reset_keeps_the_attempt_sent_with_its_key() {
     .enumerate()
     {
         let account = format!("codex-{n}");
-        request(&db, &r(&account), NOW).unwrap();
+        request(&db, &r(&account), true, NOW).unwrap();
         let attempt = queued(&db).unwrap().remove(0);
         mark_sent(&db, attempt.id, NOW + 1).unwrap();
         sent(&db, &attempt, &result, NOW + 2).unwrap();
@@ -320,7 +353,7 @@ fn a_reply_that_may_have_used_a_reset_keeps_the_attempt_sent_with_its_key() {
         assert_eq!(line.state, AttemptState::Sent, "{result:?}");
         assert_eq!(line.outcome, None);
         assert!(queued(&db).unwrap().is_empty(), "never re-sent on its own");
-        request(&db, &r(&account), NOW + 60_000).unwrap();
+        request(&db, &r(&account), true, NOW + 60_000).unwrap();
         let again = queued(&db).unwrap().remove(0);
         assert_eq!(again.id, attempt.id);
         assert_eq!(
@@ -346,7 +379,7 @@ fn a_refusal_of_a_resend_keeps_the_attempt_sent_with_its_key() {
     .enumerate()
     {
         let account = format!("codex-{n}");
-        request(&db, &r(&account), NOW).unwrap();
+        request(&db, &r(&account), true, NOW).unwrap();
         let attempt = queued(&db).unwrap().remove(0);
         mark_sent(&db, attempt.id, NOW + 1).unwrap();
         sent(
@@ -356,7 +389,7 @@ fn a_refusal_of_a_resend_keeps_the_attempt_sent_with_its_key() {
             NOW + 2,
         )
         .unwrap();
-        request(&db, &r(&account), NOW + 60_000).unwrap();
+        request(&db, &r(&account), true, NOW + 60_000).unwrap();
         let again = queued(&db).unwrap().remove(0);
         assert!(again.resend);
         mark_sent(&db, again.id, NOW + 60_001).unwrap();
@@ -375,7 +408,7 @@ fn a_refusal_of_a_resend_keeps_the_attempt_sent_with_its_key() {
 #[test]
 fn a_resend_that_cannot_go_out_goes_back_to_sent_with_its_key() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(
@@ -394,7 +427,7 @@ fn a_resend_that_cannot_go_out_goes_back_to_sent_with_its_key() {
     .into_iter()
     .enumerate()
     {
-        request(&db, &r("codex-a"), NOW + 60_000).unwrap();
+        request(&db, &r("codex-a"), true, NOW + 60_000).unwrap();
         let again = queued(&db).unwrap().remove(0);
         assert!(again.resend);
         not_sent(&db, &again, problem.as_ref(), NOW + 60_001 + n as i64).unwrap();
@@ -409,7 +442,7 @@ fn a_resend_that_cannot_go_out_goes_back_to_sent_with_its_key() {
 #[test]
 fn a_failed_poll_never_settles_a_sent_attempt() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(
@@ -445,7 +478,7 @@ fn a_failed_poll_never_settles_a_sent_attempt() {
 #[test]
 fn a_poll_newer_than_the_send_settles_a_sent_attempt_whose_reply_never_came() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(
@@ -488,7 +521,7 @@ fn a_poll_newer_than_the_send_settles_a_sent_attempt_whose_reply_never_came() {
 #[test]
 fn the_view_shows_outcomes_but_never_a_key() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(&db, &attempt, &Ok(Outcome::NoCredit), NOW + 2).unwrap();
@@ -504,7 +537,7 @@ fn the_view_shows_outcomes_but_never_a_key() {
 fn settled_attempts_are_kept_to_a_bound() {
     let (_root, db) = store();
     for n in 0..(ATTEMPTS_KEPT + 8) {
-        request(&db, &r(&format!("codex-{n}")), NOW + n).unwrap();
+        request(&db, &r(&format!("codex-{n}")), true, NOW + n).unwrap();
         let attempt = queued(&db).unwrap().remove(0);
         mark_sent(&db, attempt.id, NOW + n).unwrap();
         sent(&db, &attempt, &Ok(Outcome::Reset), NOW + n).unwrap();
@@ -728,7 +761,7 @@ fn only_a_poll_and_a_count_both_newer_than_the_last_spend_let_auto_spend_run() {
     let window_end = NOW + 3 * HOUR;
     polled(&db, "codex-a", 100.0, LimitSource::Poll, NOW, window_end);
     resets(&db, "codex-a", 2, NOW);
-    request(&db, &r("codex-a"), NOW + 1).unwrap();
+    request(&db, &r("codex-a"), true, NOW + 1).unwrap();
     let owner = queued(&db).unwrap().remove(0);
     mark_sent(&db, owner.id, NOW + 2).unwrap();
     sent(&db, &owner, &Ok(Outcome::Reset), NOW + 3).unwrap();
@@ -771,7 +804,7 @@ fn a_failed_poll_is_never_fresh_enough_for_an_auto_spend() {
         NOW + 3 * HOUR,
     );
     resets(&db, "codex-a", 2, NOW);
-    request(&db, &r("codex-a"), NOW + 1).unwrap();
+    request(&db, &r("codex-a"), true, NOW + 1).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 2).unwrap();
     sent(&db, &attempt, &Ok(Outcome::Reset), NOW + 3).unwrap();
@@ -900,7 +933,7 @@ fn auto_spend_never_queues_while_spend_is_off_or_no_account_has_a_free_reset() {
 #[test]
 fn a_queued_spend_settles_as_off_when_the_owner_turned_spend_off_after_asking() {
     let (_root, db) = store();
-    request(&db, &r("codex-a"), NOW).unwrap();
+    request(&db, &r("codex-a"), true, NOW).unwrap();
     write(&db, settings(SpendConfirm::Off, AllLimited::Notice)).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     not_sent(
