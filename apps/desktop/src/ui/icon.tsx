@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import iconArrowLeft from "../assets/icons/arrow-left.svg?raw";
 import iconArrowRight from "../assets/icons/arrow-right.svg?raw";
+import iconBell from "../assets/icons/bell.svg?raw";
 import iconBlocks from "../assets/icons/blocks.svg?raw";
 import iconBookOpen from "../assets/icons/book-open.svg?raw";
 import iconBot from "../assets/icons/bot.svg?raw";
@@ -95,6 +96,7 @@ import logoVercel from "../assets/logos/vercel.svg?raw";
 const ICON_SOURCES = {
   "arrow-left": iconArrowLeft,
   "arrow-right": iconArrowRight,
+  "bell": iconBell,
   "blocks": iconBlocks,
   "book-open": iconBookOpen,
   "bot": iconBot,

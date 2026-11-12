@@ -96,13 +96,14 @@ export function blockWebContextMenu(target: Document): void {
   });
 }
 
-/** The app frame: skip link, sidebar, and the scrolling main region holding the page, with
- * the toast region. Inputs: sidebar, page content, toast. */
-export function AppShell({ sidebar, children, toast }: { sidebar: ReactNode; children: ReactNode; toast?: ReactNode }) {
+/** The app frame: skip link, sidebar, and the scrolling main region holding the top-right
+ * corner (the notification bell) and the page, with the toast region. Inputs: sidebar, page
+ * content, toast and corner. */
+export function AppShell({ sidebar, children, toast, corner }: { sidebar: ReactNode; children: ReactNode; toast?: ReactNode; corner?: ReactNode }) {
   return <div className="shell">
     <button type="button" className="skip-link btn" onClick={() => document.getElementById("main")?.focus()}>Skip to content</button>
     {sidebar}
-    <main id="main" className="main" tabIndex={-1}><div className="page">{children}</div></main>
+    <main id="main" className="main" tabIndex={-1}>{corner}<div className="page">{children}</div></main>
     {toast}
   </div>;
 }

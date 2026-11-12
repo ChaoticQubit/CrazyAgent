@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ConfirmDialog, Icon, Segmented, type IconName } from "../../ui";
-import { listMcpServers, listSkills, loadAllProjectMemories, nextGeneration, poolSummaries } from "../../api";
+import { listMcpServers, listSkills, nextGeneration, poolSummaries } from "../../api";
 import { failureCopy, loadActivity, loadAgentPolicy, openLink, retryResearch } from "../../api-projects";
 import { loadOnboarding } from "../../api-intake";
 import type { ActivityItem, ActivityKind, ResearchJob } from "../../api-projects";
@@ -18,7 +18,8 @@ import { MarkdownView } from "./markdown";
 import { ProjectOverviewTabs } from "./overview-tabs";
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
-import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, ago, changeOutcome, goalPlacer, groupActivity, memoryGroups, newestActivity, pathWindow, phasePath, type ActivityFilter, researchJobs, researchRow, onFact, signInLine, suggestedLine, teamWaitingLine, waitingLine } from "./research";
+import { ACTIVITY_FILTERS, ACTIVITY_ROWS, RESEARCH_KEY, activityFilter, ago, changeOutcome, goalPlacer, groupActivity, newestActivity, pathWindow, phasePath, type ActivityFilter, researchJobs, researchRow, onFact } from "./research";
+import { ProjectNeedsYou } from "../notifications/panel";
 import { PlanningLine } from "./planning";
 
 const PLATFORM_LABELS: Record<string, string> = {
@@ -368,41 +369,24 @@ export function OverviewFacts({ about, overview }: { about: string; overview: st
   </>;
 }
 
-/** Overview tab: what needs the owner first, then the tab strip (Quick info with the project's
+/** Overview tab: what needs the owner first, the project's view of the notification store,
+ * then the tab strip (Quick info with the project's
  * own description, the generated tabs, README, and Activity with research progress and recent
  * activity), beside the project facts. Input: the project data. Output: the tab. */
 export function OverviewTab({ data }: { data: ProjectData }) {
   const setup = valueOf(data.setup);
-  const jobs = valueOf(data.research)?.jobs ?? [];
   const harnesses = valueOf(data.harnesses);
   const base = `/projects/${encodeURIComponent(data.id)}`;
-  const waiting = jobs.some((job) => job.status === "needs_pool") || (setup !== null && !data.assigned && setup.research.length > 0 && data.pools?.kind === "ok");
-  const [suggested, setSuggested] = useState(0);
-  useEffect(() => {
-    let live = true;
-    void loadAllProjectMemories(data.id).then((result) => { if (live) setSuggested(result.kind === "ok" ? memoryGroups(result.value.items).suggested.length : 0); });
-    return () => { live = false; };
-  }, [data.id, data.now]);
   const [skills] = useLoad(() => listSkills(data.id), [data.id], "skills");
   const [servers] = useLoad(() => listMcpServers(data.id), [data.id], "mcp-servers");
   const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
   const [policy] = useLoad(() => loadAgentPolicy(data.id), [data.id], "agent-policy");
   const [onboarding] = useLoad(() => loadOnboarding(data.id), [data.id], "onboarding");
   const assignedSummary = summaries.kind === "ok" ? summaries.value.find((pool) => pool.id === data.assigned?.pool.id) : undefined;
-  const signIn = signInLine(assignedSummary);
-  const teamWaiting = data.team.result?.kind === "ok" ? teamWaitingLine(data.team.result.value.tasks) : null;
+  const poolAccounts = assignedSummary?.members.map((member) => member.id) ?? [];
   return <div className="pj-overview">
     <div className="pj-stack">
-      {(waiting || suggested > 0 || signIn || teamWaiting) && <section className="pj-stack-s" aria-labelledby="pj-needs"><h2 id="pj-needs">Needs you</h2>
-        {waiting && <div className="pj-need"><span>{displayText(waitingLine(jobs))}</span>
-          <button type="button" className="btn primary" onClick={() => data.navigate(`${base}/settings?section=pool`)}>Choose pool</button></div>}
-        {teamWaiting && <div className="pj-need"><span>{displayText(teamWaiting)}</span>
-          <button type="button" className="btn" onClick={() => data.navigate(`${base}/settings?section=pool`)}>{data.assigned ? "Change pool" : "Choose pool"}</button></div>}
-        {signIn && <div className="pj-need"><span>{displayText(signIn)}</span>
-          <button type="button" className="btn" onClick={() => data.navigate("/settings/accounts")}>Sign in again</button></div>}
-        {suggested > 0 && <div className="pj-need"><span>{suggestedLine(suggested)}</span>
-          <button type="button" className="btn" onClick={() => data.navigate(`${base}/context?file=%40memory`)}>Review</button></div>}
-      </section>}
+      <ProjectNeedsYou projectId={data.id} accounts={poolAccounts} />
       <ProjectOverviewTabs data={data} activity={<ActivityPanel data={data} />}
         quickInfo={(text) => <OverviewFacts about={setup?.about ?? ""} overview={text ?? (onboarding.kind === "ok" ? onboarding.value.overview : null)} />} />
     </div>

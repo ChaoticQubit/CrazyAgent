@@ -5,6 +5,7 @@ import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
 import { questionWatch } from "./notify";
+import { NoticeBell } from "./screens/notifications/panel";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -126,19 +127,19 @@ function Launching() {
 
 /** The routed screen inside the shell. Each project page and onboarding review is keyed by its
  * project id, so a switch to another project starts a fresh page and never keeps the last
- * project's master ticket, name, settings or late reads. Inputs: the route, the session and
- * each project's unseen team notification count for Home. Output: the screen element. */
-export function Screen({ route, session, alerts }: { route: Route; session: Session; alerts?: Map<string, number> }) {
+ * project's master ticket, name, settings or late reads. Inputs: the route and the session.
+ * Output: the screen element. */
+export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
-    case "settings": return isUserMenuTab(route.tab) ? <Home alerts={alerts} />
+    case "settings": return isUserMenuTab(route.tab) ? <Home />
       : <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} harness={route.harness} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "metrics": return <AppMetrics projects={projects ?? []} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
-    default: return <Home alerts={alerts} />;
+    default: return <Home />;
   }
 }
 
@@ -184,6 +185,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
+      corner={<NoticeBell projects={session.projects.kind === "ok" ? session.projects.value : []} />}
       sidebar={<ShellSidebar route={page} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
@@ -201,7 +203,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
         onClick={() => void session.clearStuckSignIn()}>Clear stuck sign-in</Button>}>
         {STUCK_SIGN_IN_LINE}
       </Banner>}
-      <Screen route={page} session={session} alerts={alerts} />
+      <Screen route={page} session={session} />
       <UserDialogLayer asked={asked} under={page} back={back} />
       <GoToLayer projects={projects ?? []} />
     </AppShell>

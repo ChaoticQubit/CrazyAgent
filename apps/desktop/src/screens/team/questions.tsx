@@ -122,7 +122,7 @@ export function QuestionRow({ projectId, question, onOpen, onAnswered, focusRef 
     onAnswered();
   }
 
-  return <li ref={focusRef} className={`tg-question ${question.severity}`} tabIndex={focusRef ? -1 : undefined} data-autofocus={focusRef ? "" : undefined}>
+  return <li ref={focusRef} className={`tg-question ${question.severity}`} data-notice-anchor={`agent-${question.agent}`} tabIndex={focusRef ? -1 : undefined} data-autofocus={focusRef ? "" : undefined}>
     <div className="pj-row">
       <StatusBadge word={copy.word} tone={copy.tone} />
       <strong>{label}</strong>
@@ -224,7 +224,7 @@ export function QuestionsPanel({ projectId, read, reload, onOpen, focus = null }
     </p>}
     {inbox.waiting.length > 0 && <>
       <h4>Waiting on you in their terminal</h4>
-      <ul className="pj-rows" aria-label="Waiting on you in their terminal">{inbox.waiting.map((agent, index) => <li key={agent.agent} className="pj-row"
+      <ul className="pj-rows" aria-label="Waiting on you in their terminal">{inbox.waiting.map((agent, index) => <li key={agent.agent} className="pj-row" data-notice-anchor={`agent-${agent.agent}`}
         ref={focus === "waiting" && index === 0 ? target : undefined} tabIndex={focus === "waiting" && index === 0 ? -1 : undefined}
         data-autofocus={focus === "waiting" && index === 0 ? "" : undefined}>
         <StatusBadge word="Waiting on you" tone="warn" />

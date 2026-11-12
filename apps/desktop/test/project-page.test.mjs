@@ -286,11 +286,6 @@ test("deleting a context file uses the engine path and never the brief", () => {
   assert.equal(research.deleteQuestion("context/research/market_research.md"), "Delete market_research.md?");
 });
 
-test("the Needs you line for suggested memories counts them in plain words", () => {
-  assert.equal(research.suggestedLine(1), "1 suggested memory waits for you to save or dismiss it.");
-  assert.equal(research.suggestedLine(3), "3 suggested memories wait for you to save or dismiss them.");
-});
-
 test("the Needs you line for waiting research uses the engine's reason when it gives one", () => {
   assert.equal(research.waitingLine([job("needs_pool")]), "Research is waiting for a pool.");
   assert.equal(research.waitingLine([]), "Research is waiting for a pool.");
@@ -610,15 +605,6 @@ test("the IDE-unavailable notice keeps the same gap below it as the waiting-chan
   const gap = (selector) => new RegExp(`(?:^|\\n)${selector.replace(".", "\\.")} \\{[^}]*margin-bottom: ([^;]+);`).exec(css)?.[1] ?? null;
   assert.equal(gap(".pj-waiting"), "var(--space-4)");
   assert.equal(gap(".pj-ide-unavailable"), gap(".pj-waiting"), "the IDE notice does not touch the block under it");
-});
-
-test("Needs you names the project's pool accounts that aren't signed in", () => {
-  const member = (id, status) => ({ id, kind: "chatgpt", provider: "openai", status, status_label: "" });
-  const pool = (members) => ({ id: "pool-1", name: "Main pool", summary: "", members, project_count: 1 });
-  assert.equal(research.signInLine(pool([member("a", "signed_in"), member("b", "not_signed_in")])), "1 account in Main pool isn't signed in.");
-  assert.equal(research.signInLine(pool([member("a", "not_signed_in"), member("b", "not_signed_in"), member("c", "set_up")])), "2 accounts in Main pool aren't signed in.");
-  assert.equal(research.signInLine(pool([member("a", "signed_in"), member("b", "set_up")])), null);
-  assert.equal(research.signInLine(undefined), null);
 });
 
 test("the Overview plugin fact counts what is on in this project, with the global switch winning", () => {

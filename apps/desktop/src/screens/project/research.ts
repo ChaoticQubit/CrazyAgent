@@ -1,7 +1,7 @@
 import type { IconName, Tone } from "../../ui";
 import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ActivityItem, ActivityKind, ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
-import type { HarnessEntry, PoolSummary, Result } from "../../api";
+import type { HarnessEntry, Result } from "../../api";
 import { accountLabels, namedFailure } from "../../api";
 import { withCode, type IntentReceipt, type MasterActivityLine, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
@@ -339,16 +339,6 @@ export function pauseSummary(tasks: Pick<TeamStatus["tasks"][number], "status">[
     waiting ? `${waiting} waiting ${waiting === 1 ? "task is" : "tasks are"} cancelled` : "",
   ].filter((part) => part !== "");
   return { count: running + waiting, line: parts.length ? `${parts.join(" and ")}.` : "No team agents are working or waiting." };
-}
-
-/** The Needs you line for team tasks that wait for a pool account, with the engine's first
- * reason when it gave one. Input: the team tasks. Output: the line, or null when none wait. */
-export function teamWaitingLine(tasks: Pick<TeamStatus["tasks"][number], "status" | "problem">[]): string | null {
-  const waiting = tasks.filter((task) => task.status === "needs_pool");
-  if (waiting.length === 0) return null;
-  const reason = waiting.find((task) => task.problem)?.problem?.trim().replace(/\.$/u, "");
-  const lead = waiting.length === 1 ? "A team task waits" : `${waiting.length} team tasks wait`;
-  return reason ? `${lead}: ${reason}.` : `${lead} for an account in this project's pool.`;
 }
 
 /** The Overview fact for skills or MCP servers: how many are on in this project. An item is on
@@ -765,14 +755,6 @@ export function masterMissingLine(harnesses: HarnessEntry[] | null, master: stri
   return entry?.status.kind === "not_installed" ? `${entry.name} isn't installed on this Mac.` : null;
 }
 
-/** The Needs you line when accounts in the project's pool need to sign in again.
- * Input: the pool's summary, if known. Output: the line, or null when none needs it. */
-export function signInLine(pool: PoolSummary | undefined): string | null {
-  const count = pool?.members.filter((member) => member.status === "not_signed_in").length ?? 0;
-  if (!pool || count === 0) return null;
-  return count === 1 ? `1 account in ${pool.name} isn't signed in.` : `${count} accounts in ${pool.name} aren't signed in.`;
-}
-
 const RESENDABLE = new Set<MasterTurn["phase"]>(["failed", "blocked", "uncertain", "cancelled"]);
 
 /** Finds the owner's message to offer again when the latest master turn stopped or failed.
@@ -859,9 +841,3 @@ export function deleteQuestion(path: string): string {
   return `Delete ${path.slice(path.lastIndexOf("/") + 1)}?`;
 }
 
-/** The Overview's Needs you line for suggested memories.
- * Input: how many wait, at least one. Output: one plain sentence. */
-export function suggestedLine(count: number): string {
-  if (!(Number.isInteger(count) && count > 0)) throw new Error("suggestedLine needs a positive count");
-  return count === 1 ? "1 suggested memory waits for you to save or dismiss it." : `${count} suggested memories wait for you to save or dismiss them.`;
-}

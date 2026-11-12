@@ -252,8 +252,6 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .setup-panel li { display: grid; gap: var(--space-2); padding: 14px var(--space-4); border-top: 1px solid var(--border); }
 .setup-panel li:first-child { border-top: 0; }
 .setup-panel .done { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; }
-.needs { display: grid; gap: var(--space-2); margin-bottom: var(--space-4); }
-.need { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); }
 
 .welcome { display: grid; grid-template-columns: 300px minmax(0, 560px); gap: 48px; height: 100%; overflow: auto; padding: 56px max(var(--space-6), calc((100% - 960px) / 2 + var(--space-6))) var(--space-10); }
 .welcome .intro { display: grid; gap: var(--space-3); align-content: start; }
