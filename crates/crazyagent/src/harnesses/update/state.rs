@@ -14,6 +14,7 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 pub const UPDATE_OFF: &str = "harness_update_off";
 pub const CHECK_ONLY: &str = "harness_update_check_only";
@@ -27,6 +28,7 @@ pub const INSTALL_OFF: &str = "harness_install_off";
 pub const INSTALL_ALREADY: &str = "harness_install_already";
 pub const INSTALL_NOT_FOUND: &str = "harness_install_not_found";
 pub const INSTALL_FAILED: &str = "harness_install_failed";
+pub const INSTALL_LIST_INVALID: &str = "harness_install_list_invalid";
 
 const NO_VERSION: &str = "0";
 const VERSION_ARGS: [&str; 1] = ["--version"];
@@ -551,5 +553,37 @@ impl Updates {
         let fixed = install_command(id, roots)?;
         let home = roots.home.clone();
         Self::spawn(running, move || installed_now(&fixed, &home, after), |_| {})
+    }
+
+    /// The harnesses waiting in the install queue, in the order they install; the one
+    /// installing now is no longer listed. Output: their catalog ids.
+    pub fn queued(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Puts a list of harnesses in the install queue: each a catalog harness once, never the
+    /// RCLI that comes with the app, at most every catalog harness, while Install from the app
+    /// is on and no other list waits. Inputs: the engine database and the ids, aliases
+    /// allowed. Output: the catalog ids in install order, or the refusal code.
+    pub fn queue(
+        &self,
+        db: &Connection,
+        ids: &[String],
+    ) -> Result<Vec<&'static str>, &'static str> {
+        let _ = (db, ids);
+        Err(INSTALL_LIST_INVALID)
+    }
+
+    /// Installs the queued harnesses one after another: each starts only once no update or
+    /// install runs, a refusal or a wait past `wait_max` becomes that harness's last record,
+    /// and the rest still install. Inputs: what starts one install, the pause between looks
+    /// and the longest wait for the job slot. Output: none; returns once the last one started.
+    pub fn drain(
+        self: &Arc<Self>,
+        start: impl FnMut(&'static str) -> Result<(), &'static str>,
+        pause: Duration,
+        wait_max: Duration,
+    ) {
+        let _ = (start, pause, wait_max);
     }
 }
