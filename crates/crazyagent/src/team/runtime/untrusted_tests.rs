@@ -196,8 +196,9 @@ fn an_untrusted_team_agent_launch_profile_keeps_every_repository_harness_file_un
 
 /// U3-17 on the real team launch: an untrusted tools-on sub-agent whose model is a managed
 /// account reached on port 443 connects to another host on 443, and the installed profile
-/// denies it. Seatbelt filters by port only, so this stays red until the S4b model-only
-/// proxy carries the untrusted network (gap G2).
+/// denies it. Seatbelt filters by port only, so the agent reaches its model only through
+/// the S4b model proxy, which an untrusted project gets at every network choice (gap G2,
+/// CU-2).
 #[test]
 fn an_untrusted_team_agent_launch_profile_cannot_reach_a_non_model_host() {
     let fixture = Fixture::new(1);
@@ -226,4 +227,54 @@ fn an_untrusted_team_agent_launch_profile_cannot_reach_a_non_model_host() {
         said.contains("connectx to 127.0.0.1 port 443 (tcp) failed: Operation not permitted"),
         "an untrusted team agent reached a non-model host on 443: {said}"
     );
+}
+
+/// CU-2: an untrusted project's tools-on sub-agent on a managed account reaches the network
+/// only through its model proxy, under the None network as a reviewed one does and under
+/// Open too, since an untrusted agent gets only its model endpoint (threat model N2); its
+/// profile grants the proxy's loopback port and no host port, so it never reaches any host
+/// on 443.
+#[test]
+fn an_untrusted_managed_tools_on_agent_reaches_the_network_only_through_its_model_proxy() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    for network in [AgentNetwork::None, AgentNetwork::Open] {
+        let fixture = Fixture::new(1);
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        let runtime = untrusted_runtime(&fixture);
+        let profile = reference("managed-profile");
+        let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(managed.join("auth.json"), "{}").unwrap();
+        let account = TeamAccount {
+            connection: reference("managed-connection"),
+            reach: TeamReach::Managed {
+                profile_ref: profile,
+                model: None,
+            },
+        };
+        let plan = untrusted_launch(&runtime, &fixture, &account);
+        let port = plan.proxy.as_ref().map(|proxy| proxy.port());
+        assert!(
+            port.is_some(),
+            "{network:?}: an untrusted tools-on agent gets a model proxy"
+        );
+        let text = std::fs::read_to_string(&plan.sandbox_profile).unwrap();
+        assert!(
+            text.contains(&format!(
+                "(allow network-outbound (remote ip \"localhost:{}\"))",
+                port.unwrap()
+            )),
+            "{network:?}: {text}"
+        );
+        assert!(!text.contains("(remote ip \"*:"), "{network:?}: {text}");
+    }
 }

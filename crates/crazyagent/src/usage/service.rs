@@ -1,10 +1,15 @@
 use super::capture::{Attribution, Format, RunKind, run_attribution, scan_agent_home, scan_runs};
+use super::extras::{self, Extras, Field};
 use super::health::{UsageStep, clear, record_panic, record_recovered};
-use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
+use super::poll::{
+    CLAUDE_USAGE_URL, CODEX_USAGE_URL, PollCredential, Provider, claude_detail, poll_balance,
+    poll_with_extras,
+};
 use super::recount;
 use super::report::{mark_unreported, reports_usage};
+use super::spend;
 use super::{LimitSource, failure, record_failure, record_observation, storage};
-use crate::config::{ModelAccess, ModelConnection};
+use crate::config::{ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::NativeProfileUsePurpose;
 use crate::engine::owner::HostStamp;
 use crate::engine::{EngineError, NativeProfileCustody};
@@ -72,6 +77,34 @@ pub fn request_confirm(db: &Connection, now_ms: i64) -> rusqlite::Result<bool> {
     )?;
     assert!(asked <= 1);
     Ok(asked == 1)
+}
+
+/// What one step polls: every account, with the private Claude detail reads when they are
+/// due; only those detail reads, leaving the last poll's time alone; or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PollPlan {
+    Every { detail: bool },
+    DetailOnly,
+    Nothing,
+}
+
+/// Chooses what one step polls. Inputs: the last poll's time, the owner's last refresh ask,
+/// whether the detail reads are due and the time. Output: the plan.
+pub(crate) fn poll_plan(
+    polled_ms: Option<i64>,
+    refresh: Option<i64>,
+    detail: bool,
+    now_ms: i64,
+) -> PollPlan {
+    let due = match polled_ms {
+        None => true,
+        Some(polled) => now_ms - polled >= POLL_EVERY_MS || refresh.is_some_and(|at| at > polled),
+    };
+    match (due, detail) {
+        (true, detail) => PollPlan::Every { detail },
+        (false, true) => PollPlan::DetailOnly,
+        (false, false) => PollPlan::Nothing,
+    }
 }
 
 fn refresh_requested(db: &Connection) -> Result<Option<i64>, EngineError> {
@@ -172,6 +205,7 @@ pub fn pool_of(
 /// parts that panicked and have not completed since.
 pub struct Usage {
     db: Connection,
+    root: PathBuf,
     team: PathBuf,
     custody: Result<NativeProfileCustody, EngineError>,
     access: AccessSource,
@@ -179,6 +213,7 @@ pub struct Usage {
     lookup: Option<crate::paths::HarnessLookup>,
     endpoints: (url::Url, url::Url, bool),
     polled_ms: Option<i64>,
+    detail_ms: Option<i64>,
     polls: u64,
     doing: UsageStep,
     unrecovered: BTreeSet<UsageStep>,
@@ -206,6 +241,7 @@ impl Usage {
         let endpoint = |text: &str| url::Url::parse(text).map_err(storage);
         Ok(Self {
             db,
+            root: root.to_path_buf(),
             team: team.to_path_buf(),
             custody,
             access,
@@ -217,6 +253,7 @@ impl Usage {
                 false,
             ),
             polled_ms: None,
+            detail_ms: None,
             polls: 0,
             doing: UsageStep::Poll,
             unrecovered: BTreeSet::new(),
@@ -252,7 +289,8 @@ impl Usage {
     }
 
     /// Runs one upkeep step at `now_ms`: polls every account when ten minutes passed
-    /// since the last poll or the owner asked to refresh since, then counts every live or
+    /// since the last poll or the owner asked to refresh since, else makes only the Claude
+    /// detail reads an open Pools page asks for when they are due, then counts every live or
     /// lately stopped agent's and recent research run's records, so a run's own limit
     /// readings meet a poll as fresh as the step allows. Output: done, or the store's
     /// failure.
@@ -260,17 +298,24 @@ impl Usage {
         self.doing = UsageStep::Poll;
         let access = (self.access)().unwrap_or_default();
         let refresh = refresh_requested(&self.db)?;
-        let due = match self.polled_ms {
-            None => true,
-            Some(polled) => {
-                now_ms - polled >= POLL_EVERY_MS || refresh.is_some_and(|at| at > polled)
+        let detail = extras::detail_due(&self.db, self.detail_ms, now_ms)?;
+        match poll_plan(self.polled_ms, refresh, detail, now_ms) {
+            PollPlan::Every { detail } => {
+                self.polled_ms = Some(now_ms);
+                if detail {
+                    self.detail_ms = Some(now_ms);
+                }
+                self.poll_all(&access, now_ms, detail)?;
+                self.completed(UsageStep::Poll, now_ms)?;
             }
-        };
-        if due {
-            self.polled_ms = Some(now_ms);
-            self.poll_all(&access, now_ms)?;
-            self.completed(UsageStep::Poll, now_ms)?;
+            PollPlan::DetailOnly => {
+                self.detail_ms = Some(now_ms);
+                self.detail_all(&access, now_ms)?;
+                self.completed(UsageStep::Poll, now_ms)?;
+            }
+            PollPlan::Nothing => {}
         }
+        self.spend_all(&access, now_ms)?;
         self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
         self.completed(UsageStep::Team, now_ms)?;
@@ -489,22 +534,32 @@ impl Usage {
         Ok(())
     }
 
-    fn poll_all(&mut self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+    fn poll_all(
+        &mut self,
+        access: &ModelAccess,
+        now_ms: i64,
+        detail: bool,
+    ) -> Result<(), EngineError> {
         for connection in &access.connections {
-            if !matches!(
-                MemberKind::of(connection),
-                MemberKind::Claude | MemberKind::Chatgpt
-            ) {
-                continue;
+            match MemberKind::of(connection) {
+                MemberKind::Claude | MemberKind::Chatgpt => {}
+                MemberKind::ApiKey => {
+                    self.read_balance(connection, now_ms)?;
+                    continue;
+                }
+                _ => continue,
             }
-            match self.poll_one(connection, now_ms) {
-                Ok(Some(observation)) => record_observation(
-                    &self.db,
-                    &connection.id,
-                    &observation,
-                    LimitSource::Poll,
-                    now_ms,
-                )?,
+            match self.poll_one(connection, now_ms, detail) {
+                Ok(Some((observation, found))) => {
+                    record_observation(
+                        &self.db,
+                        &connection.id,
+                        &observation,
+                        LimitSource::Poll,
+                        now_ms,
+                    )?;
+                    extras::record_extras(&self.db, &connection.id, &found, now_ms)?;
+                }
                 Ok(None) => {}
                 Err(problem) => {
                     record_failure(&self.db, &connection.id, &failure_code(&problem), now_ms)?;
@@ -514,16 +569,128 @@ impl Usage {
         Ok(())
     }
 
-    /// Polls one managed account: proves its sign-in as an agent turn does, takes a shared
-    /// lease on its profile only to read the access token, then makes the provider's usage
-    /// call with the lease released. Inputs: the connection and the time. Output: the
-    /// observation, None for an account that is not signed in or is busy signing in, or
-    /// the poll's plain failure.
+    /// Makes only the private Claude detail read for each managed Claude account, as an open
+    /// Pools page asks between polls: no window poll, no Codex or key balance call, and the
+    /// last poll's time stays. A refusal of any kind is skipped and never stored as the
+    /// account's failure. Inputs: the access and the time. Output: done, or
+    /// `usage_unavailable`.
+    fn detail_all(&mut self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+        for connection in &access.connections {
+            if MemberKind::of(connection) != MemberKind::Claude {
+                continue;
+            }
+            let Ok(Some((Provider::Claude, credential))) = self.credential(connection, "detail")
+            else {
+                continue;
+            };
+            let (claude, _, loopback) = &self.endpoints;
+            let read = Extras {
+                resets: claude_detail(claude.clone(), &credential, *loopback, now_ms),
+                credits: Field::NotAsked,
+            };
+            extras::record_extras(&self.db, &connection.id, &read, now_ms)?;
+        }
+        Ok(())
+    }
+
+    /// Reads a saved key's balance for an account whose base URL names a known provider
+    /// host: the key comes from the engine's key store into engine memory, as the key relay
+    /// reads it, and goes only on curl's stdin to that host's constant balance URL. A missing
+    /// key or a failed read stores the credits as not reported, never a failure. Inputs: the
+    /// connection and the time. Output: done, or `usage_unavailable`.
+    fn read_balance(&self, connection: &ModelConnection, now_ms: i64) -> Result<(), EngineError> {
+        let (ModelAuthentication::ApiKey { credential_ref }, ModelEndpoint::Http { url }) =
+            (&connection.auth, &connection.endpoint)
+        else {
+            return Ok(());
+        };
+        let Some(adapter) = extras::key_adapter(url) else {
+            return Ok(());
+        };
+        let Some(balance) = extras::balance_url(adapter, url) else {
+            return Ok(());
+        };
+        let credits = match crate::storage::accounts::read_key_file(&self.root, credential_ref) {
+            Ok(Some(key)) => poll_balance(adapter, balance, &key, false),
+            Ok(None) | Err(_) => Field::Absent,
+        };
+        let read = Extras {
+            resets: Field::NotAsked,
+            credits,
+        };
+        extras::record_extras(&self.db, &connection.id, &read, now_ms).map(|_| ())
+    }
+
+    /// Polls one managed account with the credential `credential` reads: the provider's usage
+    /// call, and the private detail call when asked. Inputs: the connection, the time and
+    /// whether to make the detail call. Output: the observation and extras, None for an
+    /// account that is not signed in or is busy signing in, or the poll's plain failure.
     fn poll_one(
         &mut self,
         connection: &ModelConnection,
         now_ms: i64,
-    ) -> Result<Option<super::Observation>, EngineError> {
+        detail: bool,
+    ) -> Result<Option<(super::Observation, Extras)>, EngineError> {
+        let Some((provider, credential)) = self.credential(connection, "poll")? else {
+            return Ok(None);
+        };
+        let (claude, codex, loopback) = &self.endpoints;
+        let url = match provider {
+            Provider::Claude => claude.clone(),
+            Provider::Codex => codex.clone(),
+        };
+        poll_with_extras(provider, url, &credential, *loopback, now_ms, detail).map(Some)
+    }
+
+    /// Runs the spend part of a step (DEC-154 slice 3): settles sent spends a newer poll has
+    /// read, tracks the limited pools (queuing an auto-spend when the owner chose it), then
+    /// sends each queued spend with its stored key, its token read under the same custody
+    /// lease as the poll. Inputs: the live access and the time. Output: done, or the
+    /// store's failure.
+    fn spend_all(&mut self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
+        spend::settle_sent(&self.db, now_ms)?;
+        spend::track_pools(&self.db, access, now_ms)?;
+        for attempt in spend::queued(&self.db)? {
+            let connection = access
+                .connections
+                .iter()
+                .find(|connection| connection.id == attempt.account);
+            if let Some(code) = spend::not_spendable(connection) {
+                spend::not_sent(&self.db, &attempt, Some(&failure(code)), now_ms)?;
+                continue;
+            }
+            let connection = connection.expect("a refused attempt was skipped");
+            match self.credential(connection, "spend") {
+                Ok(Some((provider, credential))) => {
+                    let (claude, codex, loopback) = &self.endpoints;
+                    spend::send_one(
+                        &self.db,
+                        &attempt,
+                        provider,
+                        &credential,
+                        claude,
+                        codex,
+                        *loopback,
+                        now_ms,
+                    )?;
+                }
+                Ok(None) => spend::not_sent(&self.db, &attempt, None, now_ms)?,
+                Err(problem) => spend::not_sent(&self.db, &attempt, Some(&problem), now_ms)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads one managed account's credential for one call: proves its sign-in as an agent
+    /// turn does, takes a shared lease on its profile only to read the access token, and
+    /// releases the lease before the call. Inputs: the connection and the call's name for
+    /// the lease. Output: the provider and credential, None for an account that is not a
+    /// Claude or Codex sign-in, not signed in or busy signing in, or the plain failure.
+    fn credential(
+        &mut self,
+        connection: &ModelConnection,
+        call: &str,
+    ) -> Result<Option<(Provider, PollCredential)>, EngineError> {
         let (provider, harness) = match MemberKind::of(connection) {
             MemberKind::Claude => (Provider::Claude, "claude-code"),
             MemberKind::Chatgpt => (Provider::Codex, "codex"),
@@ -557,7 +724,7 @@ impl Usage {
         }
         drop(tx);
         self.polls += 1;
-        let operation = RequestId::new(format!("usage-poll-{}", self.polls)).map_err(storage)?;
+        let operation = RequestId::new(format!("usage-{call}-{}", self.polls)).map_err(storage)?;
         let custody = self.custody.as_mut().map_err(|error| error.clone())?;
         let lease = match custody.acquire_use(
             &host,
@@ -572,13 +739,7 @@ impl Usage {
         };
         let credential = lease.usage_credential(&executable);
         drop(lease);
-        let credential = credential?;
-        let (claude, codex, loopback) = &self.endpoints;
-        let url = match provider {
-            Provider::Claude => claude.clone(),
-            Provider::Codex => codex.clone(),
-        };
-        poll(provider, url, &credential, *loopback, now_ms).map(Some)
+        Ok(Some((provider, credential?)))
     }
 }
 

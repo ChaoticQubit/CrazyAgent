@@ -33,7 +33,3 @@
 .tt-profile-check { display: grid; gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .tt-profile-check:last-child { border-bottom: 0; }
 @media (max-width: 760px) { .tt-covered-row { grid-template-columns: minmax(0, 1fr); gap: 0; } }
-.tt-key { margin: 0; padding: 0; border: 0; min-width: 0; }
-.tt-label { padding: 0; font-weight: 600; }
-.tt-page { max-width: 760px; }
-.tt-note { margin: 0; }

@@ -113,7 +113,9 @@ pub(super) async fn after_owner(
         }
         (
             OwnerOperation::Apply {
-                mutation: OwnerMutation::SetProjectAgentPolicy { project_id, .. },
+                mutation:
+                    OwnerMutation::SetProjectAgentPolicy { project_id, .. }
+                    | OwnerMutation::SetProjectTrust { project_id, .. },
             },
             OwnerResponse::Applied { operation },
         ) if matches!(operation.result, OwnerResult::Applied) => {
@@ -129,10 +131,10 @@ pub(super) async fn after_owner(
     Ok(reply)
 }
 
-/// Stops a project's IDE in the background when the agent policy just committed no longer
-/// fits it. Detached so a Save never waits on a launch holding the start lock or on a
-/// server's stop grace, and a replay of the same Save follows too, since the check only
-/// compares. Inputs: the authority and the project.
+/// Stops a project's IDE in the background when the agent policy or repository trust just
+/// committed no longer fits it. Detached so a Save never waits on a launch holding the start
+/// lock or on a server's stop grace, and a replay of the same Save follows too, since the
+/// check only compares. Inputs: the authority and the project.
 #[cfg(unix)]
 fn follow_saved_level(authority: &Arc<Authority>, project: crate::protocol::ProjectId) {
     let authority = Arc::clone(authority);

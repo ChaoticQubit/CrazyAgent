@@ -775,6 +775,7 @@ pub struct TeamRuntime {
     unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
     settled: bool,
+    notices: crate::notifications::reconcile::Ticker,
     naming: Option<i64>,
     run_model: Option<String>,
     fresh_start: Option<i64>,
@@ -1053,6 +1054,8 @@ impl TeamRuntime {
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;
+        crate::notifications::initialize(&connection)?;
+        crate::notifications::events::engine_started(&connection, now_ms());
         if let Err(problem) = crate::usage::initialize(&connection) {
             eprintln!(
                 "team usage is not counted: {}",
@@ -1117,6 +1120,7 @@ impl TeamRuntime {
             unread: BTreeMap::new(),
             resuming: None,
             settled: false,
+            notices: crate::notifications::reconcile::Ticker::default(),
             naming: None,
             run_model: None,
             fresh_start: None,
@@ -1535,8 +1539,8 @@ impl TeamRuntime {
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
     /// the questions masters' harnesses ask the owner in their own terminals, asks the
-    /// scorecard's daily question when it is due, then alerts the owner to new questions and
-    /// terminal waits by severity.
+    /// scorecard's daily question when it is due, alerts the owner to new questions and
+    /// terminal waits by severity, then brings the notification store in step (DEC-136a).
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -1558,8 +1562,12 @@ impl TeamRuntime {
         self.watch_master_questions()?;
         self.ask_daily()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
+        let notices = self
+            .notices
+            .tick(&mut self.connection, &access, now_ms())
+            .map(|_ran| ());
         let lanes = self.lanes();
-        questions.and(lanes)
+        questions.and(notices).and(lanes)
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's
@@ -2815,6 +2823,7 @@ impl TeamRuntime {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
         crate::recovery::capture(&tx, Some(now))?;
+        crate::notifications::events::engine_stopped(&tx)?;
         for id in ids {
             let left = running_tasks(&tx, "agent=?1 AND cancel_requested=0", [id])?;
             tx.execute(
@@ -4480,7 +4489,9 @@ impl TeamRuntime {
         {
             super::master::set_live(&self.connection, project, false)?;
             self.live_starts.remove(project);
-            return self.note(project, &live_gone(&harness));
+            let line = live_gone(&harness);
+            crate::notifications::events::master_off(&self.connection, project, &line, now_ms());
+            return self.note(project, &line);
         }
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
@@ -4526,8 +4537,25 @@ impl TeamRuntime {
                 if let Some(note) = note {
                     self.note(project, &note)?;
                 }
-                if left.is_some_and(|left| left != account.connection) {
+                if let Some(left) = left.filter(|left| *left != account.connection) {
                     self.note(project, LIVE_MASTER_MOVED)?;
+                    let from = crate::notifications::events::connection_name(
+                        &self.connection,
+                        access,
+                        &left,
+                    );
+                    let to = crate::notifications::events::connection_name(
+                        &self.connection,
+                        access,
+                        &account.connection,
+                    );
+                    crate::notifications::events::master_moved(
+                        &self.connection,
+                        project,
+                        &from,
+                        &to,
+                        now_ms(),
+                    );
                 }
                 self.brief(stored, access, id)
             }
@@ -4941,6 +4969,7 @@ impl TeamRuntime {
         self.live_starts.remove(project);
         if super::master::problem(&self.connection, project, Some(line))? {
             self.note(project, line)?;
+            crate::notifications::events::master_off(&self.connection, project, line, now_ms());
         }
         Ok(())
     }
@@ -9141,7 +9170,7 @@ impl TeamRuntime {
             return Err(with_code(line, Some(code)));
         }
         let open = tools && !enforcement.model_endpoints_only;
-        let kept = match (open, &self.settings) {
+        let kept = match (tools, &self.settings) {
             (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
                 .map_err(|code| {
                     with_code(
@@ -9158,8 +9187,8 @@ impl TeamRuntime {
             }
             (false, _) => Vec::new(),
         };
-        let proxy = if open
-            && policy.network == AgentNetwork::None
+        let proxy = if tools
+            && (policy.network == AgentNetwork::None || enforcement.model_endpoints_only)
             && !matches!(remote, SandboxRemote::Loopback(_))
         {
             let hosts = model_hosts(launch, &account.reach)?;

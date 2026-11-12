@@ -77,6 +77,8 @@ test("the app Metrics page covers every project on the engine and filters by pro
   assert.match(markup, /<label for="mx-project" class="visually-hidden">Project<\/label><select id="mx-project"/);
   assert.deepEqual([...markup.matchAll(/<option value="([^"]*)"[^>]*>([^<]*)</gu)].map((match) => [match[1], match[2]]), [["", "All projects"], ["alpha", "Alpha"], ["beta", "Beta"]]);
   assert.match(text(markup), /2 projects · Updating · provider-reported usage per turn/);
+  const headings = [...markup.matchAll(/<h2>([^<]*)<\/h2>/gu)].map((match) => match[1]);
+  assert.equal(headings.at(-1), "Go/no-go scorecard", `the scorecard ends the page: ${headings}`);
 });
 
 test("all projects shows the same tiles, and By project lists each project with its agents and runs first", () => {
@@ -195,6 +197,7 @@ test("the project tab keeps its own page: no old-counting notice and no Account 
   assert.doesNotMatch(words, /old counting/);
   assert.doesNotMatch(words, /Account limits/);
   assert.doesNotMatch(words, /Check limits now/);
+  assert.doesNotMatch(words, /scorecard/i, "the scorecard scores the engine, so only the app page has it");
 });
 
 test("Account limits has Check limits now, a meter and the clock time of each reset", () => {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import type { Result } from "../../api";
 import {
   NOT_ATTACHED_LINE, TICKET_EFFECT_LINE, TICKET_SETTINGS_STALE_LINE, belowLabel, canUseAppDefault, checkedPage, draftOf, draftValue,
@@ -6,41 +6,44 @@ import {
 } from "../../api-ticket-settings";
 import type { KeyDraft, TicketKey, TicketScope, TicketSettingRow, TicketSettingsPage } from "../../api-ticket-settings";
 import { useLoad, type Loaded } from "../../state";
-import { Button, LoadError, Notice, NotReady, Panel, RadioCard, Skeleton, TextField } from "../../ui";
-import "./tickets.css";
+import { Button, LoadError, Notice, NotReady, RadioCard, SettingLine, SettingSection, Skeleton, TextField } from "../../ui";
 
-/** What one setting's choices need: the row, the page's scope, its draft and the change
- * handler. */
+/** What one setting's choices need: the row, the page's scope, its draft, whether a save is
+ * running and the change handler. */
 export interface TicketKeyFieldProps {
   row: TicketSettingRow;
   scope: TicketScope;
   draft: KeyDraft;
+  busy: boolean;
   onDraft: (draft: KeyDraft) => void;
 }
 
-/** One ticket setting: its label and help, then the value below, every option and, for the
- * cycle length, a custom number of days, each with one line saying what it does. Input: the
- * field props. Output: the fieldset. */
-export function TicketKeyField({ row, scope, draft, onDraft }: TicketKeyFieldProps) {
+/** One ticket setting as a Settings line: its label, marked when the choice differs from the
+ * value below, and help, then the value below, every option and, for the cycle length, a
+ * custom number of days, each with one line saying what it does. Input: the field props.
+ * Output: the line. */
+export function TicketKeyField({ row, scope, draft, busy, onDraft }: TicketKeyFieldProps) {
   const name = `ts-${row.key}`;
   const text = keyText(row.key);
   const checked = draftValue(row, draft);
-  return <fieldset className="stack ts-key" aria-describedby={`${name}-help`}>
-    <legend className="ts-label">{text.label}</legend>
-    <p id={`${name}-help`} className="helper">{text.help}</p>
-    <RadioCard name={name} value="below" checked={draft.kind === "below"} onChecked={() => onDraft({ kind: "below" })}
-      title={belowLabel(row, scope)} details={[optionText(row.key, row.below).line]} />
-    {row.options.map((option) => {
-      const words = optionText(row.key, option);
-      return <RadioCard key={String(option)} name={name} value={String(option)} checked={draft.kind === "option" && draft.value === option}
-        onChecked={() => onDraft({ kind: "option", value: option })} title={words.label} details={[words.line]} />;
-    })}
-    {row.custom && <RadioCard name={name} value="custom" checked={draft.kind === "custom"}
-      onChecked={() => onDraft({ kind: "custom", text: draft.kind === "custom" ? draft.text : "" })}
-      title="Custom" details={[`Pick any length from ${row.custom.min} to ${row.custom.max} days.`]} />}
+  const changed = "value" in checked && checked.value !== null && checked.value !== row.below;
+  return <SettingLine wide label={text.label} help={<span id={`${name}-help`}>{text.help}</span>} changed={changed}>
+    <fieldset className="field" disabled={busy} aria-describedby={`${name}-help`}>
+      <legend className="visually-hidden">{text.label}</legend>
+      <RadioCard name={name} value="below" checked={draft.kind === "below"} onChecked={() => onDraft({ kind: "below" })}
+        title={belowLabel(row, scope)} details={[optionText(row.key, row.below).line]} />
+      {row.options.map((option) => {
+        const words = optionText(row.key, option);
+        return <RadioCard key={String(option)} name={name} value={String(option)} checked={draft.kind === "option" && draft.value === option}
+          onChecked={() => onDraft({ kind: "option", value: option })} title={words.label} details={[words.line]} />;
+      })}
+      {row.custom && <RadioCard name={name} value="custom" checked={draft.kind === "custom"}
+        onChecked={() => onDraft({ kind: "custom", text: draft.kind === "custom" ? draft.text : "" })}
+        title="Custom" details={[`Pick any length from ${row.custom.min} to ${row.custom.max} days.`]} />}
+    </fieldset>
     {draft.kind === "custom" && <TextField id={`${name}-custom`} label="Days" inputMode="numeric" value={draft.text}
       onValue={(text) => onDraft({ kind: "custom", text })} error={"problem" in checked ? checked.problem : undefined} />}
-  </fieldset>;
+  </SettingLine>;
 }
 
 /** Everything a ticket settings page shows and the actions it offers, without engine calls. */
@@ -57,28 +60,36 @@ export interface TicketSettingsViewProps {
   onRetry: () => void;
 }
 
-/** One scope's ticket settings as a pure view of the read: when changes apply, every
- * setting with its choices, Save once something changed and, on a project page that sets a
- * key, "Use app default". A project without tickets says so. Input: the view props. Output:
- * the page body. */
+/** One scope's ticket settings as a pure view of the read, in the Settings section parts: the
+ * Ticket rules section saying when changes apply, every setting with its choices, then Save
+ * changes, enabled once something changed, and, on a project page that sets a key, "Use app
+ * default". A project without tickets says so. Input: the view props. Output: the page body. */
 export function TicketSettingsView(props: TicketSettingsViewProps) {
   const { page, scope, projectId, drafts, busy, note } = props;
-  if (page.kind === "loading") return <Skeleton shape="card" />;
-  if (page.kind === "not_ready") return <NotReady what="Ticket settings" compact />;
+  if (page.kind === "loading") return <Skeleton shape="line" count={4} />;
+  if (page.kind === "not_ready") return <NotReady what="Ticket settings" />;
   if (page.kind === "error" && page.code === "project_not_attached") return <Notice tone="info">{NOT_ATTACHED_LINE}</Notice>;
   if (page.kind === "error") return <LoadError message={ticketSettingsRefusal(page)} onRetry={props.onRetry} />;
   assert((scope === "app") === (projectId === null), "only a project page names a project");
   const value = checkedPage(page.value, projectId);
-  return <div className="stack ts-page">
-    <p className="small muted">{TICKET_EFFECT_LINE}{scope === "project" ? " A value set here wins over the app value for this project only." : ""}</p>
-    {value.keys.map((row) => <TicketKeyField key={row.key} row={row} scope={scope} draft={drafts[row.key] ?? draftOf(row)}
-      onDraft={(draft) => props.onDraft(row.key, draft)} />)}
-    <span className="row">
-      {draftsChanged(value.keys, drafts) && <Button variant="primary" size="small" pending={busy} pendingLabel="Saving..." onClick={props.onSave}>Save</Button>}
-      {scope === "project" && canUseAppDefault(value) && <Button variant="quiet" size="small" disabled={busy} onClick={props.onUseAppDefault}>Use app default</Button>}
-    </span>
-    {note && <p className="helper ts-note" role="status">{note}</p>}
-  </div>;
+  const changed = draftsChanged(value.keys, drafts);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (changed && !busy) props.onSave();
+  }
+  return <form className="pj set-groups" aria-label="Ticket settings" noValidate onSubmit={submit}>
+    <SettingSection title="Ticket rules" about={`${TICKET_EFFECT_LINE}${scope === "project" ? " A value set here wins over the app value for this project only." : ""}`}>
+      {value.keys.map((row) => <TicketKeyField key={row.key} row={row} scope={scope} draft={drafts[row.key] ?? draftOf(row)} busy={busy}
+        onDraft={(draft) => props.onDraft(row.key, draft)} />)}
+      <div className="set-body">
+        {note && <p className="helper" role="status">{note}</p>}
+        <span className="row">
+          <Button type="submit" variant="primary" disabled={!changed} pending={busy} pendingLabel="Saving...">Save changes</Button>
+          {scope === "project" && canUseAppDefault(value) && <Button variant="quiet" disabled={busy} onClick={props.onUseAppDefault}>Use app default</Button>}
+        </span>
+      </div>
+    </SettingSection>
+  </form>;
 }
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -130,10 +141,16 @@ export function TicketSettingsPanel({ projectId }: { projectId: string | null })
     onSave={save} onUseAppDefault={useAppDefault} onRetry={reload} />;
 }
 
-/** Settings, Tickets: the ticket settings every project starts from. Output: the panel. */
+const TICKETS_TOP = <div className="settings-top"><div>
+  <h2>Tickets</h2>
+  <p>The ticket settings every project with tickets starts from, until a project sets its own in Project Settings, Tickets.</p>
+</div></div>;
+
+/** Settings, Tickets: the title in every state, then the ticket settings every project starts
+ * from. Output: the tab. */
 export function TicketSettings() {
-  return <Panel title="Tickets">
-    <p className="secondary">These values apply to every project with tickets until a project sets its own in Project Settings, Tickets.</p>
+  return <div className="stack">
+    {TICKETS_TOP}
     <TicketSettingsPanel projectId={null} />
-  </Panel>;
+  </div>;
 }
