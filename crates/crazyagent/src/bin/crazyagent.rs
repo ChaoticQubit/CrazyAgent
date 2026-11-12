@@ -1038,7 +1038,7 @@ async fn offer_restart(
     service.stop().map_err(|e| e.to_string())?;
     let since = crazyagent::service::log_length(layout);
     service.start().map_err(|e| e.to_string())?;
-    crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
+    crazyagent::service::wait_started(layout, service, crazyagent::service::READY_TIMEOUT, since)
         .await
         .map_err(|e| e.to_string())?;
     match crazyagent::service::check_engine(
