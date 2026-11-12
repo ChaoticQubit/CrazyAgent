@@ -2998,6 +2998,21 @@ pub fn cancel_reason(by: Option<CancelBy>, path: CancelPath) -> &'static str {
 pub const OWNER_STOPPED_TEAM: &str = "You stopped the team";
 /// The activity line of the owner's start of a stopped team again (F17 audit).
 pub const OWNER_RESUMED_TEAM: &str = "You started the team again";
+/// The most bytes a queued task's wait reason keeps (F11), as its column's check says.
+pub const WAIT_BYTES_MAX: usize = 300;
+
+/// Says why a task still waits (F11), the one text the master, the desktop and the TUI
+/// show: the reason the engine stored, the pool line for a task without a pool, or the
+/// queue line before any dispatch pass looked at it. Takes the task's status and stored
+/// reason. Returns the line, None for a task that no longer waits.
+pub fn wait_line(status: TaskStatus, wait: Option<&str>) -> Option<String> {
+    match (status, wait) {
+        (TaskStatus::NeedsPool, _) => Some(events::WAIT_NEEDS_POOL.to_owned()),
+        (TaskStatus::Queued, Some(wait)) => Some(events::one_line(wait, WAIT_BYTES_MAX)),
+        (TaskStatus::Queued, None) => Some(events::WAIT_UNSEEN.to_owned()),
+        _ => None,
+    }
+}
 /// The longest task title an owner action line quotes.
 const AUDIT_TITLE_BYTES_MAX: usize = 80;
 
@@ -3352,6 +3367,10 @@ pub struct TeamTask {
     pub finished_ms: Option<i64>,
     #[serde(default)]
     pub parent: Option<i64>,
+    /// Why the task still waits (F11), only while it is queued: which cap, account or agent
+    /// it waits for. None when it runs, ended, or no reason was stored yet.
+    #[serde(default)]
+    pub wait: Option<String>,
 }
 
 /// One entry of the team conversation between owner, master and engine.
@@ -3551,7 +3570,7 @@ pub(crate) const AGENT_COLUMNS: &str = "id,role,harness,tools,connection,worktre
 /// A task a project's conversation master handed off is stored as the owner's own (DEC-093),
 /// so the team plan and history treat it like one, but reads as the master's, so the Agents
 /// tab, Team view and TUI say it came from the master.
-pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms,parent";
+pub(crate) const TASK_COLUMNS: &str = "id,CASE WHEN EXISTS (SELECT 1 FROM team_conversation_tasks c WHERE c.task=team_tasks.id) THEN 'master' ELSE source END,harness,tools,prompt,status,agent,attempts,result,error,delivered,output_bytes,created_ms,started_ms,finished_ms,parent,CASE WHEN status='queued' THEN wait END";
 
 pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
     let source: String = row.get(1)?;
@@ -3575,6 +3594,7 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
         started_ms: row.get(13)?,
         finished_ms: row.get(14)?,
         parent: row.get(15)?,
+        wait: row.get(16)?,
     })
 }
 
@@ -3815,6 +3835,11 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
             "team_tasks",
             "cancel_by",
             "TEXT CHECK(cancel_by IS NULL OR cancel_by IN ('task','all'))",
+        ),
+        (
+            "team_tasks",
+            "wait",
+            "TEXT CHECK(wait IS NULL OR length(CAST(wait AS BLOB)) <= 300)",
         ),
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),

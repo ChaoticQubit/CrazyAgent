@@ -106,6 +106,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         started_ms: None,
         finished_ms: None,
         parent: None,
+        wait: None,
     }
 }
 

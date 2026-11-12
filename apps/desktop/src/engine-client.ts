@@ -802,6 +802,7 @@ export interface TeamTask {
   started_ms: number | null;
   finished_ms: number | null;
   parent?: number | null;
+  wait?: string | null;
 }
 
 export interface TeamMessage {

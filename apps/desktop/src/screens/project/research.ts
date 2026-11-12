@@ -234,12 +234,30 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     to: (item.agent !== null ? names.get(item.agent) : undefined) ?? harnessLabel(item.harness),
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
-    summary: item.problem ?? (item.result !== null ? resultSummary(item.result) : ""),
+    summary: item.problem ?? (WAITING.includes(item.status) ? waitLine(item) : item.result !== null ? resultSummary(item.result) : ""),
     result: item.result,
     elapsed: item.started_ms !== null ? elapsed((item.finished_ms ?? now) - item.started_ms) : "",
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** Says why a waiting task waits (F11): the reason the engine stored, such as which cap, account
+ * or agent it waits for, or the pool or queue line when none was stored yet. Input: the task.
+ * Output: the line. */
+export function waitLine(task: Pick<TeamStatus["tasks"][number], "status" | "wait">): string {
+  if (task.status === "needs_pool") return "Waits for an account pool for this project";
+  return task.wait ?? "Waits for its turn in the queue";
+}
+
+/** The agent limits of a team as one read-only line for the Team view (F11): the team plan's
+ * sub-agents at once and per harness, Max harnesses per project and Max teammates per harness.
+ * Inputs: the team status and a harness namer. Output: the line. */
+export function teamLimitsLine(status: Pick<TeamStatus, "max_agents" | "harnesses" | "max_harnesses" | "max_teammates">, harnessLabel: (id: string) => string): string {
+  const cap = (value: number | null | undefined) => (value == null ? "No limit" : String(value));
+  const slots = status.harnesses.filter((item) => item.role === "sub").map((item) => `${harnessLabel(item.harness)} ${item.agents_max}`);
+  const perHarness = slots.length > 0 ? slots.join(", ") : "any harness that can run";
+  return `Limits: ${Math.max(status.max_agents - 1, 0)} sub-agents at once (${perHarness}). Max harnesses per project: ${cap(status.max_harnesses)}. Max teammates per harness: ${cap(status.max_teammates)}.`;
 }
 
 /** Names who handed a task out, as "From Grace (@lead-b)" for the lead that started it, "From a

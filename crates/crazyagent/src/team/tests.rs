@@ -7139,3 +7139,198 @@ fn a_cancel_left_running_at_close_names_the_owner_request_at_the_next_start() {
         ]
     );
 }
+
+/// F11: each waiting task carries why it waits, in one text for every client: the pool line,
+/// the stored reason, or the queue line before dispatch looked at it; a running task none.
+#[test]
+fn a_waiting_task_says_why_it_waits_in_one_text_for_every_client() {
+    assert_eq!(
+        wait_line(TaskStatus::NeedsPool, Some("stale")).as_deref(),
+        Some(events::WAIT_NEEDS_POOL)
+    );
+    assert_eq!(
+        wait_line(TaskStatus::Queued, None).as_deref(),
+        Some(events::WAIT_UNSEEN)
+    );
+    assert_eq!(
+        wait_line(TaskStatus::Queued, Some("Waits:  codex\nis not installed")).as_deref(),
+        Some("Waits: codex is not installed")
+    );
+    let long = "x".repeat(WAIT_BYTES_MAX * 2);
+    assert!(wait_line(TaskStatus::Queued, Some(&long)).unwrap().len() <= WAIT_BYTES_MAX + 3);
+    for status in [
+        TaskStatus::Running,
+        TaskStatus::Done,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+    ] {
+        assert_eq!(wait_line(status, Some("stale")), None, "{status:?}");
+    }
+}
+
+/// F11: the runtime stores why a queued task waits and the clients read it: an account the
+/// harness cannot start on, then a team the owner stopped; the reason clears once the task
+/// leaves the queue.
+#[test]
+fn the_runtime_stores_why_a_queued_task_waits_and_the_team_status_shows_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-waits",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.folder = folder.to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-waits", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Delegate {
+                project_id: project.clone(),
+                harness: None,
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    let wait = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        assert_eq!(team.tasks.len(), 1);
+        (team.tasks[0].status, team.tasks[0].wait.clone())
+    };
+    team.tick().unwrap();
+    assert_eq!(
+        wait(&connection),
+        (
+            TaskStatus::Queued,
+            Some("Waits: codex is not installed".to_owned())
+        )
+    );
+    let told = events::status(&connection, &project).unwrap().text();
+    assert!(
+        told.contains("Tasks waiting to start, oldest first:\n- task 1 \"Write page.md\": Waits: codex is not installed\n"),
+        "{told}"
+    );
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Pause {
+                project_id: project.clone(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    team.tick().unwrap();
+    assert_eq!(
+        wait(&connection),
+        (
+            TaskStatus::Queued,
+            Some("Waits until you start the team again".to_owned())
+        )
+    );
+    connection
+        .execute("UPDATE team_tasks SET status='failed'", [])
+        .unwrap();
+    assert_eq!(
+        wait(&connection),
+        (TaskStatus::Failed, None),
+        "only a waiting task shows a wait"
+    );
+    team.shutdown().unwrap();
+}
+
+/// F11: the master reads the agent limits the owner set, read only, with No limit for an
+/// unset cap, and each waiting task with its reason, oldest first; a lead never sees
+/// another lead's waiting tasks.
+#[test]
+fn the_master_reads_the_owner_s_agent_limits_and_each_waiting_task() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-limits");
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::MaxHarnesses {
+            project_id: project.clone(),
+            max: Some(4),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write login.md".into(),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write signup.md".into(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.execute(
+        "UPDATE team_tasks SET wait='Waits for a free codex slot: the team plan runs 1 at once and 1 run now' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    tx.execute("UPDATE team_tasks SET status='needs_pool' WHERE id=2", [])
+        .unwrap();
+    tx.commit().unwrap();
+    let read = events::status(&connection, &project).unwrap();
+    assert_eq!(
+        read.limits.as_deref(),
+        Some(
+            "Limits the owner sets (read only; ask the owner to change them): team plan 3 sub-agents at once, per harness: codex 1; Max harnesses per project: 4; Max teammates per harness: No limit."
+        )
+    );
+    assert_eq!(
+        read.queued
+            .iter()
+            .map(|queued| queued.line.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "- task 1 \"Write login.md\": Waits for a free codex slot: the team plan runs 1 at once and 1 run now",
+            "- task 2 \"Write signup.md\": Waits for an account pool for this project",
+        ]
+    );
+    let text = read.text();
+    assert!(text.contains(read.limits.as_deref().unwrap()), "{text}");
+    assert!(text.contains(&read.queued[1].line), "{text}");
+}

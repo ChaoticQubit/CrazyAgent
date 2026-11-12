@@ -3427,6 +3427,14 @@ impl TeamView {
                 if task.attempts > 1 {
                     rows.push(entry("Tries", task.attempts.to_string()));
                 }
+                if let Some(wait) = crate::team::wait_line(task.status, task.wait.as_deref()) {
+                    rows.extend(
+                        wrap_words(&wait, content)
+                            .into_iter()
+                            .take(PANEL_TEXT_LINES)
+                            .map(|line| Row::of(line, look.muted)),
+                    );
+                }
                 match (&task.result, &task.problem) {
                     (Some(result), _) if task.status == TaskStatus::Done => {
                         rows.push(entry("Result", title(result)));

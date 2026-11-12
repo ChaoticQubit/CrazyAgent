@@ -2705,11 +2705,13 @@ impl TeamRuntime {
         }
         if super::paused(&self.connection, project)? {
             self.hold(project);
+            self.wait_all(project, WAIT_TEAM_STOPPED)?;
             return Ok(());
         }
         if crate::projects_home::move_holds(&self.connection, &stored.project_folder())
             .map_err(error)?
         {
+            self.wait_all(project, WAIT_FOLDER_MOVE)?;
             return Ok(());
         }
         let paused = self.paused(project)?;
@@ -3088,10 +3090,143 @@ impl TeamRuntime {
     /// while the project runs fewer harnesses than Max harnesses per project. Takes the
     /// project, the lead, if any, and the harness cap. Returns true when the cap is reached.
     fn capped(&self, project: &ProjectId, lead: Option<i64>, harness_cap: Option<u8>) -> bool {
+        self.cap_wait(project, lead, harness_cap).is_some()
+    }
+
+    /// Says which agent cap holds one more agent back (F11): the lead's Max teammates per
+    /// harness in both modes, or Max harnesses per project for any other agent. Takes the
+    /// project, the lead, if any, and the harness cap. Returns the plain reason, or None.
+    fn cap_wait(
+        &self,
+        project: &ProjectId,
+        lead: Option<i64>,
+        harness_cap: Option<u8>,
+    ) -> Option<String> {
         match lead {
-            Some(lead) => super::caps::admit_sub_agent(&self.connection, project, lead).is_err(),
-            None => self.harnesses_full(project, harness_cap),
+            Some(lead) => super::caps::admit_sub_agent(&self.connection, project, lead)
+                .err()
+                .map(|reason| format!("Waits: {reason}")),
+            None => self.harnesses_full(project, harness_cap).then(|| {
+                let cap = harness_cap.expect("only a set cap is full");
+                format!("Waits under Max harnesses per project: at most {cap} run at once")
+            }),
         }
+    }
+
+    /// Says why a queued task cannot start or wake an agent now for lack of room (F11): its
+    /// harness slot of the team plan, the plan's sub-agent total, an owner cap, or the
+    /// project's terminals when a new agent needs one. Takes the project and the room asked
+    /// for. Returns the plain reason with the numbers, or None when there is room.
+    fn room_wait(&self, project: &ProjectId, room: &Room<'_>) -> Option<String> {
+        let live = self.live(project, AgentRole::Sub, Some(room.harness));
+        if live >= usize::from(room.slot) {
+            return Some(format!(
+                "Waits for a free {} slot: the team plan runs {} at once and {live} run now",
+                room.harness, room.slot
+            ));
+        }
+        let subs = self.live(project, AgentRole::Sub, None);
+        if subs >= room.subs_max {
+            return Some(format!(
+                "Waits for a free sub-agent slot: the team plan runs {} sub-agents at once and {subs} run now",
+                room.subs_max
+            ));
+        }
+        if let Some(reason) = self.cap_wait(project, room.lead, room.harness_cap) {
+            return Some(reason);
+        }
+        if room.terminals && self.panes(project) >= PANES_PER_PROJECT_MAX {
+            return Some(format!(
+                "Waits for a free terminal: the project runs {PANES_PER_PROJECT_MAX} agents, the most at once"
+            ));
+        }
+        None
+    }
+
+    /// Picks the account a queued task's agent starts on, as `account_for` does, and stores
+    /// why the task waits when none can take it now (F11): the pool's own reason, or the
+    /// sign-in check after a restart. Takes the access, the project, the harness, the paused
+    /// accounts and the task. Returns the account, None while the task waits, or a SQLite
+    /// failure.
+    fn account_or_wait(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+        task: i64,
+    ) -> Result<Option<TeamAccount>, EngineError> {
+        match self.account_for(access, project, harness, paused) {
+            Ok(Some(account)) => Ok(Some(account)),
+            Ok(None) => {
+                self.wait(task, WAIT_SIGN_IN_CHECK)?;
+                Ok(None)
+            }
+            Err(reason) => {
+                self.wait(task, &format!("Waits: {reason}"))?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Stores why a queued task waits (F11), bounded, and only when the reason changed, so a
+    /// task waiting for many ticks writes once. Only a queued task keeps a reason. Takes the
+    /// task and the reason. Returns any SQLite failure.
+    fn wait(&self, task: i64, reason: &str) -> Result<(), EngineError> {
+        let reason = bound_text(reason, super::WAIT_BYTES_MAX);
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE id=?1 AND status='queued' AND wait IS NOT ?2",
+                params![task, reason],
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// Stores one reason on every queued task of a project that waits for the whole team
+    /// (F11): a Stop all or a folder move. Takes the project and the reason. Returns any
+    /// SQLite failure.
+    fn wait_all(&self, project: &ProjectId, reason: &str) -> Result<(), EngineError> {
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND wait IS NOT ?2",
+                params![project.as_str(), bound_text(reason, super::WAIT_BYTES_MAX)],
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// Stores why the queued tasks dispatch does not look at this tick wait (F11): tasks
+    /// whose stopped run waits in Recovery, and tasks behind the `DISPATCH_TASKS_MAX` it
+    /// reads. Takes the project and the tasks it read. Returns any SQLite failure.
+    fn wait_beyond_dispatch(
+        &self,
+        project: &ProjectId,
+        read: &[QueuedTask],
+    ) -> Result<(), EngineError> {
+        assert!(read.len() <= DISPATCH_TASKS_MAX as usize);
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND wait IS NOT ?2
+                 AND id IN (SELECT task FROM recovery_runs WHERE task IS NOT NULL
+                     AND state IN ('stopped','interrupted','resuming','failed'))",
+                params![project.as_str(), WAIT_RECOVERY],
+            )
+            .map_err(error)?;
+        if read.len() < DISPATCH_TASKS_MAX as usize {
+            return Ok(());
+        }
+        let last = read.last().expect("a full read has a last task").0;
+        let behind = format!("Waits behind {DISPATCH_TASKS_MAX} earlier tasks");
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND id>?3
+                 AND wait IS NOT ?2 AND id NOT IN (SELECT task FROM recovery_runs
+                     WHERE task IS NOT NULL AND state IN ('stopped','interrupted','resuming','failed'))",
+                params![project.as_str(), behind, last],
+            )
+            .map_err(error)?;
+        Ok(())
     }
 
     /// Counts a project's agents that may still hold a terminal, stopping ones included.
@@ -5429,11 +5564,11 @@ impl TeamRuntime {
                      WHERE t.project=?1 AND t.status='queued' AND t.id NOT IN (
                          SELECT task FROM recovery_runs WHERE task IS NOT NULL
                          AND state IN ('stopped','interrupted','resuming','failed'))
-                     ORDER BY t.id LIMIT 64",
+                     ORDER BY t.id LIMIT ?2",
                 )
                 .map_err(error)?;
             statement
-                .query_map([project.as_str()], |row| {
+                .query_map(params![project.as_str(), DISPATCH_TASKS_MAX], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -5456,6 +5591,7 @@ impl TeamRuntime {
             .collect();
         let reuse = super::reuse_idle(&self.connection, project)? == super::ReuseIdle::On
             || super::keep_warm(&self.connection, project)?;
+        self.wait_beyond_dispatch(project, &queued)?;
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -5500,7 +5636,10 @@ impl TeamRuntime {
             let mut woken_fresh = false;
             let agent = match (idle, pin) {
                 (Some(agent), _) => agent,
-                (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
+                (None, Some(pinned)) if self.workers.contains_key(&pinned) => {
+                    self.wait(task, WAIT_OWN_AGENT)?;
+                    continue;
+                }
                 (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
                     let ran: bool = self
                         .connection
@@ -5512,6 +5651,8 @@ impl TeamRuntime {
                         .map_err(error)?;
                     if by_master && !ran {
                         self.fail_task(task, OWNER_STOPPED_TASK)?;
+                    } else {
+                        self.wait(task, WAIT_OWNER_STOPPED)?;
                     }
                     continue;
                 }
@@ -5520,14 +5661,20 @@ impl TeamRuntime {
                         self.fail_task(task, reason)?;
                         continue;
                     }
-                    if self.live(project, AgentRole::Sub, Some(&harness))
-                        >= usize::from(slot.agents)
-                        || self.live(project, AgentRole::Sub, None) >= subs_max
-                        || self.capped(project, parent, harness_cap)
-                    {
+                    let room = Room {
+                        harness: &harness,
+                        slot: slot.agents,
+                        subs_max,
+                        lead: parent,
+                        harness_cap,
+                        terminals: false,
+                    };
+                    if let Some(reason) = self.room_wait(project, &room) {
+                        self.wait(task, &reason)?;
                         continue;
                     }
-                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    let Some(account) =
+                        self.account_or_wait(access, project, &harness, paused, task)?
                     else {
                         continue;
                     };
@@ -5567,11 +5714,16 @@ impl TeamRuntime {
                     let slot_full = self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents);
                     let cap_full = self.capped(project, parent, harness_cap);
-                    if slot_full
-                        || cap_full
-                        || self.live(project, AgentRole::Sub, None) >= subs_max
-                        || self.panes(project) >= PANES_PER_PROJECT_MAX
-                    {
+                    let room = Room {
+                        harness: &harness,
+                        slot: slot.agents,
+                        subs_max,
+                        lead: parent,
+                        harness_cap,
+                        terminals: true,
+                    };
+                    if let Some(reason) = self.room_wait(project, &room) {
+                        self.wait(task, &reason)?;
                         if !reuse {
                             let counted = |w: &Worker| {
                                 (!slot_full || w.harness == harness)
@@ -5581,7 +5733,8 @@ impl TeamRuntime {
                         }
                         continue;
                     }
-                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    let Some(account) =
+                        self.account_or_wait(access, project, &harness, paused, task)?
                     else {
                         continue;
                     };
@@ -5600,7 +5753,10 @@ impl TeamRuntime {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
                         }
-                        Start::Held => continue,
+                        Start::Held => {
+                            self.wait(task, WAIT_FOLDER_MOVE)?;
+                            continue;
+                        }
                         Start::Refused(problem) => {
                             self.fail_task(
                                 task,
@@ -5618,7 +5774,10 @@ impl TeamRuntime {
             let grant = if self.workers[&agent].managed && !handed {
                 match self.grant(access, agent, project) {
                     Ok(Some(grant)) => Some(grant),
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        self.wait(task, WAIT_PROFILE_HELD)?;
+                        continue;
+                    }
                     Err(reason) => {
                         let worker = self.workers.get_mut(&agent).expect("worker exists");
                         worker.stopping = true;
@@ -5728,7 +5887,7 @@ impl TeamRuntime {
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
-                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
+                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
@@ -10729,6 +10888,19 @@ const OWN_TURN_TASK: &str =
 const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+/// The most queued tasks of a project dispatch reads in one tick; later ones wait behind.
+const DISPATCH_TASKS_MAX: i64 = 64;
+/// Why a queued task waits (F11), each on the task while it waits: for its own agent, busy
+/// or stopping now; for the owner to start its stopped agent again; for a signed-in
+/// account's profile another turn holds; for the sign-in check after a restart; while the
+/// project folder moves; for its stopped run in Recovery; for a stopped team.
+const WAIT_OWN_AGENT: &str = "Waits for its own agent, which is busy or stopping now";
+const WAIT_OWNER_STOPPED: &str = "Waits for you to start its agent again";
+const WAIT_PROFILE_HELD: &str = "Waits for its account's sign-in, which another turn holds now";
+const WAIT_SIGN_IN_CHECK: &str = "Waits for the pool's sign-in check after the restart";
+const WAIT_FOLDER_MOVE: &str = "Waits while the project folder moves";
+const WAIT_RECOVERY: &str = "Waits in Recovery: its stopped run must be resumed or dropped first";
+const WAIT_TEAM_STOPPED: &str = "Waits until you start the team again";
 const MASTER_STOPPED_TASK: &str = "The master stopped this sub-agent before it finished this task.";
 const LEAD_STOPPED_TASK: &str = "Its lead stopped this sub-agent before it finished this task.";
 const INSTRUCTIONS_WAIT_FOR_ROOM: &str = "The message just typed into the live master left no room for your instruction change, so a later message carries it; it applies in full when the master starts again.";
@@ -11051,6 +11223,19 @@ fn conversation_note(ended: &EndedTask) -> String {
 }
 
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+
+/// The room a queued task asks for (F11): its harness and the plan's slot for it, the plan's
+/// sub-agent total, its lead and the owner's harness cap, and whether a new terminal is
+/// needed, as `room_wait` checks them.
+struct Room<'a> {
+    harness: &'a str,
+    slot: u8,
+    subs_max: usize,
+    lead: Option<i64>,
+    harness_cap: Option<u8>,
+    terminals: bool,
+}
+
 /// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
 /// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
 /// the master asked for the lead that takes it.
