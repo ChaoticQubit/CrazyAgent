@@ -54,7 +54,8 @@ CREATE INDEX IF NOT EXISTS search_vector_pending_next ON search_vector_pending(p
 CREATE INDEX IF NOT EXISTS search_vector_pending_scope ON search_vector_pending(project, source, dropped);
 CREATE TABLE IF NOT EXISTS search_vector_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    plugin_key TEXT NOT NULL CHECK (length(plugin_key) BETWEEN 1 AND 128)
+    plugin_key TEXT NOT NULL CHECK (length(plugin_key) BETWEEN 1 AND 128),
+    refill_after INTEGER CHECK (refill_after IS NULL OR refill_after >= 0)
 );
 CREATE TABLE IF NOT EXISTS search_query_vectors (
     plugin_key TEXT NOT NULL CHECK (length(plugin_key) BETWEEN 1 AND 128),
@@ -181,26 +182,55 @@ fn triggers_found(connection: &Connection) -> Result<usize, EngineError> {
     Ok(found as usize)
 }
 
-/// Brings the vectors in line with the plugin key before a round: when the stored key is
-/// another, deletes at most `sweep_rows` of the other keys' vectors, and once none is left
-/// drops their query vectors, queues every chunk with no vector of this key and stores the
-/// key. Inputs: the connection, the plugin key and the most rows one step deletes. Output:
-/// whether the vectors are this key's alone, so the round may embed.
+/// Brings the vectors in line with the plugin key before a round, one bounded step per
+/// call. When the stored key is another, deletes at most `sweep_rows` of the other keys'
+/// vectors and forgets the stored key while any is left, so a switch back requeues what was
+/// deleted (rv-code2 HYB-M1); once none is left, drops their query vectors and starts a
+/// refill. A refill step requeues the next `sweep_rows` chunks by id that have no vector of
+/// the key. Inputs: the connection, the plugin key and the step bound. Output: whether the
+/// vectors are this key's alone and every chunk without one is queued, so the round may embed.
 fn settle(connection: &mut Connection, key: &str, sweep_rows: usize) -> Result<bool, EngineError> {
     assert!(!key.is_empty() && key.len() <= KEY_BYTES_MAX);
     assert!((1..=SWEEP_ROUND_MAX).contains(&sweep_rows));
     let tx = immediate(connection)?;
-    let state: Option<String> = tx
+    let state: Option<(String, Option<i64>)> = tx
         .query_row(
-            "SELECT plugin_key FROM search_vector_state WHERE id=1",
+            "SELECT plugin_key, refill_after FROM search_vector_state WHERE id=1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(storage)?;
-    if state.as_deref() == Some(key) {
-        return Ok(true);
-    }
+    let after = match state {
+        Some((stored, None)) if stored == key => return Ok(true),
+        Some((stored, Some(after))) if stored == key => after,
+        _ => {
+            if !drop_other_keys(&tx, key, sweep_rows)? {
+                tx.execute_batch("DELETE FROM search_vector_state;")
+                    .map_err(storage)?;
+                tx.commit().map_err(storage)?;
+                return Ok(false);
+            }
+            tx.execute(
+                "DELETE FROM search_query_vectors WHERE plugin_key <> ?1",
+                [key],
+            )
+            .map_err(storage)?;
+            0
+        }
+    };
+    let done = refill_step(&tx, key, after, sweep_rows)?;
+    tx.commit().map_err(storage)?;
+    Ok(done)
+}
+
+/// Deletes at most `sweep_rows` vectors of keys other than `key`. Inputs: the transaction,
+/// the key and the bound. Output: whether no vector of another key is left.
+fn drop_other_keys(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    sweep_rows: usize,
+) -> Result<bool, EngineError> {
     let mut deleted = 0;
     for side in ["<", ">"] {
         let left = sweep_rows - deleted;
@@ -223,33 +253,52 @@ fn settle(connection: &mut Connection, key: &str, sweep_rows: usize) -> Result<b
             |row| row.get(0),
         )
         .map_err(storage)?;
-    if others {
-        tx.commit().map_err(storage)?;
-        return Ok(false);
-    }
+    Ok(!others)
+}
+
+/// Requeues the next `sweep_rows` chunks after `after` by id that have no vector of the
+/// key, clearing their old queue rows and flags, and stores where the refill stands
+/// (rv-code2 N2: the write lock is held for one bounded step). Inputs: the transaction, the
+/// key, the last chunk id done and the bound. Output: whether the refill reached the end.
+fn refill_step(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    after: i64,
+    sweep_rows: usize,
+) -> Result<bool, EngineError> {
+    assert!(after >= 0 && sweep_rows > 0);
+    let end: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM search_chunks WHERE id > ?1 ORDER BY id LIMIT 1 OFFSET ?2",
+            params![after, sweep_rows as i64 - 1],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let upto = end.unwrap_or(i64::MAX);
+    assert!(upto > after);
     tx.execute(
-        "DELETE FROM search_query_vectors WHERE plugin_key <> ?1",
-        [key],
+        "DELETE FROM search_vector_pending WHERE chunk > ?1 AND chunk <= ?2",
+        params![after, upto],
     )
     .map_err(storage)?;
-    tx.execute_batch("DELETE FROM search_vector_pending;")
-        .map_err(storage)?;
     tx.execute(
         "INSERT INTO search_vector_pending(chunk, project, source, at_ms)
          SELECT id, project, source, at_ms FROM search_chunks
-         WHERE NOT EXISTS (SELECT 1 FROM search_vectors
-                           WHERE chunk = search_chunks.id AND plugin_key = ?1)",
-        [key],
+         WHERE id > ?1 AND id <= ?2
+           AND NOT EXISTS (SELECT 1 FROM search_vectors
+                           WHERE chunk = search_chunks.id AND plugin_key = ?3)",
+        params![after, upto, key],
     )
     .map_err(storage)?;
     tx.execute(
-        "INSERT INTO search_vector_state(id, plugin_key) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET plugin_key = excluded.plugin_key",
-        [key],
+        "INSERT INTO search_vector_state(id, plugin_key, refill_after) VALUES (1, ?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET plugin_key = excluded.plugin_key,
+             refill_after = excluded.refill_after",
+        params![key, end],
     )
     .map_err(storage)?;
-    tx.commit().map_err(storage)?;
-    Ok(true)
+    Ok(end.is_none())
 }
 
 /// One call that turns texts into vectors, one per text in order.
@@ -912,8 +961,8 @@ struct LeftOut {
 }
 
 /// Reads what of the places has no vector of the plugin. While the stored plugin key is
-/// another, every chunk of the places counts as still to embed. Inputs: the connection, the
-/// places, the source and the plugin key. Output: the answer.
+/// another or its refill is under way, every chunk of the places counts as still to embed.
+/// Inputs: the connection, the places, the source and the plugin key. Output: the answer.
 fn left_out(
     connection: &Connection,
     scopes: &[Option<&str>],
@@ -922,7 +971,7 @@ fn left_out(
 ) -> Result<LeftOut, EngineError> {
     let state: Option<String> = connection
         .query_row(
-            "SELECT plugin_key FROM search_vector_state WHERE id=1",
+            "SELECT plugin_key FROM search_vector_state WHERE id=1 AND refill_after IS NULL",
             [],
             |row| row.get(0),
         )
