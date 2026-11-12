@@ -44,6 +44,8 @@ const SYSTEM_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// How old the folders of a complete run get before they are probed again.
 pub(crate) const REFRESH_AGE: Duration = Duration::from_secs(300);
+/// The longest a folder run waits after runs that failed or found nothing new.
+pub(crate) const BACKOFF_MAX: Duration = Duration::from_secs(600);
 /// The perl program that starts the login shell in a new session with no terminal, so an
 /// interactive shell can never take over the terminal the engine was started from.
 const NEW_SESSION: &str = "POSIX::setsid() > 0 or exit 1; exec {$ARGV[0]} @ARGV or exit 1";
@@ -172,6 +174,35 @@ impl Probes {
             finished: now,
             complete,
         });
+    }
+}
+
+/// A folder run going on its thread: dropped without [`Running::finish`], such as when the
+/// run panics, it records the run as failed, so the next one can start after its backoff.
+pub(crate) struct Running<'cache> {
+    probes: &'cache Mutex<Probes>,
+    finished: bool,
+}
+
+impl<'cache> Running<'cache> {
+    /// Takes charge of the run [`Probes::start`] marked as going. Input: the cache.
+    /// Output: the guard.
+    pub(crate) fn new(probes: &'cache Mutex<Probes>) -> Self {
+        let _ = probes;
+        unimplemented!("probe Running::new")
+    }
+
+    /// Records the run's folders and whether every probe in it answered.
+    /// Inputs: the folders and the answer.
+    pub(crate) fn finish(self, found: Vec<PathBuf>, complete: bool) {
+        let _ = (found, complete);
+        unimplemented!("probe Running::finish")
+    }
+}
+
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        let _ = (self.probes, self.finished);
     }
 }
 
