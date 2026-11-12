@@ -1998,6 +1998,7 @@ fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_m
         find(&frame(&view, 80, 25), "Left running").contains("Left running  End them"),
         "every setting fits at 80 by 25"
     );
+    let short = frame(&view, 80, 24);
     assert!(find(&short, "more settings").contains("PgDn  more settings below"));
     assert!(
         !short

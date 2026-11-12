@@ -283,6 +283,9 @@ pub(in crate::tui) struct TeamView {
     saving: Option<SetupAction>,
     catalog: Option<Vec<HarnessChoice>>,
     catalog_due: bool,
+    settings_scroll: usize,
+    settings_scroll_max: std::cell::Cell<usize>,
+    settings_window: std::cell::Cell<usize>,
 }
 
 impl TeamView {
@@ -319,6 +322,9 @@ impl TeamView {
             saving: None,
             catalog: None,
             catalog_due: false,
+            settings_scroll: 0,
+            settings_scroll_max: std::cell::Cell::new(0),
+            settings_window: std::cell::Cell::new(0),
         }
     }
 
@@ -794,10 +800,32 @@ impl TeamView {
                 self.alerts = true;
                 TeamReply::Handled
             }
+            KeyCode::PageDown => self.scroll_settings(true),
+            KeyCode::PageUp => self.scroll_settings(false),
             _ => TeamReply::Ignored,
         };
         self.clamp();
         reply
+    }
+
+    /// Moves the settings rows after the first by the rows in view, down or up, after
+    /// clamping the position to the range of the last frame drawn, so a position a resize
+    /// left behind never eats a key press. Takes the direction. Returns Handled, or Ignored
+    /// when nothing scrolls, so the screen can use the key.
+    fn scroll_settings(&mut self, down: bool) -> TeamReply {
+        let max = self.settings_scroll_max.get();
+        self.settings_scroll = self.settings_scroll.min(max);
+        if max == 0 {
+            return TeamReply::Ignored;
+        }
+        let page = self.settings_window.get().max(1);
+        self.settings_scroll = if down {
+            (self.settings_scroll + page).min(max)
+        } else {
+            self.settings_scroll.saturating_sub(page)
+        };
+        assert!(self.settings_scroll <= max);
+        TeamReply::Handled
     }
 
     /// Answers the stop that waits on a key: y sends Stop all or Stop harness, a number
@@ -3147,9 +3175,9 @@ impl TeamView {
     /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
     /// blank rows before the panel and before the tasks go first, then the focused agent's
-    /// Tools and Working copy rows, then the plan line while every harness can run, then the
-    /// settings summary folds toward its first row, so every setting shows while blank rows,
-    /// those panel rows or the plan line can make room.
+    /// Tools and Working copy rows, then the settings rows after the first scroll behind a
+    /// marker row (PgUp and PgDn), then the plan line while every harness can run, once the
+    /// settings can scroll no further. The counts row and the hold rows never scroll.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -3161,8 +3189,9 @@ impl TeamView {
         look: &Look,
     ) -> (Vec<Row>, Help, Option<(usize, usize)>) {
         let wide = content >= WIDE;
-        let mut lines = self.summary(content, look);
+        let (mut lines, packed) = self.summary(content, look);
         let summary_rows = lines.len();
+        assert!(packed >= 1 && packed <= summary_rows);
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
             lines.extend(
@@ -3253,24 +3282,31 @@ impl TeamView {
                 .harnesses
                 .iter()
                 .any(|harness| harness.role == AgentRole::Master);
-        let plan_gives_way = usize::from(plan_can_go && left > 0);
-        let folded = (left - plan_gives_way).min(summary_rows.saturating_sub(1));
+        let hidden = scrolled_rows(packed, left);
+        let won = hidden.saturating_sub(1);
+        let plan_gives_way = usize::from(plan_can_go && left > won);
+        let window = packed - 1 - hidden;
+        assert!(hidden == 0 || window >= 1, "one scrolled row stays in view");
+        assert!(hidden == 0 || spacers == 2, "blank rows go before settings");
         assert!(
-            folded < summary_rows.max(1),
-            "the summary's first row stays"
+            plan_gives_way == 0 || hidden == 0 || window == 1,
+            "the settings scroll before the plan line goes"
         );
-        assert!(folded == 0 || spacers == 2, "blank rows go before settings");
-        assert!(
-            folded == 0 || plan_gives_way == 1 || !plan_can_go,
-            "the plan line goes before settings"
-        );
+        self.settings_scroll_max.set(hidden);
+        self.settings_window.set(window);
         if plan_gives_way == 1 {
             lines.remove(summary_rows);
         }
-        if folded > 0 {
-            lines.drain(1..=folded);
+        if hidden > 0 {
+            let offset = self.settings_scroll.min(hidden);
+            lines.drain(1 + offset + window..packed);
+            lines.drain(1..1 + offset);
+            lines.insert(
+                1 + window,
+                scroll_marker(offset > 0, offset < hidden, content, look),
+            );
         }
-        let fixed = fixed - spacers - briefed - plan_gives_way - folded;
+        let fixed = fixed - spacers - briefed - plan_gives_way - won;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -3388,13 +3424,14 @@ impl TeamView {
     }
 
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting whole,
-    /// right-aligned. Settings wrap in order, or by first fit (a later setting moves up to a row
-    /// with room) when that takes fewer rows, so a short window keeps the plan line. Counts wider
-    /// than the content are cut like any row. Inputs: the content width and the look. Output:
-    /// one row, or more when the settings wrap.
-    fn summary(&self, content: usize, look: &Look) -> Vec<Row> {
+    /// right-aligned, then one row per Left running hold. Settings wrap in order only, so a
+    /// resize or a wider value never moves a setting ahead of an earlier one; a short window
+    /// scrolls them instead. Counts wider than the content are cut like any row. Inputs: the
+    /// content width and the look. Output: the rows and how many of them hold the counts and
+    /// settings, the hold rows after them.
+    fn summary(&self, content: usize, look: &Look) -> (Vec<Row>, usize) {
         let Some(status) = &self.status else {
-            return vec![Row::of("Team", look.accent).pad(content)];
+            return (vec![Row::of("Team", look.accent).pad(content)], 1);
         };
         let count = |wanted: &[AgentStatus]| {
             status
@@ -3578,17 +3615,11 @@ impl TeamView {
             .chain(master_lands)
             .chain(later)
             .collect();
-        let in_order = pack(&items, left.clone(), content, false, look.muted);
-        let first_fit = pack(&items, left, content, true, look.muted);
-        let packed = if first_fit.len() < in_order.len() {
-            first_fit
-        } else {
-            in_order
-        };
-        let mut rows: Vec<Row> = packed
+        let mut rows: Vec<Row> = pack(&items, left, content, look.muted)
             .into_iter()
             .map(|(lead, right)| spread(content, lead, right))
             .collect();
+        let packed = rows.len();
         for hold in status.leftover_holds.iter().take(LEFTOVER_ROWS_MAX) {
             rows.push(
                 Row::of("Left running  ", look.warning)
@@ -3597,7 +3628,8 @@ impl TeamView {
                     .pad(content),
             );
         }
-        rows
+        assert!(packed >= 1 && rows.len() - packed <= LEFTOVER_ROWS_MAX);
+        (rows, packed)
     }
 
     /// The panel under the lists for the focused agent or task. When `brief`, for a short
@@ -4550,18 +4582,11 @@ fn heads(widths: &[usize], names: &[&str], look: &Look) -> Row {
     )
 }
 
-/// Packs the team settings onto summary rows after the counts, each setting whole. In order,
-/// a setting that does not fit starts the next row; first fit puts each setting on the first
-/// row with room for it. Inputs: the settings, the counts, the content width, whether to use
-/// first fit, and the style of the gap between settings. Output: each row's counts part and
-/// settings part, the counts on the first row only.
-fn pack(
-    items: &[Row],
-    counts: Row,
-    content: usize,
-    first_fit: bool,
-    gap: Style,
-) -> Vec<(Row, Row)> {
+/// Packs the team settings onto summary rows after the counts, each setting whole and in
+/// order: a setting that does not fit starts the next row. Inputs: the settings, the counts,
+/// the content width and the style of the gap between settings. Output: each row's counts
+/// part and settings part, the counts on the first row only.
+fn pack(items: &[Row], counts: Row, content: usize, gap: Style) -> Vec<(Row, Row)> {
     let used = |(lead, right): &(Row, Row)| match (lead.width(), right.width()) {
         (0, 0) => 0,
         (0, taken) | (taken, 0) => taken + 2,
@@ -4570,11 +4595,7 @@ fn pack(
     let mut rows = vec![(counts, Row::default())];
     for item in items {
         let fits = |row: &(Row, Row)| used(row) == 0 || used(row) + item.width() <= content;
-        let at = if first_fit {
-            rows.iter().position(fits)
-        } else {
-            rows.last().is_some_and(fits).then(|| rows.len() - 1)
-        };
+        let at = rows.last().is_some_and(fits).then(|| rows.len() - 1);
         let at = at.unwrap_or_else(|| {
             rows.push((Row::default(), Row::default()));
             rows.len() - 1
@@ -4587,6 +4608,35 @@ fn pack(
         };
     }
     rows
+}
+
+/// How many settings rows after the first scroll out of view to win back `over` rows: one
+/// more than `over`, for the marker row, keeping at least one scrolled row in view; none when
+/// that wins no row back. Inputs: the packed rows, the counts row included, and the rows the
+/// window is short by. Output: the rows scrolled out of view.
+fn scrolled_rows(packed: usize, over: usize) -> usize {
+    let hidden = (over + 1).min(packed.saturating_sub(2));
+    if over == 0 || hidden < 2 { 0 } else { hidden }
+}
+
+/// The marker row under scrolled settings, right-aligned like them: the keys that bring more
+/// settings and which way they are. Inputs: whether settings are above and below the view,
+/// the content width and the look. Output: the row.
+fn scroll_marker(above: bool, below: bool, content: usize, look: &Look) -> Row {
+    assert!(
+        above || below,
+        "the marker shows only while settings are out of view"
+    );
+    let (keys, words) = match (above, below) {
+        (true, true) => ("PgUp PgDn", "more settings above and below"),
+        (true, false) => ("PgUp", "more settings above"),
+        (false, _) => ("PgDn", "more settings below"),
+    };
+    spread(
+        content,
+        Row::default(),
+        Row::of(keys, look.accent).push(format!("  {words}"), look.muted),
+    )
 }
 
 fn plan_line(status: &TeamStatus) -> String {
