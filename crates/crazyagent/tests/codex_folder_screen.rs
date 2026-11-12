@@ -268,6 +268,16 @@ fn turn(session: &mut TerminalSession, prompt: &str) -> String {
     panic!("no end of turn for {prompt}: {said:?}");
 }
 
+/// Waits [`MARKER_GRACE`] while reading the pane's events, as the engine's idle loop does,
+/// so a Full access pane keeps following its processes up to its stop and the stop's
+/// lineage check sees no unfollowed gap. Input: the session. Output: none.
+fn grace(session: &mut TerminalSession) {
+    let until = Instant::now() + MARKER_GRACE;
+    while Instant::now() < until {
+        let _ = session.next_event(Duration::from_millis(250)).unwrap();
+    }
+}
+
 fn history_holds(world: &World, prompt: &str) -> bool {
     std::fs::read_to_string(world.home.join("history.jsonl"))
         .is_ok_and(|text| text.contains(prompt))
@@ -406,7 +416,7 @@ fn a_saved_trusted_line_plus_the_entry_starts_nothing_from_a_subfolder_terminal(
         let mut session = terminal(&world, "cf-e", &sub, tools, None);
         let said = turn(&mut session, "does the repository command run");
         assert!(said.contains(REPLY), "{tools}: {said:?}");
-        std::thread::sleep(MARKER_GRACE);
+        grace(&mut session);
         assert!(!marker.exists(), "{tools}: the repository's command ran");
         let stopped = session.stop();
         assert!(stopped.is_ok(), "{tools}: {stopped:?}");
