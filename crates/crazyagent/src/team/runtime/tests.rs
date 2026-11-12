@@ -10317,6 +10317,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 role: None,
                 mode: None,
                 ticket: None,
+                model: None,
             },
         ),
         (
@@ -10366,6 +10367,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 role: None,
                 mode: None,
                 ticket: None,
+                model: None,
             },
         ),
         ("%77", crate::team::tool::Call::InspectWork),
@@ -10384,6 +10386,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 role: None,
                 mode: None,
                 ticket: None,
+                model: None,
             },
         ),
     ];
@@ -10561,6 +10564,7 @@ fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
         role: None,
         mode: None,
         ticket: None,
+        model: None,
     })
     .unwrap();
     call.as_object_mut()
@@ -10685,6 +10689,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
         role: None,
         mode: None,
         ticket: None,
+        model: None,
     })
     .unwrap();
     let swapped = format!("{:032x}", 1);
@@ -11260,6 +11265,7 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
             role: None,
             mode: None,
             ticket: None,
+            model: None,
         },
         tool::Call::Remember {
             text: "The docs live in docs/guide.".into(),
@@ -12777,6 +12783,7 @@ fn lead_spawns(fixture: &Fixture, lead: i64, task: &str) -> String {
             role: None,
             mode: None,
             ticket: None,
+            model: None,
         },
     )
     .unwrap()
