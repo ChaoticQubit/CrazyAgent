@@ -44,6 +44,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "questions_unavailable",
     "search_choice_unavailable",
     "search_confirm_required",
+    "search_model_confirm",
     "search_model_downloading",
     "search_model_store_unavailable",
 ];
@@ -98,7 +99,9 @@ enum Action {
         confirm_host: Option<String>,
         version: u64,
     },
-    DownloadModel,
+    DownloadModel {
+        confirm_bytes: u64,
+    },
     CancelDownload,
     DeleteModel,
 }
@@ -271,9 +274,13 @@ impl OwnerClient {
     }
 
     /// Starts the local model's one-time download after the owner confirmed its size.
-    /// Output: the Search page, with the model downloading.
-    pub async fn search_model_download(&self) -> Result<SearchView, EngineError> {
-        self.search(Action::DownloadModel).await
+    /// Input: the size the confirm showed, which must equal the pinned total. Output: the
+    /// Search page with the model downloading, or `search_model_confirm`.
+    pub async fn search_model_download(
+        &self,
+        confirm_bytes: u64,
+    ) -> Result<SearchView, EngineError> {
+        self.search(Action::DownloadModel { confirm_bytes }).await
     }
 
     /// Cancels the local model download and deletes the partial file. Output: the page.
@@ -564,8 +571,8 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             }),
             Err(current) => Ok(Reply::Stale { current }),
         },
-        Action::DownloadModel => {
-            crate::semantic::local::start_download(root)?;
+        Action::DownloadModel { confirm_bytes } => {
+            crate::semantic::local::start_download(root, confirm_bytes)?;
             search(&db)
         }
         Action::CancelDownload => {
