@@ -209,19 +209,23 @@ async function ownerTurn(line, name) {
   return way;
 }
 
-/** Presses the mouse on the master terminal's screen as the owner's click does, which is
- * how xterm takes the keyboard; the native driver's element click sends no mouse press.
- * Output: whether the screen was drawn. */
+/** Presses the mouse on the middle of the master terminal's screen as the owner's click does,
+ * which is how xterm takes the keyboard; the native driver's element click sends no mouse
+ * press. The press goes to what the page shows at that point, so a covered screen is never
+ * pressed. Output: "pressed", or what is drawn there instead. */
 function pressTerminal() {
   return browser.execute((selector) => {
     const screen = document.querySelector(`${selector} .xterm-screen`);
-    if (!screen) return false;
+    if (!screen) return "no master terminal screen";
+    screen.scrollIntoView({ block: "center", inline: "center" });
     const box = screen.getBoundingClientRect();
     const at = { clientX: box.left + box.width / 2, clientY: box.top + box.height / 2, bubbles: true, cancelable: true, view: window };
-    screen.dispatchEvent(new MouseEvent("mousedown", { ...at, button: 0, buttons: 1 }));
+    const hit = document.elementFromPoint(at.clientX, at.clientY);
+    if (!hit || !screen.contains(hit)) return `covered by ${hit ? `${hit.tagName.toLowerCase()} class="${hit.getAttribute("class") ?? ""}"` : "nothing"}`;
+    hit.dispatchEvent(new MouseEvent("mousedown", { ...at, button: 0, buttons: 1 }));
     document.dispatchEvent(new MouseEvent("mouseup", { ...at, button: 0, buttons: 0 }));
-    screen.dispatchEvent(new MouseEvent("click", { ...at, button: 0, buttons: 0 }));
-    return true;
+    hit.dispatchEvent(new MouseEvent("click", { ...at, button: 0, buttons: 0 }));
+    return "pressed";
   }, TERMINAL);
 }
 
@@ -230,7 +234,8 @@ function pressTerminal() {
  * starts. Inputs: the line, the harness name the stand-in prints and whether keys reach it. */
 async function typeIntoTerminal(line, name, reaches) {
   const turns = await shownTurns(name);
-  assert.equal(await pressTerminal(), true, "the master terminal's screen is drawn");
+  const pressed = await pressTerminal();
+  assert.equal(pressed, "pressed", `the owner's press lands on the master terminal's screen: ${pressed}`);
   assert.equal(await browser.execute(() => document.activeElement?.classList.contains("xterm-helper-textarea") === true), true, "the keys are typed with the focus on the terminal");
   await browser.keys(line);
   await browser.keys(KEYS.enter);
