@@ -4,14 +4,26 @@ use std::path::{Path, PathBuf};
 const FEATURE: &str = "clean-mac-gate";
 const ENGINE_MANIFEST: &str = "crates/crazyagent/Cargo.toml";
 const DESKTOP_MANIFEST: &str = "apps/desktop/src-tauri/Cargo.toml";
-const RELEASE_SOURCES: [&str; 6] = [
+const RELEASE_SOURCES: [&str; 7] = [
     "Cargo.toml",
+    DESKTOP_MANIFEST,
     "Makefile",
     ".github/workflows/release.yml",
     "apps/desktop/package.json",
     "apps/desktop/src-tauri/tauri.conf.json",
     "apps/desktop/src-tauri/tauri.linux.conf.json",
 ];
+const SKIPPED_FOLDERS: [&str; 7] = [
+    ".git",
+    ".local-state",
+    ".worktrees",
+    "target",
+    "node_modules",
+    "graphify-out",
+    "dist",
+];
+const WALK_DEPTH_MAX: usize = 12;
+const WALK_ENTRIES_MAX: usize = 20_000;
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -32,8 +44,36 @@ fn names_feature(value: &toml::Value) -> bool {
     })
 }
 
+/// Every Cargo.toml under the repo but the engine's own, which alone defines the gate
+/// feature: the desktop app and any crate that depends on the engine. Build output,
+/// installed packages, git, sprint and worktree folders and links are not walked.
+/// Inputs: the repo, the folder walked, its depth, the entries seen and the manifests found.
+fn manifests(repo: &Path, folder: &Path, depth: usize, seen: &mut usize, found: &mut Vec<PathBuf>) {
+    assert!(depth <= WALK_DEPTH_MAX, "{} is too deep", folder.display());
+    for entry in fs::read_dir(folder).unwrap() {
+        let entry = entry.unwrap();
+        *seen += 1;
+        assert!(
+            *seen <= WALK_ENTRIES_MAX,
+            "more than {WALK_ENTRIES_MAX} entries under {}",
+            repo.display()
+        );
+        let kind = entry.file_type().unwrap();
+        let name = entry.file_name();
+        if kind.is_dir() && !SKIPPED_FOLDERS.iter().any(|skipped| name == *skipped) {
+            manifests(repo, &entry.path(), depth + 1, seen, found);
+        } else if kind.is_file()
+            && name == "Cargo.toml"
+            && entry.path() != repo.join(ENGINE_MANIFEST)
+        {
+            found.push(entry.path());
+        }
+    }
+}
+
 /// The files a release build reads that could name the gate feature: the release
-/// workflow, scripts and bundle configs. Input: the repo folder. Output: the files.
+/// workflow, scripts and bundle configs, and every Cargo.toml but the engine's own
+/// ([`manifests`]). Input: the repo folder. Output: the files, each once.
 fn sources(repo: &Path) -> Vec<PathBuf> {
     let mut sources: Vec<PathBuf> = RELEASE_SOURCES.iter().map(|path| repo.join(path)).collect();
     for entry in fs::read_dir(repo.join("scripts/release")).unwrap() {
@@ -43,6 +83,9 @@ fn sources(repo: &Path) -> Vec<PathBuf> {
             sources.push(path);
         }
     }
+    manifests(repo, repo, 0, &mut 0, &mut sources);
+    sources.sort();
+    sources.dedup();
     sources
 }
 
@@ -91,7 +134,17 @@ fn release_problems(repo: &Path) -> Vec<String> {
 /// `scripts/gate/clean-mac.sh` builds with it.
 #[test]
 fn no_release_build_enables_the_clean_mac_gate_remap() {
-    let problems = release_problems(&repo());
+    let repo = repo();
+    let sources = sources(&repo);
+    for manifest in [repo.join("Cargo.toml"), repo.join(DESKTOP_MANIFEST)] {
+        assert!(
+            sources.contains(&manifest),
+            "{} is not read",
+            manifest.display()
+        );
+    }
+    assert!(!sources.contains(&repo.join(ENGINE_MANIFEST)));
+    let problems = release_problems(&repo);
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
