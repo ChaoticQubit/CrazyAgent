@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub mod http;
 pub mod manifest;
 pub mod store;
 pub mod yaml;
@@ -432,6 +433,14 @@ const PLAIN: &[(&str, &str)] = &[
         "the key could not be saved; nothing was changed.",
     ),
     (
+        "app_plugin_call_failed",
+        "the plugin's host did not answer with vectors; search uses full text for now.",
+    ),
+    (
+        "app_plugin_reply_invalid",
+        "the plugin's reply was not the vectors its file declares.",
+    ),
+    (
         "app_plugin_request_invalid",
         "the request could not be read.",
     ),
@@ -456,6 +465,7 @@ const PLAIN: &[(&str, &str)] = &[
         "search_model_missing",
         "the local model is not downloaded yet.",
     ),
+    ("search_model_confirm", "confirm the download size first."),
     (
         "search_model_downloading",
         "the local model is already downloading.",

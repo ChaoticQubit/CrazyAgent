@@ -215,3 +215,12 @@ fn the_app_plugin_key_folder_is_an_engine_secret_agents_cannot_reach() {
     assert!(secrets.contains(&case.runtime.join("plugin-keys")));
     walled(guarded(&case).allow_read(&case.runtime.join("plugin-keys").join("inner")));
 }
+
+#[test]
+fn the_app_plugin_request_scratch_folder_is_an_engine_secret_agents_cannot_reach() {
+    let case = case();
+    fs::create_dir_all(case.runtime.join("plugin-scratch").join("inner")).unwrap();
+    let secrets = guarded(&case).secret_paths();
+    assert!(secrets.contains(&case.runtime.join("plugin-scratch")));
+    walled(guarded(&case).allow_read(&case.runtime.join("plugin-scratch").join("inner")));
+}

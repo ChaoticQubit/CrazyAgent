@@ -314,6 +314,7 @@ const ENGINE_SECRET_FILES: &[&str] = &[
 const ENGINE_SECRET_FOLDERS: &[&str] = &[
     "account-keys",
     crate::storage::accounts::PLUGIN_KEYS,
+    crate::app_plugins::http::SCRATCH,
     crate::terminal::FOLDER,
     crate::ide::FOLDER,
 ];

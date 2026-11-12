@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 const REQUEST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX;
 const KEY_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 64;
+const ACCOUNT_BYTES_MAX: usize = 128;
 pub(super) const APP_PLUGINS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Every code an App plugins or Search request can answer an owner client with: the
@@ -44,6 +45,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "questions_unavailable",
     "search_choice_unavailable",
     "search_confirm_required",
+    "search_model_confirm",
     "search_model_downloading",
     "search_model_store_unavailable",
 ];
@@ -98,7 +100,9 @@ enum Action {
         confirm_host: Option<String>,
         version: u64,
     },
-    DownloadModel,
+    DownloadModel {
+        confirm_bytes: u64,
+    },
     CancelDownload,
     DeleteModel,
 }
@@ -271,9 +275,13 @@ impl OwnerClient {
     }
 
     /// Starts the local model's one-time download after the owner confirmed its size.
-    /// Output: the Search page, with the model downloading.
-    pub async fn search_model_download(&self) -> Result<SearchView, EngineError> {
-        self.search(Action::DownloadModel).await
+    /// Input: the size the confirm showed, which must equal the pinned total. Output: the
+    /// Search page with the model downloading, or `search_model_confirm`.
+    pub async fn search_model_download(
+        &self,
+        confirm_bytes: u64,
+    ) -> Result<SearchView, EngineError> {
+        self.search(Action::DownloadModel { confirm_bytes }).await
     }
 
     /// Cancels the local model download and deletes the partial file. Output: the page.
@@ -449,11 +457,7 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::Trust { name, .. }
         | Action::SetEnabled { name, .. }
         | Action::Remove { name } => &[name.as_str()],
-        Action::BindAccount {
-            name,
-            secret,
-            account,
-        } => &[name.as_str(), secret.as_str(), account.as_str()],
+        Action::BindAccount { name, secret, .. } => &[name.as_str(), secret.as_str()],
         Action::SetKey { name, secret } | Action::Unbind { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
@@ -462,6 +466,8 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
     if names
         .iter()
         .any(|name| name.is_empty() || name.len() > NAME_BYTES_MAX)
+        || matches!(&app_plugins, Action::BindAccount { account, .. }
+            if account.is_empty() || account.len() > ACCOUNT_BYTES_MAX)
     {
         return Err(failure("app_plugin_request_invalid"));
     }
@@ -564,8 +570,8 @@ fn run(root: &Path, action: Action, key: Option<AccountSecret>) -> Result<Reply,
             }),
             Err(current) => Ok(Reply::Stale { current }),
         },
-        Action::DownloadModel => {
-            crate::semantic::local::start_download(root)?;
+        Action::DownloadModel { confirm_bytes } => {
+            crate::semantic::local::start_download(root, confirm_bytes)?;
             search(&db)
         }
         Action::CancelDownload => {
