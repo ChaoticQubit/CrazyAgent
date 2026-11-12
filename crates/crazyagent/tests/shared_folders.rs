@@ -340,6 +340,76 @@ fn read_write_changes_shared_untracked_folders_but_never_secrets_or_tracked_file
     ));
 }
 
+/// L4 r1 H2: under Read-write a folder that holds a secret stays in place. Moving it to the
+/// agent's tmp, to its own folder or to a plain name in the shared folder is refused, the
+/// secret stays closed where it is, and nothing of it lands outside.
+#[test]
+fn read_write_never_moves_a_folder_that_holds_a_secret_out_of_the_name_rule() {
+    let case = case();
+    write(
+        &case.repository.join("program").join("cfg").join(".env"),
+        "SECRET_VALUE_4471\n",
+    );
+    let sandbox = sandbox(&case, &with(SharedScope::All, SharedAccess::ReadWrite));
+    let folder = case.repository.join("program").join("cfg");
+    for target in [
+        case.tmp.join("cfg"),
+        case.own.join("cfg"),
+        case.repository.join("program").join("plain"),
+    ] {
+        let output = run(
+            &case,
+            &sandbox,
+            &format!("/bin/mv {} {}", quoted(&folder), quoted(&target)),
+        );
+        assert!(!output.status.success(), "moved to {}", target.display());
+        assert!(!target.exists(), "{}", target.display());
+        assert!(folder.join(".env").is_file(), "the folder left");
+    }
+    let output = run(
+        &case,
+        &sandbox,
+        &format!("cat {}", quoted(&folder.join(".env"))),
+    );
+    assert!(!output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("SECRET_VALUE_4471"));
+}
+
+/// L4 r1 asked row: cloning a plain-named folder that holds a secret from the read project
+/// folder into the agent's own folder leaves no secret in the copy.
+#[test]
+fn cloning_a_plain_folder_that_holds_a_secret_copies_no_secret() {
+    let case = case();
+    let sandbox = sandbox(&case, &SharedFolders::default());
+    let copy = case.own.join("cfg");
+    run(
+        &case,
+        &sandbox,
+        &format!(
+            "/bin/cp -c -R {} {}",
+            quoted(&case.repository.join("config")),
+            quoted(&copy)
+        ),
+    );
+    let mut pending = vec![copy];
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(
+                fs::read_dir(&path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+        } else if path.is_file() {
+            let text = fs::read(&path).unwrap();
+            assert!(
+                !String::from_utf8_lossy(&text).contains("SECRET_VALUE_4471"),
+                "{} holds the secret",
+                path.display()
+            );
+        }
+    }
+}
+
 fn sandbox_for_chosen(case: &Case) -> ProjectSandbox {
     sandbox(case, &with(SharedScope::Chosen, SharedAccess::ReadWrite))
 }

@@ -1610,7 +1610,9 @@ impl ProjectSandbox {
 
     /// The Seatbelt rules of [`Self::keep_project_secrets`]: the deny of secret names in the
     /// project folder outside `.git` and the agent's own writable roots there (never the
-    /// shared writable folders), then the read allow of env templates
+    /// shared writable folders); no clone of any folder, and no move or removal of a folder
+    /// inside a shared writable folder, so no folder that holds a secret leaves the name rule
+    /// by a plain-named parent (L4 r1 H2); then the read allow of env templates
     /// ([`shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
     /// rules, empty when no folder was named.
     fn project_secret_rules(&self) -> String {
@@ -1626,23 +1628,32 @@ impl ProjectSandbox {
             .map(|name| fold_case(name))
             .collect::<Vec<_>>()
             .join("|");
+        let own: String = self
+            .writable_roots()
+            .filter(|own| {
+                own.starts_with(root)
+                    && own.as_path() != root.as_path()
+                    && !self.shared_writes.contains(own)
+                    && clean_absolute(own)
+            })
+            .map(|own| format!("\n    (require-not (subpath \"{}\"))", own.display()))
+            .collect();
         let mut text = format!(
-            "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{}/(.*/)?({names})(/.*)?$\")\n    (require-not (subpath \"{}/.git\"))",
+            "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{}/(.*/)?({names})(/.*)?$\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
             seatbelt_pattern(root),
             root.display()
         );
-        for own in self.writable_roots().filter(|own| {
-            own.starts_with(root)
-                && own.as_path() != root.as_path()
-                && !self.shared_writes.contains(own)
-                && clean_absolute(own)
-        }) {
+        text.push_str("(deny file-clone (vnode-type DIRECTORY))\n");
+        for folder in self
+            .shared_writes
+            .iter()
+            .filter(|folder| clean_absolute(folder))
+        {
             text.push_str(&format!(
-                "\n    (require-not (subpath \"{}\"))",
-                own.display()
+                "(deny file-write-unlink\n  (require-all\n    (subpath \"{}\")\n    (vnode-type DIRECTORY)))\n",
+                folder.display()
             ));
         }
-        text.push_str("))\n");
         text.push_str(&format!(
             "(allow file-read-data file-read-xattr\n  (regex #\"^{}/(.*/)?{}$\"))\n",
             seatbelt_pattern(root),
