@@ -573,9 +573,9 @@ impl Process {
     /// Ends the harness and everything it left in its group, then releases the account
     /// lease. At Full access no warden reaches processes that left the group, so the
     /// harness's lineage, followed from its start, is taken before the kill and checked after
-    /// it; while some still run, the turn ends with their code and the lease stays held until
-    /// they end or the owner signs the account out. Takes nothing; records the run's last
-    /// status.
+    /// it; while some still run, the turn ends with their code and a hold ends them by the
+    /// default leftover setting, keeping the lease until none run or the owner signs the
+    /// account out. Takes nothing; records the run's last status.
     fn cleanup(&mut self) {
         let lineage = self.follower.take().map(Follower::stop);
         self.report.send_replace(Status {
@@ -659,7 +659,15 @@ impl Process {
         {
             self.fail(Fault::Host(unstopped.code()));
             if let (Unstopped::Left(left), Some(profile)) = (unstopped, self.profile.take()) {
-                left.hold(Some(profile.account().clone()), profile);
+                left.hold(
+                    Some(profile.account().clone()),
+                    profile,
+                    crate::harnesses::leftovers::HoldBy {
+                        project: None,
+                        who: "a Claude host turn".to_owned(),
+                    },
+                    crate::harnesses::leftovers::mode_of(None),
+                );
             }
         }
         self.profile = None;

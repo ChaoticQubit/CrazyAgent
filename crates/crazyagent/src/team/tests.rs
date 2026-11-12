@@ -6813,6 +6813,41 @@ fn background_commands_at_task_end_default_to_a_thirty_minute_grace() {
     }
 }
 
+/// DEC-147.4: a project with no saved Leftover processes choice ends them; every saved
+/// choice reads back, and the store refuses any other name.
+#[test]
+fn leftover_processes_default_to_end_them_and_each_choice_reads_back() {
+    let connection = Connection::open_in_memory().unwrap();
+    initialize(&connection).unwrap();
+    let project = ProjectId::new("leftovers").unwrap();
+    assert_eq!(
+        leftover_mode(&connection, project.as_str()).unwrap(),
+        LeftoverMode::End
+    );
+    for mode in [LeftoverMode::Keep, LeftoverMode::Ask, LeftoverMode::End] {
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_leftovers(project,mode) VALUES (?1,?2)",
+                rusqlite::params![project.as_str(), mode.stored()],
+            )
+            .unwrap();
+        assert_eq!(leftover_mode(&connection, project.as_str()).unwrap(), mode);
+    }
+    assert!(
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO team_leftovers(project,mode) VALUES (?1,'kill')",
+                [project.as_str()],
+            )
+            .is_err()
+    );
+    let other = ProjectId::new("leftovers-other").unwrap();
+    assert_eq!(
+        leftover_mode(&connection, other.as_str()).unwrap(),
+        LeftoverMode::End
+    );
+}
+
 /// Opening the team runtime makes the usage tables once, so a turn end writes its token and
 /// turn rows without making them again (AL4 r2).
 #[test]

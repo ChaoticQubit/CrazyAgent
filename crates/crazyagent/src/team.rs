@@ -578,6 +578,8 @@ pub enum BackgroundAtEnd {
     Stop,
 }
 
+pub use crate::harnesses::leftovers::LeftoverMode;
+
 /// The grace times, in seconds, the owner may give background commands at task end.
 pub const BACKGROUND_GRACE_SECS: std::ops::RangeInclusive<u32> = 10..=3600;
 
@@ -740,6 +742,10 @@ pub enum TeamAction {
     BackgroundAtEnd {
         project_id: ProjectId,
         choice: BackgroundAtEnd,
+    },
+    LeftoversAtEnd {
+        project_id: ProjectId,
+        mode: LeftoverMode,
     },
     AskBeforeMerge {
         project_id: ProjectId,
@@ -1031,6 +1037,7 @@ impl TeamAction {
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
+            | Self::LeftoversAtEnd { .. }
             | Self::MasterLands { .. }
             | Self::ReaskEmptyReply { .. }
             | Self::MasterIdleStop { .. }
@@ -1064,6 +1071,7 @@ impl TeamAction {
             | Self::MasterBranch { project_id, .. }
             | Self::LandOn { project_id, .. }
             | Self::BackgroundAtEnd { project_id, .. }
+            | Self::LeftoversAtEnd { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
             | Self::MasterLands { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
@@ -1574,6 +1582,23 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 mode TEXT NOT NULL CHECK(mode IN ('wait','grace','stop')),
                 grace_secs INTEGER CHECK((mode = 'grace') = (grace_secs IS NOT NULL))
             );
+            CREATE TABLE IF NOT EXISTS team_leftovers (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('end','keep','ask'))
+            );
+            CREATE TABLE IF NOT EXISTS team_agent_ends (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                at_ms INTEGER NOT NULL,
+                cause TEXT NOT NULL,
+                problem TEXT CHECK(problem IS NULL OR length(problem) <= 300),
+                turn_open INTEGER NOT NULL CHECK(turn_open IN (0,1)),
+                leftovers INTEGER NOT NULL CHECK(leftovers IN (0,1))
+            );
+            CREATE INDEX IF NOT EXISTS team_agent_ends_project ON team_agent_ends(project, id);
             CREATE TABLE IF NOT EXISTS team_merge_ask (
                 project TEXT PRIMARY KEY,
                 ask INTEGER NOT NULL CHECK(ask IN (0,1))
@@ -2602,6 +2627,15 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::LeftoversAtEnd { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_leftovers(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.stored()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::AskBeforeMerge { on, .. } => {
             tx.execute(
                 "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
@@ -3289,6 +3323,8 @@ pub struct TeamStatus {
     #[serde(default)]
     pub background_at_end: BackgroundAtEnd,
     #[serde(default)]
+    pub leftovers: LeftoverMode,
+    #[serde(default)]
     pub ask_before_merge: bool,
     #[serde(default)]
     pub master_lands: Option<MasterLands>,
@@ -3859,6 +3895,24 @@ pub fn background_at_end(
         Some((mode, secs)) => {
             BackgroundAtEnd::named(&mode, secs).ok_or_else(|| error("team_background_invalid"))
         }
+    }
+}
+
+/// What the project does with processes an agent left running when its stop named them or
+/// could not list them (DEC-147.4): the owner's choice, End them by default.
+/// Takes a connection and the project. Returns the choice, or a store failure.
+pub fn leftover_mode(connection: &Connection, project: &str) -> Result<LeftoverMode, EngineError> {
+    let row: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_leftovers WHERE project=?1",
+            [project],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match row {
+        None => Ok(LeftoverMode::default()),
+        Some(mode) => LeftoverMode::named(&mode).ok_or_else(|| error("team_leftovers_invalid")),
     }
 }
 
@@ -5120,6 +5174,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         master_branch: master_branch_choice(connection, project)?,
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
+        leftovers: leftover_mode(connection, project.as_str())?,
         ask_before_merge: ask_before_merge(connection, project)?,
         master_lands,
         access_unreadable,

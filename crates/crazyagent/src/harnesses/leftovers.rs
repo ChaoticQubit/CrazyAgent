@@ -53,6 +53,16 @@ const SETTLE: Duration = Duration::from_secs(2);
 const SETTLE_POLL: Duration = Duration::from_millis(100);
 /// How often a held account checks again whether the processes holding it have ended.
 const HOLD_POLL: Duration = Duration::from_secs(2);
+/// How often a hold that ends its processes checks them, so the kill follows the grace soon.
+const ENDING_POLL: Duration = Duration::from_millis(250);
+/// How long processes an agent left get to exit after SIGTERM before SIGKILL, under the End
+/// them setting (DEC-147.4).
+pub const LEFTOVER_GRACE: Duration = Duration::from_secs(10);
+/// The most processes of the engine's own parent chain a signal check walks.
+#[cfg(unix)]
+const PARENTS_MAX: usize = 64;
+/// The most characters of the label naming who left a hold.
+const WHO_CHARS_MAX: usize = 80;
 /// How long an account stays held for a stop whose processes could not be listed, when
 /// no later listing works and none was named; the hold ends sooner once one works.
 const UNCHECKED_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
@@ -107,13 +117,86 @@ const PS_ENVIRONMENT: &[&str] = &[
     "pid=,uid=,stat=,lstart=,command=",
 ];
 
+/// What happens to the processes an agent left running when its stop named them or could not
+/// list them, a per-project owner setting (DEC-147.4): `End` ends them after
+/// [`LEFTOVER_GRACE`] and lets the account go once none run, `Keep` lets the account go at
+/// once and leaves them running, `Ask` keeps the account held until the owner picks End or
+/// Keep in the team view, or they end.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeftoverMode {
+    #[default]
+    End,
+    Keep,
+    Ask,
+}
+
+impl LeftoverMode {
+    /// The stored name. Input: the mode. Output: `end`, `keep` or `ask`.
+    pub fn stored(self) -> &'static str {
+        match self {
+            Self::End => "end",
+            Self::Keep => "keep",
+            Self::Ask => "ask",
+        }
+    }
+
+    /// Reads a stored name. Input: the name. Output: the mode, or none for a name it never
+    /// stores.
+    pub fn named(name: &str) -> Option<Self> {
+        match name {
+            "end" => Some(Self::End),
+            "keep" => Some(Self::Keep),
+            "ask" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+}
+
+/// Where one hold stands: `Held` keeps the account while its processes run, `Ending` sends
+/// them SIGTERM, then SIGKILL after [`LEFTOVER_GRACE`], and `Kept` lets them run with the
+/// account let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldState {
+    Held,
+    Ending,
+    Kept,
+}
+
+/// Who left a hold, for the owner view: the project, if any, and a plain label such as
+/// "the live master" or "team agent 156".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoldBy {
+    pub project: Option<String>,
+    pub who: String,
+}
+
+/// One hold as the owner view shows it: its engine key, who left it, what still runs, where
+/// it stands, when it began and whether it still keeps an account. Never environment text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldView {
+    pub key: u64,
+    pub who: String,
+    pub names: String,
+    pub state: HoldState,
+    pub since_ms: i64,
+    pub holds_account: bool,
+}
+
 /// One hold of a Full access stop: the account it keeps, if any, the report naming what
-/// still runs, and what the stop holds, such as the agent's credential copy and lease.
+/// still runs, what the stop holds, such as the agent's credential copy and lease, until the
+/// hold ends or the owner keeps the processes running, who left it, the names it shows, where
+/// it stands and when it began.
 struct Held {
     account: Option<CredentialRef>,
     report: String,
     #[allow(dead_code)]
-    kept: Box<dyn Send>,
+    kept: Option<Box<dyn Send>>,
+    by: HoldBy,
+    names: String,
+    state: HoldState,
+    since_ms: i64,
 }
 
 /// Every account a Full access stop keeps now, by the order they were kept in, so a refused
@@ -154,6 +237,111 @@ pub fn held_by(account: &CredentialRef) -> Vec<String> {
         .collect()
 }
 
+/// Lists the holds one project's agents left, oldest first, for the owner view. Input: the
+/// project. Output: each hold's view.
+pub fn held_in(project: &str) -> Vec<HeldView> {
+    held()
+        .iter()
+        .filter(|(_, hold)| hold.by.project.as_deref() == Some(project))
+        .map(|(key, hold)| HeldView {
+            key: *key,
+            who: hold.by.who.clone(),
+            names: hold.names.clone(),
+            state: hold.state,
+            since_ms: hold.since_ms,
+            holds_account: hold.account.is_some(),
+        })
+        .collect()
+}
+
+/// Has one hold of a project end its processes, the owner's End: SIGTERM, then SIGKILL after
+/// [`LEFTOVER_GRACE`], each only to a process the same pass of its watcher found still
+/// running with the start it was known by. A hold already ending is left as it is. Inputs:
+/// the hold's key and the project it must belong to. Output: whether it is now ending.
+pub fn end_held(key: u64, project: &str) -> bool {
+    let mut held = held();
+    let Some(hold) = held
+        .get_mut(&key)
+        .filter(|hold| hold.by.project.as_deref() == Some(project))
+    else {
+        return false;
+    };
+    hold.state = HoldState::Ending;
+    true
+}
+
+/// Lets one hold of a project keep its processes running, the owner's Keep: the account and
+/// what the stop held for it, such as the credential copy and lease, are let go at once, and
+/// the processes stay listed until they end. Inputs: the hold's key and the project it must
+/// belong to. Output: whether it is now kept.
+pub fn keep_held(key: u64, project: &str) -> bool {
+    let released = {
+        let mut held = held();
+        let Some(hold) = held
+            .get_mut(&key)
+            .filter(|hold| hold.by.project.as_deref() == Some(project))
+        else {
+            return false;
+        };
+        hold.state = HoldState::Kept;
+        hold.account = None;
+        hold.kept.take()
+    };
+    drop(released);
+    true
+}
+
+/// Reads where one hold stands. Input: the key. Output: its state, or none once it ended.
+fn state_of(key: u64) -> Option<HoldState> {
+    held().get(&key).map(|hold| hold.state)
+}
+
+/// Writes what one hold names now, after a watcher pass. Inputs: the key, the names and the
+/// report. Output: none.
+fn named(key: u64, names: String, report: String) {
+    if let Some(hold) = held().get_mut(&key) {
+        hold.names = names;
+        hold.report = report;
+    }
+}
+
+/// Each project's leftover setting as the engine last read or wrote it, so a stop on an
+/// agent's own thread, which has no database, holds by the setting that applies now.
+static MODES: Mutex<BTreeMap<String, LeftoverMode>> = Mutex::new(BTreeMap::new());
+
+/// Records one project's leftover setting for the stops that follow. Inputs: the project and
+/// its setting. Output: none.
+pub fn set_mode(project: &str, mode: LeftoverMode) {
+    assert!(!project.is_empty());
+    MODES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(project.to_owned(), mode);
+}
+
+/// Reads the leftover setting a stop holds by. Input: the project, if any. Output: its
+/// recorded setting, or End them when none was recorded or there is no project.
+pub fn mode_of(project: Option<&str>) -> LeftoverMode {
+    project
+        .and_then(|project| {
+            MODES
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(project)
+                .copied()
+        })
+        .unwrap_or_default()
+}
+
+/// The wall clock in milliseconds since the Unix epoch, or 0 before it.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
 /// Why a stop could not report every process of an agent ended.
 #[derive(Debug)]
 pub enum Unstopped {
@@ -178,7 +366,8 @@ impl Unstopped {
 /// A random value every process of one launch inherits in [`LINEAGE_VARIABLE`], so the
 /// launch's stop finds a process that left its session and lost its parent while it kept
 /// its environment (SECAUDIT-SETSID-LEFTOVER M1). Not a secret: any process of the owner's
-/// user can read it. It only ever names processes, never signals one.
+/// user can read it, so it only lets a same-user process get itself named or, under End them
+/// (DEC-147.4), ended; an agent only ever learns its own launch's token.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct LineageToken(String);
@@ -245,7 +434,8 @@ struct Process {
 /// waits out instead of starting another; `sandboxed` tells the agent ran in a sandbox no
 /// warden empties, not at Full access; `leader_started` is the leader's start at the first
 /// read; `applied` is when the last table it took was read and `missed` tells two of them, or
-/// the last and the stop's own read, lay more than [`FOLLOW_GAP`] apart.
+/// the last and the stop's own read, lay more than [`FOLLOW_GAP`] apart; `scanned` tells the
+/// token's processes were read, or that there is no token, so a hold retries a failed scan.
 #[derive(Debug)]
 pub(crate) struct Lineage {
     #[cfg(unix)]
@@ -254,6 +444,7 @@ pub(crate) struct Lineage {
     #[cfg(unix)]
     table: &'static [&'static str],
     unchecked: bool,
+    scanned: bool,
     #[cfg(unix)]
     pending: Option<Listing>,
     sandboxed: bool,
@@ -317,30 +508,32 @@ impl Leftovers {
     }
 
     /// Says plainly which processes still run and that Full access, or a sandbox no warden
-    /// empties, cannot stop them, or that they could not be listed. Input: the leftovers. Output: one sentence naming at
-    /// most `NAMED_MAX` of them by id and program, counting the rest.
+    /// empties, cannot stop them, or that they could not be listed. Input: the leftovers.
+    /// Output: one sentence naming at most `NAMED_MAX` of them by id and program, counting
+    /// the rest.
     pub fn plain(&self) -> String {
-        assert!(!self.0.known.is_empty() || self.0.unchecked);
-        if self.0.known.is_empty() {
-            let unlisted = if self.0.sandboxed {
-                "The engine could not list what the agent started outside its terminal after its stop, and no warden empties its sandbox"
-            } else {
-                "Full access could not list what the agent started outside its terminal after its stop"
-            };
-            return format!(
-                "{unlisted}, so it cannot confirm they ended. Its account stays held until they can be checked, at most {} minutes, or until you sign it out",
-                UNCHECKED_HOLD_MAX.as_secs() / 60
-            );
+        self.0.report_now()
+    }
+
+    /// Says plainly what still runs, or that it could not be listed, and what the owner's
+    /// Leftover processes setting does with it. Inputs: the leftovers and the setting.
+    /// Output: one sentence; under Ask, [`Self::plain`] with where to choose.
+    pub fn told(&self, mode: LeftoverMode) -> String {
+        match mode {
+            LeftoverMode::Ask => format!(
+                "{}. End them or keep them running from the team view",
+                self.plain()
+            ),
+            LeftoverMode::End => format!(
+                "{}. The engine ends them after a {} second grace, finding them again until it can list them, and lets the account go once none run",
+                self.0.what(),
+                LEFTOVER_GRACE.as_secs()
+            ),
+            LeftoverMode::Keep => format!(
+                "{}. They keep running as you chose, and the account was let go",
+                self.0.what()
+            ),
         }
-        let running = if self.0.sandboxed {
-            "No warden empties this agent's sandbox, so what it started outside its terminal outlived its stop; still running in its sandbox"
-        } else {
-            "Full access cannot stop what the agent started outside its terminal; still running"
-        };
-        format!(
-            "{running}: {}. Its account stays held until they end or you sign it out",
-            self.names()
-        )
     }
 
     /// Names what still runs, for a stop that holds no account as well as in [`Self::plain`]:
@@ -348,24 +541,161 @@ impl Leftovers {
     /// unlisted, or [`UNLISTED`] when none could be listed. Input: the leftovers. Output: the
     /// names.
     pub fn names(&self) -> String {
-        assert!(!self.0.known.is_empty() || self.0.unchecked);
-        if self.0.known.is_empty() {
+        self.0.names_now()
+    }
+
+    /// Keeps `kept`, such as the agent's credential copy and account lease, listed under
+    /// `account` with this report and `by`, until a watcher pass shows no process of the agent
+    /// running, both the table and the token's processes read, or the owner signs the account
+    /// out ([`release`]), then drops it; the engine's exit ends the hold too. A pass that
+    /// cannot read both is retried, never taken as clean; with none named, the hold ends after
+    /// `UNCHECKED_HOLD_MAX` even while no listing works. `mode` starts it: End has the watcher
+    /// end the processes, Keep lets `kept` and the account go at once, Ask waits for the
+    /// owner's [`end_held`] or [`keep_held`]. When no watching thread starts, only the owner's
+    /// sign-out ends it. Inputs: the leftovers, the account they keep, if any, what they hold,
+    /// who left them and the owner's setting. Output: none.
+    pub fn hold<T: Send + 'static>(
+        self,
+        account: Option<CredentialRef>,
+        kept: T,
+        by: HoldBy,
+        mode: LeftoverMode,
+    ) {
+        let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
+        let report = self.plain();
+        let names = self.names();
+        let by = HoldBy {
+            project: by.project,
+            who: by.who.chars().take(WHO_CHARS_MAX).collect(),
+        };
+        let (state, account, kept): (HoldState, Option<CredentialRef>, Option<Box<dyn Send>>) =
+            match mode {
+                LeftoverMode::End => (HoldState::Ending, account, Some(Box::new(kept))),
+                LeftoverMode::Ask => (HoldState::Held, account, Some(Box::new(kept))),
+                LeftoverMode::Keep => {
+                    drop(kept);
+                    (HoldState::Kept, None, None)
+                }
+            };
+        let previous = held().insert(
+            key,
+            Held {
+                account,
+                report,
+                kept,
+                by,
+                names,
+                state,
+                since_ms: now_ms(),
+            },
+        );
+        assert!(previous.is_none());
+        let lineage = *self.0;
+        let _ = std::thread::Builder::new()
+            .name("full-access-hold".into())
+            .spawn(move || watch(key, lineage));
+    }
+}
+
+/// How a watcher pass treats the processes of a hold that ends them: SIGTERM once, nothing
+/// while the grace runs, then SIGKILL on every pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    Term,
+    Kill,
+}
+
+/// Watches one hold until its processes are gone and could be checked, or `UNCHECKED_HOLD_MAX`
+/// passes with none named, or the hold is let go: each pass reads the table, retries a token
+/// scan that failed, and under Ending sends SIGTERM once, then SIGKILL past [`LEFTOVER_GRACE`],
+/// only to processes that same pass found with the start they were known by. Inputs: the
+/// hold's key and its lineage. Output: none; the hold is removed at the end.
+fn watch(key: u64, mut lineage: Lineage) {
+    let begun = Instant::now();
+    let mut termed: Option<Instant> = None;
+    while let Some(state) = state_of(key) {
+        let signal = match (state, termed) {
+            (HoldState::Ending, None) => Some(Ending::Term),
+            (HoldState::Ending, Some(at)) if at.elapsed() >= LEFTOVER_GRACE => Some(Ending::Kill),
+            _ => None,
+        };
+        let read = lineage.pass(signal);
+        if signal == Some(Ending::Term) && read.is_some() {
+            termed = Some(Instant::now());
+        }
+        let checked = read == Some(true);
+        assert_eq!(checked, !lineage.unchecked);
+        if lineage.known.is_empty() && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX) {
+            break;
+        }
+        named(key, lineage.names_now(), lineage.report_now());
+        std::thread::sleep(if state == HoldState::Ending {
+            ENDING_POLL
+        } else {
+            HOLD_POLL
+        });
+    }
+    let ended = held().remove(&key);
+    drop(ended);
+}
+
+impl Lineage {
+    /// The report [`Leftovers::plain`] gives for this lineage now. Input: the lineage, with
+    /// a process named or a failed listing. Output: the sentence.
+    fn report_now(&self) -> String {
+        if self.known.is_empty() {
+            return format!(
+                "{}. Its account stays held until they can be checked, at most {} minutes, or until you sign it out",
+                self.what(),
+                UNCHECKED_HOLD_MAX.as_secs() / 60
+            );
+        }
+        format!(
+            "{}. Its account stays held until they end or you sign it out",
+            self.what()
+        )
+    }
+
+    /// Names what still runs and why the stop could not end it, or that the processes could
+    /// not be listed. Input: the lineage. Output: the clause, with no closing stop.
+    fn what(&self) -> String {
+        assert!(!self.known.is_empty() || self.unchecked);
+        if self.known.is_empty() {
+            let unlisted = if self.sandboxed {
+                "The engine could not list what the agent started outside its terminal after its stop, and no warden empties its sandbox"
+            } else {
+                "Full access could not list what the agent started outside its terminal after its stop"
+            };
+            return format!("{unlisted}, so it cannot confirm they ended");
+        }
+        let running = if self.sandboxed {
+            "No warden empties this agent's sandbox, so what it started outside its terminal outlived its stop; still running in its sandbox"
+        } else {
+            "Full access cannot stop what the agent started outside its terminal; still running"
+        };
+        format!("{running}: {}", self.names_now())
+    }
+
+    /// The names [`Leftovers::names`] gives for this lineage now. Input: the lineage, with a
+    /// process named or a failed listing. Output: the names.
+    fn names_now(&self) -> String {
+        assert!(!self.known.is_empty() || self.unchecked);
+        if self.known.is_empty() {
             return UNLISTED.to_owned();
         }
         let named: Vec<String> = self
-            .0
             .known
             .iter()
             .take(NAMED_MAX)
             .map(|process| format!("{} {}", process.pid, process.program))
             .collect();
-        let more = self.0.known.len() - named.len();
+        let more = self.known.len() - named.len();
         let counted = if more == 0 {
             String::new()
         } else {
             format!(" and {more} more")
         };
-        let unlisted = if self.0.unchecked {
+        let unlisted = if self.unchecked {
             ". More of them may run: the process list could not be read"
         } else {
             ""
@@ -373,46 +703,78 @@ impl Leftovers {
         format!("{}{counted}{unlisted}", named.join(", "))
     }
 
-    /// Keeps `kept`, such as the agent's credential copy and account lease, listed under
-    /// `account` with this report, until a listing shows no process of the agent running or
-    /// the owner signs the account out ([`release`]), then drops it; the engine's exit ends
-    /// the hold too. With none named, it ends after `UNCHECKED_HOLD_MAX` even while no
-    /// listing works. When no watching thread starts, only the owner's sign-out ends it.
-    /// Inputs: the leftovers, the account they keep, if any, and what they hold.
-    /// Output: none.
-    pub fn hold<T: Send + 'static>(self, account: Option<CredentialRef>, kept: T) {
-        let key = NEXT_HELD.fetch_add(1, Ordering::Relaxed);
-        let report = self.plain();
-        let previous = held().insert(
-            key,
-            Held {
-                account,
-                report,
-                kept: Box::new(kept),
-            },
-        );
-        assert!(previous.is_none());
-        let mut lineage = *self.0;
-        let _ = std::thread::Builder::new()
-            .name("full-access-hold".into())
-            .spawn(move || {
-                let begun = Instant::now();
-                while held().contains_key(&key) {
-                    let checked = lineage.refresh().is_ok();
-                    if lineage.known.is_empty()
-                        && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX)
-                    {
-                        break;
-                    }
-                    std::thread::sleep(HOLD_POLL);
-                }
-                let ended = held().remove(&key);
-                drop(ended);
-            });
+    /// Adds every process whose environment holds the launch's token, from one listing that
+    /// keeps only each match's id and start. Input: the lineage. Output: Ok, also with no
+    /// token, or uncertain when the listing failed.
+    #[cfg(unix)]
+    fn add_carriers(&mut self) -> Result<(), Unstopped> {
+        let Some(token) = self.token.clone() else {
+            return Ok(());
+        };
+        for (pid, started) in carrying(&token, &mut self.pending)? {
+            let process = Process {
+                pid,
+                started,
+                program: String::new(),
+            };
+            if !self.known.iter().any(|known| same(known, &process)) {
+                self.known.push(process);
+            }
+        }
+        Ok(())
     }
-}
 
-impl Lineage {
+    /// One pass of a hold's watcher: reads the table and applies it, sends `signal`, if any,
+    /// to the known processes that same table shows with the start they were known by, then
+    /// retries the token scan while it has not read. A failed read is a retry, never clean.
+    /// Inputs: the lineage and the signal. Output: none when the table could not be read,
+    /// else whether the lineage is now checked, the token's processes read too; `unchecked`
+    /// is set to the opposite.
+    #[cfg(unix)]
+    fn pass(&mut self, signal: Option<Ending>) -> Option<bool> {
+        let Ok(rows) = rows(self.table, &mut self.pending) else {
+            self.unchecked = true;
+            return None;
+        };
+        self.apply(&rows);
+        if let Some(signal) = signal {
+            self.signal(&rows, signal);
+        }
+        if !self.scanned {
+            self.scanned = self.add_carriers().is_ok();
+        }
+        self.unchecked = !self.scanned;
+        Some(self.scanned)
+    }
+
+    /// Reads nothing where no process table is read. Input: unused. Output: none.
+    #[cfg(not(unix))]
+    fn pass(&mut self, _signal: Option<Ending>) -> Option<bool> {
+        self.unchecked = true;
+        None
+    }
+
+    /// Sends `signal` to each target [`targets`] picks from `rows`, one process at a time,
+    /// never to a group. Inputs: the lineage, a table read in this pass and the signal.
+    /// Output: how many were signalled.
+    #[cfg(unix)]
+    fn signal(&self, rows: &[Row], signal: Ending) -> usize {
+        let Ok(own) = i32::try_from(std::process::id()) else {
+            return 0;
+        };
+        let picked = targets(&self.known, rows, own, &parents(rows));
+        let sent = match signal {
+            Ending::Term => rustix::process::Signal::TERM,
+            Ending::Kill => rustix::process::Signal::KILL,
+        };
+        for pid in &picked {
+            if let Some(pid) = rustix::process::Pid::from_raw(*pid) {
+                let _ = rustix::process::kill_process(pid, sent);
+            }
+        }
+        picked.len()
+    }
+
     /// Finds a Full access agent's processes before its group is killed. Inputs: the
     /// group's leader, whose id is also its session's, and the launch's token, if it gave
     /// one. Output: the lineage, marked unchecked when the processes cannot be listed, or
@@ -500,6 +862,7 @@ impl Lineage {
             known: Vec::new(),
             table,
             unchecked: false,
+            scanned: token.is_none(),
             pending: None,
             sandboxed: false,
             token,
@@ -534,20 +897,9 @@ impl Lineage {
     /// [`Leftovers`] still running at the deadline or, once a listing failed, unchecked.
     #[cfg(unix)]
     pub(crate) fn settle(mut self) -> Result<(), Unstopped> {
-        if let Some(token) = &self.token {
-            match carrying(token, &mut self.pending) {
-                Ok(found) => {
-                    for (pid, started) in found {
-                        let process = Process {
-                            pid,
-                            started,
-                            program: String::new(),
-                        };
-                        if !self.known.iter().any(|known| same(known, &process)) {
-                            self.known.push(process);
-                        }
-                    }
-                }
+        if !self.scanned {
+            match self.add_carriers() {
+                Ok(()) => self.scanned = true,
                 Err(_) => self.unchecked = true,
             }
         }
@@ -730,6 +1082,49 @@ fn follow_run(
 #[cfg(unix)]
 fn same(known: &Process, now: &Process) -> bool {
     known.pid == now.pid && known.started == now.started
+}
+
+/// Picks which known processes a hold may signal now: each one a table read in the same pass
+/// shows with the same id and start, so a reused id never is, and that table lists only this
+/// user's processes. Never process 0 or 1, the engine itself or any process of its parent
+/// chain. Inputs: the known processes, the rows, the engine's id and its parent chain.
+/// Output: the ids, each at most once.
+#[cfg(unix)]
+fn targets(known: &[Process], rows: &[Row], own: i32, parents: &[i32]) -> Vec<i32> {
+    let mut picked: Vec<i32> = Vec::new();
+    for process in known {
+        if process.pid > 1
+            && process.pid != own
+            && !parents.contains(&process.pid)
+            && !picked.contains(&process.pid)
+            && rows.iter().any(|(row, ..)| same(row, process))
+        {
+            picked.push(process.pid);
+        }
+    }
+    assert!(picked.len() <= known.len());
+    picked
+}
+
+/// Walks the engine's parent chain from its parent through `rows`, at most `PARENTS_MAX`
+/// steps, stopping at process 1 or a loop. Input: a table read. Output: the chain's ids.
+#[cfg(unix)]
+fn parents(rows: &[Row]) -> Vec<i32> {
+    let mut chain: Vec<i32> = Vec::new();
+    let mut next = rustix::process::getppid().map(|pid| pid.as_raw_nonzero().get());
+    while let Some(pid) = next
+        && pid > 1
+        && chain.len() < PARENTS_MAX
+        && !chain.contains(&pid)
+    {
+        chain.push(pid);
+        next = rows
+            .iter()
+            .find(|(row, ..)| row.pid == pid)
+            .map(|(_, parent, _)| *parent);
+    }
+    assert!(chain.len() <= PARENTS_MAX);
+    chain
 }
 
 /// Reads this user's running processes, other than the engine, with the listing command;
@@ -1091,6 +1486,7 @@ pub(crate) mod tests {
             known,
             table: PS_TABLE,
             unchecked: false,
+            scanned: true,
             pending: None,
             sandboxed: false,
             token: None,
@@ -1225,6 +1621,7 @@ pub(crate) mod tests {
             known: Vec::new(),
             table: PS_TABLE,
             unchecked: false,
+            scanned: true,
             pending: None,
             sandboxed: false,
             token: None,
@@ -1247,6 +1644,7 @@ pub(crate) mod tests {
             }],
             table: PS_TABLE,
             unchecked: true,
+            scanned: true,
             pending: Some(held_up),
             sandboxed: false,
             token: None,
@@ -1296,7 +1694,7 @@ pub(crate) mod tests {
 
         left.0.table = PS_TABLE;
         let (held, released) = std::sync::mpsc::channel::<()>();
-        left.hold(None, held);
+        left.hold(None, held, by(), LeftoverMode::Ask);
         assert_eq!(
             released.recv_timeout(Duration::from_secs(5)),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
@@ -1327,7 +1725,7 @@ pub(crate) mod tests {
         let account = CredentialRef::new("signed-out-full-access").unwrap();
         let other = CredentialRef::new("other-full-access").unwrap();
         let (held, released) = std::sync::mpsc::channel::<()>();
-        Leftovers(Box::new(lineage)).hold(Some(account.clone()), held);
+        Leftovers(Box::new(lineage)).hold(Some(account.clone()), held, by(), LeftoverMode::Ask);
 
         let reports = held_by(&account);
         let release_count = release(&other);
@@ -1370,6 +1768,7 @@ pub(crate) mod tests {
             known: Vec::new(),
             table: PS_TABLE,
             unchecked: false,
+            scanned: true,
             pending: None,
             sandboxed: false,
             token: None,
@@ -1529,15 +1928,33 @@ pub(crate) mod tests {
         token: &LineageToken,
         extra: (&str, &str),
     ) -> (u32, i32) {
+        detached_with(folder, name, Some(token), extra)
+    }
+
+    /// Starts a sleeper as [`detached`] does, with the launch's token or with none at all,
+    /// as an unrelated program of the owner's user would run. Inputs: the folder, the id
+    /// file's name, the token, if any, and one more variable. Output: the shell's id and the
+    /// sleeper's.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn detached_with(
+        folder: &std::path::Path,
+        name: &str,
+        token: Option<&LineageToken>,
+        extra: (&str, &str),
+    ) -> (u32, i32) {
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(
+                "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; exec @ARGV or exit 1' \"$0\" --ignored --exact harnesses::leftovers::tests::a_lineage_sleeper --test-threads=1 < /dev/null > /dev/null 2>&1 &",
+            )
+            .arg(std::env::current_exe().unwrap())
+            .env_clear();
+        if let Some(token) = token {
+            command.env(LINEAGE_VARIABLE, token.as_str());
+        }
         let mut shell = crate::spawn_gate::spawn(
-            std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(
-                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; exec @ARGV or exit 1' \"$0\" --ignored --exact harnesses::leftovers::tests::a_lineage_sleeper --test-threads=1 < /dev/null > /dev/null 2>&1 &",
-                )
-                .arg(std::env::current_exe().unwrap())
-                .env_clear()
-                .env(LINEAGE_VARIABLE, token.as_str())
+            command
                 .env(SLEEPER_PID, folder.join(name))
                 .env(extra.0, extra.1)
                 .current_dir(folder)
@@ -1592,7 +2009,7 @@ pub(crate) mod tests {
         let pids: Vec<i32> = left.0.known.iter().map(|process| process.pid).collect();
         let account = CredentialRef::new("detached-full-access").unwrap();
         let (held, _released) = std::sync::mpsc::channel::<()>();
-        left.hold(Some(account.clone()), held);
+        left.hold(Some(account.clone()), held, by(), LeftoverMode::Ask);
         let reports = held_by(&account);
         release(&account);
         end(named);
@@ -1610,6 +2027,376 @@ pub(crate) mod tests {
             assert!(
                 !text.contains(canary.1) && !text.contains(other.as_str()),
                 "environment text reached a report: {text}"
+            );
+        }
+    }
+
+    /// Who left a test hold, in no project. Output: the label.
+    fn by() -> HoldBy {
+        HoldBy {
+            project: None,
+            who: "a test".into(),
+        }
+    }
+
+    /// Who left a test hold in `project`. Input: the project. Output: the label.
+    fn by_in(project: &str) -> HoldBy {
+        HoldBy {
+            project: Some(project.into()),
+            who: "team agent 7".into(),
+        }
+    }
+
+    /// Tells whether a process still runs and is no zombie. Input: the id. Output: true then.
+    fn runs(pid: i32) -> bool {
+        table(PS_TABLE, &mut None)
+            .is_ok_and(|rows| rows.iter().any(|(process, _)| process.pid == pid))
+    }
+
+    /// Waits up to `wait` for `done`. Inputs: the bound and the condition. Output: whether it
+    /// held in time.
+    fn within(wait: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + wait;
+        while Instant::now() < deadline {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        done()
+    }
+
+    /// Ends a test process by id. Input: the id. Output: none.
+    fn end_pid(pid: i32) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
+
+    /// Starts a perl process in a session of its own that ignores SIGTERM, or not, and waits
+    /// until it left its session. Input: whether it ignores SIGTERM. Output: the child.
+    fn session_sleeper(ignores_term: bool) -> std::process::Child {
+        let script = if ignores_term {
+            "$SIG{TERM} = 'IGNORE'; POSIX::setsid() > 0 or exit 1; sleep 60"
+        } else {
+            "POSIX::setsid() > 0 or exit 1; sleep 60"
+        };
+        let child = crate::spawn_gate::spawn(
+            std::process::Command::new("/usr/bin/perl")
+                .args(["-mPOSIX", "-e", script])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let pid = rustix::process::Pid::from_child(&child);
+        assert!(
+            within(Duration::from_secs(10), || rustix::process::getsid(Some(
+                pid
+            )) == Ok(pid)),
+            "the sleeper never left its session"
+        );
+        child
+    }
+
+    #[test]
+    fn the_leftover_setting_defaults_to_end_and_reads_back_each_stored_name() {
+        assert_eq!(LeftoverMode::default(), LeftoverMode::End);
+        for mode in [LeftoverMode::End, LeftoverMode::Keep, LeftoverMode::Ask] {
+            assert_eq!(LeftoverMode::named(mode.stored()), Some(mode));
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{}\"", mode.stored()));
+        }
+        assert_eq!(LeftoverMode::named("kill"), None);
+        assert_eq!(LeftoverMode::named(""), None);
+    }
+
+    #[test]
+    fn a_reused_id_the_engine_and_its_parents_are_never_signalled() {
+        let own = 900;
+        let parent = 901;
+        let rows = [
+            row(500, 1, 500, LATER),
+            row(501, 1, 501, FIRST),
+            row(own, parent, own, FIRST),
+            row(parent, 1, parent, FIRST),
+        ];
+        let known = |pid: i32, started: &str| Process {
+            pid,
+            started: started.into(),
+            program: "sleep".into(),
+        };
+        let picked = targets(
+            &[
+                known(500, FIRST),
+                known(501, FIRST),
+                known(501, FIRST),
+                known(1, FIRST),
+                known(0, FIRST),
+                known(own, FIRST),
+                known(parent, FIRST),
+                known(502, FIRST),
+            ],
+            &rows,
+            own,
+            &[parent],
+        );
+        assert_eq!(
+            picked,
+            [501],
+            "only a process the same table shows with its known start may be signalled"
+        );
+    }
+
+    #[test]
+    fn end_terms_then_kills_past_the_grace_and_lets_the_account_go_once_none_run() {
+        let mut leftover = session_sleeper(true);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let lineage = Lineage::of(leftover.id(), None).unwrap();
+        let account = CredentialRef::new("ended-full-access").unwrap();
+        let (held, released) = std::sync::mpsc::channel::<()>();
+        Leftovers(Box::new(lineage)).hold(
+            Some(account.clone()),
+            held,
+            by_in("project-end"),
+            LeftoverMode::End,
+        );
+        std::thread::sleep(Duration::from_secs(2));
+        let _ = leftover.try_wait();
+        let alive_in_grace = runs(pid);
+        let held_in_grace = held_by(&account);
+        let view = held_in("project-end");
+        let ended = within(LEFTOVER_GRACE + Duration::from_secs(5), || {
+            let _ = leftover.try_wait();
+            !runs(pid)
+        });
+        let after = released.recv_timeout(Duration::from_secs(5));
+        let remaining = held_by(&account);
+        end_pid(pid);
+        let _ = leftover.wait();
+
+        assert!(alive_in_grace, "SIGKILL came before the grace ended");
+        assert_eq!(held_in_grace.len(), 1, "{held_in_grace:?}");
+        assert!(
+            matches!(view.as_slice(), [one] if one.state == HoldState::Ending && one.holds_account && one.names.contains(&pid.to_string())),
+            "{view:?}"
+        );
+        assert!(ended, "a process that ignores SIGTERM outlived the grace");
+        assert_eq!(
+            after,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "the account stayed held after its leftover was ended"
+        );
+        assert!(remaining.is_empty(), "{remaining:?}");
+    }
+
+    #[test]
+    fn keep_lets_the_account_go_at_once_and_lists_the_processes_until_they_end() {
+        let mut leftover = session_sleeper(false);
+        let pid = i32::try_from(leftover.id()).unwrap();
+        let lineage = Lineage::of(leftover.id(), None).unwrap();
+        let account = CredentialRef::new("kept-full-access").unwrap();
+        let (held, released) = std::sync::mpsc::channel::<()>();
+        Leftovers(Box::new(lineage)).hold(
+            Some(account.clone()),
+            held,
+            by_in("project-keep"),
+            LeftoverMode::Keep,
+        );
+        let let_go = released.recv_timeout(Duration::from_millis(500));
+        let reports = held_by(&account);
+        let view = held_in("project-keep");
+        std::thread::sleep(HOLD_POLL * 2);
+        let _ = leftover.try_wait();
+        let still_runs = runs(pid);
+        end_pid(pid);
+        let _ = leftover.wait();
+        let cleared = within(HOLD_POLL * 3, || held_in("project-keep").is_empty());
+
+        assert_eq!(
+            let_go,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "Keep held the account"
+        );
+        assert!(reports.is_empty(), "{reports:?}");
+        assert!(
+            matches!(view.as_slice(), [one] if one.state == HoldState::Kept && !one.holds_account && one.names.contains(&pid.to_string()) && one.who == "team agent 7"),
+            "{view:?}"
+        );
+        assert!(still_runs, "Keep ended the process");
+        assert!(cleared, "a kept process that ended stayed listed");
+    }
+
+    #[test]
+    fn ask_holds_the_account_until_the_owner_ends_or_keeps_and_only_in_its_project() {
+        let mut first = session_sleeper(false);
+        let mut second = session_sleeper(false);
+        let (one, two) = (
+            i32::try_from(first.id()).unwrap(),
+            i32::try_from(second.id()).unwrap(),
+        );
+        let account = CredentialRef::new("asked-full-access").unwrap();
+        let (held_one, released_one) = std::sync::mpsc::channel::<()>();
+        let (held_two, released_two) = std::sync::mpsc::channel::<()>();
+        Leftovers(Box::new(Lineage::of(first.id(), None).unwrap())).hold(
+            Some(account.clone()),
+            held_one,
+            by_in("project-ask"),
+            LeftoverMode::Ask,
+        );
+        Leftovers(Box::new(Lineage::of(second.id(), None).unwrap())).hold(
+            Some(account.clone()),
+            held_two,
+            by_in("project-ask"),
+            LeftoverMode::Ask,
+        );
+        let view = held_in("project-ask");
+        let keys: Vec<u64> = view.iter().map(|hold| hold.key).collect();
+        let waiting = released_one.recv_timeout(HOLD_POLL * 2);
+        let elsewhere = (
+            end_held(keys[0], "project-other"),
+            keep_held(keys[1], "project-other"),
+        );
+        let ended = end_held(keys[0], "project-ask");
+        let gone = within(LEFTOVER_GRACE, || {
+            let _ = first.try_wait();
+            !runs(one)
+        });
+        let kept = keep_held(keys[1], "project-ask");
+        let let_go = released_two.recv_timeout(Duration::from_millis(500));
+        let _ = second.try_wait();
+        let second_runs = runs(two);
+        let after = held_in("project-ask");
+        end_pid(one);
+        end_pid(two);
+        let _ = first.wait();
+        let _ = second.wait();
+
+        assert_eq!(view.len(), 2, "{view:?}");
+        assert!(
+            view.iter()
+                .all(|hold| hold.state == HoldState::Held && hold.holds_account)
+        );
+        assert_eq!(
+            waiting,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "Ask let the account go before the owner chose"
+        );
+        assert_eq!(
+            elsewhere,
+            (false, false),
+            "another project's owner action reached the hold"
+        );
+        assert!(ended && gone, "the owner's End did not end the process");
+        assert!(kept, "the owner's Keep was refused");
+        assert_eq!(let_go, Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+        assert!(second_runs, "the owner's Keep ended the process");
+        assert!(
+            after
+                .iter()
+                .all(|hold| hold.key != keys[1] || hold.state == HoldState::Kept),
+            "{after:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_token_scan_that_failed_at_the_stop_is_retried_by_the_hold_and_ends_the_orphan() {
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let (leader, orphan) = detached(folder.path(), "orphan.pid", &ours, ("UNUSED", "x"));
+        let mut lineage = Lineage::of(leader, Some(ours)).unwrap();
+        lineage.scanned = false;
+        lineage.unchecked = true;
+        lineage.known.clear();
+        let account = CredentialRef::new("retried-full-access").unwrap();
+        let (held, released) = std::sync::mpsc::channel::<()>();
+        Leftovers(Box::new(lineage)).hold(
+            Some(account.clone()),
+            held,
+            by_in("project-retry"),
+            LeftoverMode::End,
+        );
+        let ended = within(LEFTOVER_GRACE + Duration::from_secs(5), || !runs(orphan));
+        let after = released.recv_timeout(Duration::from_secs(5));
+        end_pid(orphan);
+
+        assert!(
+            ended,
+            "the hold let a token carrier the stop could not scan for run on"
+        );
+        assert_eq!(after, Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unrelated_parent_one_process_started_after_the_launch_without_the_token_is_never_signalled()
+     {
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let (leader, named) = detached(folder.path(), "ours.pid", &ours, ("UNUSED", "x"));
+        let (_, unrelated) = detached_with(folder.path(), "unrelated.pid", None, ("UNUSED", "x"));
+        let lineage = Lineage::of(leader, Some(ours)).unwrap();
+        let left = match lineage.settle() {
+            Err(Unstopped::Left(left)) => left,
+            other => {
+                end_pid(named);
+                end_pid(unrelated);
+                panic!("the token carrier was not named: {other:?}");
+            }
+        };
+        let (held, _released) = std::sync::mpsc::channel::<()>();
+        left.hold(None, held, by_in("project-unrelated"), LeftoverMode::End);
+        let ended = within(LEFTOVER_GRACE + Duration::from_secs(5), || !runs(named));
+        std::thread::sleep(ENDING_POLL * 4);
+        let unrelated_runs = runs(unrelated);
+        end_pid(named);
+        end_pid(unrelated);
+
+        assert!(ended, "the launch's own orphan was not ended");
+        assert!(
+            unrelated_runs,
+            "an unrelated parent-1 process without the token was signalled"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn no_environment_text_reaches_a_report_the_owner_view_or_a_told_line() {
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let canary = ("CRAZYAGENT_TEST_CANARY", "environment-text-never-shown");
+        let (leader, named) = detached(folder.path(), "canary.pid", &ours, canary);
+        let left = match Lineage::of(leader, Some(ours.clone())).unwrap().settle() {
+            Err(Unstopped::Left(left)) => left,
+            other => {
+                end_pid(named);
+                panic!("the token carrier was not named: {other:?}");
+            }
+        };
+        let told: Vec<String> = [LeftoverMode::End, LeftoverMode::Keep, LeftoverMode::Ask]
+            .into_iter()
+            .map(|mode| left.told(mode))
+            .collect();
+        let debug = format!("{left:?}");
+        let (held, _released) = std::sync::mpsc::channel::<()>();
+        left.hold(None, held, by_in("project-canary"), LeftoverMode::Ask);
+        let view = serde_json::to_string(&held_in("project-canary")).unwrap();
+        let keys: Vec<u64> = held_in("project-canary")
+            .iter()
+            .map(|hold| hold.key)
+            .collect();
+        for key in keys {
+            end_held(key, "project-canary");
+        }
+        within(LEFTOVER_GRACE + Duration::from_secs(5), || !runs(named));
+        end_pid(named);
+
+        assert!(view.contains(&named.to_string()), "{view}");
+        for text in told.iter().chain([&debug, &view]) {
+            assert!(
+                !text.contains(canary.1) && !text.contains(canary.0),
+                "environment text reached a report or the owner view: {text}"
             );
         }
     }

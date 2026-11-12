@@ -1048,7 +1048,12 @@ impl ResearchRunner {
                         credential.stop_renewing();
                     }
                     let account = lease.as_ref().map(|(profile, _)| profile.account().clone());
-                    left.hold(account, (credential, lease));
+                    let by = leftovers::HoldBy {
+                        project: Some(job.project.clone()),
+                        who: format!("research job {}", job.id),
+                    };
+                    let mode = jobs.leftover_mode(&job.project);
+                    left.hold(account, (credential, lease), by, mode);
                     return Err(RunError::Uncertain(code));
                 }
             }

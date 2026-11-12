@@ -446,8 +446,8 @@ impl OwnedChild {
     /// Publishes the run's end and releases the account lease. At Full access, no warden
     /// reaches what left the group, so the lineage taken at the stop, or now when the harness
     /// ended on its own, is checked first; while some of it still runs the run ends with that
-    /// code and the lease stays held until it ends or the owner signs the account out.
-    /// Takes nothing.
+    /// code and a hold ends it by the default leftover setting, keeping the lease until none
+    /// of it runs or the owner signs the account out. Takes nothing.
     fn publish_completion(&mut self) {
         assert!(self.complete());
         assert!(self.status.is_some() || self.abandoned);
@@ -467,7 +467,15 @@ impl OwnedChild {
             left = Some(unstopped.code());
             self.shared.fail(unstopped.code());
             if let (Unstopped::Left(leftovers), Some(profile)) = (unstopped, self.profile.take()) {
-                leftovers.hold(Some(profile.account().clone()), profile);
+                leftovers.hold(
+                    Some(profile.account().clone()),
+                    profile,
+                    crate::harnesses::leftovers::HoldBy {
+                        project: None,
+                        who: "a Codex host turn".to_owned(),
+                    },
+                    crate::harnesses::leftovers::mode_of(None),
+                );
             }
         }
         self.profile = None;

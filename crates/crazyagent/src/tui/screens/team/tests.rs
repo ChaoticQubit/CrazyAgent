@@ -4310,7 +4310,7 @@ fn a_master_stopped_for_another_reason_offers_no_start_again() {
     requests(&mut shell);
     shell.arrive(switch(
         Some(false),
-        Some("The live master was turned off: its terminal ended. Start it again from the master view."),
+        Some("The live master was turned off: it had to start 3 times within 10 minutes. Start it again from the master view."),
     ));
     requests(&mut shell);
     let seen = render(&mut shell).join("\n");
