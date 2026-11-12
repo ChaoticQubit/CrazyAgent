@@ -155,11 +155,11 @@ impl ProjectPlugins {
                             assert!(visible(scope, &self.project));
                             assert_eq!(on_here.is_some(), *scope == Scope::Global);
                         }
-                        let asked = self.asking().map(|server| server.runs.clone());
+                        let asked = self.asked_server().map(|server| server.runs.clone());
                         self.skills = skills.clone();
                         self.servers = servers.clone();
                         self.loaded = true;
-                        if self.asking().map(|server| &server.runs) != asked.as_ref() {
+                        if self.asked_server().map(|server| &server.runs) != asked.as_ref() {
                             self.command_top.set(0);
                             *self.read_through.borrow_mut() = None;
                         }
@@ -234,7 +234,7 @@ impl ProjectPlugins {
         }
     }
 
-    fn asking(&self) -> Option<&ServerView> {
+    fn asked_server(&self) -> Option<&ServerView> {
         let id = self.confirm.as_deref()?;
         self.servers
             .iter()
@@ -280,7 +280,7 @@ impl ProjectPlugins {
 
     fn clamp(&mut self) {
         self.cursor = self.cursor.min(self.count().saturating_sub(1));
-        if self.confirm.is_some() && self.asking().is_none() {
+        if self.confirm.is_some() && self.asked_server().is_none() {
             self.confirm = None;
         }
         if self.removing.is_some() && self.removed().is_none() {
@@ -539,7 +539,7 @@ impl ProjectPlugins {
     }
 
     fn read_whole_command(&self) -> bool {
-        self.asking().is_some_and(|server| {
+        self.asked_server().is_some_and(|server| {
             matches!(
                 &*self.read_through.borrow(),
                 Some((id, runs)) if *id == server.id && *runs == server.runs
@@ -575,7 +575,7 @@ impl ProjectPlugins {
             lines.extend(self.notice.iter().map(|notice| notice.row(look)));
             return (lines, self.help());
         }
-        if let Some(server) = self.asking() {
+        if let Some(server) = self.asked_server() {
             return (self.approval(server, content, room, look), self.help());
         }
         let footer = self.footer(look);
