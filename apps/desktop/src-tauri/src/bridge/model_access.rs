@@ -330,7 +330,7 @@ impl NativeBridge {
             .ok_or_else(|| failure("stale_model_access"))?;
         let view = self.current_view();
         if !self.status().connected
-            || !view.is_some_and(|view| view.fresh && view.state == selected.state)
+            || !view.is_some_and(|view| unwritten_since(&selected.state, &view))
         {
             return Err(failure("stale_model_access"));
         }
@@ -386,6 +386,17 @@ impl NativeBridge {
         );
         self.deliver_intent(false).await
     }
+}
+
+/// Whether the latest view still stands on the read an edit ticket was taken from: fresh, at the
+/// same owner revision and config, so only reads such as Pools' pools, schedule and ranking came
+/// between. Any owner write moves the revision and expires the ticket, the engine still checks
+/// revision, config and source at commit, and sign-in tickets keep the exact-view rule. Inputs:
+/// the ticket's read and the latest view. Output: true while the ticket holds.
+fn unwritten_since(selected: &OwnerReadReply, view: &ControllerView) -> bool {
+    view.fresh
+        && view.state.revision == selected.revision
+        && view.state.config_id == selected.config_id
 }
 
 /// Refuses a connection CrazyAgent does not manage a native sign-in for: only a native Codex
