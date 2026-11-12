@@ -144,7 +144,7 @@ pub fn refusal_text(code: &str) -> &'static str {
         }
         "grant_socket_needs_macos" => "A socket can be allowed only on macOS in this version.",
         "grant_socket_not_plain" => {
-            "The socket path must be a full path of letters, digits, '/', '.', '-' and '_', at most 103 bytes, in a folder that exists."
+            "The socket path must be a full path of letters, digits, slashes, dots, dashes and underscores, at most 103 bytes, in a folder that exists."
         }
         "grant_socket_secret" => {
             "That socket sits with your keys or credentials, so it is never allowed."
@@ -178,7 +178,7 @@ pub fn refusal_text(code: &str) -> &'static str {
         }
         "grant_full" => "This project already allows as many extras of that kind as it can.",
         "grant_requests_full" => {
-            "4 access requests of this project are still waiting for the owner."
+            "Four access requests of this project are still waiting for the owner."
         }
         "grant_reason_invalid" => "Give a reason in plain words.",
         _ => "The request could not be recorded.",

@@ -184,10 +184,29 @@ export type Toolchain = "rust" | "node" | "python";
  * one per access level and kind of folder, per_agent one per agent. */
 export type ToolCacheScope = "shared" | "per_agent";
 
+/** When a wider saved access reaches agents already running (F08): when_idle stops each at its
+ * next idle point so its next start has it, the live master resuming its own conversation;
+ * next_start leaves it until it next starts. Lowering or removing an extra always stops at once. */
+export type AccessApply = "when_idle" | "next_start";
+
+/** One narrow extra the owner allows a project's agents beyond their level (F08): connecting to
+ * one unix socket, connecting to one port on this computer, or the owner's own temp folder. */
+export type AccessGrant = { kind: "socket"; path: string } | { kind: "port"; port: number } | { kind: "temp_folder" };
+
+/** One row of a project's extras log, newest first: granted and revoked by an owner save,
+ * allowed and denied by an access request question (by is `owner` or `question <id>`). */
+export interface GrantLogRow {
+  at_ms: number;
+  action: "granted" | "revoked" | "allowed" | "denied";
+  grant: string;
+  by: string;
+}
+
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
  * that differ from the project's own use, whether git in the IDE runs the project's own
- * hooks, what the IDE may change in agent folders, and who shares the agents' tool cache,
- * shared when it is left out. */
+ * hooks, what the IDE may change in agent folders, who shares the agents' tool cache,
+ * shared when it is left out, when wider access reaches running agents and the allowed
+ * extras, the saved ones kept when left out. */
 export interface AgentPolicy {
   access: AgentAccess;
   network: AgentNetwork;
@@ -195,6 +214,8 @@ export interface AgentPolicy {
   ide_git_hooks: boolean;
   tool_cache?: ToolCacheScope;
   ide_agent_files: IdeAgentFiles;
+  apply_changes?: AccessApply;
+  grants?: AccessGrant[];
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
@@ -210,6 +231,11 @@ export interface PolicyView {
   tool_cache: ToolCacheScope;
   tool_caches: { scope: ToolCacheScope; label: string }[];
   ide_agent_files: IdeAgentFiles;
+  apply_changes?: AccessApply;
+  apply_choices?: { apply: AccessApply; label: string }[];
+  grants?: { grant: AccessGrant; label: string }[];
+  temp_folder?: { path: string | null; unavailable: string | null };
+  grant_log?: GrantLogRow[];
   version: number;
 }
 
