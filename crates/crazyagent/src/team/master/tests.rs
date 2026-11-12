@@ -2599,10 +2599,13 @@ fn inspect_work_shows_a_lead_its_team_and_marks_what_it_read() {
     assert!(!plain.contains("Your team's work"), "{plain}");
     assert!(!plain.contains("Questions for the owner"), "{plain}");
     assert!(!plain.contains("Your workers"), "{plain}");
+    let models = crate::team::model_pick::MODELS_HEAD;
+    assert!(!plain.contains(models), "{plain}");
     let (master, refused) = as_master(&mut fixture, tool::INSPECT_WORK_TOOL, json!({}));
     assert!(!refused, "{master}");
     assert!(master.contains("Write the API"), "{master}");
     assert!(master.contains("The team:\n"), "{master}");
+    assert!(master.contains(&format!("{models}\n- codex: ")), "{master}");
 }
 
 /// update_work to a running agent stores the message Sent and wakes nothing, one key

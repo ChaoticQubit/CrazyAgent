@@ -249,8 +249,8 @@ pub(super) fn inspect_task(
 /// messages and questions waiting for it, which this marks read, what it sent and how far
 /// each got and its overlapping claims; a lead or the master also reads the agents it
 /// leads, their work, the questions for the owner from its team and the change sets
-/// waiting. Takes the database, what the answers need, the caller and whether it is the
-/// master. Returns the text.
+/// waiting, and the master the models a spawn may name (DEC-150 F9). Takes the database,
+/// what the answers need, the caller and whether it is the master. Returns the text.
 pub(super) fn inspect_work(
     connection: &Connection,
     answering: &Answering<'_>,
@@ -363,17 +363,17 @@ pub(super) fn inspect_work(
         sections.push(format!("Overlapping claims:\n{}", lines.join("\n")));
     }
     if master {
-        sections.push(match crate::team::events::status(connection, project) {
-            Ok(status) => format!("The team:\n{}", status.text()),
-            Err(problem) => super::unreadable(problem),
-        });
-        sections.push(super::changes(answering).0);
         let models =
             crate::team::model_pick::plan_lines(connection, project, &answering.stored.team)
                 .unwrap_or_default();
         if !models.is_empty() {
             sections.push(models.trim_end().to_owned());
         }
+        sections.push(match crate::team::events::status(connection, project) {
+            Ok(status) => format!("The team:\n{}", status.text()),
+            Err(problem) => super::unreadable(problem),
+        });
+        sections.push(super::changes(answering).0);
     } else if !led.is_empty() {
         sections.push(super::lead_status(connection, project, agent)?.0);
         sections.push(super::lead_changes(connection, answering, agent)?.0);
