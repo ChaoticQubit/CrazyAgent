@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -15,6 +16,9 @@ const SOURCE_BYTES = 2 * 1024 * 1024;
 const EXCERPT_LINES = 30;
 const FRAME_LINES = 120;
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const PRINT_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"];
+const GROUP_END_MS = 5_000;
+const GROUP_POLL_MS = 50;
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RESULTS = ["PASS", "FAIL", "UNKNOWN"];
 const IMAGES = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml" };
@@ -977,8 +981,30 @@ export function renderReport(model) {
 }
 
 /**
+ * Kills every process left in the process group a print started and waits until the group is gone,
+ * trying again while macOS still answers EPERM for a group whose last members are being reaped.
+ * Input: the group id, which is the id of the process the print started. Output: none. Throws
+ * report_pdf_group_left when a member outlives GROUP_END_MS.
+ */
+async function endGroup(group) {
+  assert.ok(Number.isInteger(group) && group > 1, "a print's process group is a real group");
+  const deadline = Date.now() + GROUP_END_MS;
+  for (;;) {
+    try {
+      process.kill(-group, "SIGKILL");
+    } catch (error) {
+      if (error.code === "ESRCH") return;
+      if (error.code !== "EPERM") throw error;
+    }
+    if (Date.now() > deadline) fail(`report_pdf_group_left: Chrome's process group ${group} outlived ${GROUP_END_MS} ms`);
+    await new Promise((done) => setTimeout(done, GROUP_POLL_MS));
+  }
+}
+
+/**
  * Prints an HTML file to PDF with Google Chrome headless under umask 077, in a throwaway profile with a mock
- * keychain, every request sent to a closed proxy and every host name unresolvable.
+ * keychain, every request sent to a closed proxy and every host name unresolvable. Chrome runs in its own process
+ * group, killed whole on the timeout, on this process's exit or SIGTERM, SIGINT or SIGHUP, and after Chrome ends.
  * Input: the HTML path, the PDF path and optionally the Chrome executable (CRAZYAGENT_CHROME or the macOS app).
  * Output: the PDF path, mode 0600, moved into place only once complete. Throws a BLOCKED error when Chrome is missing.
  */
@@ -999,9 +1025,49 @@ export async function printPdf(htmlPath, pdfPath, { chrome = process.env.CRAZYAG
       "--proxy-server=127.0.0.1:9", "--proxy-bypass-list=<-loopback>", "--host-resolver-rules=MAP * ~NOTFOUND",
       `--user-data-dir=${profile}`, "--no-pdf-header-footer", `--print-to-pdf=${staged}`, pathToFileURL(htmlPath).href,
     ];
-    await new Promise((done, failed) => {
-      execFile("/bin/sh", ["-c", 'umask 077 && exec "$0" "$@"', chrome, ...args], { timeout, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 }, (error) => (error ? failed(new Error(`report_pdf_failed: ${error.message.split("\n")[0]}`)) : done()));
-    });
+    const printer = spawn("/bin/sh", ["-c", 'umask 077 && exec "$0" "$@"', chrome, ...args], { detached: true, stdio: "ignore" });
+    const group = printer.pid;
+    const sweep = () => {
+      try {
+        if (Number.isInteger(group) && group > 1) process.kill(-group, "SIGKILL");
+      } catch {
+        return;
+      }
+    };
+    const forget = () => {
+      process.removeListener("exit", sweep);
+      for (const signal of PRINT_SIGNALS) process.removeListener(signal, stop);
+    };
+    const stop = (signal) => {
+      sweep();
+      forget();
+      process.kill(process.pid, signal);
+    };
+    process.once("exit", sweep);
+    for (const signal of PRINT_SIGNALS) process.once(signal, stop);
+    try {
+      await new Promise((done, failed) => {
+        const timer = setTimeout(() => {
+          sweep();
+          failed(new Error(`report_pdf_failed: Chrome did not print within ${timeout} ms`));
+        }, timeout);
+        printer.once("error", (error) => {
+          clearTimeout(timer);
+          failed(new Error(`report_pdf_failed: ${error.message}`));
+        });
+        printer.once("exit", (code, signal) => {
+          clearTimeout(timer);
+          if (code === 0) done();
+          else failed(new Error(`report_pdf_failed: Chrome ended with ${signal ?? `exit code ${code}`}`));
+        });
+      });
+    } finally {
+      try {
+        if (group !== undefined) await endGroup(group);
+      } finally {
+        forget();
+      }
+    }
     const where = await lstat(staged).catch(() => fail("report_pdf_missing"));
     if (!where.isFile()) fail("report_pdf_missing");
     if (where.mode & 0o077) fail("report_pdf_mode: Chrome wrote the PDF readable by others");
