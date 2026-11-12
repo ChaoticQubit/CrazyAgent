@@ -797,18 +797,31 @@ pub(crate) fn agent_remember(
 /// the query, newest first, at most `RECALL_ITEMS_MAX`. Inputs: the engine connection, the
 /// project and the untrusted query, blank for the newest. Output: the memories, or a refusal
 /// code for a query that is not one line of up to 100 bytes.
+#[cfg(test)]
 pub(crate) fn recall(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
     query: &str,
 ) -> Result<Result<Vec<SavedMemory>, String>, EngineError> {
+    Ok(recall_ranked(connection, project, query)?.map(|(found, _)| found))
+}
+
+/// Finds the memories [`recall`] finds, with the hybrid ranking note when the search index
+/// answered (P-14), worded for memories ([`recall_note`]); the scan carries none. Inputs and
+/// refusals as [`recall`]. Output: the memories and the note.
+pub(crate) fn recall_ranked(
+    connection: &mut rusqlite::Connection,
+    project: &ProjectId,
+    query: &str,
+) -> Result<Result<(Vec<SavedMemory>, Option<String>), String>, EngineError> {
     let query = query.trim();
     let search = (!query.is_empty()).then_some(query);
     if let Err(problem) = validate_page(search, PAGE_ITEMS_MAX) {
         return Ok(Err(problem.0));
     }
-    if let Some(found) = search.and_then(|query| indexed_recall(connection, project, query)) {
-        return Ok(Ok(found));
+    if let Some((found, note)) = search.and_then(|query| indexed_recall(connection, project, query))
+    {
+        return Ok(Ok((found, note.map(recall_note))));
     }
     let tx = connection.transaction().map_err(error)?;
     let mut found = Vec::new();
@@ -827,42 +840,30 @@ pub(crate) fn recall(
     found.sort_by_key(|memory| std::cmp::Reverse(memory.ordinal));
     found.truncate(RECALL_ITEMS_MAX);
     assert!(found.iter().all(|memory| !memory.origin.waiting()));
-    Ok(Ok(found))
-}
-
-/// Finds the memories [`recall`] finds, with the hybrid ranking note when the search index
-/// answered (P-14), worded for memories ([`recall_note`]); the scan carries none. Inputs and
-/// refusals as [`recall`]. Output: the memories and the note.
-pub(crate) fn recall_ranked(
-    connection: &mut rusqlite::Connection,
-    project: &ProjectId,
-    query: &str,
-) -> Result<Result<(Vec<SavedMemory>, Option<String>), String>, EngineError> {
-    let _ = (connection, project, query);
-    unimplemented!("recall_ranked")
+    Ok(Ok((found, None)))
 }
 
 /// A hybrid ranking note as recall shows it: a note about "this history" speaks of the saved
 /// memories instead. Input: the note. Output: the note for recall.
 pub(crate) fn recall_note(note: &str) -> String {
-    let _ = note;
-    unimplemented!("recall_note")
+    note.replace("this history", "the saved memories")
 }
 
 /// Answers recall from the search index while it holds every memory change (DEC-105): the
 /// best BM25 matches first, each reloaded from the library and kept only when it is this
 /// project's or app-wide, not waiting for the owner and free of hidden characters, at most
 /// `RECALL_ITEMS_MAX`. Inputs: the connection, the project and the query. Output: the
-/// memories, or None so the scan answers, also when the index finds none.
+/// memories with the hybrid ranking note, or None so the scan answers, also when the index
+/// finds none.
 fn indexed_recall(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
     query: &str,
-) -> Option<Vec<SavedMemory>> {
+) -> Option<(Vec<SavedMemory>, Option<&'static str>)> {
     if !crate::search_index::memories_ready(connection) {
         return None;
     }
-    let (ids, _) = crate::search_index::ranked(
+    let (ids, note) = crate::search_index::ranked(
         connection,
         project,
         crate::search_index::Source::Memory,
@@ -900,7 +901,7 @@ fn indexed_recall(
     }
     assert!(found.len() <= RECALL_ITEMS_MAX);
     assert!(found.iter().all(|memory| !memory.origin.waiting()));
-    (!found.is_empty()).then_some(found)
+    (!found.is_empty()).then_some((found, note))
 }
 
 fn save_selection(
