@@ -280,9 +280,11 @@ fn removed_outside(record: &store::Record) -> bool {
 /// Lead (DEC-107), with the place the lead works, read from the store only; a native
 /// teammate whose turns the engine commits is its lead's worker too (OP9B-L3). Inputs: the
 /// store, the project, the change set's agent and its repository. Output: the lead and its
-/// place, None for an agent that is not a lead's worker or while Lands is Owner, or
-/// `changes_workspace_invalid` for a lead's worker whose lead has no worktree in that
-/// repository now, which is never measured against the owner's branch instead.
+/// place, None for an agent that is not a lead's worker, while Lands is Owner, or for a
+/// worker whose lead has no worktree recorded now: that lead is gone for good, so its
+/// worker lands on the project's Land on branch like an owner's set (F24), logged once per
+/// engine run. A lead whose worktree is in another repository gives
+/// `changes_workspace_invalid`, never the owner's branch.
 pub(super) fn lead_of(
     db: &Connection,
     project: &ProjectId,
@@ -309,7 +311,14 @@ pub(super) fn lead_of(
     };
     match place(db, project, lead)? {
         Some(lead_place) if lead_place.repository == repository => Ok(Some((lead, lead_place))),
-        _ => Err(failure("changes_workspace_invalid")),
+        Some(_) => Err(failure("changes_workspace_invalid")),
+        None => {
+            super::log_once(&format!(
+                "landing_lead_gone project={} lead={lead} worker={id}",
+                project.as_str()
+            ));
+            Ok(None)
+        }
     }
 }
 

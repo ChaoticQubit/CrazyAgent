@@ -189,6 +189,7 @@ fn engine_tool(name: &str) -> Option<&'static str> {
         tool::SPAWN_TOOL => SUB_AGENT_STARTING,
         tool::STOP_TOOL => "Stopping a sub-agent",
         tool::MERGE_TOOL => "Merging a sub-agent's work",
+        tool::DISCARD_TOOL => "Discarding a sub-agent's work",
         tool::REMEMBER_TOOL => "Saving to project memory",
         tool::RECALL_TOOL => "Recalling project memory",
         tool::SESSIONS_TOOL | tool::SESSION_TOOL => "Reading past sessions",

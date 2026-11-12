@@ -1,5 +1,5 @@
 use super::*;
-use crate::landing::{ChangeAgent, ChangeDiff};
+use crate::landing::{ChangeAgent, ChangeDiff, TurnOutcome};
 
 const NOW: i64 = 1_800_000_000_000;
 const DAY: i64 = 24 * 60 * 60 * 1000;
@@ -37,6 +37,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         outside: false,
         regenerated: Vec::new(),
         number: None,
+        landing_result: crate::landing::LandingResult::None,
     }
 }
 
@@ -305,7 +306,7 @@ fn a_refused_accept_says_why_in_plain_words_and_reads_the_list_again() {
     view.key(key(KeyCode::Enter), NOW);
     reply(&mut view, Err("changes_owner_dirty".into()));
     assert!(text(&view).contains(
-        "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again."
+        "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again."
     ));
     assert_eq!(
         view.next_query(NOW),

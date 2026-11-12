@@ -7,17 +7,31 @@ use std::path::{Path, PathBuf};
 pub const CONTROL_SOCKET: &str = "app-server-control/app-server-control.sock";
 
 /// The Codex releases, as major and minor, whose app-server protocol the bridge was
-/// checked against on the installed binary (DEC-104 Q13). Any other release fails closed,
-/// so the engine falls back to typing.
+/// checked against on the installed binary (DEC-104 Q13). A later minor of the same major
+/// runs with a warning (F38); an earlier release, another major or one of `REFUSED` fails
+/// closed, so the engine falls back to typing.
 pub const VERSIONS: [(u64, u64); 1] = [(0, 164)];
+
+/// Codex releases, as major, minor and patch, known to break the bridge: refused even
+/// where `VERSIONS` or the range rule would let them run (F38). None is known yet.
+pub const REFUSED: [(u64, u64, u64); 0] = [];
+
+/// How the bridge treats one Codex release: checked against, newer than every checked
+/// release of its major and run with a warning, or refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Support {
+    Checked,
+    Newer((u64, u64, u64)),
+    Refused,
+}
 
 /// What one bridge attempt did: the text reached the agent's Codex thread through
 /// `turn/start` or `turn/steer`, into the turn whose id the server named (none when its
-/// answer named none of at most `TURN_ID_BYTES_MAX` bytes), or the bridge cannot be used
-/// now, with a plain reason.
+/// answer named none of at most `TURN_ID_BYTES_MAX` bytes), with the release when it is
+/// newer than the checked ones, or the bridge cannot be used now, with a plain reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Bridged {
-    Delivered(Option<String>),
+    Delivered(Option<String>, Option<(u64, u64, u64)>),
     Unavailable(&'static str),
 }
 
@@ -59,9 +73,53 @@ pub fn deliver(home: &Path, text: &str, start: bool, pane: Option<u32>) -> Bridg
         return Bridged::Unavailable("codex_bridge_peer_unknown");
     };
     match wire::deliver(&socket, text, start, pane) {
-        Ok(turn) => Bridged::Delivered(turn),
+        Ok((turn, newer)) => Bridged::Delivered(turn, newer),
         Err(reason) => Bridged::Unavailable(reason),
     }
+}
+
+/// Judges one Codex release by the bridge's own tables, `VERSIONS` and `REFUSED` (F38).
+/// Takes the release as major, minor and patch. Returns how the bridge treats it.
+pub fn support(release: (u64, u64, u64)) -> Support {
+    judged(release, &VERSIONS, &REFUSED)
+}
+
+/// Judges one Codex release: refused when listed as known-bad; checked when its major and
+/// minor are; newer when its major is the newest checked one's and its minor is later;
+/// refused otherwise, so an older release or a major bump fails closed. Takes the release
+/// and the two tables. Returns how the bridge treats it.
+fn judged(
+    release: (u64, u64, u64),
+    checked: &[(u64, u64)],
+    refused: &[(u64, u64, u64)],
+) -> Support {
+    let (major, minor, _) = release;
+    if refused.contains(&release) {
+        return Support::Refused;
+    }
+    if checked.contains(&(major, minor)) {
+        return Support::Checked;
+    }
+    match checked.iter().max() {
+        Some(&(newest_major, newest_minor)) if major == newest_major && minor > newest_minor => {
+            Support::Newer(release)
+        }
+        _ => Support::Refused,
+    }
+}
+
+/// The engine's notice in a Codex agent's Messages timeline when its bridge runs on a
+/// release newer than the checked ones (F38), worded from the numbers alone. Takes the
+/// release. Returns the plain sentence.
+pub fn newer_notice(release: (u64, u64, u64)) -> String {
+    let (major, minor, patch) = release;
+    let checked = VERSIONS
+        .iter()
+        .max()
+        .map_or_else(String::new, |(major, minor)| format!(" ({major}.{minor})"));
+    format!(
+        "Codex {major}.{minor}.{patch} is newer than the Codex CrazyAgent was checked with{checked}. Messages still go straight to this agent; if it stops getting them, update CrazyAgent."
+    )
 }
 
 /// Asks an agent's own Codex app-server whether it trusts every hook the agent's launch
@@ -128,16 +186,19 @@ fn daemon_folder() -> Option<PathBuf> {
     }
 }
 
-/// Reads a Codex app-server's `userAgent`, `<client>/<release> (...)`, and checks the
-/// release against `VERSIONS`. Takes the text. Returns whether the bridge may run.
+/// Reads a Codex app-server's `userAgent`, `<client>/<release> (...)`, and judges the
+/// release by [`support`]. Takes the text. Returns how the bridge treats it; a text with no
+/// release in it is refused.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn supported(user_agent: &str) -> bool {
+fn release(user_agent: &str) -> Support {
     user_agent
         .split_whitespace()
         .next()
         .and_then(|head| head.split_once('/'))
         .and_then(|(_, release)| semver::Version::parse(release).ok())
-        .is_some_and(|release| VERSIONS.contains(&(release.major, release.minor)))
+        .map_or(Support::Refused, |release| {
+            support((release.major, release.minor, release.patch))
+        })
 }
 
 #[cfg(all(test, unix))]
@@ -145,7 +206,7 @@ mod tests;
 
 #[cfg(target_os = "macos")]
 mod wire {
-    use super::{supported, turn_id};
+    use super::{Support, release, turn_id};
     use serde_json::{Value, json};
     use std::io::{Read, Write};
     use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt};
@@ -173,6 +234,7 @@ mod wire {
         read: usize,
         deadline: Instant,
         next_id: i64,
+        newer: Option<(u64, u64, u64)>,
     }
 
     /// What one try to put text into a thread did: it went into a turn, named by the id
@@ -198,17 +260,21 @@ mod wire {
         Ok(())
     }
 
+    /// Puts text into the agent's thread through one session, trying again once when the
+    /// turn changed under the request. Takes the socket, the text, whether an idle thread may
+    /// start a turn and the pane's first process. Returns the turn the server named and the
+    /// release when it is newer than the checked ones, or the plain reason.
     pub(super) fn deliver(
         socket: &Path,
         text: &str,
         start: bool,
         pane: u32,
-    ) -> Result<Option<String>, &'static str> {
+    ) -> Result<(Option<String>, Option<(u64, u64, u64)>), &'static str> {
         let mut wire = session(socket, pane)?;
         let thread = wire.thread()?;
         for _ in 0..ATTEMPTS_MAX {
             if let Sent::Into(turn) = wire.send_into(&thread, text, start)? {
-                return Ok(turn);
+                return Ok((turn, wire.newer));
             }
         }
         Err("codex_bridge_turn_moved")
@@ -226,7 +292,8 @@ mod wire {
 
     /// Opens one initialized JSON-RPC session with an agent's app-server: the owner's private
     /// daemon folder, the owner's own socket, a listener in the agent's pane and a release
-    /// in `VERSIONS`. Takes the socket and the pane's first process. Returns the session.
+    /// the range rule lets run, kept on the session when it is newer than the checked ones
+    /// (F38). Takes the socket and the pane's first process. Returns the session.
     fn session(socket: &Path, pane: u32) -> Result<Wire, &'static str> {
         let folder = socket.parent().ok_or("codex_bridge_unsupported")?;
         private_folder(folder)?;
@@ -247,8 +314,10 @@ mod wire {
             .get("userAgent")
             .and_then(Value::as_str)
             .ok_or("codex_bridge_protocol_unknown")?;
-        if !supported(user_agent) {
-            return Err("codex_bridge_version_unknown");
+        match release(user_agent) {
+            Support::Checked => {}
+            Support::Newer(newer) => wire.newer = Some(newer),
+            Support::Refused => return Err("codex_bridge_version_unknown"),
         }
         wire.notify("initialized")?;
         Ok(wire)
@@ -290,6 +359,7 @@ mod wire {
                 read: 0,
                 deadline: Instant::now() + DEADLINE,
                 next_id: 0,
+                newer: None,
             };
             wire.handshake()?;
             Ok(wire)
@@ -598,7 +668,7 @@ mod wire {
         _text: &str,
         _start: bool,
         _pane: u32,
-    ) -> Result<Option<String>, &'static str> {
+    ) -> Result<(Option<String>, Option<(u64, u64, u64)>), &'static str> {
         Err("codex_bridge_unsupported")
     }
 

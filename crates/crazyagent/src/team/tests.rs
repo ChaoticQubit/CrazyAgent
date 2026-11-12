@@ -4858,7 +4858,10 @@ fn add_late_columns_upgrades_an_old_database_once() {
             "pane_pid".to_owned()
         ]
     );
-    assert_eq!(tasks.last().map(String::as_str), Some("mode"));
+    assert_eq!(
+        tasks[tasks.len() - 3..],
+        ["mode".to_owned(), "cancel_by".to_owned(), "wait".to_owned()]
+    );
     let kept: (String, Option<String>, Option<String>, bool, Option<i64>) = connection
         .query_row(
             "SELECT harness,pane,mode,hookless,pane_pid FROM team_agents WHERE project='team-old'",
@@ -4875,10 +4878,33 @@ fn add_late_columns_upgrades_an_old_database_once() {
         )
         .unwrap();
     assert_eq!(kept, ("claude-code".to_owned(), None, None, false, None));
-    let task_mode: Option<String> = connection
-        .query_row("SELECT mode FROM team_tasks", [], |row| row.get(0))
+    type OldTask = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let old_task: OldTask = connection
+        .query_row(
+            "SELECT status,error,mode,cancel_by,wait FROM team_tasks WHERE project='team-old'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
         .unwrap();
-    assert_eq!(task_mode, None);
+    assert_eq!(
+        old_task,
+        ("done".to_owned(), None, None, None, None),
+        "the old task keeps its status and error, with no cancel request or wait reason"
+    );
 
     initialize(&connection).unwrap();
     assert_eq!(columns("team_agents"), agents, "a second open adds nothing");
@@ -5304,16 +5330,16 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     let defaults = coordination(&connection, &project).unwrap();
     assert_eq!(defaults.settings, CoordSettings::default());
     assert_eq!(defaults.harnesses.len(), HarnessKind::ALL.len());
-    assert_eq!(
-        row(&defaults, HarnessKind::ClaudeCode),
-        (SubagentMode::AppSpawned, Delivery::Auto, true)
-    );
-    for harness in [HarnessKind::Codex, HarnessKind::Rcli] {
+    for harness in [HarnessKind::ClaudeCode, HarnessKind::Codex] {
         assert_eq!(
             row(&defaults, harness),
-            (SubagentMode::AppSpawned, Delivery::Auto, false)
+            (SubagentMode::AppSpawned, Delivery::Auto, true)
         );
     }
+    assert_eq!(
+        row(&defaults, HarnessKind::Rcli),
+        (SubagentMode::AppSpawned, Delivery::Auto, false)
+    );
     assert_eq!(
         status(&connection, &setup).unwrap().coordination,
         Some(defaults)
@@ -5390,7 +5416,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
     );
     assert_eq!(
         row(&saved, HarnessKind::Codex),
-        (SubagentMode::AppSpawned, Delivery::Auto, false)
+        (SubagentMode::AppSpawned, Delivery::Auto, true)
     );
     let other = stored("team-coord-other", vec![]);
     assert_eq!(
@@ -6255,6 +6281,71 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
     );
 }
 
+/// End a turn after done is 10 min for a project with no choice saved; the team status keeps
+/// each owner choice, Off, 2 min, 10 min and 1 h; a time outside the choices is refused; and
+/// the choice is per project (F15).
+#[test]
+fn end_a_turn_after_done_keeps_every_owner_choice_and_refuses_any_other() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-done-quiet",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-done-quiet", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert_eq!(
+        status(&connection, &setup).unwrap().done_quiet_secs,
+        Some(DONE_QUIET_DEFAULT_SECS),
+        "10 min is the default"
+    );
+    for secs in [None, Some(120), Some(600), Some(3600)] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::DoneQuiet {
+                    project_id: project.clone(),
+                    secs,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().done_quiet_secs, secs);
+    }
+    for secs in [Some(0), Some(1), Some(300)] {
+        let action = TeamAction::DoneQuiet {
+            project_id: project.clone(),
+            secs,
+        };
+        assert_eq!(
+            action.validate().unwrap_err().0,
+            "team_done_quiet_invalid",
+            "{secs:?}"
+        );
+    }
+    assert_eq!(
+        done_quiet(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        Some(DONE_QUIET_DEFAULT_SECS),
+        "the choice is per project"
+    );
+}
+
 /// Each "Stop the master when idle after" choice gives its own time against the engine's
 /// bound, and with no choice each kind of master keeps what it did (DEC-117 Q4).
 #[test]
@@ -6840,4 +6931,497 @@ fn opening_the_runtime_makes_the_usage_tables_its_turn_ends_write() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(tables, ["usage_tokens", "usage_turns"]);
+}
+
+/// A team database with one project of a one-slot codex plan, the activity tables and the
+/// owner's pool. Returns the folder, the connection, the setup and the pool.
+fn audited_team(project: &str) -> (tempfile::TempDir, Connection, StoredSetup, ModelAccess) {
+    let (directory, connection) = database();
+    crate::activity::initialize(&connection).unwrap();
+    let setup = stored(
+        project,
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access(project, &["local-a"]);
+    (directory, connection, setup, pool)
+}
+
+/// The owner's team actions a project's activity shows, oldest first, as (actor, text).
+fn owner_actions(connection: &Connection, project: &ProjectId) -> Vec<(String, String)> {
+    let mut rows: Vec<(String, String)> = crate::activity::listed(connection, project, 50)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter(|item| item.kind == crate::activity::ActivityKind::TeamAction)
+        .map(|item| (item.actor, item.text))
+        .collect();
+    rows.reverse();
+    rows
+}
+
+/// F17: every cancel path and owner request has its own reason, so no path reads as another,
+/// and only a Cancel of one waiting task reads "Cancelled by you".
+#[test]
+fn each_cancel_path_and_owner_request_names_its_own_reason() {
+    let requests = [Some(CancelBy::Task), Some(CancelBy::All), None];
+    let paths = [
+        CancelPath::Waiting,
+        CancelPath::Running,
+        CancelPath::Held,
+        CancelPath::Closed,
+    ];
+    let mut seen = std::collections::BTreeMap::new();
+    for path in paths {
+        for by in requests {
+            let reason = cancel_reason(by, path);
+            assert!(!reason.is_empty() && reason.len() <= 120, "{reason}");
+            assert!(!reason.contains('\u{2014}'), "{reason}");
+            let kept = by.unwrap_or(CancelBy::Task);
+            let shared = by.is_none() && path != CancelPath::Running;
+            if !shared {
+                assert_eq!(
+                    seen.insert(reason, (path, kept)),
+                    None,
+                    "{reason} names two paths"
+                );
+            }
+        }
+    }
+    assert_eq!(seen.len(), 9);
+    assert_eq!(
+        cancel_reason(Some(CancelBy::Task), CancelPath::Waiting),
+        "Cancelled by you"
+    );
+    assert_eq!(
+        cancel_reason(Some(CancelBy::All), CancelPath::Waiting),
+        "Cancelled when you paused all agents"
+    );
+    assert_eq!(
+        cancel_reason(None, CancelPath::Running),
+        "Stopped when CrazyAgent stopped its agent"
+    );
+    assert_eq!(CancelBy::named(Some("all")), CancelBy::All);
+    assert_eq!(CancelBy::named(Some("task")), CancelBy::Task);
+    assert_eq!(CancelBy::named(None), CancelBy::Task);
+}
+
+/// F17: Pause all, a Cancel that names no task, marks every waiting task with its own reason,
+/// keeps which request it was on a running task for the runtime, and logs the owner's action
+/// with its counts; a Cancel of one task keeps "Cancelled by you" and logs that task.
+#[test]
+fn pause_all_and_a_one_task_cancel_each_keep_their_reason_and_an_owner_action_row() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-audit");
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for prompt in [
+        "Write login.md",
+        "Write signup.md",
+        "Write reset.md",
+        "Write help.md",
+    ] {
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::Delegate {
+                    project_id: project.clone(),
+                    harness: None,
+                    prompt: prompt.into(),
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+    }
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Cancel {
+                project_id: project.clone(),
+                task: Some(1),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.execute("UPDATE team_tasks SET status='running' WHERE id=2", [])
+        .unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Cancel {
+                project_id: project.clone(),
+                task: None,
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let rows: Vec<(i64, String, Option<String>, bool, Option<String>)> = connection
+        .prepare("SELECT id,status,error,cancel_requested,cancel_by FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [
+            (
+                1,
+                "cancelled".into(),
+                Some("Cancelled by you".into()),
+                false,
+                Some("task".into())
+            ),
+            (2, "running".into(), None, true, Some("all".into())),
+            (
+                3,
+                "cancelled".into(),
+                Some("Cancelled when you paused all agents".into()),
+                false,
+                Some("all".into())
+            ),
+            (
+                4,
+                "cancelled".into(),
+                Some("Cancelled when you paused all agents".into()),
+                false,
+                Some("all".into())
+            ),
+        ]
+    );
+    assert_eq!(
+        owner_actions(&connection, &project),
+        [
+            (
+                crate::activity::OWNER_ACTOR.to_owned(),
+                "You cancelled task 1: Write login.md".to_owned()
+            ),
+            (
+                crate::activity::OWNER_ACTOR.to_owned(),
+                "You paused all agents: 2 waiting tasks cancelled, 1 running task stopping"
+                    .to_owned()
+            ),
+        ]
+    );
+}
+
+/// F17: the owner's stop of a sub-agent, Stop all and the start again are each logged as the
+/// owner's own team action, in the order they were made.
+#[test]
+fn owner_stops_and_the_team_start_again_are_logged_as_owner_actions() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-audit-stop");
+    let project = setup.project_id.clone();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','codex',0,'idle',1,1)",
+            [project.as_str()],
+        )
+        .unwrap();
+    let agent = connection.last_insert_rowid();
+    let named = crate::activity::agent_actor(&connection, agent).unwrap();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::StopAgent {
+            project_id: project.clone(),
+            agent,
+        },
+        TeamAction::Pause {
+            project_id: project.clone(),
+        },
+        TeamAction::Resume {
+            project_id: project.clone(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.commit().unwrap();
+    let owner = crate::activity::OWNER_ACTOR.to_owned();
+    assert_eq!(
+        owner_actions(&connection, &project),
+        [
+            (owner.clone(), format!("You stopped {named}")),
+            (owner.clone(), OWNER_STOPPED_TEAM.to_owned()),
+            (owner, OWNER_RESUMED_TEAM.to_owned()),
+        ]
+    );
+}
+
+/// F17: a task the owner asked to cancel that still ran when CrazyAgent closed ends at the
+/// next start with the reason of the request the owner made, Pause all or Cancel of that one
+/// task, never another path's.
+#[test]
+fn a_cancel_left_running_at_close_names_the_owner_request_at_the_next_start() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    initialize(&connection).unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms,cancel_requested,cancel_by) VALUES
+               ('team-closed','owner','codex',0,'one','running',1,1,1,'task'),
+               ('team-closed','owner','codex',0,'all','running',1,1,1,'all'),
+               ('team-closed','owner','codex',0,'old','running',1,1,1,NULL);",
+        )
+        .unwrap();
+    let reopened = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(|| None),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    drop(reopened);
+    let rows: Vec<(String, String, Option<String>, Option<i64>)> = connection
+        .prepare("SELECT prompt,status,error,agent FROM team_tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let closed = |by| Some(cancel_reason(Some(by), CancelPath::Closed).to_owned());
+    assert_eq!(
+        rows,
+        [
+            (
+                "one".into(),
+                "cancelled".into(),
+                closed(CancelBy::Task),
+                None
+            ),
+            (
+                "all".into(),
+                "cancelled".into(),
+                closed(CancelBy::All),
+                None
+            ),
+            (
+                "old".into(),
+                "cancelled".into(),
+                closed(CancelBy::Task),
+                None
+            ),
+        ]
+    );
+}
+
+/// F11: each waiting task carries why it waits, in one text for every client: the pool line,
+/// the stored reason, or the queue line before dispatch looked at it; a running task none.
+#[test]
+fn a_waiting_task_says_why_it_waits_in_one_text_for_every_client() {
+    assert_eq!(
+        wait_line(TaskStatus::NeedsPool, Some("stale")).as_deref(),
+        Some(events::WAIT_NEEDS_POOL)
+    );
+    assert_eq!(
+        wait_line(TaskStatus::Queued, None).as_deref(),
+        Some(events::WAIT_UNSEEN)
+    );
+    assert_eq!(
+        wait_line(TaskStatus::Queued, Some("Waits:  codex\nis not installed")).as_deref(),
+        Some("Waits: codex is not installed")
+    );
+    let long = "x".repeat(WAIT_BYTES_MAX * 2);
+    assert!(wait_line(TaskStatus::Queued, Some(&long)).unwrap().len() <= WAIT_BYTES_MAX + 3);
+    for status in [
+        TaskStatus::Running,
+        TaskStatus::Done,
+        TaskStatus::Failed,
+        TaskStatus::Cancelled,
+    ] {
+        assert_eq!(wait_line(status, Some("stale")), None, "{status:?}");
+    }
+}
+
+/// F11: the runtime stores why a queued task waits and the clients read it: an account the
+/// harness cannot start on, then a team the owner stopped; the reason clears once the task
+/// leaves the queue.
+#[test]
+fn the_runtime_stores_why_a_queued_task_waits_and_the_team_status_shows_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let mut connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let mut setup = stored(
+        "team-waits",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    setup.folder = folder.to_str().unwrap().into();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-waits", &["local-a"]);
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Delegate {
+                project_id: project.clone(),
+                harness: None,
+                prompt: "Write page.md".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let source = pool.clone();
+    let mut team = runtime::TeamRuntime::open(
+        &database,
+        &base.join("team"),
+        std::collections::BTreeMap::new(),
+        Box::new(move || Some(source.clone())),
+        runtime::TeamLimits::default(),
+    )
+    .unwrap();
+    let wait = |connection: &Connection| {
+        let team = status(connection, &setup).unwrap();
+        assert_eq!(team.tasks.len(), 1);
+        (team.tasks[0].status, team.tasks[0].wait.clone())
+    };
+    team.tick().unwrap();
+    assert_eq!(
+        wait(&connection),
+        (
+            TaskStatus::Queued,
+            Some("Waits: codex is not installed".to_owned())
+        )
+    );
+    let told = events::status(&connection, &project).unwrap().text();
+    assert!(
+        told.contains("Tasks waiting to start, oldest first:\n- task 1 \"Write page.md\": Waits: codex is not installed\n"),
+        "{told}"
+    );
+
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(
+            &tx,
+            &pool,
+            &TeamAction::Pause {
+                project_id: project.clone(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    team.tick().unwrap();
+    assert_eq!(
+        wait(&connection),
+        (
+            TaskStatus::Queued,
+            Some("Waits until you start the team again".to_owned())
+        )
+    );
+    connection
+        .execute("UPDATE team_tasks SET status='failed'", [])
+        .unwrap();
+    assert_eq!(
+        wait(&connection),
+        (TaskStatus::Failed, None),
+        "only a waiting task shows a wait"
+    );
+    team.shutdown().unwrap();
+}
+
+/// F11: the master reads the agent limits the owner set, read only, with No limit for an
+/// unset cap, and each waiting task with its reason, oldest first; a lead never sees
+/// another lead's waiting tasks.
+#[test]
+fn the_master_reads_the_owner_s_agent_limits_and_each_waiting_task() {
+    let (_directory, mut connection, setup, pool) = audited_team("team-limits");
+    let project = setup.project_id.clone();
+    let tx = connection.transaction().unwrap();
+    for action in [
+        TeamAction::MaxHarnesses {
+            project_id: project.clone(),
+            max: Some(4),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write login.md".into(),
+        },
+        TeamAction::Delegate {
+            project_id: project.clone(),
+            harness: None,
+            prompt: "Write signup.md".into(),
+        },
+    ] {
+        assert_eq!(
+            execute(&tx, &pool, &action).unwrap(),
+            Outcome::Applied,
+            "{action:?}"
+        );
+    }
+    tx.execute(
+        "UPDATE team_tasks SET wait='Waits for a free codex slot: the team plan runs 1 at once and 1 run now' WHERE id=1",
+        [],
+    )
+    .unwrap();
+    tx.execute("UPDATE team_tasks SET status='needs_pool' WHERE id=2", [])
+        .unwrap();
+    tx.commit().unwrap();
+    let read = events::status(&connection, &project).unwrap();
+    assert_eq!(
+        read.limits.as_deref(),
+        Some(
+            "Limits the owner sets (read only; ask the owner to change them): team plan 3 sub-agents at once, per harness: codex 1; Max harnesses per project: 4; Max teammates per harness: No limit."
+        )
+    );
+    assert_eq!(
+        read.queued
+            .iter()
+            .map(|queued| queued.line.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "- task 1 \"Write login.md\": Waits for a free codex slot: the team plan runs 1 at once and 1 run now",
+            "- task 2 \"Write signup.md\": Waits for an account pool for this project",
+        ]
+    );
+    let text = read.text();
+    assert!(text.contains(read.limits.as_deref().unwrap()), "{text}");
+    assert!(text.contains(&read.queued[1].line), "{text}");
 }

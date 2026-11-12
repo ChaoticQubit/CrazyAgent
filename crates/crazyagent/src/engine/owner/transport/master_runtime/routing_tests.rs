@@ -2635,6 +2635,7 @@ async fn console_claude_master(
         account_ref.clone(),
         clock,
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -2909,6 +2910,41 @@ fn store_step_limit(case: &Fixture, limit: StepLimit) {
         crate::master_step_limit::load(&writer).unwrap().limit,
         limit
     );
+}
+
+/// Saves the owner's master frame size limit in a fixture's engine store, as the owner's
+/// Save in Settings does. Inputs: the fixture and the size. Output: none.
+fn store_frame_limit(case: &Fixture, limit: crate::master_frame_limit::FrameSize) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let settings = crate::master_frame_limit::MasterFrameSettings { limit };
+    let saved = crate::master_frame_limit::save(&writer, &settings).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(crate::master_frame_limit::load(&writer).unwrap(), settings);
+}
+
+/// A master turn carries the owner's saved master frame size limit to its host (F39): 64
+/// KiB before any save, and each option once the owner saved it.
+#[tokio::test]
+async fn a_prepared_master_turn_carries_the_saved_frame_size_limit() {
+    use crate::master_frame_limit::FrameSize;
+
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.frames, FrameSize::Kib64);
+    for limit in FrameSize::ALL {
+        let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+        store_frame_limit(&case, limit);
+        case.sign_in("codex-c", true).await;
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(
+            prepared.frames, limit,
+            "the turn carries the saved frame size"
+        );
+    }
 }
 
 /// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
@@ -3529,6 +3565,8 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn"), None).unwrap();
     fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
     let more = crate::landing_turns::record(&db, &workspace, &end("more-turn"), None).unwrap();
+    fs::write(prepared.cwd.join("LAST.md"), "Last from the master.\n").unwrap();
+    let last = crate::landing_turns::record_news(&db, &workspace, &end("last-turn"), None).unwrap();
     drop(db);
     drop(prepared);
     case.finish().await;
@@ -3543,6 +3581,11 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         Landed::Added(sets[0].id.clone()),
         "a later turn adds to the same set"
     );
+    assert_eq!(
+        last,
+        (Landed::Added(sets[0].id.clone()), false),
+        "edits added to a set already pending for the owner are no news (F31)"
+    );
     assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
     assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
     assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
@@ -3552,6 +3595,38 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     assert_eq!(sets[0].agent.id, session.as_str());
     assert_eq!(sets[0].files, 1);
     assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+}
+
+/// F31, S2R1-L1: a conversation master's second editing turn that only grows the change set
+/// already pending for the owner is no news. Its turn ends through the master runtime with
+/// no changes note, while the first turn keeps its note and the one set holds both files.
+#[tokio::test]
+async fn a_master_s_second_editing_turn_on_a_pending_set_ends_with_no_changes_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let first = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    drop(prepared);
+    let second = case.submit("Write more notes.").await;
+    let next = case.prepared(&second).await;
+    let more = |cwd: &Path| fs::write(cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let grown = end_tools_turn(&case, &next, &second, more, landing_reply(&next)).await;
+    drop(next);
+    let sets = case.change_sets().await;
+    let settled = case.settled_turns(2).await;
+    case.finish().await;
+    assert_eq!(first.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(grown.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(
+        grown.changes, None,
+        "a turn that only grew the pending set posts no note (F31)"
+    );
+    assert_eq!(settled[1].id, second);
+    assert_eq!(settled[1].changes, None);
+    assert_eq!(settled[0].changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].files, 2);
 }
 
 #[tokio::test]

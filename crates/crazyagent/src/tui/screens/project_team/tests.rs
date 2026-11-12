@@ -106,6 +106,7 @@ fn task(id: i64, source: TaskSource, prompt: &str, status: TaskStatus) -> TeamTa
         started_ms: None,
         finished_ms: None,
         parent: None,
+        wait: None,
     }
 }
 
@@ -168,6 +169,7 @@ fn team() -> TeamStatus {
         master_lands: None,
         access_unreadable: false,
         reask_empty_reply: true,
+        done_quiet_secs: Some(crate::team::DONE_QUIET_DEFAULT_SECS),
         master_idle_stop: crate::team::MasterIdleStop::default(),
         master_live_terminal: true,
         catch_up_main: crate::team::CatchUpMain::On,
@@ -2580,7 +2582,7 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(!view.typing());
     assert!(view.branch_edit.is_none());
-    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
 }
 
 #[test]
@@ -2694,8 +2696,8 @@ fn g_turns_ask_before_merge_on_and_off() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(view.help().contains(&("g", "Ask before merge")));
-    assert!(shows(&view, "Ask before merge  Off"));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
+    assert!(shows(&view, "Master accepts change sets  Itself"));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2708,13 +2710,16 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+            "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
         ))
     );
     let mut asking = team();
     asking.ask_before_merge = true;
     reread(&mut view, asking, NOW + 10);
-    assert!(shows(&view, "Ask before merge  On"));
+    assert!(shows(
+        &view,
+        "Master accepts change sets  Only when I click or say accept all"
+    ));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2726,9 +2731,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     applied(&mut view, reply);
     assert_eq!(
         view.notice,
-        Some(Notice::plain(
-            "The master now merges a finished harness without asking."
-        ))
+        Some(Notice::plain("The master now accepts change sets itself."))
     );
 }
 
@@ -2896,6 +2899,60 @@ fn capital_v_stores_the_choice_with_no_master_yet() {
     );
     assert!(shows(&view, "Live terminal"), "the strip offers it");
     assert!(view.help().contains(&("V", "Live terminal")));
+}
+
+/// D moves "End a turn after done" through every option (F15): 10 min shows for a team that
+/// made no choice, then 1 h, Off, 2 min and 10 min, each sent with its plain notice.
+#[test]
+fn capital_d_moves_end_a_turn_after_done_through_every_option() {
+    let mut view = loaded();
+    assert!(view.help().contains(&("D", "End a turn after done")));
+    assert!(shows(&view, "End a turn after done  10 min"));
+    let steps = [
+        (
+            Some(600),
+            Some(3600),
+            "1 h",
+            "A task turn now ends 1 h after its agent says done and goes quiet.",
+        ),
+        (
+            Some(3600),
+            None,
+            "Off",
+            "A task turn now ends only when its agent ends it.",
+        ),
+        (
+            None,
+            Some(120),
+            "2 min",
+            "A task turn now ends 2 min after its agent says done and goes quiet.",
+        ),
+        (
+            Some(120),
+            Some(600),
+            "10 min",
+            "A task turn now ends 10 min after its agent says done and goes quiet.",
+        ),
+    ];
+    for (at, (from, to, shown, notice)) in steps.into_iter().enumerate() {
+        let mut saved = team();
+        saved.done_quiet_secs = from;
+        reread(&mut view, saved, NOW + 10_000 * (2 * at as i64 + 1));
+        let reply = view.key(press(KeyCode::Char('D')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::DoneQuiet {
+                project_id: project(),
+                secs: to,
+            })
+        );
+        applied(&mut view, reply);
+        assert_eq!(view.notice, Some(Notice::plain(notice)));
+        let mut after = team();
+        after.done_quiet_secs = to;
+        reread(&mut view, after, NOW + 10_000 * (2 * at as i64 + 2));
+        assert!(shows(&view, &format!("End a turn after done  {shown}")));
+    }
 }
 
 /// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
@@ -4472,7 +4529,7 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("p", "Stop teammate"),
         ("z", "Stop agent"),
         ("m", "Master's branch"),
-        ("g", "Ask before merge"),
+        ("g", "Master accepts change sets"),
         ("T", "Token budget"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");

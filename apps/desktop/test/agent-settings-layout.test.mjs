@@ -14,7 +14,7 @@ const rows = await import("../src/screens/team/setup-rows.tsx").catch(() => ({})
 
 const GROUPS = [
   ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
-  ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
+  ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Master accepts change sets", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
   ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
   ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
   ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Token budget", "Master run time", "Sub-agent rounds per message"]],
@@ -27,7 +27,7 @@ const MASTER_GROUPS = [
 ];
 const MERGE = "Under Full access, merging into main";
 const RESTART = "After you accept, the agent's branch restarts from main";
-const ASK = "Ask me before merging into the master's branch";
+const ASK = "Master accepts change sets";
 
 const attr = (text) => text.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
 const harness = (name, role, extra = {}) => ({ harness: name, role, agents_max: 2, tools: true, live: 0, delegation: null, delegation_label: null, runnable: true, ...extra });
@@ -214,11 +214,20 @@ test("Model and harness picks the master harness and each sub-agent harness's co
   assert.doesNotMatch(html, /Change in Settings, Team/, "the team is changed in place");
 });
 
+test("Master accepts change sets offers Itself, the default, and Only when I click or say accept all, each shown as the engine keeps it (DEC-147.7)", () => {
+  const itself = radios(settingsHtml(), ASK);
+  assert.deepEqual(itself, { labels: ["Itself", "Only when I click or say accept all"], checked: ["Itself"] });
+  assert.deepEqual(radios(settingsHtml({ ask_before_merge: false }), ASK).checked, ["Itself"]);
+  assert.deepEqual(radios(settingsHtml({ ask_before_merge: true }), ASK).checked, ["Only when I click or say accept all"]);
+  const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
+  assert.match(source, /setAskBeforeMerge\(projectId, choice === "on"\)/, "Only when I click or say accept all turns the engine's ask on, Itself turns it off");
+});
+
 test("Access and merging words the merge choice as the mockup does, with its two cards, and the restart line as Always", () => {
   const cards = (html) => [...row(html, MERGE).matchAll(/<label class="radio-card">([\s\S]*?)<\/label>/g)].map((card) => ({ checked: /checked=""/.test(card[1]), text: plain(card[1]) }));
   const merges = settingsHtml({ master_lands: "merges" });
   assert.deepEqual(cards(merges), [
-    { checked: true, text: "Master resolves conflicts and merges into main itself Default A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Ask me before merging is off. Anything else in the set makes all of it wait for your Accept." },
+    { checked: true, text: "Master resolves conflicts and merges into main itself Default A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Master accepts change sets is Itself. Anything else in the set makes all of it wait for your Accept." },
     { checked: false, text: "Master resolves conflicts, then waits for my accept The resolved change set waits in Changes until you accept it." },
   ]);
   assert.deepEqual(cards(settingsHtml({ master_lands: "waits" })).map((card) => card.checked), [false, true]);
@@ -226,7 +235,7 @@ test("Access and merging words the merge choice as the mockup does, with its two
   assert.match(plain(row(settingsHtml(), MERGE)), /Only at Full access\./, "below Full access the engine sends no merge choice");
   assert.deepEqual(cards(settingsHtml()).map((card) => card.text), cards(merges).map((card) => card.text), "below Full access the row shows the same two choices");
   assert.equal([...row(settingsHtml(), MERGE).matchAll(/<input type="radio"[^>]*disabled=""/g)].length, 2, "below Full access both choices are locked");
-  assert.match(plain(row(merges, ASK)), /On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict\./);
+  assert.match(plain(row(merges, ASK)), /Itself is the default: the master merges each finished harness's work\. Only when I click or say accept all stops that: the work, and a master change set that fixes a conflict, waits in Changes until you click Accept or send accept all to the team\./);
   const restart = row(merges, RESTART);
   assert.match(plain(restart), /Always/);
   assert.doesNotMatch(restart, /<(button|select|input|textarea)/, "the restart line has no control while it has no setting");

@@ -3,10 +3,11 @@ use super::events::{
     OWNER_STOPPED_AGENT, OWNER_WOKE,
 };
 use super::{
-    AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
-    MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy, TaskSource, TaskStatus, TeamAccount,
-    TeamReach, admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness,
-    names, now_ms, parse_delegations, parse_wakes, pick_account_held, tool,
+    AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, CancelBy, CancelPath,
+    DELEGATIONS_PER_REPLY_MAX, Delegation, MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy,
+    TaskSource, TaskStatus, TeamAccount, TeamReach, admit, agent_row, append_message, bound_text,
+    eligible_accounts, launch_harness, names, now_ms, parse_delegations, parse_wakes,
+    pick_account_held, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -63,16 +64,46 @@ const LEAD_RESULTS_TRAILER: &str =
 const LEAD_MERGES: &str = "Merge them into your task branch with merge(agent) once it is done.";
 /// What a lead hears when its worker's change set is ready, under the Lands setting Owner.
 const OWNER_ACCEPTS: &str = "The owner accepts them in Changes; you do not merge them.";
+/// The most bytes of one line of the engine's facts about an ended task (F32).
+const FACT_LINE_BYTES_MAX: usize = 160;
+/// The most bytes of the engine's facts about an ended task in a results message: its
+/// change set line, its tests heading and quoted line, and its open items line (F32).
+const FACTS_BYTES_MAX: usize = 4 * (FACT_LINE_BYTES_MAX + 1);
+/// How a results message says where a task's whole result is when its text was cut (F32):
+/// a master without the team tools reads it through the owner, who sees it in the Team view.
+const WHOLE_RESULT: &str = "Whole result: the owner's Team view, or inspect_work with task";
+/// The engine's line over a result whose start was cut so its end, which says how the
+/// work ended, still fits (F32).
+const RESULT_CUT: &str = "The start of this result was cut; its end follows:";
+const RESULTS_HEAD: &str = "Results from your sub-agents:\n";
+const TASK_HEAD_BYTES_MAX: usize = 128;
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
 const _: () = assert!(
-    RESULT_IN_MESSAGE_BYTES_MAX * 2
-        + 256
+    RESULTS_HEAD.len()
+        + TASK_HEAD_BYTES_MAX
+        + 2 * (RESULT_IN_MESSAGE_BYTES_MAX + 1)
+        + FACTS_BYTES_MAX
+        + WHOLE_RESULT.len()
+        + 32
         + RESULTS_TRAILER.len()
         + super::master_limits::ROUND_LINE_BYTES_MAX
-        < RESULTS_MESSAGE_BYTES_MAX
+        <= RESULTS_MESSAGE_BYTES_MAX
 );
+const _: () = assert!(
+    RESULTS_HEAD.len()
+        + TASK_HEAD_BYTES_MAX
+        + 2 * (crate::coord::BODY_BYTES_MAX / 4 + 1)
+        + FACTS_BYTES_MAX
+        + WHOLE_RESULT.len()
+        + 32
+        + LEAD_RESULTS_TRAILER.len()
+        <= crate::coord::BODY_BYTES_MAX
+);
+const _: () = assert!(RESULT_CUT.len() + 64 < crate::coord::BODY_BYTES_MAX / 4);
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// How often a busy sub-agent's worktree is looked at for a new commit (F15).
+const HEAD_LOOK_EVERY: Duration = Duration::from_secs(5);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
@@ -637,6 +668,26 @@ struct Worker {
     reask: Option<i64>,
     reasked: Option<i64>,
     starts: crate::coord::relay::TaskStarts,
+    after_done: AfterDone,
+}
+
+/// The lstat size and modification time of an agent worktree's HEAD file and of its own
+/// branch's loose ref, read without opening either, so a commit the agent makes shows as a
+/// change (F15).
+type HeadMark = [(u64, i64, i64); 2];
+
+/// What the engine watches of a sub-agent's task turn so the turn's change set is posted
+/// when its agent reports done or commits, not only at the turn end (F15): the task the
+/// rest belongs to, the flag that ends the turn after done, when done was reported, when
+/// the turn's output last grew, and the worktree's head mark at the last look.
+#[derive(Default)]
+struct AfterDone {
+    task: Option<i64>,
+    wrap: Arc<AtomicBool>,
+    done_at: Option<Instant>,
+    output: Option<(usize, Instant)>,
+    mark: Option<HeadMark>,
+    looked: Option<Instant>,
 }
 
 impl Worker {
@@ -763,6 +814,36 @@ fn running_tasks(
             })
         })
         .collect())
+}
+
+/// Ends running tasks the owner asked to cancel as cancelled, each with the reason of its
+/// request and path (F17): every such task, or only `task` when one is named. A task ended
+/// while CrazyAgent was closed also drops its agent. Takes the connection, the task or
+/// None, the path and the time in ms. Returns how many tasks ended, or a SQLite failure.
+fn cancel_requested_tasks(
+    connection: &Connection,
+    task: Option<i64>,
+    path: CancelPath,
+    now: i64,
+) -> Result<usize, EngineError> {
+    assert!(matches!(path, CancelPath::Held | CancelPath::Closed));
+    let ended = connection
+        .execute(
+            "UPDATE team_tasks SET status='cancelled', finished_ms=?2,
+                 error=CASE cancel_by WHEN 'all' THEN ?3 ELSE ?4 END,
+                 agent=CASE WHEN ?5 THEN NULL ELSE agent END
+             WHERE status='running' AND cancel_requested=1 AND (?1 IS NULL OR id=?1)",
+            params![
+                task,
+                now,
+                super::cancel_reason(Some(CancelBy::All), path),
+                super::cancel_reason(Some(CancelBy::Task), path),
+                path == CancelPath::Closed
+            ],
+        )
+        .map_err(error)?;
+    assert!(task.is_none() || ended <= 1);
+    Ok(ended)
 }
 
 /// Tells the project's activity how each task in `left` left its agent: stopped when the
@@ -942,11 +1023,10 @@ impl TeamRuntime {
                WHERE status IN ('starting','idle','working');
              UPDATE team_tasks SET status='queued', agent=NULL, cancel_requested=0
                WHERE status='running' AND cancel_requested=0;
-             UPDATE team_tasks SET status='cancelled', agent=NULL, error='Cancelled by you', finished_ms={now}
-               WHERE status='running' AND cancel_requested=1;
              UPDATE team_messages SET state='pending' WHERE state='sent';"
         ))
         .map_err(error)?;
+        cancel_requested_tasks(&tx, None, CancelPath::Closed, now)?;
         note_left_tasks(&tx, &left, now);
         tx.commit().map_err(error)?;
         delivery::settle(&connection)?;
@@ -1131,7 +1211,9 @@ impl TeamRuntime {
     }
 
     /// Takes over one live team pane when its agent may still run: the project's setup and
-    /// team plan still hold its role and harness, the team is not paused, the project has
+    /// team plan still hold its role and harness, a master on a harness the plan no longer
+    /// names included, as a saved harness change reaches it when idle or at its next start
+    /// (F06), the team is not paused, the project has
     /// room, and its account is still in the project's pool, as an endpoint, or as a
     /// signed-in account for a live master or a native-mode lead, whose worker hands the
     /// credential to its home again before it serves. The pane keeps the access level its
@@ -1184,12 +1266,16 @@ impl TeamRuntime {
         if super::paused(&self.connection, &project)? {
             return Ok(Err("the team is paused".into()));
         }
-        let in_plan = match role {
-            AgentRole::Master => {
-                crate::harnesses::same(&stored.team.master, &harness)
-                    && stored.team.master_tools == tools
-                    && self.master(&project).is_none()
+        if role == AgentRole::Master {
+            if self.master(&project).is_some() {
+                return Ok(Err("another master of the project runs already".into()));
             }
+            if stored.team.master_tools != tools {
+                return Ok(Err("the master's Tools setting changed".into()));
+            }
+        }
+        let in_plan = match role {
+            AgentRole::Master => true,
             AgentRole::Sub => super::slot(&stored.team, &harness).is_some_and(|slot| {
                 slot.tools == tools
                     && self.live(&project, AgentRole::Sub, Some(&harness))
@@ -2681,11 +2767,13 @@ impl TeamRuntime {
         }
         if super::paused(&self.connection, project)? {
             self.hold(project);
+            self.wait_all(project, WAIT_TEAM_STOPPED)?;
             return Ok(());
         }
         if crate::projects_home::move_holds(&self.connection, &stored.project_folder())
             .map_err(error)?
         {
+            self.wait_all(project, WAIT_FOLDER_MOVE)?;
             return Ok(());
         }
         let paused = self.paused(project)?;
@@ -2697,6 +2785,7 @@ impl TeamRuntime {
         self.keep_live(&stored, access, &paused)?;
         self.serve_live_calls(&stored, access)?;
         self.serve_agent_calls(&stored, access);
+        self.watch_done(project)?;
         self.serve_relays(project);
         self.tell_agent_answers(project);
         self.feed_master(&stored, access, &paused)?;
@@ -2996,13 +3085,7 @@ impl TeamRuntime {
                         )
                         .map_err(error)?;
                 }
-                self.connection
-                    .execute(
-                        "UPDATE team_tasks SET status='cancelled', error='Cancelled by you', finished_ms=?2
-                         WHERE id=?1 AND status='running'",
-                        params![task, now],
-                    )
-                    .map_err(error)?;
+                cancel_requested_tasks(&self.connection, Some(task), CancelPath::Held, now)?;
                 note_left_tasks(&self.connection, &left, now);
             }
             Busy::Message(message) => {
@@ -3071,10 +3154,143 @@ impl TeamRuntime {
     /// while the project runs fewer harnesses than Max harnesses per project. Takes the
     /// project, the lead, if any, and the harness cap. Returns true when the cap is reached.
     fn capped(&self, project: &ProjectId, lead: Option<i64>, harness_cap: Option<u8>) -> bool {
+        self.cap_wait(project, lead, harness_cap).is_some()
+    }
+
+    /// Says which agent cap holds one more agent back (F11): the lead's Max teammates per
+    /// harness in both modes, or Max harnesses per project for any other agent. Takes the
+    /// project, the lead, if any, and the harness cap. Returns the plain reason, or None.
+    fn cap_wait(
+        &self,
+        project: &ProjectId,
+        lead: Option<i64>,
+        harness_cap: Option<u8>,
+    ) -> Option<String> {
         match lead {
-            Some(lead) => super::caps::admit_sub_agent(&self.connection, project, lead).is_err(),
-            None => self.harnesses_full(project, harness_cap),
+            Some(lead) => super::caps::admit_sub_agent(&self.connection, project, lead)
+                .err()
+                .map(|reason| format!("Waits: {reason}")),
+            None => self.harnesses_full(project, harness_cap).then(|| {
+                let cap = harness_cap.expect("only a set cap is full");
+                format!("Waits under Max harnesses per project: at most {cap} run at once")
+            }),
         }
+    }
+
+    /// Says why a queued task cannot start or wake an agent now for lack of room (F11): its
+    /// harness slot of the team plan, the plan's sub-agent total, an owner cap, or the
+    /// project's terminals when a new agent needs one. Takes the project and the room asked
+    /// for. Returns the plain reason with the numbers, or None when there is room.
+    fn room_wait(&self, project: &ProjectId, room: &Room<'_>) -> Option<String> {
+        let live = self.live(project, AgentRole::Sub, Some(room.harness));
+        if live >= usize::from(room.slot) {
+            return Some(format!(
+                "Waits for a free {} slot: the team plan runs {} at once and {live} run now",
+                room.harness, room.slot
+            ));
+        }
+        let subs = self.live(project, AgentRole::Sub, None);
+        if subs >= room.subs_max {
+            return Some(format!(
+                "Waits for a free sub-agent slot: the team plan runs {} sub-agents at once and {subs} run now",
+                room.subs_max
+            ));
+        }
+        if let Some(reason) = self.cap_wait(project, room.lead, room.harness_cap) {
+            return Some(reason);
+        }
+        if room.terminals && self.panes(project) >= PANES_PER_PROJECT_MAX {
+            return Some(format!(
+                "Waits for a free terminal: the project runs {PANES_PER_PROJECT_MAX} agents, the most at once"
+            ));
+        }
+        None
+    }
+
+    /// Picks the account a queued task's agent starts on, as `account_for` does, and stores
+    /// why the task waits when none can take it now (F11): the pool's own reason, or the
+    /// sign-in check after a restart. Takes the access, the project, the harness, the paused
+    /// accounts and the task. Returns the account, None while the task waits, or a SQLite
+    /// failure.
+    fn account_or_wait(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+        task: i64,
+    ) -> Result<Option<TeamAccount>, EngineError> {
+        match self.account_for(access, project, harness, paused) {
+            Ok(Some(account)) => Ok(Some(account)),
+            Ok(None) => {
+                self.wait(task, WAIT_SIGN_IN_CHECK)?;
+                Ok(None)
+            }
+            Err(reason) => {
+                self.wait(task, &format!("Waits: {reason}"))?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Stores why a queued task waits (F11), bounded, and only when the reason changed, so a
+    /// task waiting for many ticks writes once. Only a queued task keeps a reason. Takes the
+    /// task and the reason. Returns any SQLite failure.
+    fn wait(&self, task: i64, reason: &str) -> Result<(), EngineError> {
+        let reason = bound_text(reason, super::WAIT_BYTES_MAX);
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE id=?1 AND status='queued' AND wait IS NOT ?2",
+                params![task, reason],
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// Stores one reason on every queued task of a project that waits for the whole team
+    /// (F11): a Stop all or a folder move. Takes the project and the reason. Returns any
+    /// SQLite failure.
+    fn wait_all(&self, project: &ProjectId, reason: &str) -> Result<(), EngineError> {
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND wait IS NOT ?2",
+                params![project.as_str(), bound_text(reason, super::WAIT_BYTES_MAX)],
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// Stores why the queued tasks dispatch does not look at this tick wait (F11): tasks
+    /// whose stopped run waits in Recovery, and tasks behind the `DISPATCH_TASKS_MAX` it
+    /// reads. Takes the project and the tasks it read. Returns any SQLite failure.
+    fn wait_beyond_dispatch(
+        &self,
+        project: &ProjectId,
+        read: &[QueuedTask],
+    ) -> Result<(), EngineError> {
+        assert!(read.len() <= DISPATCH_TASKS_MAX as usize);
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND wait IS NOT ?2
+                 AND id IN (SELECT task FROM recovery_runs WHERE task IS NOT NULL
+                     AND state IN ('stopped','interrupted','resuming','failed'))",
+                params![project.as_str(), WAIT_RECOVERY],
+            )
+            .map_err(error)?;
+        if read.len() < DISPATCH_TASKS_MAX as usize {
+            return Ok(());
+        }
+        let last = read.last().expect("a full read has a last task").0;
+        let behind = format!("Waits behind {DISPATCH_TASKS_MAX} earlier tasks");
+        self.connection
+            .execute(
+                "UPDATE team_tasks SET wait=?2 WHERE project=?1 AND status='queued' AND id>?3
+                 AND wait IS NOT ?2 AND id NOT IN (SELECT task FROM recovery_runs
+                     WHERE task IS NOT NULL AND state IN ('stopped','interrupted','resuming','failed'))",
+                params![project.as_str(), behind, last],
+            )
+            .map_err(error)?;
+        Ok(())
     }
 
     /// Counts a project's agents that may still hold a terminal, stopping ones included.
@@ -3487,8 +3703,9 @@ impl TeamRuntime {
     /// restarting, as after the live switch goes off, so the project never runs two masters
     /// at once, nor to a live master finishing its turn under Live terminal Off, which would
     /// drop it. A master that keeps running gets the owner's instruction edit at the start of
-    /// its next message under the Next task choice (DEC-111 QR1), once. Takes the setup, live
-    /// access and paused accounts.
+    /// its next message under the Next task choice (DEC-111 QR1), once. The master's waiting
+    /// team messages, such as overlap notes that start no turn alone, ride with the message
+    /// when they fit the prompt (F31). Takes the setup, live access and paused accounts.
     fn feed_master(
         &mut self,
         stored: &StoredSetup,
@@ -3634,7 +3851,14 @@ impl TeamRuntime {
             ));
         }
         prompt.push_str(&format!("{speaker}:\n{text}"));
+        let (letters, mut riding) = crate::coord::delivery::next_turn(&self.connection, id)?;
+        if prompt.len() + letters.len() <= self.turn_prompt_max(id) {
+            prompt.push_str(&letters);
+        } else {
+            riding.clear();
+        }
         if author == "owner"
+            && owner_chat_turn(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
             && crate::coord::settings::read(&self.connection, project)?.task_start
                 == crate::coord::settings::TaskStart::On
@@ -3688,6 +3912,7 @@ impl TeamRuntime {
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
         }
+        crate::coord::delivery::delivered(&self.connection, &riding, now_ms())?;
         self.mark_agent(id, AgentStatus::Working, None)
     }
 
@@ -3700,7 +3925,10 @@ impl TeamRuntime {
     /// owner instruction edit (DEC-111 QR1 Restart) never counts toward the starts that turn
     /// the live master off. The owner's Live terminal Off ends the master at its next stop,
     /// once no turn is open and the owner is not typing, and clears those starts, so switching
-    /// it off and on never counts as a crash. Takes the setup, live access and paused accounts.
+    /// it off and on never counts as a crash. With no master running and a saved master
+    /// harness that has no live terminal, such as RCLI, it turns the live master off with one
+    /// note, so the one-turn master answers (F06). Takes the setup, live access and paused
+    /// accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -3744,6 +3972,14 @@ impl TeamRuntime {
         let planned = self.master_restarts.remove(project);
         let left = self.master_moves.remove(project);
         assert!(left.is_none() || planned, "a move is a planned restart");
+        if on
+            && crate::harnesses::interactive::support(&harness)
+                != crate::harnesses::interactive::Support::Terminal
+        {
+            super::master::set_live(&self.connection, project, false)?;
+            self.live_starts.remove(project);
+            return self.note(project, &live_gone(&harness));
+        }
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
@@ -3814,9 +4050,11 @@ impl TeamRuntime {
     /// Applies a saved master harness change to the project's running live master under the
     /// owner's When the master is idle choice: once it is quiet with no turn of its own it
     /// stops for a planned restart that `keep_live` starts on the new harness, which writes
-    /// the switch and its divider. Under At the next start, or while no pool account can run
-    /// the new harness, the master keeps running. Takes the setup, the access, the paused
-    /// accounts and the master's id. Returns any SQLite failure.
+    /// the switch and its divider. A new harness with no live terminal, such as RCLI, stops it
+    /// with no restart, and `keep_live` then turns the live master off (F06). Under At the
+    /// next start, or while no pool account can run a new live harness, the master keeps
+    /// running. Takes the setup, the access, the paused accounts and the master's id.
+    /// Returns any SQLite failure.
     fn switch_when_idle(
         &mut self,
         stored: &StoredSetup,
@@ -3827,17 +4065,17 @@ impl TeamRuntime {
         let project = &stored.project_id;
         let worker = &self.workers[&id];
         assert!(worker.role == AgentRole::Master && &worker.project == project);
-        let Some(saved) = launch_harness(&stored.team.master) else {
-            return Ok(());
-        };
+        let saved = launch_harness(&stored.team.master);
         if !worker.live
-            || launch_harness(&worker.harness) == Some(saved)
-            || !self.live_master(project, AgentRole::Master, saved)
+            || crate::harnesses::same(&worker.harness, &stored.team.master)
+            || (saved.is_some() && launch_harness(&worker.harness) == saved)
+            || super::master_backend(&stored.team.master).is_none()
             || super::apply_harness_switch(&self.connection, project)?
                 != super::SwitchApply::WhenIdle
         {
             return Ok(());
         }
+        let saved = saved.filter(|saved| self.live_master(project, AgentRole::Master, saved));
         let quiet = super::master::quiet(
             &self.connection,
             self.agents.as_deref().map(Agents::typing),
@@ -3848,17 +4086,21 @@ impl TeamRuntime {
             worker.busy.is_none() && worker.own_turn.is_none() && worker.turn_started.is_none();
         if !idle
             || !quiet
-            || !matches!(
-                self.account_for(access, project, saved, paused),
-                Ok(Some(_))
-            )
+            || saved.is_some_and(|saved| {
+                !matches!(
+                    self.account_for(access, project, saved, paused),
+                    Ok(Some(_))
+                )
+            })
         {
             return Ok(());
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         worker.stopping = true;
         let _ = worker.orders.send(Order::Stop);
-        self.master_restarts.insert(project.clone());
+        if saved.is_some() {
+            self.master_restarts.insert(project.clone());
+        }
         Ok(())
     }
 
@@ -4387,6 +4629,7 @@ impl TeamRuntime {
             .map(|(id, _)| *id)
             .collect();
         let host = self.terminal.as_deref();
+        let mut done = Vec::new();
         for id in subs {
             let label = super::events::label(&self.connection, id)
                 .unwrap_or_else(|_| AgentRole::Sub.agent_label(id));
@@ -4419,11 +4662,132 @@ impl TeamRuntime {
                     )
                 },
                 &mut |connection, caller, call| {
-                    super::master::answer_sub(connection, &answering, caller, call)
-                        .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
+                    let finished = caller == id
+                        && matches!(
+                            &call,
+                            tool::Call::FinishWork {
+                                outcome: crate::coord::Finish::Complete
+                                    | crate::coord::Finish::ReviewReady,
+                                ..
+                            }
+                        );
+                    let answer = super::master::answer_sub(connection, &answering, caller, call)
+                        .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)));
+                    if finished && answer.as_ref().is_some_and(|(_, refused)| !refused) {
+                        done.push(id);
+                    }
+                    answer
                 },
             );
         }
+        for id in done {
+            if let Err(problem) = self.reported_done(id, project) {
+                eprintln!(
+                    "team_done_landing_failed cause={}",
+                    bound_text(&problem.0, 120)
+                );
+            }
+        }
+    }
+
+    /// Takes a sub-agent's accepted `finish_work` done report on its task (F15): posts or
+    /// updates the turn's change set from its commits now, and starts the quiet time after which the owner's
+    /// "End a turn after done" ends the turn. Takes the agent and its project. Returns any
+    /// SQLite failure.
+    fn reported_done(&mut self, id: i64, project: &ProjectId) -> Result<(), EngineError> {
+        let Some(worker) = self.workers.get_mut(&id) else {
+            return Ok(());
+        };
+        let Some(Busy::Task(task)) = worker.busy else {
+            return Ok(());
+        };
+        watch_task(&mut worker.after_done, task);
+        worker.after_done.done_at = Some(Instant::now());
+        self.land_now(id, project, task)
+    }
+
+    /// Watches each busy sub-agent task turn of a project after its agent reported done or
+    /// committed (F15): a new commit in its worktree, seen by `head_mark` at most once per
+    /// `HEAD_LOOK_EVERY`, posts or updates the turn's change set, and a turn that stayed
+    /// quiet for the owner's "End a turn after done" time since its done report is ended as
+    /// a success with one team note. Takes the project. Returns any SQLite failure.
+    fn watch_done(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        let now = Instant::now();
+        let busy: Vec<(i64, i64)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project && worker.role == AgentRole::Sub && !worker.stopping
+            })
+            .filter_map(|(id, worker)| match worker.busy {
+                Some(Busy::Task(task)) => Some((*id, task)),
+                _ => None,
+            })
+            .take(PANES_PER_PROJECT_MAX)
+            .collect();
+        if busy.is_empty() {
+            return Ok(());
+        }
+        let quiet = super::done_quiet(&self.connection, project)?
+            .map(|secs| Duration::from_secs(secs.into()));
+        for (id, task) in busy {
+            let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
+            watch_task(watch, task);
+            if watch
+                .looked
+                .is_none_or(|at| now.duration_since(at) >= HEAD_LOOK_EVERY)
+            {
+                watch.looked = Some(now);
+                let mark = self.head_mark(id, project)?;
+                let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
+                let before = std::mem::replace(&mut watch.mark, mark);
+                if before.is_some() && mark.is_some() && before != mark {
+                    self.land_now(id, project, task)?;
+                }
+            }
+            let watch = &self.workers[&id].after_done;
+            let (Some(quiet), Some(done_at)) = (quiet, watch.done_at) else {
+                continue;
+            };
+            let since = watch.output.map_or(done_at, |(_, at)| at.max(done_at));
+            if now.duration_since(since) < quiet {
+                continue;
+            }
+            let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
+            watch.done_at = None;
+            watch.wrap.store(true, Ordering::SeqCst);
+            self.note(
+                project,
+                &format!(
+                    "Task {task} ended {} after its agent said it was done and went quiet.",
+                    super::span_words(quiet.as_secs())
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Reads a sub-agent worktree's `HeadMark` from its worktree row, as `head_mark` reads
+    /// it (F15). Takes the agent and its project. Returns the mark, none for an agent with no
+    /// worktree row or a HEAD that cannot be read, or any SQLite failure.
+    fn head_mark(&self, id: i64, project: &ProjectId) -> Result<Option<HeadMark>, EngineError> {
+        let row: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![id, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((repository, worktree, git_dir)) = row else {
+            return Ok(None);
+        };
+        Ok(head_mark(
+            Path::new(&repository),
+            Path::new(&worktree),
+            Path::new(&git_dir),
+        ))
     }
 
     /// Keeps the caller socket of each native lead of a project bound and answered (DEC-111
@@ -4695,9 +5059,11 @@ impl TeamRuntime {
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
     /// team note says the edit waits for a later message, once per edited text until it is
-    /// delivered (DEC-111 QR1). An owner message ends with the master's Task-start reminder
+    /// delivered (DEC-111 QR1). A message the owner typed in the team chat, never a relayed
+    /// answer, ends with the master's Task-start reminder (F30)
     /// while the setting is On and it still fits the input limit beside the message and the
-    /// edit, which it never cuts (DEC-116, OP4-L1). While the master's app
+    /// edit, which it never cuts (DEC-116, OP4-L1). The master's waiting team messages ride
+    /// with the typed message when the whole still types (F31). While the master's app
     /// does not read keys the message waits, and past `READY_WAIT` one note and the problem
     /// line say so (F2); a typed message takes that line down, also one an earlier engine
     /// stored. Takes the project. Returns any SQLite failure; a message that cannot be typed
@@ -4750,7 +5116,14 @@ impl TeamRuntime {
             Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
         };
+        let (letters, mut riding) = crate::coord::delivery::next_turn(&self.connection, id)?;
+        if !letters.is_empty() && super::master::typable(&format!("{typed}{letters}")) {
+            typed.push_str(&letters);
+        } else {
+            riding.clear();
+        }
         if author == "owner"
+            && owner_chat_turn(&self.connection, project, message)?
             && let Some(reminder) = &self.workers[&id].starts.text
             && typed.len() + "\n\n".len() + reminder.len() <= super::master::INPUT_TEXT_MAX
             && crate::coord::settings::read(&self.connection, project)?.task_start
@@ -4790,6 +5163,7 @@ impl TeamRuntime {
                 "A team message could not be typed into the master because it is empty or not plain text.",
             );
         }
+        crate::coord::delivery::delivered(&self.connection, &riding, now_ms())?;
         let fed = if author == "owner" {
             crate::master_sessions::Fed::Owner(text)
         } else {
@@ -5070,7 +5444,7 @@ impl TeamRuntime {
             return Ok(());
         }
         let live = crate::master_sessions::live_session(&self.connection, project)?;
-        let ready: Vec<ReadyTask> = {
+        let mut ready: Vec<ReadyTask> = {
             let mut statement = self
                 .connection
                 .prepare(
@@ -5090,6 +5464,7 @@ impl TeamRuntime {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        String::new(),
                     ))
                 })
                 .map_err(error)?
@@ -5098,6 +5473,9 @@ impl TeamRuntime {
         };
         if ready.is_empty() {
             return Ok(());
+        }
+        for task in &mut ready {
+            task.5 = task_facts(&self.connection, project, task.0)?;
         }
         let tx = self
             .connection
@@ -5158,7 +5536,7 @@ impl TeamRuntime {
             .map(|(id, _)| *id)
             .collect();
         for lead in leads {
-            let ready: Vec<ReadyTask> = {
+            let mut ready: Vec<ReadyTask> = {
                 let mut statement = self
                     .connection
                     .prepare(
@@ -5175,6 +5553,7 @@ impl TeamRuntime {
                             row.get(2)?,
                             row.get(3)?,
                             row.get(4)?,
+                            String::new(),
                         ))
                     })
                     .map_err(error)?
@@ -5183,6 +5562,9 @@ impl TeamRuntime {
             };
             if ready.is_empty() {
                 continue;
+            }
+            for task in &mut ready {
+                task.5 = task_facts(&self.connection, project, task.0)?;
             }
             let (text, held) =
                 results_within(&ready, crate::coord::BODY_BYTES_MAX, LEAD_RESULTS_TRAILER);
@@ -5433,11 +5815,11 @@ impl TeamRuntime {
                      WHERE t.project=?1 AND t.status='queued' AND t.id NOT IN (
                          SELECT task FROM recovery_runs WHERE task IS NOT NULL
                          AND state IN ('stopped','interrupted','resuming','failed'))
-                     ORDER BY t.id LIMIT 64",
+                     ORDER BY t.id LIMIT ?2",
                 )
                 .map_err(error)?;
             statement
-                .query_map([project.as_str()], |row| {
+                .query_map(params![project.as_str(), DISPATCH_TASKS_MAX], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -5460,6 +5842,7 @@ impl TeamRuntime {
             .collect();
         let reuse = super::reuse_idle(&self.connection, project)? == super::ReuseIdle::On
             || super::keep_warm(&self.connection, project)?;
+        self.wait_beyond_dispatch(project, &queued)?;
         for (task, harness, prompt, pin, by_master, parent, mode) in queued {
             let slot = if stored.team.sub_harnesses.is_empty() {
                 super::slot(&stored.team, &harness)
@@ -5504,7 +5887,10 @@ impl TeamRuntime {
             let mut woken_fresh = false;
             let agent = match (idle, pin) {
                 (Some(agent), _) => agent,
-                (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
+                (None, Some(pinned)) if self.workers.contains_key(&pinned) => {
+                    self.wait(task, WAIT_OWN_AGENT)?;
+                    continue;
+                }
                 (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
                     let ran: bool = self
                         .connection
@@ -5516,6 +5902,8 @@ impl TeamRuntime {
                         .map_err(error)?;
                     if by_master && !ran {
                         self.fail_task(task, OWNER_STOPPED_TASK)?;
+                    } else {
+                        self.wait(task, WAIT_OWNER_STOPPED)?;
                     }
                     continue;
                 }
@@ -5524,14 +5912,20 @@ impl TeamRuntime {
                         self.fail_task(task, reason)?;
                         continue;
                     }
-                    if self.live(project, AgentRole::Sub, Some(&harness))
-                        >= usize::from(slot.agents)
-                        || self.live(project, AgentRole::Sub, None) >= subs_max
-                        || self.capped(project, parent, harness_cap)
-                    {
+                    let room = Room {
+                        harness: &harness,
+                        slot: slot.agents,
+                        subs_max,
+                        lead: parent,
+                        harness_cap,
+                        terminals: false,
+                    };
+                    if let Some(reason) = self.room_wait(project, &room) {
+                        self.wait(task, &reason)?;
                         continue;
                     }
-                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    let Some(account) =
+                        self.account_or_wait(access, project, &harness, paused, task)?
                     else {
                         continue;
                     };
@@ -5571,11 +5965,16 @@ impl TeamRuntime {
                     let slot_full = self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents);
                     let cap_full = self.capped(project, parent, harness_cap);
-                    if slot_full
-                        || cap_full
-                        || self.live(project, AgentRole::Sub, None) >= subs_max
-                        || self.panes(project) >= PANES_PER_PROJECT_MAX
-                    {
+                    let room = Room {
+                        harness: &harness,
+                        slot: slot.agents,
+                        subs_max,
+                        lead: parent,
+                        harness_cap,
+                        terminals: true,
+                    };
+                    if let Some(reason) = self.room_wait(project, &room) {
+                        self.wait(task, &reason)?;
                         if !reuse {
                             let counted = |w: &Worker| {
                                 (!slot_full || w.harness == harness)
@@ -5585,7 +5984,8 @@ impl TeamRuntime {
                         }
                         continue;
                     }
-                    let Ok(Some(account)) = self.account_for(access, project, &harness, paused)
+                    let Some(account) =
+                        self.account_or_wait(access, project, &harness, paused, task)?
                     else {
                         continue;
                     };
@@ -5604,7 +6004,10 @@ impl TeamRuntime {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
                         }
-                        Start::Held => continue,
+                        Start::Held => {
+                            self.wait(task, WAIT_FOLDER_MOVE)?;
+                            continue;
+                        }
                         Start::Refused(problem) => {
                             self.fail_task(
                                 task,
@@ -5622,7 +6025,10 @@ impl TeamRuntime {
             let grant = if self.workers[&agent].managed && !handed {
                 match self.grant(access, agent, project) {
                     Ok(Some(grant)) => Some(grant),
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        self.wait(task, WAIT_PROFILE_HELD)?;
+                        continue;
+                    }
                     Err(reason) => {
                         let worker = self.workers.get_mut(&agent).expect("worker exists");
                         worker.stopping = true;
@@ -5689,7 +6095,14 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
-            if let Some(text) = &self.workers[&agent].starts.text
+            let wake_only = matches!(
+                task_text,
+                super::master::WAKE_TASK | super::master::WAKE_DELIVERED
+            ) && !woken_fresh
+                && self.workers[&agent].kept_session
+                && self.workers[&agent].fresh.is_none();
+            if !wake_only
+                && let Some(text) = &self.workers[&agent].starts.text
                 && crate::coord::settings::read(&self.connection, project)?.task_start
                     == crate::coord::settings::TaskStart::On
             {
@@ -5732,7 +6145,7 @@ impl TeamRuntime {
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
             self.connection
                 .execute(
-                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
+                    "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
@@ -6601,6 +7014,8 @@ impl TeamRuntime {
         let cancel = Arc::new(AtomicBool::new(false));
         let leave = Arc::new(AtomicBool::new(false));
         let (flag, kept) = (cancel.clone(), leave.clone());
+        let after_done = AfterDone::default();
+        let wrap = after_done.wrap.clone();
         let managed = match &launch {
             Launch::Fresh(_, mode) => matches!(**mode, Mode::PerTurn { .. }),
             Launch::Adopt(adoption) => adoption.managed.is_some(),
@@ -6629,7 +7044,7 @@ impl TeamRuntime {
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
-            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept))
+            .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept, wrap))
             .map_err(error)?;
         let team_tool =
             seat.role == AgentRole::Master && seat.tools && self.delegation_tool.is_some();
@@ -6699,6 +7114,7 @@ impl TeamRuntime {
                 reask: None,
                 reasked: None,
                 starts,
+                after_done,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -7557,12 +7973,14 @@ impl TeamRuntime {
         self.note_lead(project, lead, body)
     }
 
-    /// Tells whether a stored agent with tools runs on a harness kind whose native sub-agents
-    /// are threads of its own process (PA-7), read from its row; tools off runs none (r1).
-    /// Takes the agent. Returns the answer, false when unread.
-    fn native_threads_lead(&self, agent: i64) -> bool {
+    /// Tells whether a stored agent runs on a harness kind whose native sub-agents are
+    /// threads of its own process (PA-7), and if so whether it has tools, without which it
+    /// starts none (r1), read from its row. Takes the agent. Returns Some(tools) for such a
+    /// harness, None for any other harness or when unread.
+    fn threads_lead_tools(&self, agent: i64) -> Option<bool> {
         use crate::coord::settings::{HarnessKind, NativeSubAgents, native_sub_agents};
-        self.connection
+        let (harness, tools) = self
+            .connection
             .query_row(
                 "SELECT harness,tools FROM team_agents WHERE id=?1",
                 [agent],
@@ -7570,18 +7988,17 @@ impl TeamRuntime {
             )
             .optional()
             .ok()
-            .flatten()
-            .filter(|(_, tools)| *tools)
-            .and_then(|(harness, _)| HarnessKind::from_harness(&harness))
-            .map(native_sub_agents)
-            == Some(NativeSubAgents::Threads)
+            .flatten()?;
+        (HarnessKind::from_harness(&harness).map(native_sub_agents)
+            == Some(NativeSubAgents::Threads))
+        .then_some(tools)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch,
     /// and for a native lead in its own clone (DEC-111 Q10) where its sub-agents work: each
     /// teammate in `.worktrees/<name>` on `<task branch>--<name>`, merged before it reports
-    /// done, or a Codex lead's sub-agents in its own worktree (PA-7). Takes the project and
-    /// the agent. Returns the line, empty for an agent with no task branch of its own.
+    /// done, or, for a Codex lead with tools, its sub-agents in its own worktree (PA-7).
+    /// Takes the project and the agent. Returns the line, empty with no task branch.
     fn branch_line(&self, project: &ProjectId, agent: i64) -> String {
         let row: Option<(String, String)> = self
             .connection
@@ -7614,23 +8031,25 @@ impl TeamRuntime {
                 finish = super::tool::FINISH_WORK_TOOL
             );
         }
+        let plain = format!(
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
+        );
         if !matches!(
             super::lead_mode(&self.connection, project, agent),
             Ok(crate::coord::settings::SubagentMode::Native)
         ) {
-            return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there."
-            );
+            return plain;
         }
-        if self.native_threads_lead(agent) {
-            return format!(
-                "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
-            );
+        match self.threads_lead_tools(agent) {
+            Some(false) => plain,
+            Some(true) => format!(
+                "{plain} Your Codex sub-agents work in this same worktree on {branch}, so give each its own files and never the same file to two of them. They must not call the team tools, because their calls count as yours: wait for each one, close it, then commit and report done yourself."
+            ),
+            None => format!(
+                "{plain} Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+                folder = crate::agent_git::TEAMMATES_FOLDER
+            ),
         }
-        format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
-            folder = crate::agent_git::TEAMMATES_FOLDER
-        )
     }
 
     /// The branch a new sub-agent of a lead works on (DEC-104 K5b, Q32): `<the lead's task
@@ -8430,7 +8849,8 @@ impl TeamRuntime {
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
     /// off or deleted for the project, for a sub-agent the owner's Sub-agent depth setting
     /// keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway, and for every
-    /// sub-agent `record_answer`, since only the master records an owner chat answer. Takes
+    /// sub-agent `record_answer`, since only the master records an owner chat answer, and
+    /// `discard`, since only the master discards a change set (DEC-147 S3.6). Takes
     /// the project, the agent and its role. Returns the names, or a SQLite failure.
     fn off_tools(
         &self,
@@ -8450,7 +8870,8 @@ impl TeamRuntime {
             }
         }
         if role != AgentRole::Master {
-            off.push(tool::RECORD_TOOL.to_owned());
+            off.extend(tool::MASTER_QUESTION_TOOLS.map(str::to_owned));
+            off.push(tool::DISCARD_TOOL.to_owned());
         }
         assert!(tool::known_tools(&off));
         Ok(off)
@@ -8621,6 +9042,14 @@ impl TeamRuntime {
                 Ok(false)
             }
             Report::Progress { bytes } => {
+                let watch = &mut self
+                    .workers
+                    .get_mut(&id)
+                    .expect("a reporting worker exists")
+                    .after_done;
+                if watch.output.is_none_or(|(seen, _)| seen != bytes) {
+                    watch.output = Some((bytes, Instant::now()));
+                }
                 if let Some(Busy::Task(task)) = self.workers[&id].busy {
                     self.connection
                         .execute(
@@ -8712,6 +9141,7 @@ impl TeamRuntime {
             Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
+                end_watch(&mut worker.after_done);
                 worker.background_held = false;
                 let cut =
                     (end == TurnEnd::TimedOut).then(|| limit_note(cause.as_deref(), worker.bound));
@@ -9100,6 +9530,49 @@ impl TeamRuntime {
         what: &str,
         end: TurnEnd,
     ) -> Result<bool, EngineError> {
+        self.land_turn_as(id, project, (turn, line), what, end, true)
+    }
+
+    /// Posts or updates the change set of a sub-agent's task turn that is still open, once
+    /// its agent reported done or committed (F15), from its commits only: its worktree and
+    /// index are not touched while it may still write, and a clash with main is not sent
+    /// back mid-turn. A look that finds nothing new adds nothing; a refusal stays quiet, and
+    /// the turn end records the rest and tells it. Inputs: the agent, its project and the
+    /// task. Output: any SQLite failure.
+    fn land_now(&mut self, id: i64, project: &ProjectId, task: i64) -> Result<(), EngineError> {
+        let line: String = self
+            .connection
+            .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?
+            .unwrap_or_default();
+        self.land_turn_as(
+            id,
+            project,
+            (format!("task-{task}"), line),
+            &format!("task {task}"),
+            TurnEnd::Success,
+            false,
+        )?;
+        Ok(())
+    }
+
+    /// `land_turn`, or with `whole` false the open turn's commits only, through
+    /// `landing_turns::record_commits`, with no worker sets settled and a refusal kept quiet
+    /// (F15). Inputs: the agent, its project, the turn key with its prompt line, what ended
+    /// for the note, how it ended and whether the turn ended. Output: whether the record was
+    /// kept, or any SQLite failure.
+    fn land_turn_as(
+        &mut self,
+        id: i64,
+        project: &ProjectId,
+        (turn, line): (String, String),
+        what: &str,
+        end: TurnEnd,
+        whole: bool,
+    ) -> Result<bool, EngineError> {
         type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
             .connection
@@ -9158,6 +9631,18 @@ impl TeamRuntime {
         let task = turn
             .strip_prefix("task-")
             .and_then(|task| task.parse::<i64>().ok());
+        let summary = match task {
+            Some(task) => self
+                .connection
+                .query_row(
+                    "SELECT COALESCE(result,'') FROM team_tasks WHERE id=?1",
+                    [task],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(error)?,
+            None => None,
+        };
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -9168,8 +9653,20 @@ impl TeamRuntime {
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
         let landed = crate::landing::open(&self.root).and_then(|db| {
+            if !whole {
+                return crate::landing_turns::record_commits(&db, &workspace, &ended);
+            }
             let landed =
-                crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
+                crate::landing_turns::record_news(&db, &workspace, &ended, self.settings.as_ref());
+            if let (Ok((crate::landing_turns::Landed::Added(set), _)), Some(summary)) =
+                (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, set, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -9180,12 +9677,10 @@ impl TeamRuntime {
         });
         let kept = landed.is_ok();
         let note = match landed {
-            Ok(
-                crate::landing_turns::Landed::Nothing | crate::landing_turns::Landed::Waiting(_),
-            ) => {
+            Ok((_, false)) => {
                 return Ok(true);
             }
-            Ok(crate::landing_turns::Landed::Added(_)) => {
+            Ok((_, true)) => {
                 let note = format!("The edits from {what} are waiting for you in Changes.");
                 let told = match lands {
                     Some(super::ChildLanding::Lead) => LEAD_MERGES,
@@ -9208,6 +9703,7 @@ impl TeamRuntime {
                 }
                 note
             }
+            Err(_) if !whole => return Ok(false),
             Err(problem) => {
                 if let Some(text) = crate::landing::refusal_for_agent(&problem) {
                     self.note_lead(project, id, text)?;
@@ -9250,18 +9746,20 @@ impl TeamRuntime {
         end: TurnEnd,
         cause: Option<&str>,
     ) -> Result<(), EngineError> {
-        let Some(attempts): Option<i64> = self
+        let Some((attempts, asked)): Option<(i64, Option<String>)> = self
             .connection
             .query_row(
-                "SELECT attempts FROM team_tasks WHERE id=?1",
+                "SELECT attempts, CASE WHEN cancel_requested=1 THEN COALESCE(cancel_by,'task') END
+                 FROM team_tasks WHERE id=?1",
                 [task],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(error)?
         else {
             return Ok(());
         };
+        let asked = asked.map(|name| CancelBy::named(Some(&name)));
         let left = running_tasks(&self.connection, "id=?1", [task])?;
         assert!(left.len() <= 1);
         let retry = attempts < self.limits.attempts_max;
@@ -9269,7 +9767,10 @@ impl TeamRuntime {
         let timed = format!("The sub-agent was {}", cause.unwrap_or(TIME_LIMIT_NOTE));
         let (status, problem) = match end {
             TurnEnd::Success => (TaskStatus::Done, None),
-            TurnEnd::Cancelled => (TaskStatus::Cancelled, Some("Cancelled by you")),
+            TurnEnd::Cancelled => (
+                TaskStatus::Cancelled,
+                Some(super::cancel_reason(asked, CancelPath::Running)),
+            ),
             TurnEnd::Interrupted => (TaskStatus::Cancelled, Some("Interrupted by you")),
             TurnEnd::RateLimited => (
                 if retry {
@@ -9616,12 +10117,13 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat, and the same tool with answer in place of owner_turn records one the owner typed here in your terminal; {}(question, version) takes a question you no longer need off the owner's list. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
             tool::SPAWN_TOOL,
             tool::UPDATE_WORK_TOOL,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::INSPECT_WORK_TOOL
         )
     } else {
@@ -9699,6 +10201,7 @@ fn work(
     cancel: Arc<AtomicBool>,
     interrupt: Arc<AtomicBool>,
     leave: Arc<AtomicBool>,
+    wrap: Arc<AtomicBool>,
 ) {
     let _proxy = launch.proxy();
     let _relay = launch.relay();
@@ -9714,7 +10217,9 @@ fn work(
             return;
         }
         Launch::Adopt(adoption) if adoption.managed.is_some() => {
-            let problem = native_adopted(*adoption, &orders, &reports, &cancel, &interrupt, &leave);
+            let problem = native_adopted(
+                *adoption, &orders, &reports, &cancel, &interrupt, &leave, &wrap,
+            );
             let _ = reports.send(Report::Ended { problem });
             return;
         }
@@ -9741,13 +10246,14 @@ fn work(
                 })
             }
             Mode::PerTurn { home } if plan.native => {
-                let problem =
-                    native_session(&plan, &home, &orders, &reports, &cancel, &interrupt, &leave);
+                let problem = native_session(
+                    &plan, &home, &orders, &reports, &cancel, &interrupt, &leave, &wrap,
+                );
                 let _ = reports.send(Report::Ended { problem });
                 return;
             }
             Mode::PerTurn { home } => {
-                let problem = per_turn(&plan, &home, &orders, &reports, &cancel, &interrupt);
+                let problem = per_turn(&plan, &home, &orders, &reports, &cancel, &interrupt, &wrap);
                 let _ = reports.send(Report::Ended { problem });
                 return;
             }
@@ -9784,7 +10290,7 @@ fn work(
             live_serve(*session, &orders, &reports, &cancel, &leave, true, None)
         }
         Ok(session) => serve(
-            session, None, &orders, &reports, &cancel, &interrupt, &leave,
+            session, None, &orders, &reports, &cancel, &interrupt, &leave, &wrap,
         ),
         Err(problem) => Some(problem),
     };
@@ -10203,6 +10709,7 @@ fn turn_closed(reports: &Sender<Report>, taken: bool, cause: Option<String>) {
 /// session, so its pane record, server and teammates outlive a turn. Later turns carry no
 /// account. Takes the plan, the lead's home and the worker's channels and flags. Returns the
 /// problem that ended it, if any.
+#[allow(clippy::too_many_arguments)]
 fn native_session(
     plan: &Plan,
     home: &Path,
@@ -10211,6 +10718,7 @@ fn native_session(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     assert!(plan.native && !plan.live && plan.pane.is_some());
     let (first, grant) = match next_turn(orders, cancel, None) {
@@ -10268,6 +10776,7 @@ fn native_session(
             cancel,
             interrupt,
             leave,
+            wrap,
         ),
         Err(problem) => {
             if resume.is_some() && problem.0 == RESUME_REFUSED {
@@ -10294,6 +10803,7 @@ fn native_adopted(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     let Adoption {
         host,
@@ -10363,6 +10873,7 @@ fn native_adopted(
             cancel,
             interrupt,
             leave,
+            wrap,
         ),
         Err(problem) => {
             let cause = Some(with_code(
@@ -10545,13 +11056,15 @@ fn next_lead_turn(
 /// when one is given. A kept session, a native lead's, also reports the turns its app
 /// starts by itself between orders, so its later work is recorded, landed and told to the
 /// master. A turn the owner interrupted while commands its agent started in the background
-/// still ran also ends the agent, so those commands stop with its process.
+/// still ran also ends the agent, so those commands stop with its process, and so does a
+/// turn the wrap flag ended, whose app may still run its own turn (F15).
 /// At the end it stops the agent, or, when the engine quits with the agent kept,
 /// stops the running turn and leaves the pane running for the next engine. A kept
 /// session's credential copy and custody use are released once its process stopped or was
 /// left. A stop its warden did not confirm keeps both for the engine's life and ends the
 /// agent with that problem; a Full access stop that left processes running keeps both
 /// until they end, names them and ends the agent.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     mut session: AgentSession,
     kept: Option<Kept>,
@@ -10560,6 +11073,7 @@ fn serve(
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
     leave: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     let lead = kept.is_some();
     let (mut first, held) = kept.map_or((None, None), |kept| (kept.first, Some(kept.held)));
@@ -10600,12 +11114,19 @@ fn serve(
         assert!(grant.is_none());
         latest = rules;
         let prompt = told(prompt, rules, session.reports_background());
-        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
-        let reusable = matches!(
+        let (text, end, cause) = turn(
+            &mut session,
+            &prompt,
+            reports,
+            (cancel, interrupt, wrap),
+            rules,
+        );
+        let reusable = keeps_session(
             end,
-            TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
-        ) && (end != TurnEnd::Interrupted || session.background_running() == 0)
-            && !session.held();
+            session.background_running(),
+            session.held(),
+            wrap.load(Ordering::SeqCst),
+        );
         if end == TurnEnd::Closed {
             problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
         }
@@ -10643,6 +11164,7 @@ fn per_turn(
     reports: &Sender<Report>,
     cancel: &AtomicBool,
     interrupt: &AtomicBool,
+    wrap: &AtomicBool,
 ) -> Option<String> {
     let mut resume = plan.resume.clone();
     while let Next::Turn(prompt, grant, rules) = next_turn(orders, cancel, None) {
@@ -10720,7 +11242,13 @@ fn per_turn(
             pane: session.pane_record().map(Box::new),
         });
         let prompt = told(prompt, rules, true);
-        let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
+        let (text, end, cause) = turn(
+            &mut session,
+            &prompt,
+            reports,
+            (cancel, interrupt, wrap),
+            rules,
+        );
         if let Some(recorded) = session
             .conversation()
             .filter(|c| plan.continues && resume.as_ref() != Some(c))
@@ -10747,11 +11275,28 @@ fn per_turn(
     None
 }
 
+/// Tells whether `serve` hands the next turn to the same running agent after a turn ended:
+/// after a success, failure or interrupt, unless an interrupt left background commands, its
+/// app still holds the turn open for them, or the wrap flag ended it while the app's own
+/// turn may still run (F15). Inputs: the end, the background commands still running, whether
+/// the app holds the turn and whether the wrap flag ended it. Output: true to reuse it.
+fn keeps_session(end: TurnEnd, background: usize, held: bool, wrapped: bool) -> bool {
+    matches!(
+        end,
+        TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
+    ) && (end != TurnEnd::Interrupted || background == 0)
+        && !held
+        && !wrapped
+}
+
 const PROCESS_CLOSED: &str = "The agent process closed";
 /// What a task the owner's interrupt ends says when commands its agent started still ran.
 const BACKGROUND_INTERRUPTED: &str = "The owner's interrupt ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// What a task cut by a time limit says when commands its agent started still ran.
 const BACKGROUND_CUT: &str = "The time limit ended this task while a command it started in the background still ran; that command was stopped with it.";
+/// What a task turn the engine ended after its agent reported done and stayed quiet says
+/// first (F15), so the reply is never empty and the task reads as the agent's own finish.
+const DONE_QUIET_ENDED: &str = "The agent reported this task done and then stayed quiet, so CrazyAgent ended its turn, as End a turn after done in Team settings says.";
 /// What a task the owner's background grace time ended says (DEC-111 Q13).
 const BACKGROUND_GRACE_ENDED: &str = "The background grace time in Team settings ended this task while a command it started in the background still ran; that command was stopped.";
 /// What a task that ended with its turn under the owner's Stop setting says (DEC-111 Q13).
@@ -10766,6 +11311,19 @@ const OWN_TURN_TASK: &str =
 const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
+/// The most queued tasks of a project dispatch reads in one tick; later ones wait behind.
+const DISPATCH_TASKS_MAX: i64 = 64;
+/// Why a queued task waits (F11), each on the task while it waits: for its own agent, busy
+/// or stopping now; for the owner to start its stopped agent again; for a signed-in
+/// account's profile another turn holds; for the sign-in check after a restart; while the
+/// project folder moves; for its stopped run in Recovery; for a stopped team.
+const WAIT_OWN_AGENT: &str = "Waits for its own agent, which is busy or stopping now";
+const WAIT_OWNER_STOPPED: &str = "Waits for you to start its agent again";
+const WAIT_PROFILE_HELD: &str = "Waits for its account's sign-in, which another turn holds now";
+const WAIT_SIGN_IN_CHECK: &str = "Waits for the pool's sign-in check after the restart";
+const WAIT_FOLDER_MOVE: &str = "Waits while the project folder moves";
+const WAIT_RECOVERY: &str = "Waits in Recovery: its stopped run must be resumed or dropped first";
+const WAIT_TEAM_STOPPED: &str = "Waits until you start the team again";
 const MASTER_STOPPED_TASK: &str = "The master stopped this sub-agent before it finished this task.";
 const LEAD_STOPPED_TASK: &str = "Its lead stopped this sub-agent before it finished this task.";
 const INSTRUCTIONS_WAIT_FOR_ROOM: &str = "The message just typed into the live master left no room for your instruction change, so a later message carries it; it applies in full when the master starts again.";
@@ -11087,7 +11645,22 @@ fn conversation_note(ended: &EndedTask) -> String {
     note
 }
 
-type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+/// One ended task as a results message reads it: id, harness, status, result, problem and
+/// the engine's facts about it from `task_facts` (F32).
+type ReadyTask = (i64, String, String, Option<String>, Option<String>, String);
+
+/// The room a queued task asks for (F11): its harness and the plan's slot for it, the plan's
+/// sub-agent total, its lead and the owner's harness cap, and whether a new terminal is
+/// needed, as `room_wait` checks them.
+struct Room<'a> {
+    harness: &'a str,
+    slot: u8,
+    subs_max: usize,
+    lead: Option<i64>,
+    harness_cap: Option<u8>,
+    terminals: bool,
+}
+
 /// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
 /// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
 /// the master asked for the lead that takes it.
@@ -11102,9 +11675,10 @@ type QueuedTask = (
 );
 
 /// Writes one results message for the finished master tasks that fit, oldest first: each
-/// task's line, then its problem and its result on lines of their own, every agent-written
-/// line quoted by `events::agent_text` so none can pose as the owner's, closed by the round
-/// line of the owner's goal (F09). Takes the ready tasks, at least one, and the round line.
+/// task's line, then its problem, its result and the engine's facts on lines of their own,
+/// every agent-written line quoted by `events::agent_text` so none can pose as the owner's,
+/// closed by the round line of the owner's goal (F09). Takes the ready tasks, at least one,
+/// and the round line.
 /// Returns the text, at most `RESULTS_MESSAGE_BYTES_MAX` bytes, and how many tasks it holds.
 fn results_message(ready: &[ReadyTask], round: &str) -> (String, usize) {
     assert!(round.len() <= super::master_limits::ROUND_LINE_BYTES_MAX);
@@ -11113,17 +11687,19 @@ fn results_message(ready: &[ReadyTask], round: &str) -> (String, usize) {
 }
 
 /// Writes one results message as `results_message` does, within `max` bytes and closed by
-/// `trailer`, each problem and result cut to a quarter of `max` at most, so a lead's
-/// message fits what one terminal prompt takes. Takes the ready tasks, at least one, the
-/// bound and the closing line. Returns the text and how many tasks it holds.
+/// `trailer`, each problem and result cut to a quarter of `max` at most, a result keeping
+/// its end and naming `inspect_work` for the whole (F32), so a lead's message fits what one
+/// terminal prompt takes. Takes the ready tasks, at least one, the bound and the closing
+/// line. Returns the text and how many tasks it holds.
 fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, usize) {
     assert!(!ready.is_empty());
     let each = RESULT_IN_MESSAGE_BYTES_MAX.min(max / 4);
-    let mut text = String::from("Results from your sub-agents:\n");
+    let mut text = String::from(RESULTS_HEAD);
     let mut held = 0;
-    for (id, harness, status, result, problem) in ready {
+    for (id, harness, status, result, problem, facts) in ready {
         let label = super::TaskStatus::parse(status).map_or("Finished", TaskStatus::label);
         let mut part = format!("\nTask {id} ({}): {label}\n", excerpt(harness, 64));
+        assert!(part.len() <= TASK_HEAD_BYTES_MAX);
         if let Some(problem) = problem {
             part.push_str(&bound_text(
                 &super::events::agent_text(problem.trim()),
@@ -11131,9 +11707,17 @@ fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, us
             ));
             part.push('\n');
         }
+        let mut cut = false;
         if let Some(result) = result {
-            part.push_str(&bound_text(&super::events::agent_text(result.trim()), each));
+            let (kept, was_cut) = result_end(&super::events::agent_text(result.trim()), each);
+            part.push_str(&kept);
             part.push('\n');
+            cut = was_cut;
+        }
+        assert!(facts.len() <= FACTS_BYTES_MAX);
+        part.push_str(facts);
+        if cut {
+            part.push_str(&format!("{WHOLE_RESULT} {id}.\n"));
         }
         if held > 0 && text.len() + part.len() + trailer.len() > max {
             break;
@@ -11145,6 +11729,147 @@ fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, us
     assert!((1..=ready.len()).contains(&held));
     assert!(text.len() <= max);
     (text, held)
+}
+
+/// Keeps the end of a quoted result longer than `max` bytes (F32), since a sub-agent's last
+/// lines say how its work ended: the engine's cut line, then the result's last whole lines,
+/// or the end of its one long line quoted again. Takes the quoted text and the bound.
+/// Returns at most `max` bytes and whether the text was cut.
+fn result_end(quoted: &str, max: usize) -> (String, bool) {
+    assert!(RESULT_CUT.len() + 64 < max);
+    if quoted.len() <= max {
+        return (quoted.to_owned(), false);
+    }
+    let room = max - RESULT_CUT.len() - 1 - 2 * "> ".len();
+    let mut start = quoted.len() - room;
+    while !quoted.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &quoted[start..];
+    let kept = match tail
+        .char_indices()
+        .find(|(_, c)| super::events::line_break(*c))
+    {
+        Some((at, c)) if at + c.len_utf8() < tail.len() => tail[at + c.len_utf8()..].to_owned(),
+        _ => super::events::agent_text(tail),
+    };
+    let text = format!("{RESULT_CUT}\n{kept}");
+    assert!(text.len() <= max);
+    (text, true)
+}
+
+/// Writes the engine's facts about one ended task for its results message (F32): the newest
+/// change set its agent moved since the task started, the newest test line that agent logged
+/// since then, quoted as its own text, and its unfinished work and waiting questions, each
+/// "none" when there is none. Takes the connection, the project and the task. Returns the
+/// lines, each ending in a line break, at most `FACTS_BYTES_MAX` bytes, or a SQLite failure.
+fn task_facts(
+    connection: &Connection,
+    project: &ProjectId,
+    task: i64,
+) -> Result<String, EngineError> {
+    let ran: Option<(Option<i64>, Option<i64>)> = connection
+        .query_row(
+            "SELECT agent,started_ms FROM team_tasks WHERE id=?1 AND project=?2",
+            params![task, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let mut changes = "Change set: none".to_owned();
+    let mut tests = "Tests: none logged".to_owned();
+    let mut open = "Open: none".to_owned();
+    if let Some((Some(agent), started)) = ran {
+        let since = started.unwrap_or(0);
+        let exists = |name: &str| super::history::table_exists(connection, name).map_err(error);
+        if exists("landing_change_sets")? && exists("landing_change_set_numbers")? {
+            let set: Option<(String, String, i64, i64, i64, Option<i64>)> = connection
+                .query_row(
+                    "SELECT c.state,c.head,c.files,c.added,c.removed,n.number FROM landing_change_sets c
+                     LEFT JOIN landing_change_set_numbers n ON n.change_set=c.id
+                     WHERE c.project=?1 AND c.agent_kind='sub' AND c.agent_id=?2 AND c.updated_ms>=?3
+                     ORDER BY c.updated_ms DESC LIMIT 1",
+                    params![project.as_str(), agent.to_string(), since],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(error)?;
+            if let Some((state, head, files, added, removed, number)) = set {
+                let number = number.map_or(String::new(), |number| format!("#{number} "));
+                changes = format!(
+                    "Change set: {number}{}, head {}, {files} files +{added} -{removed}",
+                    excerpt(&state, 16),
+                    bound_text(&excerpt(&head, 64), 12)
+                );
+            }
+        }
+        if exists("project_activity")? {
+            let actor = crate::activity::agent_actor(connection, agent)?;
+            let line: Option<String> = connection
+                .query_row(
+                    "SELECT text FROM project_activity WHERE project=?1 AND kind=?2 AND actor=?3 AND at_ms>=?4 AND undone=0
+                     ORDER BY at_ms DESC, id DESC LIMIT 1",
+                    params![
+                        project.as_str(),
+                        crate::activity::ActivityKind::Test.name(),
+                        actor,
+                        since
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            if let Some(line) = line {
+                let quoted = super::events::agent_text(&excerpt(&line, FACT_LINE_BYTES_MAX - 8));
+                tests = format!("Tests:\n{}", bound_text(&quoted, FACT_LINE_BYTES_MAX));
+            }
+        }
+        let work: i64 = if exists("coord_work")? {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM coord_work WHERE project=?1 AND owner_agent=?2
+                     AND state IN ('assigned','accepted','active','review_ready')",
+                    params![project.as_str(), agent],
+                    |row| row.get(0),
+                )
+                .map_err(error)?
+        } else {
+            0
+        };
+        let asked: i64 = if exists("questions_log")? {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM questions_log WHERE project=?1 AND asker=?2 AND status='pending'",
+                    params![
+                        project.as_str(),
+                        crate::questions::Asker::Agent(agent).name()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(error)?
+        } else {
+            0
+        };
+        if work > 0 || asked > 0 {
+            open = format!(
+                "Open: {work} unfinished work items, {asked} questions waiting for the owner"
+            );
+        }
+    }
+    assert!(changes.len() <= FACT_LINE_BYTES_MAX && open.len() <= FACT_LINE_BYTES_MAX);
+    assert!(tests.len() <= "Tests:\n".len() + FACT_LINE_BYTES_MAX);
+    let facts = format!("{changes}\n{tests}\n{open}\n");
+    assert!(facts.len() <= FACTS_BYTES_MAX);
+    Ok(facts)
 }
 
 /// Settles a takeover of a session's conversation by a live master that started: a change
@@ -11168,6 +11893,24 @@ fn settle_takeover(
     }
     let (project, session) = (project.as_str(), session.as_str());
     crate::master_sessions::note_continued(connection, project, session, launch, resumed)
+}
+
+/// Tells whether the owner typed a team message in the team chat, the only owner message that
+/// starts a master's task and so carries its Task-start reminder (F30); an answer to a
+/// question the engine relays as the owner's has no owner turn. Takes the connection, the
+/// project and the message id. Returns the answer, or the SQLite failure.
+fn owner_chat_turn(
+    connection: &Connection,
+    project: &ProjectId,
+    message: i64,
+) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_owner_turns WHERE message=?1 AND project=?2)",
+            params![message, project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// Writes what a live master is typed for one pending message: the owner's direct prompt
@@ -11280,6 +12023,79 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
         }
         None => sentence.to_owned(),
     }
+}
+
+/// Starts the watch of a sub-agent's task turn afresh when its task changed, keeping the
+/// wrap flag the agent's thread holds (F15). Takes the watch and the task.
+fn watch_task(watch: &mut AfterDone, task: i64) {
+    if watch.task == Some(task) {
+        return;
+    }
+    end_watch(watch);
+    watch.task = Some(task);
+}
+
+/// Ends the watch of a sub-agent's turn when the turn ended, so a retry of the same task on
+/// the same agent never inherits its done report, output time or head mark (F15). Keeps
+/// the wrap flag the agent's thread holds, which its next turn clears. Takes the watch.
+fn end_watch(watch: &mut AfterDone) {
+    watch.task = None;
+    watch.done_at = None;
+    watch.output = None;
+    watch.mark = None;
+    watch.looked = None;
+}
+
+/// Reads the `HeadMark` of an agent worktree (F15): the lstat of its git folder's HEAD, and
+/// of the loose ref of the engine branch HEAD names, in its own clone's git folder or, for a
+/// linked worktree, the owner repository's, zeros when HEAD is detached or the ref is
+/// packed. HEAD is read only as a plain file, never through a link or from a pipe, and a
+/// branch the engine did not name is not looked up. Takes the repository, the worktree and
+/// its git folder. Returns the mark, or none when HEAD cannot be read.
+#[cfg(unix)]
+fn head_mark(repository: &Path, worktree: &Path, git_dir: &Path) -> Option<HeadMark> {
+    use std::os::unix::fs::MetadataExt;
+    let mark = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .ok()
+            .filter(|meta| meta.file_type().is_file())
+            .map(|meta| (meta.len(), meta.mtime(), meta.mtime_nsec()))
+    };
+    let head_file = git_dir.join("HEAD");
+    let head = mark(&head_file)?;
+    let text = plain_text(&head_file)?;
+    let own = crate::agent_git::branch(worktree);
+    let common = if git_dir == crate::agent_git::git_dir(worktree) {
+        git_dir.to_path_buf()
+    } else {
+        repository.join(".git")
+    };
+    let branch = text
+        .strip_prefix("ref: refs/heads/")
+        .map(str::trim_end)
+        .filter(|branch| {
+            crate::agent_git::is_agent_branch(branch) || own.as_deref() == Some(*branch)
+        })
+        .and_then(|branch| mark(&common.join("refs/heads").join(branch)))
+        .unwrap_or((0, 0, 0));
+    Some([head, branch])
+}
+
+/// Reads no `HeadMark` where team agents do not run, so no commit look lands anything there.
+/// Takes the repository, the worktree and its git folder. Returns none.
+#[cfg(not(unix))]
+fn head_mark(_repository: &Path, _worktree: &Path, _git_dir: &Path) -> Option<HeadMark> {
+    None
+}
+
+/// The team note when a saved master harness with no live terminal, such as RCLI, takes
+/// over and the live master turns off (F06). Takes the harness. Returns the note.
+pub(super) fn live_gone(harness: &str) -> String {
+    let to = crate::master_sessions::harness_label(harness);
+    assert!(!to.is_empty());
+    format!(
+        "The live master is off: the master now runs on {to}, which has no live terminal, one turn at a time."
+    )
 }
 
 /// Ends an owner line with one full stop, leaving a line that already ends with a sentence
@@ -11508,18 +12324,21 @@ fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
 /// choice: at once under Stop, after the grace time under Grace (DEC-111 Q13). A turn ended
 /// for its background commands is still held, so its caller stops the agent and them with
 /// it. Each change between held and running is reported, so a message can be typed into a
-/// held agent while it shows working on its task (DEC-119). Takes the session, the prompt, the reports
-/// channel, the cancel and interrupt flags and the turn's rules. Returns the turn's text,
-/// its end and the end's cause.
+/// held agent while it shows working on its task (DEC-119). The wrap flag, set once its agent
+/// reported done and stayed quiet for the owner's "End a turn after done" time, ends the turn
+/// as a success with `DONE_QUIET_ENDED` before its text and stays set, since the app's own
+/// turn may still run, so its caller stops the agent (F15). Takes the session, the prompt,
+/// the reports channel, the cancel, interrupt and wrap flags and the turn's rules. Returns
+/// the turn's text, its end and the end's cause.
 fn turn(
     session: &mut AgentSession,
     prompt: &str,
     reports: &Sender<Report>,
-    cancel: &AtomicBool,
-    interrupt: &AtomicBool,
+    (cancel, interrupt, wrap): (&AtomicBool, &AtomicBool, &AtomicBool),
     rules: TurnRules,
 ) -> (String, TurnEnd, Option<String>) {
     interrupt.store(false, Ordering::SeqCst);
+    wrap.store(false, Ordering::SeqCst);
     if let Err(problem) = session.send_or_cancel(prompt, cancel) {
         if problem.0 == "launch_cancelled" {
             return (String::new(), TurnEnd::Cancelled, None);
@@ -11535,12 +12354,17 @@ fn turn(
     let mut held_since = None;
     let mut released = None;
     let mut shown_held = false;
+    let mut wrapped = false;
     let end = loop {
         if cancel.load(Ordering::SeqCst) {
             break TurnEnd::Cancelled;
         }
         if interrupt.swap(false, Ordering::SeqCst) {
             let _ = session.interrupt();
+        }
+        if wrap.load(Ordering::SeqCst) {
+            wrapped = true;
+            break TurnEnd::Success;
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             cause = Some(TURN_LIMIT.to_owned());
@@ -11604,7 +12428,10 @@ fn turn(
         }
     };
     assert!(released.is_none() || (end == TurnEnd::Success && session.held()));
-    if session.background_running() > 0 {
+    assert!(!wrapped || (end == TurnEnd::Success && released.is_none()));
+    if wrapped {
+        text = format!("{DONE_QUIET_ENDED}\n{text}");
+    } else if session.background_running() > 0 {
         match (end, released) {
             (TurnEnd::TimedOut, _) => text = format!("{BACKGROUND_CUT}\n{text}"),
             (TurnEnd::Interrupted, _) => text = format!("{BACKGROUND_INTERRUPTED}\n{text}"),
@@ -11620,6 +12447,7 @@ fn turn(
                     .max(BACKGROUND_INTERRUPTED.len())
                     .max(BACKGROUND_GRACE_ENDED.len())
                     .max(BACKGROUND_STOPPED.len())
+                    .max(DONE_QUIET_ENDED.len())
                 + 1
     );
     (text, end, cause)

@@ -750,6 +750,7 @@ impl TeamView {
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('E') => self.master_lands(),
             KeyCode::Char('R') => self.reask_empty_reply(),
+            KeyCode::Char('D') => self.done_quiet(),
             KeyCode::Char('I') => self.master_idle_stop(),
             KeyCode::Char('V') => self.live_terminal(),
             KeyCode::Char('F') => self.new_folder_limit(),
@@ -2054,7 +2055,8 @@ impl TeamView {
         })
     }
 
-    /// Flips "Ask me before merging into the master's branch" between Off and On.
+    /// Flips "Master accepts change sets" between Itself and Only when I click or say accept
+    /// all (DEC-147.7).
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn ask_before_merge(&mut self) -> TeamReply {
         if self.status.is_some() && self.still_saving() {
@@ -2067,9 +2069,9 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+                "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
             } else {
-                "The master now merges a finished harness without asking."
+                "The master now accepts change sets itself."
             }
             .to_owned(),
         );
@@ -2141,6 +2143,35 @@ impl TeamView {
         TeamReply::Change(TeamAction::ReaskEmptyReply {
             project_id: self.project.clone(),
             on,
+        })
+    }
+
+    /// Moves "End a turn after done" to its next choice: 2 min, 10 min, 1 h, Off and back to
+    /// 2 min (F15): how long a task turn may stay quiet after its agent reported done before
+    /// the engine ends it. Output: the change to send, or Handled with a notice while loading
+    /// or saving.
+    fn done_quiet(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let secs = done_quiet_next(status.done_quiet_secs);
+        self.changing = Some(match secs {
+            Some(secs) => format!(
+                "A task turn now ends {} after its agent says done and goes quiet.",
+                crate::team::span_words(secs.into())
+            ),
+            None => "A task turn now ends only when its agent ends it.".to_owned(),
+        });
+        TeamReply::Change(TeamAction::DoneQuiet {
+            project_id: self.project.clone(),
+            secs,
         })
     }
 
@@ -3152,7 +3183,7 @@ impl TeamView {
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3286,8 +3317,13 @@ impl TeamView {
                     .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
-                "Ask before merge",
-                if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+                "Master accepts change sets",
+                if status.ask_before_merge {
+                    "Only when I click or say accept all"
+                } else {
+                    "Itself"
+                }
+                .to_owned(),
             ),
         ];
         let master_lands = status.master_lands.map(|lands| {
@@ -3309,6 +3345,10 @@ impl TeamView {
                     "Off"
                 }
                 .to_owned(),
+            ),
+            setting(
+                "End a turn after done",
+                done_quiet_words(status.done_quiet_secs),
             ),
             setting(
                 "New folder limit",
@@ -3477,6 +3517,14 @@ impl TeamView {
                 }
                 if task.attempts > 1 {
                     rows.push(entry("Tries", task.attempts.to_string()));
+                }
+                if let Some(wait) = crate::team::wait_line(task.status, task.wait.as_deref()) {
+                    rows.extend(
+                        wrap_words(&wait, content)
+                            .into_iter()
+                            .take(PANEL_TEXT_LINES)
+                            .map(|line| Row::of(line, look.muted)),
+                    );
                 }
                 match (&task.result, &task.problem) {
                     (Some(result), _) if task.status == TaskStatus::Done => {
@@ -3679,9 +3727,10 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("L", "Land on"),
-            ("g", "Ask before merge"),
+            ("g", "Master accepts change sets"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
+            ("D", "End a turn after done"),
             ("I", "Stop the master when idle after"),
             ("V", "Live terminal"),
             ("F", "New folder limit"),
@@ -3730,6 +3779,27 @@ fn master_runs_live(status: &TeamStatus) -> bool {
             crate::harnesses::interactive::support(&harness.harness)
                 == crate::harnesses::interactive::Support::Terminal
         })
+}
+
+/// The "End a turn after done" choice after `secs`: each of `IDLE_CHOICES_SECS` in turn,
+/// then Off, then the first again (F15). Input: the saved choice, none for Off. Output: the
+/// next choice.
+fn done_quiet_next(secs: Option<u32>) -> Option<u32> {
+    let choices = crate::team::IDLE_CHOICES_SECS;
+    match secs.and_then(|secs| choices.iter().position(|choice| *choice == secs)) {
+        Some(at) => choices.get(at + 1).copied(),
+        None if secs.is_none() => Some(choices[0]),
+        None => Some(crate::team::DONE_QUIET_DEFAULT_SECS),
+    }
+}
+
+/// How the Team settings list shows the "End a turn after done" choice. Input: the saved
+/// choice, none for Off. Output: the words.
+fn done_quiet_words(secs: Option<u32>) -> String {
+    secs.map_or_else(
+        || "Off".to_owned(),
+        |secs| crate::team::span_words(secs.into()),
+    )
 }
 
 /// Which cap on running agents a key moves.

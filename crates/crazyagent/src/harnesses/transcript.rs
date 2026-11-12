@@ -33,6 +33,53 @@ const CLAUDE_ASIDES: [&str; 10] = [
     "<system-reminder>",
     "<user-prompt-submit-hook>",
 ];
+/// The first words of the block Codex writes into its conversation as a user message to give
+/// the model the project's AGENTS.md (codex-rs `core/src/context/user_instructions.rs` at
+/// rust-v0.164.0): nobody typed it (F33).
+const CODEX_INSTRUCTIONS: &str = "# AGENTS.md instructions";
+/// The first words of the summary Codex writes as a user message once it compacts a
+/// conversation (codex-rs `prompts/templates/compact/summary_prefix.md` at rust-v0.164.0).
+const CODEX_SUMMARY: &str = "Another language model started to solve this problem and produced a summary of its thinking process.";
+
+/// Context a harness wrote into its own conversation as a user message that nobody typed:
+/// the project instructions it hands the model, or the summary that stands for the turns it
+/// compacted (F33). It is never a turn's typed words, and the session search names it by its
+/// own role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Injected {
+    Instructions,
+    Summary,
+}
+
+impl Injected {
+    /// The role the session search shows for it. Takes the kind. Returns the role.
+    pub fn role(self) -> &'static str {
+        match self {
+            Self::Instructions => "instructions",
+            Self::Summary => "summary",
+        }
+    }
+}
+
+/// Tells which context a harness injected one user text is, by the first words Codex gives
+/// it. Takes the text. Returns the kind, none for anything else.
+fn codex_injected(text: &str) -> Option<Injected> {
+    let start = text.trim_start();
+    if start.starts_with(CODEX_INSTRUCTIONS) {
+        Some(Injected::Instructions)
+    } else if start.starts_with(CODEX_SUMMARY) {
+        Some(Injected::Summary)
+    } else {
+        None
+    }
+}
+
+/// Whether a Claude Code line is the summary it writes in place of the turns it compacted.
+/// Takes the line. Returns the answer.
+fn claude_summary(value: &Value) -> bool {
+    value["type"] == "user" && value["isCompactSummary"] == true
+}
+
 const CLAUDE_NOT_PROMPTS: [&str; 3] = [
     "isCompactSummary",
     "isVisibleInTranscriptOnly",
@@ -937,9 +984,10 @@ const FIELDS_BYTES_MAX: usize = TOOL_TEXT_BYTES_MAX + 4;
 /// `conversation_messages` reads, plus each tool call with its input (Claude Code
 /// `tool_use`, Codex `function_call` and `custom_tool_call`) and each tool's output
 /// (`tool_result`, `function_call_output` and `custom_tool_call_output`), each cut to
-/// `TOOL_TEXT_BYTES_MAX` bytes. Takes the catalog harness id and the line. Returns who said
-/// it ("typed", "agent" or "tool") and the text, or none for any other line, a harness
-/// without a reader or a line that is not JSON.
+/// `TOOL_TEXT_BYTES_MAX` bytes, and the context a harness injected ([`Injected`]). Takes the
+/// catalog harness id and the line. Returns who said it ("typed", "agent", "tool",
+/// "instructions" or "summary") and the text, or none for any other line, a harness without
+/// a reader or a line that is not JSON.
 pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, String)> {
     let value = serde_json::from_slice::<Value>(line).ok()?;
     match harness {
@@ -987,11 +1035,24 @@ fn codex_entry(value: &Value) -> Option<(&'static str, String)> {
             };
             Some(("tool", tool_output(&output)))
         }
+        "message" if payload["role"] == "user" => {
+            let text = codex_text(payload)?;
+            match codex_injected(&text) {
+                Some(kind) => Some((kind.role(), text)),
+                None => {
+                    said(Speaker::Input, text).map(|(speaker, text)| (speaker_name(speaker), text))
+                }
+            }
+        }
         _ => codex_message(value).map(|(speaker, text)| (speaker_name(speaker), text)),
     }
 }
 
 fn claude_entry(value: &Value) -> Option<(&'static str, String)> {
+    if claude_summary(value) {
+        let text = content_texts(&value["message"]["content"]).join("\n");
+        return (!text.trim().is_empty()).then(|| (Injected::Summary.role(), text));
+    }
     let speaker = match value["type"].as_str()? {
         "user" if value["isMeta"] != true => "typed",
         "assistant" if value["isApiErrorMessage"] != true => "agent",
@@ -1147,19 +1208,30 @@ fn codex_message(value: &Value) -> Option<(Speaker, String)> {
         "assistant" => Speaker::Agent,
         _ => return None,
     };
-    let text: String = payload["content"]
-        .as_array()?
-        .iter()
-        .filter(|part| part["type"] == "input_text" || part["type"] == "output_text")
-        .filter_map(|part| part["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = codex_text(payload)?;
+    if speaker == Speaker::Input && codex_injected(&text).is_some() {
+        return None;
+    }
     said(speaker, text)
+}
+
+/// The text of one Codex rollout message: its input and output text parts joined by lines.
+/// Takes the message payload. Returns the text, none when it has no content list.
+fn codex_text(payload: &Value) -> Option<String> {
+    Some(
+        payload["content"]
+            .as_array()?
+            .iter()
+            .filter(|part| part["type"] == "input_text" || part["type"] == "output_text")
+            .filter_map(|part| part["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 fn claude_message(value: &Value) -> Option<(Speaker, String)> {
     let speaker = match value["type"].as_str()? {
-        "user" if value["isMeta"] != true => Speaker::Input,
+        "user" if value["isMeta"] != true && !claude_summary(value) => Speaker::Input,
         "assistant" if value["isApiErrorMessage"] != true => Speaker::Agent,
         _ => return None,
     };

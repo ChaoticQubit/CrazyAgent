@@ -1085,3 +1085,76 @@ fn an_upgrade_from_eight_lets_the_trash_hold_account_files_keeping_every_note() 
             .is_err()
     );
 }
+
+/// F36: an older build or a copy left the backups folder open to others, and every engine
+/// start refused the upgrade as storage_backup_unsafe. A folder of this user is now made
+/// private again and the upgrade runs, leaving no failure record.
+#[tokio::test]
+async fn a_backups_folder_left_open_to_others_is_made_private_and_the_upgrade_runs() {
+    let root = Root::new();
+    legacy(&root).await;
+    let folder = root.path().join(BACKUPS);
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    close(root.open().await.unwrap()).await;
+
+    assert_eq!(mode(&folder), 0o700);
+    assert_eq!(root.backups().len(), 1);
+    assert_eq!(version(&root.connection()).unwrap(), latest(STEPS));
+    assert_eq!(backup_failure(root.path()), None);
+    assert!(!root.path().join(BACKUP_FAILURE_FILE).exists());
+}
+
+/// F36: a backups folder that is a link is still refused, the database is left as it was,
+/// and the refusal is kept in a private record a client reads while no engine answers. The
+/// next start whose backup succeeds removes the record.
+#[tokio::test]
+async fn a_refused_backup_is_recorded_for_clients_and_a_later_backup_clears_it() {
+    let root = Root::new();
+    legacy(&root).await;
+    let elsewhere = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(elsewhere.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let folder = root.path().join(BACKUPS);
+    std::os::unix::fs::symlink(elsewhere.path(), &folder).unwrap();
+
+    let refusal = refused(root.open().await);
+
+    assert!(refusal.starts_with("storage_backup_unsafe"), "{refusal}");
+    assert_eq!(version(&root.connection()).unwrap(), 0);
+    assert_eq!(backup_failure(root.path()), Some("storage_backup_unsafe"));
+    assert_eq!(mode(&root.path().join(BACKUP_FAILURE_FILE)), 0o600);
+    assert_eq!(std::fs::read_dir(elsewhere.path()).unwrap().count(), 0);
+
+    std::fs::remove_file(&folder).unwrap();
+    close(root.open().await.unwrap()).await;
+
+    assert_eq!(backup_failure(root.path()), None);
+    assert!(!root.path().join(BACKUP_FAILURE_FILE).exists());
+    assert_eq!(root.backups().len(), 1);
+}
+
+/// F36: clients trust the failure record only as the engine writes it: a private regular
+/// file of this user holding one known code, never through a link.
+#[test]
+fn a_backup_failure_record_counts_only_as_the_engine_writes_it() {
+    let root = Root::new();
+    let record = root.path().join(BACKUP_FAILURE_FILE);
+    let write = |text: &[u8], mode: u32| {
+        let _ = std::fs::remove_file(&record);
+        std::fs::write(&record, text).unwrap();
+        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    write(b"storage_backup_failed", 0o600);
+    assert_eq!(backup_failure(root.path()), Some("storage_backup_failed"));
+    write(b"storage_backup_unsafe", 0o644);
+    assert_eq!(backup_failure(root.path()), None);
+    write(b"storage_backup_unsafe: /Users/someone", 0o600);
+    assert_eq!(backup_failure(root.path()), None);
+    std::fs::remove_file(&record).unwrap();
+    let target = root.path().join("elsewhere");
+    std::fs::write(&target, b"storage_backup_failed").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::os::unix::fs::symlink(&target, &record).unwrap();
+    assert_eq!(backup_failure(root.path()), None);
+}

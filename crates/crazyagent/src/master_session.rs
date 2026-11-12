@@ -191,6 +191,9 @@ pub enum MasterReason {
     RepositoryMissing,
     RepositoryConfigRefused,
     InstructionsTooLarge,
+    ProtocolFault,
+    FrameLimit,
+    WorktreeUncertain,
     Cancelled,
     Unknown,
 }
@@ -270,6 +273,20 @@ impl MasterSessionView {
                 .rebound
                 .iter()
                 .any(|binding| &binding.config_id == config)
+    }
+
+    /// Whether settings a turn was prepared under belong to this session, by the rule of
+    /// [`Self::admits_attempt`]. Input: the config, source hash and whether the turn is
+    /// still live. Output: a live turn needs the current binding; a settled one any binding
+    /// the session has had.
+    pub(crate) fn admits_binding(&self, config: &ConfigId, source_hash: &str, live: bool) -> bool {
+        if live {
+            return self.binding() == (config, source_hash);
+        }
+        (&self.config_id, self.source_hash.as_str()) == (config, source_hash)
+            || self.rebound.iter().any(|binding| {
+                (&binding.config_id, binding.source_hash.as_str()) == (config, source_hash)
+            })
     }
 
     /// Checks the stored rebindings: bounded, well formed, made after the Open in

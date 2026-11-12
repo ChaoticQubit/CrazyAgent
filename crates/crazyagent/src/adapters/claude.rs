@@ -278,6 +278,7 @@ pub struct ClaudeProtocol {
     seen_requests: BTreeSet<RequestId>,
     seen_events: SeenIds,
     buffer: Vec<u8>,
+    frame_max: usize,
 }
 
 impl ClaudeProtocol {
@@ -305,9 +306,26 @@ impl ClaudeProtocol {
             seen_requests: BTreeSet::new(),
             seen_events: SeenIds::default(),
             buffer: Vec::new(),
+            frame_max: FRAME_BYTES_MAX,
         };
         protocol.assert_consistent();
         Ok(protocol)
+    }
+
+    /// Bounds each prompt frame this protocol writes by the owner's master frame size limit
+    /// (F39) in place of the engine wire frame. Input: the bound in bytes, from
+    /// `FRAME_BYTES_MAX` to `master_frame_limit::BYTES_MAX`; another bound is a caller
+    /// fault. Output: the protocol with that bound.
+    pub fn with_frame_limit(mut self, bytes: usize) -> Self {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        self.frame_max = bytes;
+        self.assert_consistent();
+        self
+    }
+
+    /// The bound on each prompt frame this protocol writes. Input: none. Output: the bytes.
+    pub fn frame_limit(&self) -> usize {
+        self.frame_max
     }
 
     pub fn state(&self) -> State {
@@ -337,7 +355,7 @@ impl ClaudeProtocol {
         if text.trim().is_empty() || text.contains('\0') {
             return Err(ProtocolError::InvalidInput);
         }
-        if text.len() > FRAME_BYTES_MAX {
+        if text.len() > self.frame_max {
             return Err(ProtocolError::FrameTooLarge);
         }
         if self.seen_requests.contains(&request_id) {
@@ -354,10 +372,11 @@ impl ClaudeProtocol {
             value["session_id"] = json!(session_id);
         }
         let mut bytes = serde_json::to_vec(&value).map_err(|_| ProtocolError::InvalidInput)?;
-        if bytes.len() >= FRAME_BYTES_MAX {
+        if bytes.len() >= self.frame_max {
             return Err(ProtocolError::FrameTooLarge);
         }
         bytes.push(b'\n');
+        assert!(bytes.len() <= self.frame_max);
         self.seen_requests.insert(request_id.clone());
         self.active_request = Some(request_id);
         if self.native_session_id.is_some() {
@@ -396,6 +415,7 @@ impl ClaudeProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&self.frame_max));
         self.seen_events.check();
         assert!(self.seen_requests.len() <= REQUESTS_MAX);
         assert_eq!(self.provenance.harness, NativeHarness::Claude);

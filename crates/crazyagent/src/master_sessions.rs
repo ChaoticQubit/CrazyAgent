@@ -770,6 +770,13 @@ fn kept_record(
     )
 }
 
+/// Whether a message a harness record shows as typed was typed by the engine: a handoff or a
+/// message it typed for the team, so the session search names it `engine` (F33). Takes the
+/// typed text. Returns the answer.
+pub(crate) fn engine_typed(text: &str) -> bool {
+    typed_by(text) == MessageSpeaker::Engine
+}
+
 /// Tells who typed a message a harness record shows: the engine, for a handoff it typed or
 /// a message it typed for the team, else the owner. Takes the typed text. Returns the
 /// speaker.
@@ -4944,6 +4951,51 @@ mod tests {
                 "master/live/terminal: Done",
             ]
         );
+    }
+
+    /// F33: HackerBlog's store held Claude Code's compaction summary as something the owner
+    /// typed: the backfill read it from the record an older engine kept as a typed message.
+    /// It is the harness's own context, so the store keeps the typed messages and replies
+    /// around it and no row for it.
+    #[cfg(unix)]
+    #[test]
+    fn a_compaction_summary_in_a_kept_record_is_never_stored_as_the_owner_s_words() {
+        let (folder, connection) = store_fixture();
+        old_session(&connection, "s-compact", "claude");
+        old_record(
+            &folder,
+            &connection,
+            "s-compact",
+            &[("Plan the parser", "Planned")],
+        );
+        record_line(
+            &folder,
+            &serde_json::json!({"type": "user", "isCompactSummary": true,
+                "message": {"content":
+                    "This session is being continued from a previous conversation that ran out of context."}}),
+        );
+        record_more(&folder, &[("Keep going", "On it")]);
+        connection
+            .execute(
+                "INSERT INTO session_owner_turns(session,project,turns,last_line)
+                 VALUES ('s-compact','store-project',2,'On it')",
+                [],
+            )
+            .unwrap();
+
+        super::initialize(&connection).unwrap();
+
+        assert_eq!(
+            shown(&connection, "s-compact"),
+            [
+                "owner/live/record: Plan the parser",
+                "master/live/record: Planned",
+                "owner/live/record: Keep going",
+                "master/live/record: On it",
+            ]
+        );
+        assert!(super::engine_typed("[team] Agent 4 finished"));
+        assert!(!super::engine_typed("Keep going"));
     }
 
     /// OB-6 merge-up with OB-1: what the engine typed for the turn that starts after a

@@ -387,7 +387,7 @@ impl NativeBridge {
         .await
     }
 
-    /// Turns a project's "Ask me before merging into the master's branch" setting on or
+    /// Turns a project's "Master accepts change sets" setting on or
     /// off: on, the master's merge of a finished harness waits for the owner's Accept.
     /// Takes the project id, the switch and the client generation. Returns the actual
     /// commit receipt.
@@ -428,6 +428,21 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         self.team_action(TeamAction::ReaskEmptyReply { project_id, on }, generation)
+            .await
+    }
+
+    /// Saves a project's "End a turn after done" choice (F15): how long a sub-agent's task
+    /// turn may stay quiet after its agent reported done before the engine ends it, in
+    /// seconds, none for Off. Takes the project id, the choice and the client generation.
+    /// Returns the actual commit receipt.
+    pub async fn team_done_quiet(
+        &mut self,
+        id: &str,
+        secs: Option<u32>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::DoneQuiet { project_id, secs }, generation)
             .await
     }
 

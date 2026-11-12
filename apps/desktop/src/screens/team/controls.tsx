@@ -1,5 +1,5 @@
 import { useContext, useEffect, useState, type ReactNode } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setMasterLands, setCatchUpMain, setChildLanding, setLandOn, setMasterBranch, setMasterIdleStop, setMasterLiveTerminal, setMasterRounds, setMasterRunTime, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setDoneQuiet, setReaskEmptyReply, setReuseIdle, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, MasterIdleStop, MasterLands, SwitchMode, TeamStatus } from "../../engine-client";
@@ -78,6 +78,21 @@ export const SWITCH_OPTIONS: SelectOption[] = [
   { value: "carry", label: "Carry conversation over" },
   { value: "fresh", label: "Start fresh" },
 ];
+
+export const DONE_QUIET_OPTIONS: SelectOption[] = [
+  { value: "off", label: "Off" },
+  { value: "120", label: "2 min" },
+  { value: "600", label: "10 min" },
+  { value: "3600", label: "1 h" },
+];
+
+/** The End a turn after done choice a team status holds as its select value (F15): the
+ * seconds, "off" for Off, and 10 min when an older engine sends none. Input: the status.
+ * Output: the value. */
+export function doneQuietValue(status: Pick<TeamStatus, "done_quiet_secs">): string {
+  if (status.done_quiet_secs === null) return "off";
+  return String(status.done_quiet_secs ?? 600);
+}
 
 export const MASTER_IDLE_OPTIONS: SelectOption[] = [
   { value: "off", label: "Off" },
@@ -284,9 +299,9 @@ export const SETTING_GROUPS: readonly (SettingGroupInfo & { id: SettingGroupId; 
   { id: "model", title: "Model and harness", about: "Which harnesses run, on which accounts, and how many.", icon: "cpu",
     rows: ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"] },
   { id: "access", title: "Access and merging", about: "What agents may touch, and who merges finished work.", icon: "shield-check",
-    rows: ["Agent access", MERGE_INTO_MAIN, "Ask me before merging into the master's branch", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
+    rows: ["Agent access", MERGE_INTO_MAIN, "Master accepts change sets", "Agent branches", RESTARTS_FROM_MAIN, "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"] },
   { id: "tools", title: "Skills and tools", about: "What agents can call and how they are nudged to use it.", icon: "puzzle",
-    rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"] },
+    rows: ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"] },
   { id: "coord", title: "Coordination", about: "How agents talk to each other and to you.", icon: "users",
     rows: ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", ...PER_HARNESS_ROWS] },
   { id: "limits", title: "Limits", about: "Time and token bounds for every agent.", icon: "hourglass",
@@ -385,6 +400,24 @@ export function LiveTerminalSetting({ projectId, status, reload, liveHarness }: 
     <span className="set-label" aria-hidden="true">Live terminal</span>
     <span className="set-ctl"><Switch id={`tg-live-terminal-${projectId}`} label="Live terminal" hideLabel disabledReason={liveHarness ? undefined : "This master has no live terminal: its conversation is the console."} checked={shown === "on"} onChecked={(on) => { if (!busy) void choose(on); }} /></span>
     {liveHarness && <span className="tg-terminal-note">You see and type into the master's own terminal.</span>}
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+  </SettingRow>;
+}
+
+/** The End a turn after done setting as one row, on Agent settings and in the master's
+ * settings (F15): how long a sub-agent's task turn may stay quiet after its agent reported
+ * done before CrazyAgent ends it. Inputs: the project id, the team status and a reload.
+ * Output: the row. */
+export function DoneQuietSetting({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
+  const { busy, note, change } = useChange(reload);
+  const [shown, hold] = useHeld<string>(doneQuietValue(status), Object.is, status);
+
+  const choose = (value: string) => change(() => setDoneQuiet(projectId, value === "off" ? null : Number(value)), "the end a turn after done setting", () => hold(value));
+
+  return <SettingRow label="End a turn after done">
+    <Select id={`tg-done-quiet-${projectId}`} label="End a turn after done" value={shown} options={DONE_QUIET_OPTIONS}
+      onValue={(value) => { if (!busy && DONE_QUIET_OPTIONS.some((option) => option.value === value)) void choose(value); }}
+      helper="A sub-agent's commits go to Changes as soon as it makes them or says its task is done; the rest goes when its turn ends. If it stays quiet this long after saying done, CrazyAgent ends its turn." />
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }
@@ -680,18 +713,18 @@ export function TeamControls({ projectId, status, reload, data, group }: {
               <RadioCard name={`${prefix}-merge`} value="merges" checked={masterLands === "merges"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("merges"); }}
                 title={<>Master resolves conflicts and merges into main itself <span className="badge">Default</span></>}
-                details={["A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Ask me before merging is off. Anything else in the set makes all of it wait for your Accept."]} />
+                details={["A master change set lands on main by itself only when all it holds is the fix of a real conflict with another open change set, and Master accepts change sets is Itself. Anything else in the set makes all of it wait for your Accept."]} />
               <RadioCard name={`${prefix}-merge`} value="waits" checked={masterLands === "waits"} disabled={!status.master_lands}
                 onChecked={() => { if (!busy && status.master_lands) void chooseMasterLands("waits"); }}
                 title="Master resolves conflicts, then waits for my accept" details={["The resolved change set waits in Changes until you accept it."]} />
             </div>
             {!status.master_lands && <span className="tg-terminal-note">{status.access_unreadable ? ACCESS_UNREADABLE : "Only at Full access."}</span>}
           </SettingRow>
-          <SettingRow label="Ask me before merging into the master's branch">
-            <span className="set-label" aria-hidden="true">Ask me before merging into the master's branch</span>
-            <Segmented label="Ask me before merging into the master's branch" value={askMerge} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
-              options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
-            <span className="tg-terminal-note">On stops the master merging by itself: each finished harness's work waits in Changes for your Accept, and so does a master change set that fixes a conflict.</span>
+          <SettingRow label="Master accepts change sets">
+            <span className="set-label" aria-hidden="true">Master accepts change sets</span>
+            <Segmented label="Master accepts change sets" value={askMerge} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
+              options={[{ value: "off", label: "Itself" }, { value: "on", label: "Only when I click or say accept all" }]} />
+            <span className="tg-terminal-note">Itself is the default: the master merges each finished harness's work. Only when I click or say accept all stops that: the work, and a master change set that fixes a conflict, waits in Changes until you click Accept or send accept all to the team.</span>
           </SettingRow>
           <h3 className="set-sub" hidden={!access.rows.slice(3).some((row) => settingMatches(row, words))}>Branches</h3>
           <SettingRow label="Agent branches">
@@ -737,6 +770,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
         <SettingGroup group={tools} prefix={prefix}>
           <ToolsControls projectId={projectId} status={status} reload={reload} />
           <ReaskSetting projectId={projectId} status={status} reload={reload} />
+          <DoneQuietSetting projectId={projectId} status={status} reload={reload} />
         </SettingGroup>
         <SettingGroup group={coord} prefix={prefix}>
           <CoordinationControls projectId={projectId} status={status} reload={reload}>

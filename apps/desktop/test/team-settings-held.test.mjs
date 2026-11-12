@@ -18,7 +18,7 @@ const REFUSED = { outcome: "rejected", pending: false, rejection: "engine_refuse
 
 const ROWS = [
   "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness",
-  "Under Full access, merging into main", "Ask me before merging into the master's branch", "Agent branches",
+  "Under Full access, merging into main", "Master accepts change sets", "Agent branches",
   "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than",
   "Workflow nudges", "Task-start reminder", "Re-ask a sub-agent's empty reply",
   "Claude Code sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display",
