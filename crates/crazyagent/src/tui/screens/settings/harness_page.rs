@@ -200,6 +200,13 @@ impl HarnessPage {
         }
     }
 
+    fn scoped(&self) -> Option<(ProjectId, String)> {
+        match &self.scope {
+            Scope::App => None,
+            Scope::Project { id, name } => Some((id.clone(), name.clone())),
+        }
+    }
+
     fn project(&self) -> Option<ProjectId> {
         match &self.scope {
             Scope::App => None,
@@ -731,8 +738,14 @@ impl Screen for HarnessPage {
             None => {}
         }
         match self.state {
-            State::Loading => return vec![hint("Esc", "Back")],
-            State::Failed(_) => return vec![hint("r", "Try again"), hint("Esc", "Back")],
+            State::Loading => return vec![hint("m", "Models"), hint("Esc", "Back")],
+            State::Failed(_) => {
+                return vec![
+                    hint("m", "Models"),
+                    hint("r", "Try again"),
+                    hint("Esc", "Back"),
+                ];
+            }
             State::Ready(_) => {}
         }
         let mut hints = Vec::new();
@@ -748,6 +761,7 @@ impl Screen for HarnessPage {
                 hints.push(hint("x", "Reset"));
             }
         }
+        hints.push(hint("m", "Models"));
         hints.push(hint(
             &format!("{}{}", ctx.glyphs.up, ctx.glyphs.down),
             "Move",
@@ -776,6 +790,13 @@ impl Screen for HarnessPage {
             Key::Char(' ') => self.change(true, ctx),
             Key::Enter => self.change(false, ctx),
             Key::Char('x') => self.reset(ctx),
+            Key::Char('m') => {
+                return Flow::Open(Place::Models {
+                    harness: self.harness.clone(),
+                    name: self.name.clone(),
+                    project: self.scoped(),
+                });
+            }
             _ => return Flow::Ignored,
         }
         Flow::Handled
@@ -833,10 +854,7 @@ impl Screen for HarnessPage {
         Some(Place::HarnessSettings {
             harness: self.harness.clone(),
             name: self.name.clone(),
-            project: match &self.scope {
-                Scope::App => None,
-                Scope::Project { id, name } => Some((id.clone(), name.clone())),
-            },
+            project: self.scoped(),
         })
     }
 }
