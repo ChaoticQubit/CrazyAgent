@@ -91,6 +91,8 @@
 .pool-sched-text b { display: block; font-weight: 600; color: var(--text); }
 .spend-reset { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
 .spend-reset-line { font-size: 12px; line-height: 16px; color: var(--text-2); overflow-wrap: anywhere; }
+.pool-right .spend-reset { justify-content: flex-end; text-align: right; }
+@container (max-width: 560px) { .pool-right .spend-reset { justify-content: flex-start; text-align: left; } }
 .pool-spend { margin-top: var(--space-4); }
 .pool-refusal { position: sticky; top: 8px; z-index: 3; margin-bottom: var(--space-4); border-radius: var(--radius-panel); background: var(--bg); }
 @container (max-width: 560px) { .pool-ctl { justify-content: flex-start; } }
