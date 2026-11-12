@@ -157,7 +157,7 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     let (_tmp, mut db) = engine();
     let told = |db: &mut Connection, task: i64| {
         let tx = db.transaction().unwrap();
-        let told = fell_back(&tx, &project(), "codex", "gpt-a", task, 1_000 + task).unwrap();
+        let told = fell_back(&tx, &project(), "codex", "gpt-a", Some(task), 1_000 + task).unwrap();
         tx.commit().unwrap();
         told
     };
@@ -165,11 +165,18 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     assert!(!told(&mut db, 2));
     let other = {
         let tx = db.transaction().unwrap();
-        let told = fell_back(&tx, &project(), "codex", "gpt-b", 3, 1_003).unwrap();
+        let told = fell_back(&tx, &project(), "codex", "gpt-b", Some(3), 1_003).unwrap();
         tx.commit().unwrap();
         told
     };
     assert!(other);
+    let master = {
+        let tx = db.transaction().unwrap();
+        let told = fell_back(&tx, &project(), "claude-code", "opus", None, 1_004).unwrap();
+        tx.commit().unwrap();
+        told
+    };
+    assert!(master);
     let notices: Vec<(String, String)> = db
         .prepare("SELECT kind,text FROM team_notifications WHERE project=?1 ORDER BY id")
         .unwrap()
@@ -177,7 +184,7 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(notices.len(), 2);
+    assert_eq!(notices.len(), 3);
     assert!(notices.iter().all(|(kind, _)| kind == "model_fallback"));
     assert_eq!(
         notices[0].1,
@@ -190,7 +197,7 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(messages.len(), 2);
+    assert_eq!(messages.len(), 3);
     assert!(
         messages
             .iter()
@@ -201,4 +208,61 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     ran(&db, &project(), "codex", "gpt-a").unwrap();
     assert!(told(&mut db, 4));
     assert!(!told(&mut db, 5));
+}
+
+#[test]
+fn a_master_fallback_names_the_master_instead_of_a_task() {
+    let (_tmp, mut db) = engine();
+    let tx = db.transaction().unwrap();
+    assert!(fell_back(&tx, &project(), "codex", "gpt-a", None, 1_000).unwrap());
+    tx.commit().unwrap();
+    let text: String = db
+        .query_row(
+            "SELECT text FROM team_notifications WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        text,
+        "No account in this project's pool can run gpt-a for the codex master now, so the master runs on the default model. You are told again only after gpt-a runs once more."
+    );
+}
+
+#[test]
+fn a_master_starts_on_the_owner_s_master_model_and_an_agent_on_its_record() {
+    let (_tmp, db) = engine();
+    assert_eq!(
+        start_model(&db, &project(), 1, "codex", true).unwrap(),
+        None
+    );
+    owner_models(&db, &["gpt-a", "gpt-b"], &[], None);
+    let catalog = crate::model_choice::catalog("codex");
+    let scope = crate::harness_settings::Scope::App;
+    let written = set(
+        &db,
+        "codex",
+        &catalog,
+        &scope,
+        Slot::Master,
+        &json!("gpt-a"),
+        0,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    record_agent(&db, &project(), 1, Some("gpt-b")).unwrap();
+    record_agent(&db, &project(), 2, Some("gpt-b")).unwrap();
+    assert_eq!(
+        start_model(&db, &project(), 1, "codex", true).unwrap(),
+        Some("gpt-a".to_owned())
+    );
+    assert_eq!(
+        start_model(&db, &project(), 2, "codex", false).unwrap(),
+        Some("gpt-b".to_owned())
+    );
+    assert_eq!(
+        start_model(&db, &project(), 3, "codex", false).unwrap(),
+        None
+    );
+    assert_eq!(start_model(&db, &project(), 1, "rcli", true).unwrap(), None);
 }

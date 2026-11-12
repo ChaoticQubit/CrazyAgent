@@ -2614,3 +2614,7 @@ mod codex_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/untrusted_tests.rs"]
 mod untrusted_tests;
+
+#[cfg(all(test, unix))]
+#[path = "master_host_launch/model_tests.rs"]
+mod model_tests;

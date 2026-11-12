@@ -14422,3 +14422,86 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         "the lead's teammate pane is listed for it: {listed:?}"
     );
 }
+
+/// A master model no pool account can run starts the master on an account that can run
+/// the project, on that account's own model, and tells the owner and the master once;
+/// a master model the endpoint serves starts on it with no notice (DEC-150).
+#[test]
+fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
+    use crate::model_choice::store::{self, Begun};
+    use crate::model_choice::{Slot, Written};
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let paused = BTreeSet::new();
+    let project = fixture.setup.project_id.clone();
+    let master = |team: &mut TeamRuntime| {
+        let Ok(Some(account)) = team
+            .master_account(&fixture.access, &project, "codex", &paused)
+            .unwrap()
+        else {
+            panic!("the endpoint takes the master");
+        };
+        account.connection
+    };
+    let notices = || -> Vec<String> {
+        fixture
+            .connection
+            .prepare("SELECT text FROM team_notifications WHERE project=?1 AND kind='model_fallback' ORDER BY id")
+            .unwrap()
+            .query_map([PROJECT], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert!(notices().is_empty());
+    let catalog = crate::model_choice::catalog("codex");
+    let set_master = |model: &str| {
+        let scope = crate::harness_settings::Scope::App;
+        let models = store::values(&fixture.connection, "codex", &catalog, &scope).unwrap();
+        let version = models
+            .rows
+            .iter()
+            .find(|row| row.slot == Slot::Master)
+            .unwrap()
+            .version;
+        assert_eq!(
+            store::custom_begin(&fixture.connection, "codex", &catalog, model).unwrap(),
+            Begun::Pending
+        );
+        store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
+        let written = store::set(
+            &fixture.connection,
+            "codex",
+            &catalog,
+            &scope,
+            Slot::Master,
+            &serde_json::json!(model),
+            version,
+        )
+        .unwrap();
+        assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    };
+    set_master("gpt-a");
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert_eq!(
+        notices(),
+        vec![
+            "No account in this project's pool can run gpt-a for the codex master now, so the master runs on the default model. You are told again only after gpt-a runs once more."
+                .to_owned()
+        ]
+    );
+    let told: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_messages WHERE project=?1 AND text LIKE '%(model_fallback)'",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(told, 1);
+    set_master("qwen2.5:0.5b");
+    assert_eq!(master(&mut team), reference(ENDPOINT));
+    assert_eq!(notices().len(), 1);
+}
