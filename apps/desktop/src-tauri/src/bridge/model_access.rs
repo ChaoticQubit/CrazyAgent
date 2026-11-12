@@ -388,11 +388,11 @@ impl NativeBridge {
     }
 }
 
-/// Whether the latest view still stands on the read an edit ticket was taken from: fresh, at the
-/// same owner revision and config, so only reads such as Pools' pools, schedule and ranking came
-/// between. Any owner write moves the revision and expires the ticket, the engine still checks
-/// revision, config and source at commit, and sign-in tickets keep the exact-view rule. Inputs:
-/// the ticket's read and the latest view. Output: true while the ticket holds.
+/// Whether an edit ticket still holds: the latest view is fresh, at the ticket's owner revision
+/// and config. Logged owner writes (settings edits, pools included, a sign-in account's add, a
+/// held account's removal, master and dispatch writes) move one and expire it; reads and writes
+/// to the accounts table alone (a rename, an API-key add, an unheld removal) keep it, and the
+/// engine rechecks at commit. Inputs: the ticket's read, the latest view. Output: true if held.
 fn unwritten_since(selected: &OwnerReadReply, view: &ControllerView) -> bool {
     view.fresh
         && view.state.revision == selected.revision
