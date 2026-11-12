@@ -90,9 +90,10 @@ test("an account added to a pool from Add account is set up for agents the way t
   assert.deepEqual(await run(["s"], ["s", "k"]), { line: "Work key isn't ready for agents yet. CrazyAgent's engine isn't running.", noted: ["engine_unreachable"] });
 });
 
-/** A bridge stand-in that keeps one selected account, as the desktop bridge does: inspecting
- * picks the account and gives its ticket, and a set-up with any other ticket is refused as
- * stale_model_access. Output: the commands seen in order and the invoke to install. */
+/** A bridge stand-in that keeps one selected record, as the desktop bridge does: inspecting
+ * picks an account or a pool and gives its ticket, and a set-up or an edit with any other
+ * ticket is refused as stale_model_access. Output: the commands seen in order and the invoke
+ * to install. */
 function singleSelectionBridge() {
   const seen = [];
   let selection = 0;
@@ -102,7 +103,13 @@ function singleSelectionBridge() {
       const ticket = String(selection);
       seen.push(`inspect ${args.id}`);
       await new Promise((done) => setTimeout(done, 5));
+      if (args.collection === "pools") return { ticket, record: { kind: "pool", pool: { id: args.id, name: "Team", members: ["a"], projects: [], roles: [], fallback_allowed: false } } };
       return { ticket };
+    }
+    if (command === "desktop_edit_model_access") {
+      seen.push(`edit ${args.ticket}`);
+      if (args.ticket !== String(selection)) throw Object.assign(new Error("stale"), { code: "stale_model_access" });
+      return { pending: false, outcome: "applied", rejection: null };
     }
     if (command === "desktop_configure_account_profile") {
       seen.push(`configure ${args.ticket}`);
@@ -152,6 +159,30 @@ test("DESIGN-5B-F2: the app holds a pool's Get ready run outside the Pools view,
     assert.deepEqual(bridge.seen, ["inspect a", "configure 1", "inspect b", "configure 2"]);
   } finally {
     stop();
+    globalThis.window = before;
+  }
+});
+
+test("READY-GUARD F1: a pool save and a pool delete started beside a set-up each hold the bridge's one selection from inspect to edit, so all three end ok", async () => {
+  const { readyEach } = await import("../src/screens/settings/pools.tsx");
+  const bridge = singleSelectionBridge();
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: bridge.invoke } };
+  try {
+    const [ready, saved, removed] = await Promise.all([
+      readyEach([{ id: "a", name: "Editor key" }], (result) => result),
+      api.savePool("team", "Team", ["a", "b"], { name: "Team", members: ["a"] }),
+      api.deletePool("spare"),
+    ]);
+    assert.deepEqual(ready, [], "the set-up is not refused because a save moved the selection");
+    assert.deepEqual(saved, { kind: "ok", value: undefined }, "the save is not refused because a set-up moved the selection");
+    assert.deepEqual(removed, { kind: "ok", value: undefined });
+    assert.equal(bridge.seen.length, 6, JSON.stringify(bridge.seen));
+    for (let at = 0; at < 6; at += 2) {
+      assert.match(bridge.seen[at], /^inspect /, JSON.stringify(bridge.seen));
+      assert.match(bridge.seen[at + 1], new RegExp(`^(configure|edit) ${at / 2 + 1}$`), `each inspect is followed by the use of its own ticket: ${JSON.stringify(bridge.seen)}`);
+    }
+  } finally {
     globalThis.window = before;
   }
 });
