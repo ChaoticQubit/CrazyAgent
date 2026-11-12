@@ -1664,7 +1664,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
     ),
     (
         "native_auth_host_unavailable",
-        "{harness} isn't installed on this Mac, so {name} sign-in isn't available. Install {harness}, then check again in Settings, Harnesses.",
+        "CrazyAgent didn't find a {harness} it can run on this Mac, so {name} sign-in isn't available. Install {harness}, then check again in Settings, Harnesses.",
     ),
     (
         "native_auth_interrupted",

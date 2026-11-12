@@ -494,8 +494,9 @@ fn uses_defaults(args: &[OsString]) -> bool {
 }
 
 /// Reads the default engine form: no positional arguments, an optional `--home` and the
-/// harness flags. Input: the command arguments. Output: the start with its layout prepared
-/// and every harness resolved for this start only, or a usage error.
+/// harness flags. Each harness is its flag, else the file the owner chose, else what the
+/// shared search finds (PATH, system, then HOME folders). Input: the command arguments.
+/// Output: the start with its layout prepared and its harnesses resolved, or a usage error.
 fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let mut home = None;
     let mut explicit = crazyagent::paths::Harnesses::default();
@@ -536,8 +537,16 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
         explicit.claude.is_none(),
         explicit.rcli.is_none(),
     ];
+    let search = crazyagent::harnesses::Search::from_environment();
+    let chosen = crazyagent::harnesses::finding::at_start(layout.root(), search.home());
+    let given = crazyagent::paths::Harnesses {
+        codex: explicit.codex.or(chosen.codex),
+        claude: explicit.claude.or(chosen.claude),
+        rcli: explicit.rcli,
+    };
     let harnesses = crazyagent::paths::resolve_harnesses(
-        explicit,
+        given,
+        &search,
         std::env::var_os("PATH").as_deref(),
         executable.parent(),
     );
@@ -585,9 +594,9 @@ type Register = fn(
 ) -> Result<(), crazyagent::engine::EngineError>;
 
 /// Registers the harness executables of one start. An explicit flag that cannot be
-/// registered stops the engine; one found on PATH is dropped with a note on stderr, so
-/// setup reports it as missing. Inputs: the service, the harnesses and which came from
-/// PATH. Output: Ok with the harnesses left registered, or the explicit failure.
+/// registered stops the engine; a chosen or found one is dropped with a note on stderr
+/// naming the refusal, and Check again reports it. Inputs: the service, the harnesses and
+/// which were not flags. Output: Ok with the harnesses left registered, or the failure.
 fn register_harnesses(
     service: &mut crazyagent::engine::bootstrap::EngineService,
     harnesses: &mut crazyagent::paths::Harnesses,

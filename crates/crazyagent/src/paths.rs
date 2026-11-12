@@ -298,11 +298,13 @@ pub struct Harnesses {
 }
 
 /// Resolves the harnesses for one engine start, never reusing an earlier answer. Inputs:
-/// the explicit flags, the PATH value and the folder holding the running executable.
-/// Output: each explicit flag, else the `codex` and `claude` PATH entries and the RCLI host
-/// next to the executable, then on PATH, links kept so each launch finds the current install.
+/// the given paths (flags, else the owner's chosen files), the engine search, the PATH value
+/// and the folder holding the running executable. Output: each given path, else the `codex`
+/// and `claude` entries the search finds as the catalog does (PATH, system, then HOME
+/// folders), and the RCLI host next to the executable, then on PATH, links kept.
 pub fn resolve_harnesses(
-    explicit: Harnesses,
+    given: Harnesses,
+    search: &crate::harnesses::Search,
     path: Option<&OsStr>,
     executable_folder: Option<&Path>,
 ) -> Harnesses {
@@ -314,9 +316,11 @@ pub fn resolve_harnesses(
             .find(|entry| executable_file(entry).is_some())
     };
     Harnesses {
-        codex: explicit.codex.or_else(|| path_entry("codex", path)),
-        claude: explicit.claude.or_else(|| path_entry("claude", path)),
-        rcli: explicit
+        codex: given.codex.or_else(|| harness_entry("codex", search, path)),
+        claude: given
+            .claude
+            .or_else(|| harness_entry("claude-code", search, path)),
+        rcli: given
             .rcli
             .or_else(beside)
             .or_else(|| path_entry(RCLI_EXECUTABLE, path)),
@@ -330,20 +334,21 @@ pub fn resolve_harnesses(
 /// Input: the launch harness id. Output: the entry, or none.
 pub type HarnessLookup = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 
-/// Finds the PATH entry of a harness the engine did not have when it started, for the engine
-/// to check and pin after its own install or update job. It covers every catalog harness
-/// CrazyAgent starts itself, by the executable names of its catalog row; a harness without
-/// a launch adapter is never started, so nothing about it waits for a restart. Inputs: the
-/// catalog id and the engine's own PATH value. Output: the entry with its links kept; none
-/// for an alias or unknown id, for a harness without a launch adapter, for no PATH value
-/// and for a harness that is still not installed.
-pub fn harness_entry(harness: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+/// Finds the entry of a harness CrazyAgent starts itself, the one lookup engine start, the
+/// catalog, Check again and the install pin share: the search's folders first, then PATH by
+/// the platform's executable names. Inputs: the catalog id, the engine search and the PATH
+/// value. Output: the entry with its links kept; none for an alias or unknown id, for a
+/// harness without a launch adapter and for a harness found nowhere.
+pub fn harness_entry(
+    harness: &str,
+    search: &crate::harnesses::Search,
+    path: Option<&OsStr>,
+) -> Option<PathBuf> {
     let spec = crate::harnesses::spec(harness)
         .filter(|spec| spec.id == harness && spec.launch.is_none())?;
-    let entry = spec
-        .binaries
-        .iter()
-        .find_map(|name| path_entry(name, path))?;
+    let entry = search
+        .find(harness)
+        .or_else(|| spec.binaries.iter().find_map(|name| path_entry(name, path)))?;
     assert!(entry.is_absolute());
     Some(entry)
 }
@@ -549,6 +554,17 @@ mod tests {
         }
     }
 
+    /// A search over the PATH folders alone, with no system folders and no HOME, so a row
+    /// never depends on what this machine has installed. Input: the PATH value. Output: it.
+    fn on_path(path: &OsStr) -> crate::harnesses::Search {
+        crate::harnesses::Search::new(std::env::split_paths(path).collect(), None, Vec::new())
+    }
+
+    /// A search that looks nowhere. Output: it.
+    fn nowhere() -> crate::harnesses::Search {
+        crate::harnesses::Search::new(Vec::new(), None, Vec::new())
+    }
+
     fn program(path: &Path, mode: u32) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
@@ -566,7 +582,7 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(&old, bin.join("claude")).unwrap();
         let path = std::env::join_paths([bin.clone()]).unwrap();
-        let entry = resolve_harnesses(Harnesses::default(), Some(&path), None)
+        let entry = resolve_harnesses(Harnesses::default(), &on_path(&path), Some(&path), None)
             .claude
             .unwrap();
         assert_eq!(entry, bin.join("claude"));
@@ -590,13 +606,13 @@ mod tests {
         program(&bin.join("aider"), 0o755);
         let path = std::env::join_paths([bin.clone()]).unwrap();
         assert_eq!(
-            harness_entry("claude-code", Some(&path)),
+            harness_entry("claude-code", &on_path(&path), Some(&path)),
             Some(bin.join("claude"))
         );
-        assert_eq!(harness_entry("codex", Some(&path)), None);
-        assert_eq!(harness_entry("aider", Some(&path)), None);
-        assert_eq!(harness_entry("claude", Some(&path)), None);
-        assert_eq!(harness_entry("claude-code", None), None);
+        assert_eq!(harness_entry("codex", &on_path(&path), Some(&path)), None);
+        assert_eq!(harness_entry("aider", &on_path(&path), Some(&path)), None);
+        assert_eq!(harness_entry("claude", &on_path(&path), Some(&path)), None);
+        assert_eq!(harness_entry("claude-code", &nowhere(), None), None);
         let started = crate::harnesses::specs()
             .iter()
             .filter(|spec| spec.launch.is_none());
@@ -606,7 +622,10 @@ mod tests {
             if !entry.exists() {
                 program(&entry, 0o755);
             }
-            assert_eq!(harness_entry(spec.id, Some(&path)), Some(entry));
+            assert_eq!(
+                harness_entry(spec.id, &on_path(&path), Some(&path)),
+                Some(entry)
+            );
             assert!(crate::team::launch_harness(spec.id).is_some());
             covered += 1;
         }
@@ -622,7 +641,7 @@ mod tests {
         program(&first.join("claude"), 0o755);
         program(&second.join("claude"), 0o755);
         let path = std::env::join_paths([first.clone(), second.clone()]).unwrap();
-        let entry = resolve_harnesses(Harnesses::default(), Some(&path), None)
+        let entry = resolve_harnesses(Harnesses::default(), &on_path(&path), Some(&path), None)
             .claude
             .unwrap();
         assert_eq!(entry, first.join("claude"));
@@ -654,7 +673,7 @@ mod tests {
         std::os::unix::fs::symlink(&cellar, first.join("codex")).unwrap();
         let path = std::env::join_paths([PathBuf::from("relative"), first.clone(), second.clone()])
             .unwrap();
-        let found = resolve_harnesses(Harnesses::default(), Some(&path), None);
+        let found = resolve_harnesses(Harnesses::default(), &on_path(&path), Some(&path), None);
         assert_eq!(found.codex, Some(first.join("codex")));
         assert_eq!(found.claude, Some(second.join("claude")));
         assert_eq!(found.rcli, None);
@@ -663,12 +682,12 @@ mod tests {
             claude: None,
             rcli: Some(PathBuf::from("/explicit/rcli")),
         };
-        let found = resolve_harnesses(explicit, Some(&path), None);
+        let found = resolve_harnesses(explicit, &on_path(&path), Some(&path), None);
         assert_eq!(found.codex, Some(PathBuf::from("/explicit/codex")));
         assert_eq!(found.claude, Some(second.join("claude")));
         assert_eq!(found.rcli, Some(PathBuf::from("/explicit/rcli")));
         assert_eq!(
-            resolve_harnesses(Harnesses::default(), None, None),
+            resolve_harnesses(Harnesses::default(), &nowhere(), None, None),
             Harnesses::default()
         );
     }
@@ -681,11 +700,146 @@ mod tests {
         let bin = root.join("bin");
         program(&bin.join(RCLI_EXECUTABLE), 0o755);
         let path = std::env::join_paths([bin.clone()]).unwrap();
-        let found = resolve_harnesses(Harnesses::default(), Some(&path), Some(&app));
+        let found = resolve_harnesses(
+            Harnesses::default(),
+            &on_path(&path),
+            Some(&path),
+            Some(&app),
+        );
         assert_eq!(found.rcli, Some(bin.join(RCLI_EXECUTABLE)));
         program(&app.join(RCLI_EXECUTABLE), 0o755);
-        let found = resolve_harnesses(Harnesses::default(), Some(&path), Some(&app));
+        let found = resolve_harnesses(
+            Harnesses::default(),
+            &on_path(&path),
+            Some(&path),
+            Some(&app),
+        );
         assert_eq!(found.rcli, Some(app.join(RCLI_EXECUTABLE)));
+    }
+
+    #[test]
+    fn a_finder_path_still_finds_codex_in_a_system_folder_at_engine_start() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let homebrew = root.join("opt/homebrew/bin");
+        program(&homebrew.join("codex"), 0o755);
+        let finder = std::ffi::OsString::from("/usr/bin:/bin:/usr/sbin:/sbin");
+        let search = crate::harnesses::Search::engine(Some(&finder), &[homebrew.clone()], None);
+        let found = resolve_harnesses(Harnesses::default(), &search, Some(&finder), None);
+        assert_eq!(found.codex, Some(homebrew.join("codex")));
+        let path_only =
+            resolve_harnesses(Harnesses::default(), &on_path(&finder), Some(&finder), None);
+        assert_eq!(path_only.codex, None);
+    }
+
+    #[test]
+    fn an_nvm_codex_is_found_at_engine_start_default_alias_first_then_newest() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        let versions = home.join(".nvm/versions/node");
+        for version in ["v18.20.4", "v20.17.0", "v22.11.0", "not-a-version"] {
+            program(&versions.join(version).join("bin/codex"), 0o755);
+        }
+        let search = crate::harnesses::Search::engine(None, &[], Some(home.clone()));
+        let newest = resolve_harnesses(Harnesses::default(), &search, None, None);
+        assert_eq!(newest.codex, Some(versions.join("v22.11.0/bin/codex")));
+        std::fs::create_dir_all(home.join(".nvm/alias")).unwrap();
+        std::fs::write(home.join(".nvm/alias/default"), "20\n").unwrap();
+        let search = crate::harnesses::Search::engine(None, &[], Some(home.clone()));
+        let aliased = resolve_harnesses(Harnesses::default(), &search, None, None);
+        assert_eq!(aliased.codex, Some(versions.join("v20.17.0/bin/codex")));
+        std::fs::write(home.join(".nvm/alias/default"), "lts/*\n").unwrap();
+        let search = crate::harnesses::Search::engine(None, &[], Some(home.clone()));
+        let named = resolve_harnesses(Harnesses::default(), &search, None, None);
+        assert_eq!(named.codex, Some(versions.join("v22.11.0/bin/codex")));
+    }
+
+    #[test]
+    fn nvm_reads_a_bounded_number_of_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        let versions = home.join(".nvm/versions/node");
+        for minor in 0..200 {
+            std::fs::create_dir_all(versions.join(format!("v1.{minor}.0/bin"))).unwrap();
+        }
+        let search = crate::harnesses::Search::engine(None, &[], Some(home.clone()));
+        let looked = search.looked("codex");
+        let nvm = looked
+            .iter()
+            .filter(|folder| folder.starts_with(&versions))
+            .count();
+        assert!((1..=8).contains(&nvm), "{nvm}");
+    }
+
+    #[test]
+    fn home_tool_folders_are_found_at_engine_start_and_shims_never_are() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        for shim in [".volta/bin", ".asdf/shims", ".local/share/mise/shims"] {
+            program(&home.join(shim).join("codex"), 0o755);
+        }
+        let search = crate::harnesses::Search::engine(None, &[], Some(home.clone()));
+        assert_eq!(
+            resolve_harnesses(Harnesses::default(), &search, None, None).codex,
+            None
+        );
+        let looked = search.looked("codex");
+        assert!(looked.contains(&home.join(".volta/bin")));
+        assert!(looked.contains(&home.join(".asdf/shims")));
+        for (folder, found) in [
+            (".local/share/fnm/aliases/default/bin", true),
+            ("Library/pnpm", true),
+            (".npm-global/bin", true),
+            (".local/bin", true),
+        ] {
+            let entry = home.join(folder).join("codex");
+            program(&entry, 0o755);
+            let search = crate::harnesses::Search::engine(None, &[], Some(home.clone()));
+            let codex = resolve_harnesses(Harnesses::default(), &search, None, None).codex;
+            assert_eq!(codex.is_some(), found, "{folder}");
+            std::fs::remove_file(&entry).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_catalog_and_engine_start_find_the_same_codex_and_claude() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let home = root.join("home");
+        let on_path = root.join("on-path");
+        let system = root.join("system");
+        std::fs::create_dir_all(&on_path).unwrap();
+        let path = std::env::join_paths([on_path.clone()]).unwrap();
+        let layouts: [(&str, PathBuf); 6] = [
+            ("codex", on_path.join("codex")),
+            ("codex", system.join("codex")),
+            ("codex", home.join(".local/bin/codex")),
+            ("codex", home.join(".nvm/versions/node/v22.11.0/bin/codex")),
+            ("claude-code", home.join(".claude/local/claude")),
+            ("claude-code", home.join("bin/claude")),
+        ];
+        for (id, entry) in layouts {
+            program(&entry, 0o755);
+            let search = crate::harnesses::Search::engine(
+                Some(&path),
+                &[system.clone()],
+                Some(home.clone()),
+            );
+            let started = resolve_harnesses(Harnesses::default(), &search, Some(&path), None);
+            let catalog = crate::harnesses::catalog(&search);
+            let listed = catalog
+                .iter()
+                .find(|row| row.id == id)
+                .and_then(|row| row.executable.clone());
+            let found = if id == "codex" {
+                started.codex
+            } else {
+                started.claude
+            };
+            assert_eq!(found.as_ref(), Some(&entry), "{id} {}", entry.display());
+            assert_eq!(listed, found, "{id} {}", entry.display());
+            std::fs::remove_file(&entry).unwrap();
+        }
     }
 
     #[test]

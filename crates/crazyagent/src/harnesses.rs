@@ -1,4 +1,5 @@
 pub(crate) mod codex_folder;
+pub mod finding;
 pub mod interactive;
 pub mod launch;
 pub mod leftovers;
@@ -8,6 +9,8 @@ pub mod update;
 
 #[cfg(test)]
 mod account_fit_tests;
+#[cfg(all(test, unix))]
+mod finding_tests;
 #[cfg(test)]
 mod probe_tests;
 
@@ -31,14 +34,31 @@ const SYSTEM_DIRECTORIES: [&str; 4] = [
 ];
 #[cfg(not(target_os = "linux"))]
 const SYSTEM_DIRECTORIES: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
-const HOME_DIRECTORIES: [&str; 6] = [
+const HOME_DIRECTORIES: [&str; 10] = [
     ".local/bin",
     ".npm-global/bin",
     ".bun/bin",
     ".cargo/bin",
-    ".volta/bin",
     "bin",
+    ".nvm/current/bin",
+    ".local/share/fnm/aliases/default/bin",
+    "Library/Application Support/fnm/aliases/default/bin",
+    "Library/pnpm",
+    ".local/share/pnpm",
 ];
+/// Version-manager shim folders. Their files start the real program by their own name, so a
+/// launch of the resolved file runs the shim, not the harness: they are named in the places
+/// looked but never used, and the owner chooses the real file instead.
+pub const SHIM_DIRECTORIES: [&str; 3] = [".volta/bin", ".asdf/shims", ".local/share/mise/shims"];
+/// The real programs behind version-manager shims, refused as a chosen harness file.
+pub const SHIM_PROGRAMS: [&str; 3] = ["volta-shim", "mise", "asdf"];
+const NVM_VERSIONS: &str = ".nvm/versions/node";
+const NVM_DEFAULT_ALIAS: &str = ".nvm/alias/default";
+const NVM_ENTRIES_MAX: usize = 64;
+const NVM_VERSIONS_MAX: usize = 8;
+const NVM_ALIAS_BYTES_MAX: u64 = 64;
+const HOME_PLACES_MAX: usize = HOME_DIRECTORIES.len() + NVM_VERSIONS_MAX;
+const LOCATIONS_MAX: usize = 8;
 
 /// Names a kind of account a harness can run on.
 /// Input: none. Output: the plain wire name shared by the TUI and desktop clients.
@@ -135,6 +155,7 @@ pub struct HarnessEntry {
 pub struct Search {
     directories: Vec<PathBuf>,
     home: Option<PathBuf>,
+    home_places: Vec<PathBuf>,
     registered: Vec<(String, PathBuf)>,
 }
 
@@ -152,31 +173,99 @@ impl Search {
             .take(SEARCH_DIRECTORIES_MAX)
             .collect();
         let home = home.filter(|home| usable_path(home));
+        let home_places = home.as_deref().map(home_places).unwrap_or_default();
         let registered: Vec<(String, PathBuf)> = registered
             .into_iter()
             .filter(|(_, path)| usable_path(path))
             .collect();
         assert!(directories.len() <= SEARCH_DIRECTORIES_MAX);
         assert!(directories.iter().all(|directory| directory.is_absolute()));
+        assert!(home_places.len() <= HOME_PLACES_MAX);
         Self {
             directories,
             home,
+            home_places,
             registered,
         }
     }
 
-    /// Builds a search from this process's PATH and HOME with no registered executables.
-    /// Output: the search the engine uses for harnesses it does not launch itself.
-    pub fn from_environment() -> Self {
-        let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect())
+    /// Builds the one search engine start, the catalog, Check again and sign-in all use: the
+    /// PATH folders, then the system folders, then the HOME folders (see [`home_places`]).
+    /// Inputs: the PATH value, the system folders and HOME. Output: the bounded search.
+    pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
+        let mut directories: Vec<PathBuf> = path
+            .map(|path| std::env::split_paths(path).collect())
             .unwrap_or_default();
-        directories.extend(SYSTEM_DIRECTORIES.iter().map(PathBuf::from));
-        Self::new(
-            directories,
+        for folder in system {
+            if !directories.contains(folder) {
+                directories.push(folder.clone());
+            }
+        }
+        Self::new(directories, home, Vec::new())
+    }
+
+    /// Builds the engine search from this process's PATH and HOME and the built-in system
+    /// folders, with no registered executables. Output: the search ([`Search::engine`]).
+    pub fn from_environment() -> Self {
+        let system: Vec<PathBuf> = SYSTEM_DIRECTORIES.iter().map(PathBuf::from).collect();
+        Self::engine(
+            std::env::var_os("PATH").as_deref(),
+            &system,
             std::env::var_os("HOME").map(PathBuf::from),
-            Vec::new(),
         )
+    }
+
+    /// Finds the executable entry of one catalog harness, its links kept, exactly as the
+    /// catalog finds it. Input: the catalog id. Output: the absolute entry, or none for an
+    /// alias, an unknown id or a harness found nowhere this search looks.
+    pub fn find(&self, id: &str) -> Option<PathBuf> {
+        let spec = spec(id).filter(|spec| spec.id == id)?;
+        let found = self.locate(spec)?;
+        assert!(found.is_absolute());
+        Some(found)
+    }
+
+    /// The folders this search looks in for one harness, in order, then the version-manager
+    /// shim folders it never uses, for the owner's "where we looked" line. Input: the catalog
+    /// id. Output: the folders, bounded; empty for an alias or unknown id.
+    pub fn looked(&self, id: &str) -> Vec<PathBuf> {
+        let Some(spec) = spec(id).filter(|spec| spec.id == id) else {
+            return Vec::new();
+        };
+        let mut folders = self.places(spec);
+        if let Some(home) = &self.home {
+            folders.extend(
+                SHIM_DIRECTORIES
+                    .iter()
+                    .map(|relative| below(home, relative)),
+            );
+        }
+        assert!(
+            folders.len()
+                <= SEARCH_DIRECTORIES_MAX
+                    + HOME_PLACES_MAX
+                    + LOCATIONS_MAX
+                    + SHIM_DIRECTORIES.len()
+        );
+        folders
+    }
+
+    /// The HOME this search looks under, for showing folders below it as `~`.
+    /// Output: the absolute HOME, or none.
+    pub fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
+    }
+
+    /// The folders searched for one spec, in order: the search folders, the HOME folders and
+    /// the spec's own install folders under HOME. Input: the spec. Output: the folders.
+    fn places(&self, spec: &HarnessSpec) -> Vec<PathBuf> {
+        assert!(spec.locations.len() <= LOCATIONS_MAX);
+        let mut folders: Vec<PathBuf> = self.directories.clone();
+        folders.extend(self.home_places.iter().cloned());
+        if let Some(home) = &self.home {
+            folders.extend(spec.locations.iter().map(|relative| below(home, relative)));
+        }
+        folders
     }
 
     /// Adds an executable the engine was started with, which wins over any search hit.
@@ -192,11 +281,7 @@ impl Search {
         if let Some((_, path)) = self.registered.iter().find(|(id, _)| id == spec.id) {
             return executable_file(path).then(|| path.clone());
         }
-        let mut directories: Vec<PathBuf> = self.directories.clone();
-        if let Some(home) = &self.home {
-            directories.extend(HOME_DIRECTORIES.iter().map(|relative| home.join(relative)));
-            directories.extend(spec.locations.iter().map(|relative| home.join(relative)));
-        }
+        let directories = self.places(spec);
         for binary in spec.binaries {
             assert!(!binary.contains('/'));
             for directory in &directories {
@@ -209,6 +294,93 @@ impl Search {
         }
         None
     }
+}
+
+/// The HOME folders a harness search looks in after PATH and the system folders: the usual
+/// user bin folders, nvm's current link, fnm's default alias, pnpm's global bin, then nvm's
+/// installed Node versions with the default alias first and the newest after it. No shell
+/// is run and no shell file is read. Input: an absolute HOME. Output: the folders, bounded.
+fn home_places(home: &Path) -> Vec<PathBuf> {
+    assert!(home.is_absolute());
+    let mut folders: Vec<PathBuf> = HOME_DIRECTORIES
+        .iter()
+        .map(|relative| below(home, relative))
+        .collect();
+    folders.extend(nvm_versions(home));
+    assert!(folders.len() <= HOME_PLACES_MAX);
+    folders
+}
+
+/// The `bin` folders of nvm's installed Node versions: the one the default alias names
+/// first, then the newest. Reads at most [`NVM_ENTRIES_MAX`] folder entries and
+/// [`NVM_ALIAS_BYTES_MAX`] alias bytes. Input: HOME. Output: at most [`NVM_VERSIONS_MAX`].
+fn nvm_versions(home: &Path) -> Vec<PathBuf> {
+    let versions = below(home, NVM_VERSIONS);
+    let Ok(entries) = std::fs::read_dir(&versions) else {
+        return Vec::new();
+    };
+    let mut found: Vec<((u64, u64, u64), String)> = entries
+        .take(NVM_ENTRIES_MAX)
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            Some((node_version(&name)?, name))
+        })
+        .collect();
+    found.sort_by(|left, right| right.0.cmp(&left.0));
+    if let Some(alias) = nvm_default(home) {
+        let named = |name: &str| {
+            let bare = name.trim_start_matches('v');
+            bare == alias || bare.starts_with(&format!("{alias}."))
+        };
+        found.sort_by_key(|(_, name)| !named(name));
+    }
+    found.truncate(NVM_VERSIONS_MAX);
+    let folders: Vec<PathBuf> = found
+        .into_iter()
+        .map(|(_, name)| versions.join(name).join("bin"))
+        .collect();
+    assert!(folders.len() <= NVM_VERSIONS_MAX);
+    folders
+}
+
+/// Reads a Node version folder name such as `v22.11.0`. Input: the name.
+/// Output: the major, minor and patch numbers, or none for any other name.
+fn node_version(name: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = name.strip_prefix('v')?.split('.');
+    let version = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(version)
+}
+
+/// The version nvm's default alias names when it is a plain version such as `22` or
+/// `v22.11.0`; a named alias such as `lts/*` is not followed. Input: HOME. Output: the
+/// version without its `v`, or none.
+fn nvm_default(home: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(below(home, NVM_DEFAULT_ALIAS))
+        .ok()?
+        .take(NVM_ALIAS_BYTES_MAX)
+        .read_to_string(&mut text)
+        .ok()?;
+    let alias = text.trim().trim_start_matches('v');
+    (!alias.is_empty()
+        && alias
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.'))
+    .then(|| alias.to_owned())
+}
+
+/// Joins a `/`-separated relative folder onto a base one part at a time.
+/// Inputs: the base and the relative folder. Output: the joined path.
+fn below(base: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(base.to_path_buf(), |at, part| at.join(part))
 }
 
 fn usable_path(path: &Path) -> bool {

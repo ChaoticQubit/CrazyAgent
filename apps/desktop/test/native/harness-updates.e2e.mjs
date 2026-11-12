@@ -144,11 +144,10 @@ async function until(what, wanted, read, ms = STEP_MS) {
 
 /** Starts the real engine and the bridge with fake harnesses first on the engine's PATH, makes
  * one project, serves the built app to a browser page, runs the steps and stops everything.
- * Inputs: the test context, the temporary folder prefix, the steps and whether the engine's
- * HTTPS goes through a proxy that refuses every connection. The steps get the bridge, the owner
- * on the page, the page, a page opener, a harness name reader, a row reader, the fakes, the
- * proxy and the engine's pid. Output: none. */
-async function onEngine(t, prefix, steps, { offline = false } = {}) {
+ * Inputs: the test context, the folder prefix, the steps, whether HTTPS goes through a refusing
+ * proxy, whether the fake Codex is on PATH at start, and the page's local answers. The steps get
+ * the bridge, the owner, the page and its helpers, the fakes, the proxy and the engine. */
+async function onEngine(t, prefix, steps, { offline = false, codexAtStart = true, local = {} } = {}) {
   const engineBinary = required("E2E_ENGINE", "crazyagent engine binary");
   const bridgeBinary = required("E2E_BRIDGE", "desktop-e2e-bridge binary (cargo build -p crazyagent-desktop --bin desktop-e2e-bridge --features e2e-bridge)");
   assert.equal(readFileSync(ROUTES, "utf8"), render(readFileSync(LIB, "utf8")), "routes.rs is stale: run node test/native/bridge-routes.mjs");
@@ -176,7 +175,7 @@ connections = [
 ]
 pools = [{ id = "local-pool", members = ["local-connection"], projects = [], roles = [], fallback_allowed = false }]
 `, { mode: 0o600 });
-  const path = [fakes.opencode, codex.bin, fakes.claude, "/usr/bin", "/bin"].join(":");
+  const path = [fakes.opencode, ...(codexAtStart ? [codex.bin] : []), fakes.claude, "/usr/bin", "/bin"].join(":");
   const through = offline ? { https_proxy: `http://127.0.0.1:${proxy.port}`, HTTPS_PROXY: `http://127.0.0.1:${proxy.port}` } : {};
   const env = { PATH: path, HOME: home, CODEX_HOME: join(home, ".codex"), TMPDIR: tmpdir(), LANG: "en_US.UTF-8", ...through };
   const log = { calls: [], answers: new Map(), trail: [], unrouted: new Set(), invalid: [], dropped: [], picked: 0, closing: false };
@@ -203,7 +202,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     assert.deepEqual(await value(bridge, "desktop_harness_update_settings"), DEFAULTS, "a new engine starts with the default update settings");
     const catalog = await value(bridge, "desktop_harness_catalog", { check: true });
     const named = new Map(catalog.map((entry) => [entry.id, entry]));
-    for (const id of ["codex", "claude-code", "opencode"]) assert.notEqual(named.get(id)?.status.kind, "not_installed", `the engine finds the fake ${id} on its PATH`);
+    for (const id of ["codex", "claude-code", "opencode"].filter((id) => codexAtStart || id !== "codex")) assert.notEqual(named.get(id)?.status.kind, "not_installed", `the engine finds the fake ${id} on its PATH`);
+    if (!codexAtStart) assert.equal(named.get("codex")?.status.kind, "not_installed", "the engine starts with no Codex");
     const name = (id) => {
       assert.ok(named.has(id), `the catalog lists ${id}`);
       return named.get(id).name;
@@ -212,7 +212,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     const dist = join(root, "dist");
     await build({ root: appRoot, configLoader: "runner", logLevel: "silent", build: { outDir: dist, emptyOutDir: true } });
     assert.ok(existsSync(join(dist, "index.html")), "the frontend built");
-    site = await serveApp(dist, bridge, [], log);
+    site = await serveApp(dist, bridge, [], log, local);
     await withPage(async (page) => {
       const me = owner(page, evidence);
       try {
@@ -462,6 +462,54 @@ test("Install from the app Don't offer Install: no Install button anywhere, and 
     assert.deepEqual(installs, [], "no Install button on any row");
     assert.equal(await refused(bridge, "desktop_harness_install", "aider"), "harness_install_off");
   }));
+
+const SYSTEM_CODEX = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].some((folder) => existsSync(join(folder, "codex")))
+  ? "a Codex in a system folder of this Mac is found at engine start, so the engine cannot start without one" : false;
+
+/** Writes a fake Codex 0.0.1 that answers its version, as an install made after the engine
+ * started would. Input: the path. Output: the path. */
+function lateCodex(path) {
+  mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+  script(path, "#!/bin/sh\necho \"codex-cli 0.0.1\"\n");
+  return path;
+}
+
+test("Codex installed after the engine started: the Not installed row lists where CrazyAgent looked, and Check again pins it with no engine restart", { timeout: 600000, skip: SYSTEM_CODEX }, (t) =>
+  onEngine(t, "ca-harness-late-", async ({ bridge, me, open, rowShows, fakes }) => {
+    await open();
+    await me.waitFor("where CrazyAgent looked for codex", (text) => text.includes("CrazyAgent looked for codex in these folders and didn't find it:") && text.includes("~/.local/bin") && text.includes("/opt/homebrew/bin"));
+    assert.equal((await value(bridge, "desktop_harness_find", { id: "codex" })).kind, "missing", "the engine still has no Codex");
+    await me.capture("codex-looked");
+    const late = lateCodex(join(fakes.root, "home", ".local", "bin", "codex"));
+    await me.click("Check again for Codex", "button");
+    await rowShows("codex", "the version of the Codex installed after start", "Version 0.0.1.");
+    assert.deepEqual(await value(bridge, "desktop_harness_find", { id: "codex" }), { kind: "ready", path: late }, "sign-in now uses the Codex Check again pinned");
+    const catalog = await value(bridge, "desktop_harness_catalog", { check: false });
+    assert.equal(catalog.find((entry) => entry.id === "codex")?.executable, late, "the catalog and sign-in name the same Codex");
+  }, { codexAtStart: false }));
+
+test("Choose the codex file: a file that isn't a program is refused with the reason, and a chosen program is pinned and shown with no engine restart", { timeout: 600000, skip: SYSTEM_CODEX }, (t) => {
+  const picks = [];
+  return onEngine(t, "harness-choose-", async ({ bridge, me, open, rowShows, fakes }) => {
+    const folder = join(fakes.root, "tools");
+    const notes = join(folder, "codex-notes");
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    writeFileSync(notes, "not a program\n", { mode: 0o600 });
+    const program = lateCodex(join(folder, "codex"));
+    picks.push(notes, program);
+    await open();
+    await me.click("Choose the codex file", "button");
+    await me.waitFor("the refusal of a file that isn't a program", (text) => text.includes(`CrazyAgent won't use ${notes}. That file isn't a program this Mac can run.`));
+    await me.capture("codex-choose-refused");
+    const refusedAnswer = await bridgeCall(bridge, "desktop_harness_choose_path", { id: "codex", path: notes });
+    assert.equal(refusedAnswer.failure?.code, "harness_path_not_executable", "a direct bridge call is refused the same way");
+    assert.equal((await value(bridge, "desktop_harness_find", { id: "codex" })).kind, "missing", "a refused file is neither stored nor pinned");
+    await me.click("Choose the codex file", "button");
+    await rowShows("codex", "the version of the chosen Codex", "Version 0.0.1.");
+    assert.deepEqual(await value(bridge, "desktop_harness_find", { id: "codex" }), { kind: "ready", path: program }, "sign-in uses the chosen Codex");
+    assert.deepEqual(picks, [], "the page opened the chooser once for each pick");
+  }, { codexAtStart: false, local: { desktop_pick_harness_file: () => ({ value: picks.shift() ?? null }) } });
+});
 
 const NO_TEST_PREFIX = "backlog H-E2E-1: the engine takes Homebrew and npm for an install only from the fixed Homebrew prefixes (Roots::system), and v2.3.0 adds no test prefix because redirecting the install root is security-sensitive; running the install would run the owner's real Homebrew";
 

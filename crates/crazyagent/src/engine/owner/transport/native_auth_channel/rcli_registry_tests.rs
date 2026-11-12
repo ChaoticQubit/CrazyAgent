@@ -1,6 +1,9 @@
 use super::{OwnerRuntimeHandle, RegisteredNativeAuthHost};
 use crate::engine::bootstrap::EngineService;
+use crate::harnesses::Search;
+use crate::harnesses::finding::Found;
 use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
 use std::future::Future;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -60,6 +63,17 @@ where
     let outcome = tokio::spawn(case(host, root)).await;
     fixture.service.shutdown().await.unwrap();
     outcome.unwrap();
+}
+
+/// A search over the given PATH folders alone, so a row never sees this machine's harnesses.
+/// Input: the PATH value. Output: the search.
+fn on(path: &OsStr) -> Search {
+    Search::new(std::env::split_paths(path).collect(), None, Vec::new())
+}
+
+/// A search that looks nowhere. Output: the search.
+fn nowhere() -> Search {
+    Search::new(Vec::new(), None, Vec::new())
 }
 
 fn physical_file(root: &Path, name: &str, contents: &[u8]) -> PathBuf {
@@ -407,19 +421,23 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
             .unwrap_err();
         assert_eq!(frozen.0, "native_auth_host_registration_frozen");
         assert!(host.registered_codex_executable().is_err());
-        assert!(!host.register_installed_harness("codex", None).unwrap());
         assert!(
             !host
-                .register_installed_harness("aider", Some(&path))
+                .register_installed_harness("codex", &nowhere(), None)
                 .unwrap()
         );
         assert!(
             !host
-                .register_installed_harness("claude-code", Some(&path))
+                .register_installed_harness("aider", &on(&path), Some(&path))
                 .unwrap()
         );
         assert!(
-            host.register_installed_harness("codex", Some(&path))
+            !host
+                .register_installed_harness("claude-code", &on(&path), Some(&path))
+                .unwrap()
+        );
+        assert!(
+            host.register_installed_harness("codex", &on(&path), Some(&path))
                 .unwrap()
         );
         assert_eq!(
@@ -434,7 +452,7 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
         assert_eq!(lookup("aider"), None);
         assert!(
             !host
-                .register_installed_harness("codex", Some(&later))
+                .register_installed_harness("codex", &on(&later), Some(&later))
                 .unwrap()
         );
         assert_eq!(
@@ -446,12 +464,12 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
         );
         host.authority.native_auth_host.lock().unwrap().disabled = true;
         let disabled = host
-            .register_installed_harness("claude-code", Some(&later))
+            .register_installed_harness("claude-code", &on(&later), Some(&later))
             .unwrap_err();
         assert_eq!(disabled.0, "native_auth_host_registration_frozen");
         host.authority.native_auth_host.lock().unwrap().disabled = false;
         assert!(
-            host.register_installed_harness("claude-code", Some(&later))
+            host.register_installed_harness("claude-code", &on(&later), Some(&later))
                 .unwrap()
         );
         assert_eq!(
@@ -465,6 +483,138 @@ async fn a_harness_installed_after_the_freeze_fills_only_an_empty_slot() {
             let pinned = lookup(spec.id).is_some();
             assert_eq!(pinned, spec.launch.is_none(), "{}", spec.id);
         }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn codex_installed_after_start_is_pinned_by_check_again_and_sign_in_becomes_available() {
+    registry_case(|host, root| async move {
+        let bin = root.join("installed-later");
+        std::fs::create_dir(&bin).unwrap();
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        host.authority.native_auth_host.lock().unwrap().frozen = true;
+        assert_eq!(
+            host.registered_codex_executable().unwrap_err().0,
+            "native_auth_host_unavailable"
+        );
+        let missing = host
+            .find_harness("codex", None, &on(&path), Some(&path))
+            .unwrap();
+        assert!(
+            matches!(&missing, Found::Missing { looked } if looked.iter().any(|folder| folder == &bin.display().to_string())),
+            "{missing:?}"
+        );
+        let codex = physical_file(&bin, "codex", b"codex-installed-after-start");
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Registered {
+                path: codex.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            codex
+        );
+        assert_eq!(host.harness_lookup()("codex"), Some(codex.clone()));
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Ready { path: codex }
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_chosen_codex_file_is_pinned_and_never_replaces_a_pinned_one() {
+    registry_case(|host, root| async move {
+        let chosen = root.join("chosen");
+        let other = root.join("other");
+        std::fs::create_dir(&chosen).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let picked = physical_file(&chosen, "codex-aarch64-apple-darwin", b"chosen-codex");
+        let on_path = physical_file(&other, "codex", b"path-codex");
+        let path = std::env::join_paths([other]).unwrap();
+        assert_eq!(
+            host.find_harness("codex", Some(&picked), &on(&path), Some(&path))
+                .unwrap(),
+            Found::Registered {
+                path: picked.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            picked
+        );
+        assert_eq!(
+            host.find_harness("codex", Some(&on_path), &nowhere(), None)
+                .unwrap(),
+            Found::Ready {
+                path: picked.clone()
+            }
+        );
+        assert_eq!(
+            host.registered_codex_executable()
+                .unwrap()
+                .verified_path()
+                .unwrap(),
+            picked
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_found_codex_that_fails_the_pin_checks_is_refused_with_its_code_not_missing() {
+    registry_case(|host, root| async move {
+        let bin = root.join("group-writable");
+        std::fs::create_dir(&bin).unwrap();
+        let codex = physical_file(&bin, "codex", b"group-writable-codex");
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        assert_eq!(
+            host.find_harness("codex", None, &on(&path), Some(&path))
+                .unwrap(),
+            Found::Refused {
+                path: codex.clone(),
+                code: "native_auth_host_executable_unsafe".into()
+            }
+        );
+        assert!(host.registered_codex_executable().is_err());
+        assert_eq!(
+            host.register_installed_harness("codex", &on(&path), Some(&path))
+                .unwrap_err()
+                .0,
+            "native_auth_host_executable_unsafe"
+        );
+        let unknown = host
+            .find_harness("aider", None, &on(&path), Some(&path))
+            .unwrap_err();
+        assert_eq!(unknown.0, "harness_path_unknown_harness");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn an_nvm_codex_is_pinned_by_the_shared_search() {
+    registry_case(|host, root| async move {
+        let home = root.join("home");
+        let bin = home.join(".nvm/versions/node/v22.11.0/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = physical_file(&bin, "codex", b"nvm-codex");
+        let search = Search::new(Vec::new(), Some(home), Vec::new());
+        assert_eq!(
+            host.find_harness("codex", None, &search, None).unwrap(),
+            Found::Registered { path: codex }
+        );
     })
     .await;
 }

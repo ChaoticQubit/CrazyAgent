@@ -8,6 +8,39 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
+const SIGN_IN_PATH: &str = "/usr/bin:/bin";
+const NODE_PREFIX_DEPTH_MAX: usize = 32;
+const NODE_PREFIX_BYTES_MAX: usize = 1024;
+
+/// The PATH a sign-in child runs with: `/usr/bin:/bin`, after the `bin` folder of the npm
+/// prefix a Node script harness sits in (`<prefix>/lib/node_modules/...`, with `node` in
+/// `<prefix>/bin`) when that folder holds `node` and only the owner and the system can
+/// change it. Input: the pinned real file. Output: the PATH value.
+fn sign_in_path(executable: &Path) -> std::ffi::OsString {
+    let bin = executable
+        .ancestors()
+        .take(NODE_PREFIX_DEPTH_MAX)
+        .find(|folder| folder.ends_with("lib/node_modules"))
+        .and_then(|modules| modules.parent()?.parent())
+        .map(|prefix| prefix.join("bin"));
+    let usable = bin.as_ref().is_some_and(|bin| {
+        bin.is_absolute()
+            && bin
+                .to_str()
+                .is_some_and(|text| !text.contains(':') && text.len() <= NODE_PREFIX_BYTES_MAX)
+            && bin.join("node").is_file()
+            && crate::service::changeable_by_others(bin).is_none()
+    });
+    match bin.filter(|_| usable) {
+        Some(bin) => {
+            let mut path = bin.into_os_string();
+            path.push(":");
+            path.push(SIGN_IN_PATH);
+            path
+        }
+        None => SIGN_IN_PATH.into(),
+    }
+}
 
 /// How long after a harness identity was first seen a matching hash must start to prove its
 /// bytes for good off macOS. A write after that stamps a change time more than one clock tick
@@ -81,9 +114,14 @@ struct ExecutableIdentity {
 }
 
 impl ExecutableIdentity {
+    /// The identity of a file the engine may pin and run: a regular file of 1 byte to
+    /// [`EXECUTABLE_BYTES_MAX`] the owner may run, owned by the engine's user or by root
+    /// (only root can change a root file), with no group or world write. Input: the file's
+    /// metadata. Output: the identity, or `native_auth_host_executable_unsafe`.
     fn of(metadata: &Metadata) -> Result<Self, EngineError> {
+        let owner = metadata.uid();
         if !metadata.is_file()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || (owner != rustix::process::geteuid().as_raw() && owner != 0)
             || metadata.mode() & 0o022 != 0
             || metadata.mode() & 0o100 == 0
             || !(1..=EXECUTABLE_BYTES_MAX).contains(&metadata.len())

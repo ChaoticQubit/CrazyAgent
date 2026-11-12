@@ -5,11 +5,12 @@ use crate::harnesses::update::{
 
 pub(in crate::engine::owner::transport) const UPDATES_TIMEOUT: Duration =
     Duration::from_secs(VERSION_TIME.as_secs() + CHECK_TIME.as_secs() + 5);
-const REQUEST_BYTES_MAX: usize = 256;
+pub(super) const REQUEST_BYTES_MAX: usize = 2 * finding::PATH_BYTES_MAX + 256;
 const ID_BYTES_MAX: usize = 64;
 const UNAVAILABLE: &str = "harness_update_unavailable";
 
 const _: () = assert!(UPDATES_TIMEOUT.as_secs() > VERSION_TIME.as_secs() + CHECK_TIME.as_secs());
+const _: () = assert!(REQUEST_BYTES_MAX + 4 <= crate::protocol::FRAME_BYTES_MAX);
 
 fn unknown() -> EngineError {
     failure("harness_update_outcome_unknown")
@@ -75,6 +76,44 @@ impl OwnerClient {
         let action = Action::Install { id: id.to_owned() };
         match self.harness_exchange(action, None).await? {
             WireReply::Started => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Has the engine look for Codex or Claude Code again and pin it when the engine started
+    /// without it: the chosen file, else the same search as engine start. Input: the
+    /// catalog id. Output: what was found, or the refusal code.
+    pub async fn harness_find(&self, id: &str) -> Result<Found, EngineError> {
+        let action = Action::Find { id: id.to_owned() };
+        match self.harness_exchange(action, None).await? {
+            WireReply::Found { found } => Ok(found),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Saves the file the owner chose for Codex or Claude Code once it passes every check,
+    /// then looks again with it; none clears the choice. Inputs: the catalog id and the
+    /// absolute path, at most [`finding::PATH_BYTES_MAX`] bytes. Output: what was found.
+    pub async fn harness_choose_path(
+        &self,
+        id: &str,
+        path: Option<&Path>,
+    ) -> Result<Found, EngineError> {
+        let path = match path {
+            Some(path) => Some(
+                path.to_str()
+                    .filter(|text| text.len() <= finding::PATH_BYTES_MAX)
+                    .ok_or_else(|| failure(finding::PATH_INVALID))?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        let action = Action::ChoosePath {
+            id: id.to_owned(),
+            path,
+        };
+        match self.harness_exchange(action, None).await? {
+            WireReply::Found { found } => Ok(found),
             _ => Err(unknown()),
         }
     }
@@ -224,11 +263,13 @@ async fn blocking(
 }
 
 /// Pins the sign-in and master host of a harness the engine's own job just installed or
-/// updated with success, when the engine started without it. Only the engine's PATH is searched and a
-/// refusal is logged by its code alone. Inputs: the owner runtime and the harness id.
+/// updated with success, when the engine started without it. The engine search looks as at
+/// engine start and a refusal is logged by its code alone. Inputs: the owner runtime and the
+/// harness id.
 fn pin(owner: &OwnerRuntimeHandle, id: &str) {
     let path = std::env::var_os("PATH");
-    if let Err(error) = owner.register_installed_harness(id, path.as_deref()) {
+    let search = Search::from_environment();
+    if let Err(error) = owner.register_installed_harness(id, &search, path.as_deref()) {
         eprintln!("{id} got no sign-in host after its install ({})", error.0);
     }
 }
@@ -262,6 +303,24 @@ async fn answer(
     };
     match action {
         Action::List | Action::Check => Err(failure("harness_catalog_request_invalid")),
+        Action::Find { id } => {
+            if !finding::CHOOSABLE.contains(&id.as_str()) {
+                return Err(failure(finding::UNKNOWN_HARNESS));
+            }
+            let found = owner.look_again(&id)?;
+            let _ = probe.entries(search, true).await;
+            Ok(WireReply::Found { found })
+        }
+        Action::ChoosePath { id, path } => {
+            if !finding::CHOOSABLE.contains(&id.as_str()) {
+                return Err(failure(finding::UNKNOWN_HARNESS));
+            }
+            let chosen = id.clone();
+            blocking(move || choose(&root, &chosen, path.as_deref())).await?;
+            let found = owner.look_again(&id)?;
+            let _ = probe.entries(search, true).await;
+            Ok(WireReply::Found { found })
+        }
         Action::Settings => {
             blocking(move || update::settings(&open(&root)?).map(settings_reply)).await
         }
@@ -332,6 +391,26 @@ async fn answer(
     }
 }
 
+/// Stores or clears the file the owner chose for one harness. A path is stored only once it
+/// passes [`finding::check`] and a capture with every check of an engine-start registration,
+/// so a file the engine would refuse is never kept. Inputs: the engine folder, the id and
+/// the path text, none to clear. Output: Ok once stored, or the plain refusal code.
+fn choose(root: &Path, id: &str, path: Option<&str>) -> Result<WireReply, EngineError> {
+    let db = open(root)?;
+    finding::initialize(&db)?;
+    let Some(text) = path else {
+        finding::set_chosen(&db, id, None)?;
+        return Ok(WireReply::Started);
+    };
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let checked = finding::check(id, Path::new(text), root, home.as_deref())?;
+    let host = crate::engine::RegisteredNativeAuthHost::capture_entry(&checked)?;
+    host.verified_path()?;
+    drop(host);
+    finding::set_chosen(&db, id, Some(&checked))?;
+    Ok(WireReply::Started)
+}
+
 /// Serves one harness update action: the work is done first, then under the owner barrier
 /// the grant is checked again and the reply is written. Nothing but a catalog id and the
 /// four setting choices is ever read from the request.
@@ -396,12 +475,40 @@ mod tests {
                 online: update::OnlineLookup::Off,
                 install: update::InstallFromApp::Off,
             },
+            Action::Find {
+                id: "claude-code".into(),
+            },
+            Action::ChoosePath {
+                id: "claude-code".into(),
+                path: Some("\"".repeat(finding::PATH_BYTES_MAX)),
+            },
+            Action::ChoosePath {
+                id: "codex".into(),
+                path: None,
+            },
         ];
         for action in &actions {
             let bytes = body(action);
             assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
             assert!(slow(&bytes));
         }
+    }
+
+    #[test]
+    fn choose_path_carries_an_id_and_a_path_and_nothing_else() {
+        let bytes = br#"{"harness_catalog":{"choose_path":{"id":"codex","path":"/opt/codex"}}}"#;
+        assert!(slow(bytes));
+        for extra in ["command", "args", "sha256", "entry"] {
+            let bytes = format!(
+                r#"{{"harness_catalog":{{"choose_path":{{"id":"codex","path":"/opt/codex","{extra}":"x"}}}}}}"#
+            );
+            assert!(
+                serde_json::from_slice::<Envelope>(bytes.as_bytes()).is_err(),
+                "{extra}"
+            );
+        }
+        let find = br#"{"harness_catalog":{"find":{"id":"codex","path":"/x"}}}"#;
+        assert!(serde_json::from_slice::<Envelope>(find).is_err());
     }
 
     #[test]
@@ -417,7 +524,7 @@ mod tests {
         }
         let oversized = format!(
             r#"{{"harness_catalog":{{"update":{{"id":"{}"}}}}}}"#,
-            "x".repeat(300)
+            "x".repeat(REQUEST_BYTES_MAX)
         );
         assert!(!slow(oversized.as_bytes()));
     }
