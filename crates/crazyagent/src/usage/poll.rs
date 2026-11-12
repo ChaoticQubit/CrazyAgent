@@ -1,3 +1,7 @@
+use super::extras::{
+    Adapter, CLAUDE_DETAIL_QUERY, Extras, Field, Resets, claude_credits, claude_resets,
+    codex_from_usage, key_balance,
+};
 use super::{LimitWindow, Observation, PLAN_BYTES_MAX, RESET_MS_MAX, checked_text, failure};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
@@ -242,6 +246,18 @@ pub fn poll(
     loopback: bool,
     now_ms: i64,
 ) -> Result<Observation, EngineError> {
+    let body = fetch(provider, url, credential, loopback)?;
+    observe(provider, &body, credential, now_ms)
+}
+
+/// Makes one usage call and maps its status. Inputs: the provider, the URL, the credential
+/// and whether loopback is allowed. Output: the body of a 200 reply, or `poll`'s failure.
+fn fetch(
+    provider: Provider,
+    url: url::Url,
+    credential: &PollCredential,
+    loopback: bool,
+) -> Result<Vec<u8>, EngineError> {
     let account_id = credential.account_id.as_deref().filter(|id| {
         !id.is_empty()
             && id.len() <= ACCOUNT_ID_BYTES_MAX
@@ -273,14 +289,23 @@ pub fn poll(
             _ => "usage_unreachable",
         })
     })?;
-    let mut observation = match reply.status {
-        200 => match provider {
-            Provider::Claude => parse_claude(&reply.body)?,
-            Provider::Codex => parse_codex(&reply.body, now_ms)?,
-        },
-        401 | 403 => return Err(failure("usage_sign_in_lapsed")),
-        429 => return Err(failure("usage_rate_limited")),
-        _ => return Err(failure("usage_poll_failed")),
+    match reply.status {
+        200 => Ok(reply.body),
+        401 | 403 => Err(failure("usage_sign_in_lapsed")),
+        429 => Err(failure("usage_rate_limited")),
+        _ => Err(failure("usage_poll_failed")),
+    }
+}
+
+fn observe(
+    provider: Provider,
+    body: &[u8],
+    credential: &PollCredential,
+    now_ms: i64,
+) -> Result<Observation, EngineError> {
+    let mut observation = match provider {
+        Provider::Claude => parse_claude(body)?,
+        Provider::Codex => parse_codex(body, now_ms)?,
     };
     if observation.plan.is_none() {
         observation.plan = plan(credential.plan.as_deref());
@@ -288,8 +313,84 @@ pub fn poll(
     Ok(observation)
 }
 
+/// Reads Claude's free resets from the private detail call: the poll's URL with
+/// `CLAUDE_DETAIL_QUERY`. Any failure or bad body reads them absent and never becomes the
+/// account's poll failure. Inputs: the poll's URL, the credential, whether loopback is
+/// allowed and the time. Output: the resets, or absent.
+fn claude_detail(
+    mut url: url::Url,
+    credential: &PollCredential,
+    loopback: bool,
+    now_ms: i64,
+) -> Field<Resets> {
+    url.set_query(Some(CLAUDE_DETAIL_QUERY));
+    let Ok(body) = fetch(Provider::Claude, url, credential, loopback) else {
+        return Field::Absent;
+    };
+    serde_json::from_slice::<Value>(&body)
+        .map_or(Field::Absent, |value| claude_resets(&value, now_ms))
+}
+
+/// Reads one account's windows as `poll` does, with its free resets and credits: Codex's from
+/// the same reply, Claude's credits from the same reply and, when `detail` is set, its free
+/// resets from a second call with `CLAUDE_DETAIL_QUERY` whose failure only reads them absent.
+/// Inputs: as `poll`, and whether to make the detail call. Output: the observation and
+/// extras, or `poll`'s failure.
+pub fn poll_with_extras(
+    provider: Provider,
+    url: url::Url,
+    credential: &PollCredential,
+    loopback: bool,
+    now_ms: i64,
+    detail: bool,
+) -> Result<(Observation, Extras), EngineError> {
+    let body = fetch(provider, url.clone(), credential, loopback)?;
+    let observation = observe(provider, &body, credential, now_ms)?;
+    let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
+    let extras = match provider {
+        Provider::Codex => codex_from_usage(&value),
+        Provider::Claude => Extras {
+            resets: if detail {
+                claude_detail(url, credential, loopback, now_ms)
+            } else {
+                Field::NotAsked
+            },
+            credits: claude_credits(&value),
+        },
+    };
+    Ok((observation, extras))
+}
+
+/// Reads a saved key's balance from its provider's documented call at `url` through the
+/// system curl, the key only on curl's stdin, with no redirect followed. Any failure reads
+/// absent and is never stored as the account's failure. Inputs: the key adapter, the URL,
+/// the key and whether loopback is allowed. Output: the balance words, or absent.
+pub fn poll_balance(
+    adapter: Adapter,
+    url: url::Url,
+    key: &SecretString,
+    loopback: bool,
+) -> Field<String> {
+    let request = Request {
+        url,
+        accept: "application/json",
+        token: Some(key),
+        form: None,
+        headers: Vec::new(),
+        allow_http: loopback,
+    };
+    match request.send() {
+        Ok(reply) if reply.status == 200 => serde_json::from_slice::<Value>(&reply.body)
+            .map_or(Field::Absent, |value| key_balance(adapter, &value)),
+        Ok(_) | Err(_) => Field::Absent,
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
 
 #[cfg(all(test, target_os = "macos"))]
 mod live_codex_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod live_limits_tests;
