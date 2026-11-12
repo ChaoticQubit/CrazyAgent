@@ -329,7 +329,17 @@ fn a_memory_review_notice_opens_the_first_suggestion_once_the_suggestions_arrive
     let mut screen = Memory::for_project(tidepool.clone(), "Tidepool".into());
     screen.open_at(&review, &mut ctx);
     screen.shown(&mut ctx);
-    while ctx.next_request().is_some() {}
+    let asked: Vec<Request> = std::iter::from_fn(|| ctx.next_request()).collect();
+    assert!(
+        asked.iter().any(|request| matches!(
+            request,
+            Request::Settings(job) if matches!(
+                job.as_ref(),
+                SettingsJob::Suggestions { projects } if *projects == vec![tidepool.clone()]
+            )
+        )),
+        "a review notice makes Project memory ask for its own project's suggestions: {asked:?}"
+    );
     screen.arrive(
         &settings(SettingsEvent::Memories(
             screen.scoped.clone(),
@@ -342,16 +352,22 @@ fn a_memory_review_notice_opens_the_first_suggestion_once_the_suggestions_arrive
         "nothing to review before the suggestions arrive"
     );
     screen.arrive(
-        &settings(SettingsEvent::Suggestions(Ok(vec![suggestion(
-            "tidepool",
-            "Labs want hourly exports.",
-        )]))),
+        &settings(SettingsEvent::Suggestions(Ok(vec![
+            suggestion("harbor", "Buoys report every minute."),
+            suggestion("tidepool", "Labs want hourly exports."),
+        ]))),
         &mut ctx,
     );
     let (modal, _) = screen
         .modal(&ctx)
         .expect("the first suggestion opens for review");
     assert_eq!(modal.title, "Suggested memory");
+    assert!(
+        !texts(&modal.body)
+            .iter()
+            .any(|line| line.contains("Buoys report every minute.")),
+        "Project memory keeps only its own project's suggestions from a reply"
+    );
     assert!(
         texts(&modal.body)
             .iter()
