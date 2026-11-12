@@ -239,13 +239,15 @@ fn checking(status: &SetupStatus) -> bool {
         .any(|tool| tool.state == DependencyState::Checking)
 }
 
-/// Names the tools the setup check did not find, in its order. Home's short line
-/// calls the Graphify command just Graphify, as there is no pack row beside it.
-/// Input: the setup status. Output: the names of tools neither found nor installed.
+/// Names the tools the setup check did not find, in its order, leaving out Node, which
+/// only npm harnesses need. Home's short line calls the Graphify command just Graphify, as
+/// there is no pack row beside it. Input: the setup status. Output: the names of tools
+/// neither found nor installed.
 fn missing_tools(status: &SetupStatus) -> Vec<String> {
     status
         .dependencies
         .iter()
+        .filter(|tool| tool.name != Dependency::Node)
         .filter(|tool| {
             !matches!(
                 tool.state,
