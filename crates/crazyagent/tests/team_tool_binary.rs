@@ -486,7 +486,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         .unwrap();
     connection
         .execute(
-            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('memory-bin','sub','codex',1,'working',1,1)",
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES ('memory-bin','sub','claude-code',1,'working',1,1)",
             [],
         )
         .unwrap();

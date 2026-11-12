@@ -59,7 +59,7 @@ async function devtools(address) {
  * writes to `DevToolsActivePort`. Input: the profile folder. Output: the process and the
  * browser WebSocket address. */
 async function chrome(profile) {
-  const child = spawn(CHROME, ["--headless=new", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "about:blank"], {
+  const child = spawn(CHROME, ["--headless=new", "--no-first-run", "--no-default-browser-check", `--user-data-dir=${profile}`, "--remote-debugging-port=0", "--use-mock-keychain", "--password-store=basic", "about:blank"], {
     stdio: "ignore",
   });
   const portFile = join(profile, "DevToolsActivePort");

@@ -244,6 +244,10 @@ pub(crate) enum Job {
     Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
+    /// Keeps the storage thread busy until the test sends on, or drops, the paired sender,
+    /// so every job queued after it is answered only then, however fast the machine is.
+    #[cfg(all(test, unix))]
+    Hold(oneshot::Receiver<()>),
 }
 
 pub(crate) struct Storage {
@@ -953,6 +957,10 @@ impl Storage {
                             drop(sources.take());
                             let _ = reply.send(released);
                             break;
+                        }
+                        #[cfg(all(test, unix))]
+                        Job::Hold(release) => {
+                            let _ = release.blocking_recv();
                         }
                     }
                 }
