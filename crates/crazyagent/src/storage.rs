@@ -42,6 +42,8 @@ pub(crate) use native_auth::CUSTODIAN_CODES;
 pub mod versioned;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
+#[cfg(unix)]
+pub(crate) use native_auth::account_check_running;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
@@ -1101,6 +1103,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_step_limit::initialize(connection)?;
     crate::master_time_limit::initialize(connection)?;
     crate::master_frame_limit::initialize(connection)?;
+    crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
@@ -1465,6 +1468,7 @@ fn apply(
             | Command::OwnerMasterSteps { .. }
             | Command::OwnerMasterTime { .. }
             | Command::OwnerMasterFrames { .. }
+            | Command::OwnerLearningMark { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1655,6 +1659,7 @@ fn execute(
         Command::OwnerMasterSteps { settings } => crate::master_step_limit::save(tx, settings),
         Command::OwnerMasterTime { settings } => crate::master_time_limit::save(tx, settings),
         Command::OwnerMasterFrames { settings } => crate::master_frame_limit::save(tx, settings),
+        Command::OwnerLearningMark { step, on } => crate::learning::mark(tx, *step, *on),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -1668,6 +1673,7 @@ fn execute(
         Command::ProjectSetup { action } => {
             let caches = match action {
                 crate::project_setup::SetupAction::Remove { project_id } => {
+                    crate::learning::latch(tx);
                     projects_home::forgotten_caches(tx, path, project_id)?
                 }
                 _ => Vec::new(),
@@ -2449,12 +2455,14 @@ fn owner_apply_with(
                 },
             ) = (&outcome, &request.operation)
             {
+                crate::demo::assert_confined(&tx, project_id)?;
                 crate::demo::record(&tx, project_id, crate::team::now_ms())?;
             }
             outcome
         }
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
+            crate::learning::latch(&tx);
             crate::project_setup::record_delete(&tx, action, outcome, revision)?
         }
         (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
@@ -2851,6 +2859,9 @@ fn owner_read(
         },
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
+        },
+        OwnerRead::LearningProgress => OwnerData::LearningProgress {
+            progress: crate::learning::progress(&tx)?,
         },
         OwnerRead::Memories {
             scope,

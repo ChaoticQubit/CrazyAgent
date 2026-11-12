@@ -492,3 +492,35 @@ fn a_harness_installed_after_engine_start_is_found_only_through_the_engines_look
     assert_eq!(usage.harness("codex"), Some(codex));
     assert_eq!(usage.harness("claude-code"), Some(given));
 }
+
+#[test]
+fn an_open_pools_page_between_polls_makes_only_the_detail_reads() {
+    let polled = Some(NOW - 60_000);
+    assert_eq!(
+        poll_plan(polled, None, true, NOW),
+        PollPlan::DetailOnly,
+        "a detail read between polls never polls every account again (LE-L1)"
+    );
+    assert_eq!(poll_plan(polled, None, false, NOW), PollPlan::Nothing);
+    assert_eq!(
+        poll_plan(Some(NOW - POLL_EVERY_MS), None, true, NOW),
+        PollPlan::Every { detail: true }
+    );
+    assert_eq!(
+        poll_plan(Some(NOW - POLL_EVERY_MS), None, false, NOW),
+        PollPlan::Every { detail: false }
+    );
+    assert_eq!(
+        poll_plan(None, None, false, NOW),
+        PollPlan::Every { detail: false }
+    );
+    assert_eq!(
+        poll_plan(polled, Some(NOW - 1), true, NOW),
+        PollPlan::Every { detail: true },
+        "an owner refresh polls every account, with the detail read riding along"
+    );
+    assert_eq!(
+        poll_plan(polled, Some(NOW - 120_000), false, NOW),
+        PollPlan::Nothing
+    );
+}

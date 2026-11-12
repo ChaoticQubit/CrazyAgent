@@ -28,8 +28,8 @@ use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, Subagent
 use crazyagent::coord::tool_switches::Switch;
 use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
-    NativeAuthMethod,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
+    ModelAccessCollection, NativeAuthMethod,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -37,6 +37,7 @@ use crazyagent::harnesses::update::HarnessVersions;
 use crazyagent::ide::bridge::run_command::RunMode;
 use crazyagent::ide::extensions::{Approved, AskView};
 use crazyagent::landing::{AcceptOutcome, ChangeDiff, ChangeSetView, OwnerDirty, TargetBranches};
+use crazyagent::learning::{LearningProgress, MarkStep};
 use crazyagent::master_frame_limit::MasterFrameSettings;
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
@@ -3016,6 +3017,30 @@ async fn desktop_set_quit_settings(
 }
 
 #[tauri::command]
+async fn desktop_learning_progress(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<LearningProgress, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.learning_progress().await
+}
+
+#[tauri::command]
+async fn desktop_set_learning_mark(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    step: MarkStep,
+    on: bool,
+    generation: u64,
+) -> Result<Option<IntentReceipt>, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .set_learning_mark(step, on, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_master_step_settings(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3586,6 +3611,17 @@ async fn desktop_usage_metrics(
 ) -> Result<Metrics, BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.usage_metrics(project_id, since_ms)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_extras(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    detail: bool,
+) -> Result<Vec<AccountExtras>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_extras(detail)?;
     call.await
 }
 
@@ -4943,6 +4979,8 @@ native_commands! {
     desktop_set_cleanup_settings,
     desktop_quit_settings,
     desktop_set_quit_settings,
+    desktop_learning_progress,
+    desktop_set_learning_mark,
     desktop_master_step_settings,
     desktop_set_master_step_settings,
     desktop_master_time_settings,
@@ -5039,6 +5077,7 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_extras,
     desktop_usage_notices,
     desktop_usage_set_money,
     desktop_usage_decide_recount,

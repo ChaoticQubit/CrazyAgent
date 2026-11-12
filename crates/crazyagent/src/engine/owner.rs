@@ -39,7 +39,7 @@ pub use transport::recovery::{
 };
 pub use transport::roadmap::ROADMAP_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
-pub use transport::usage::USAGE_CODES;
+pub use transport::usage::{AccountExtras, USAGE_CODES};
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };
@@ -279,6 +279,10 @@ pub enum OwnerMutation {
     },
     SetMasterFrameSettings {
         settings: crate::master_frame_limit::MasterFrameSettings,
+    },
+    SetLearningMark {
+        step: crate::learning::MarkStep,
+        on: bool,
     },
     Memory {
         action: crate::memory::library::LibraryAction,
@@ -597,6 +601,10 @@ impl OwnerMutation {
             Self::SetMasterFrameSettings { settings } => Command::OwnerMasterFrames {
                 settings: *settings,
             },
+            Self::SetLearningMark { step, on } => Command::OwnerLearningMark {
+                step: *step,
+                on: *on,
+            },
             Self::CreateDemo { project_id, pool } => Command::ProjectSetup {
                 action: crate::demo::create_action(project_id, pool)?,
             },
@@ -804,6 +812,7 @@ pub enum OwnerRead {
     ProjectsHome,
     ProjectDemo,
     SetupStatus,
+    LearningProgress,
     FoundProjects,
     FolderSize {
         path: String,
@@ -908,6 +917,7 @@ impl OwnerRead {
             | Self::ProjectsHome
             | Self::ProjectDemo
             | Self::SetupStatus
+            | Self::LearningProgress
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -1365,6 +1375,9 @@ pub enum OwnerData {
     },
     SetupStatus {
         status: crate::setup::SetupStatus,
+    },
+    LearningProgress {
+        progress: crate::learning::LearningProgress,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,

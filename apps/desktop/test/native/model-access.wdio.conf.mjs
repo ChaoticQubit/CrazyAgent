@@ -17,6 +17,8 @@ const SPECS = {
   "model-access": "model-access.e2e.mjs",
   "model-access-read-only": "model-access-read-only.e2e.mjs",
   "pools-screen": "pools-screen.e2e.mjs",
+  "first-run-guide": "first-run-guide.e2e.mjs",
+  "first-run-skip-guide": "first-run-skip-guide.e2e.mjs",
 };
 assert(SPECS[process.env.CRAZYAGENT_DESKTOP_TEST_SUITE], "a suite this configuration runs");
 

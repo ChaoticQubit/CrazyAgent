@@ -47,6 +47,7 @@ CLEAR = b"\x15"
 GO_TO = b"\x0b"
 UP = b"\x1b[A"
 DOWN = b"\x1b[B"
+RIGHT = b"\x1b[C"
 SHIFT_LEFT = b"\x1b[1;2D"
 SHIFT_RIGHT = b"\x1b[1;2C"
 QUIT = b"\x11"
@@ -354,14 +355,25 @@ def setup(term, root):
         way = "Go to Home"
     else:
         term.key(ENTER)
-        way = "Continue"
-    term.wait("Get set up", 30)
+        term.wait("[> Add account ]   [ Skip for now ]", 30)
+        term.key(RIGHT)
+        term.wait("[ Add account ]   [> Skip for now ]", 10)
+        term.key(ENTER)
+        way = "Continue, then Skip for now on the Accounts step,"
+    home_panel(term, 30)
     assert not (root / "setup").exists(), "first-run Setup installed something"
     step("first-run Setup checked this computer; %s went Home without installing" % way)
 
 
+def home_panel(term, limit):
+    """Waits for Home's side panel: Get set up, or Learn CrazyAgent while the DEC-153 guide
+    shows. Takes the terminal and the seconds to wait. Returns the screen."""
+    return term.until("waiting for Home's side panel", limit,
+                      lambda current: "Get set up" in current or "Learn CrazyAgent" in current)
+
+
 def home_empty(term):
-    screen = term.wait("Get set up", 10)
+    screen = home_panel(term, 10)
     assert "Add an account" in screen and "Create a pool" in screen, screen
     assert PROJECT not in screen, screen
     assert "Pick your projects folder with f." not in screen, screen

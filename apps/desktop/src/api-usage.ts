@@ -76,6 +76,44 @@ export interface AccountLimits {
   weekly_left_out_label: string | null;
 }
 
+/** The kind of limit one free reset clears, when the provider says. */
+export type ResetKind = "five_hour" | "weekly" | "model" | "all_limits";
+
+/** How an account's free resets, credits and spend are read: by its harness, its key
+ * provider's balance call, or not at all. */
+export type LimitAdapter = "codex" | "claude" | "open_router" | "deep_seek" | "moonshot" | "not_reported";
+
+/** An account's free resets: how many, the kinds the provider named and the next expiry. */
+export interface FreeResets {
+  count: number;
+  kinds: ResetKind[];
+  next_expiry_ms: number | null;
+}
+
+/** Where the owner spends a free reset or credit. */
+export type SpendWay = { kind: "in_app" } | { kind: "elsewhere"; place: string } | { kind: "not_reported" };
+
+/** The engine's limits contract for one account (DEC-154): null resets or credits mean not
+ * reported, never 0. `resets_gained_ms` is when the count last rose, for the new-reset notice. */
+export interface LimitExtras {
+  harness: string;
+  adapter: LimitAdapter;
+  may_break: boolean;
+  resets: FreeResets | null;
+  credits: string | null;
+  spend: SpendWay;
+  not_reported: string;
+  resets_checked_ms: number | null;
+  credits_checked_ms: number | null;
+  resets_gained_ms?: number | null;
+}
+
+/** One account's limits contract, by account id. */
+export interface AccountExtras {
+  account: string;
+  extras: LimitExtras;
+}
+
 export interface MoneySettings {
   main_number: "dollars" | "tokens";
   prices: "bundled" | "off";
@@ -269,6 +307,14 @@ export function loadUsage(sinceMs: number | null, offsetMinutes: number, project
  * and the project id. Output: the metrics. */
 export function loadMetrics(sinceMs: number, projectId: string | null): Promise<Result<Metrics>> {
   return call<Metrics>("desktop_usage_metrics", { projectId, sinceMs });
+}
+
+/** Reads every account's free resets, credits and spend as the engine stored them. Pools
+ * passes `detail` on each reread, which asks the engine to read the detail rows while Pools
+ * is open; every other caller reads only what is stored. Input: whether Pools is open.
+ * Output: one entry per account. */
+export function loadExtras(detail: boolean): Promise<Result<AccountExtras[]>> {
+  return call<AccountExtras[]>("desktop_usage_extras", { detail });
 }
 
 /** Asks the engine to read every signed-in account's limits now. */

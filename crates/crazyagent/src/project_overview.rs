@@ -24,8 +24,8 @@ pub use pack::{
 };
 pub use run::{
     Ended, NO_ACCOUNT, NO_TABS, NOT_WRITTEN, REPLY_BYTES_MAX, REPLY_TOO_LONG, RUN_TIME,
-    STARTS_PER_TICK_MAX, Started, UNFINISHED, brief, close_orphans, fail, finish, requeue, tick,
-    wait_for_account,
+    STARTS_PER_TICK_MAX, Started, UNFINISHED, account_found, brief, close_orphans, fail, finish,
+    requeue, tick, wait_for_account,
 };
 
 /// The folder inside a project's `.crazyagent` that holds the tab files.

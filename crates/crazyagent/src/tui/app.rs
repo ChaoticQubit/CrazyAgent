@@ -900,6 +900,7 @@ impl App {
             | OwnerEvent::Questions(_)
             | OwnerEvent::Cleanup(_)
             | OwnerEvent::Reveal(_)
+            | OwnerEvent::Learning(_)
             | OwnerEvent::Settled(_) => {}
             OwnerEvent::Setup(event) => match event.result {
                 Ok(view) => {

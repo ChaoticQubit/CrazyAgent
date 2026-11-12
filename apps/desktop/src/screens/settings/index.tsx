@@ -1,9 +1,8 @@
 import { useLayoutEffect, type ReactNode } from "react";
-import { PageHeader, formatRoute, type SettingsTab } from "../../ui";
-import { SETTINGS_TABS, type SettingsAction } from "../../ui/router";
+import { PageHeader, formatRoute } from "../../ui";
+import { SETTINGS_TABS, isUserMenuTab, type ListedSettingsTab, type SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
 import { FinishedAgentsSettings } from "./finished-agents";
-import { GitHubSettings } from "./github";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
 import { MemorySettings } from "./memory";
@@ -12,23 +11,19 @@ import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
 import { QuittingSettings } from "./quitting";
 import { ProcessSettings } from "../process";
-import { ProfileSettings } from "./profile";
-import { ProjectsHomeSettings } from "./projects-home";
 import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
-import { UpdatesSettings } from "./updates";
 import "../project/projects.css";
 import "./settings.css";
 
 interface SettingsGroup {
   title: string;
-  items: { id: SettingsTab; label: string }[];
+  items: { id: ListedSettingsTab; label: string }[];
 }
 
 export const SETTINGS_GROUPS: SettingsGroup[] = [
   { title: "Access", items: [
     { id: "accounts", label: "Accounts" }, { id: "pools", label: "Pools" },
-    { id: "github", label: "GitHub" }, { id: "profile", label: "Profile" },
   ] },
   { title: "Agents", items: [
     { id: "harnesses", label: "Harnesses" }, { id: "plugins", label: "Plugins and skills" },
@@ -37,26 +32,28 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "master", label: "Master" },
   ] },
   { title: "App", items: [
-    { id: "home", label: "Projects folder" }, { id: "sandbox", label: "Sandbox" },
-    { id: "alerts", label: "Team alerts" }, { id: "updates", label: "Updates" },
+    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" },
   ] },
 ];
 
 /** Refuses a Settings list that leaves out, repeats or invents a section, so an edit cannot
  * lose one from view. Inputs: the groups and every section there is. Throws when they differ. */
-export function assertEverySection(groups: SettingsGroup[], tabs: readonly SettingsTab[]): void {
+export function assertEverySection(groups: SettingsGroup[], tabs: readonly ListedSettingsTab[]): void {
   const listed = groups.flatMap((group) => group.items.map((item) => item.id));
   const same = listed.length === tabs.length && new Set(listed).size === tabs.length && tabs.every((tab) => listed.includes(tab));
   if (!same) throw new Error(`the Settings list must name every section once: ${listed.join(", ")}`);
 }
 
-assertEverySection(SETTINGS_GROUPS, SETTINGS_TABS);
+/** Every section the Settings list names: all but the four the user menu opens (DEC-151). */
+export const LISTED_TABS: readonly ListedSettingsTab[] = SETTINGS_TABS.filter((tab): tab is ListedSettingsTab => !isUserMenuTab(tab));
+
+assertEverySection(SETTINGS_GROUPS, LISTED_TABS);
 
 /** The Settings page's frame as the approved design draws it: the title, then the sections
  * listed in groups beside the open section. A narrow window puts the list above it, and a
  * newly opened section starts at its top. Inputs: the open section and its panel. Output: the
  * frame. */
-export function SettingsFrame({ tab, children }: { tab: SettingsTab; children: ReactNode }) {
+export function SettingsFrame({ tab, children }: { tab: ListedSettingsTab; children: ReactNode }) {
   useLayoutEffect(() => {
     document.getElementById("main")?.scrollTo({ top: 0, behavior: "instant" });
   }, [tab]);
@@ -78,7 +75,7 @@ export function SettingsFrame({ tab, children }: { tab: SettingsTab; children: R
 /** Settings: the frame around the selected section's panel.
  * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
  * "sign_in" opens the sign-in of the given account) and the skill whose detail is open. */
-export function Settings({ tab, action, account, skill }: { tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
+export function Settings({ tab, action, account, skill }: { tab: ListedSettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
   return <SettingsFrame tab={tab}>
     {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
       : tab === "pools" ? <Pools creating={action === "new"} />
@@ -86,15 +83,11 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
       : tab === "plugins" ? <PluginsAndSkills skill={skill} />
       : tab === "process" ? <ProcessSettings />
       : tab === "pack" ? <PackSettings />
-      : tab === "home" ? <ProjectsHomeSettings />
-      : tab === "github" ? <GitHubSettings />
       : tab === "sandbox" ? <SandboxSettingsTab />
       : tab === "memory" ? <MemorySettings />
       : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "quit" ? <QuittingSettings />
       : tab === "master" ? <MasterSettings />
-      : tab === "alerts" ? <TeamAlertsSettings />
-      : tab === "updates" ? <UpdatesSettings />
-      : <ProfileSettings />}
+      : <TeamAlertsSettings />}
   </SettingsFrame>;
 }

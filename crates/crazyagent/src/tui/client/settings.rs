@@ -62,6 +62,9 @@ pub(in crate::tui) enum SettingsJob {
         offset_minutes: i32,
     },
     RefreshUsage,
+    Extras {
+        detail: bool,
+    },
     SetMoney(MoneySettings),
     DecideRecount(bool),
     SignIn(SignInJob),
@@ -232,6 +235,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
+            Self::Extras { .. } => "Extras",
             Self::SetMoney(_) => "SetMoney",
             Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
@@ -358,6 +362,7 @@ pub(in crate::tui) enum SettingsEvent {
     HarnessUpdateSettings(Result<UpdateSettings, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
+    Extras(Result<Vec<crate::engine::owner::AccountExtras>, String>),
     MoneySet(Result<(), String>),
     RecountDecided(Result<(), String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
@@ -421,6 +426,7 @@ impl SettingsEvent {
             SettingsJob::HarnessUpdateSettings => Self::HarnessUpdateSettings(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
+            SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
@@ -651,6 +657,15 @@ impl NativeOwner {
                 SettingsEvent::UsageRefreshed(match self.settings_controller() {
                     Ok(controller) => controller
                         .usage_refresh()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::Extras { detail } => {
+                SettingsEvent::Extras(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_extras(detail)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

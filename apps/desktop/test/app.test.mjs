@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { App, AppView, EngineOutdatedView, ideFocusRoute } = await import("../src/app.tsx");
+const { App, AppView, EngineOutdatedView, ideFocusRoute, pageUnder } = await import("../src/app.tsx");
 const { formatRoute, parseRoute } = await import("../src/ui/router.ts");
 const state = await import("../src/state.ts");
 const { HomeView, setupSteps, needsYou, cardActivity } = await import("../src/screens/dashboard/index.tsx");
@@ -129,7 +129,8 @@ test("routes reach Settings tabs and the project screens", () => {
   assert.match(settings, /<h1>Settings<\/h1>/);
   assert.match(settings, /<nav class="settings-nav" aria-label="Settings sections">/);
   assert.match(settings, /<a class="settings-nav-item" href="#\/settings\/pools" aria-current="page">Pools<\/a>/);
-  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory", "Profile"]) assert.match(settings, new RegExp(`>${label}</a>`));
+  for (const label of ["Accounts", "Pools", "Harnesses", "Plugins and skills", "Memory"]) assert.match(settings, new RegExp(`>${label}</a>`));
+  for (const moved of ["GitHub", "Profile", "Projects folder", "Updates"]) assert.doesNotMatch(settings, new RegExp(`>${moved}</a>`), `${moved} lives in the user menu`);
   const project = render({ projects: { kind: "ok", value: [{ id: "p-1", name: "Harbor Notes", repository_count: 1 }] } }, { name: "project", id: "p-1", tab: "overview" });
   assert.match(project, /<h1>Harbor Notes<\/h1>/);
   assert.match(project, /role="tablist" aria-label="Project"/);
@@ -504,4 +505,17 @@ test("each sidebar row gets its project's working count, beside its unseen count
   assert.match(alpha, /<span class="nav-flag">4<\/span>/u);
   assert.doesNotMatch(beta, /nav-live/u);
   assert.match(beta, /<span class="nav-flag">1<\/span>/u);
+});
+
+test("the way back from a user-menu dialog is never an address still on its way in", () => {
+  const kept = { route: { name: "home" }, hash: "#/home" };
+  const project = { name: "project", id: "p-1", tab: "overview" };
+  assert.deepEqual(pageUnder(project, "#/projects/p-1/overview?section=notes", kept), { route: project, hash: "#/projects/p-1/overview?section=notes" });
+  assert.deepEqual(pageUnder({ name: "home" }, "", kept), { route: { name: "home" }, hash: undefined });
+  assert.equal(pageUnder({ name: "settings", tab: "updates" }, "#/settings/updates", kept), kept, "a menu route keeps the page under it");
+  assert.equal(pageUnder({ name: "welcome" }, "#/welcome", kept), kept);
+  for (const menu of ["#/settings/updates", "#/settings/profile", "#/settings/github", "#/settings/home"]) {
+    assert.equal(pageUnder(project, menu, kept), kept, `${menu} pushed before its hashchange is not the way back`);
+  }
+  assert.equal(pageUnder(project, "#/projects/p-2/overview", kept), kept, "a live address for another page waits for its own render");
 });

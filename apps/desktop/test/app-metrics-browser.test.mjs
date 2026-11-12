@@ -31,6 +31,7 @@ const METRICS = { running: 0, tasks_waiting: 0, tasks_done: 0, tasks_failed: 0, 
 const ANSWERS = {
   desktop_usage_report: REPORT, desktop_usage_metrics: METRICS, desktop_usage_notices: "", desktop_usage_refresh: null, desktop_usage_set_reset: null,
   desktop_list_accounts: { accounts: [{ id: "acct-a", name: "Pool A, Claude 1" }], next: null }, desktop_pool_summaries: [], desktop_account_ranking: [],
+  desktop_usage_extras: [{ account: "acct-a", extras: { harness: "Claude Code", adapter: "claude", may_break: true, resets: { count: 2, kinds: ["five_hour"], next_expiry_ms: null }, credits: "$12.00 of $50.00 used this month", spend: { kind: "in_app" }, not_reported: "not reported by Claude Code", resets_checked_ms: null, credits_checked_ms: null } }],
 };
 
 /** Opens the app Metrics page in Chrome. Inputs: the page, the theme and the window width.
@@ -253,3 +254,26 @@ test("picking a project on the app page reads that project, hides Account limits
     assert.deepEqual(await page.evaluate(`Fixture.sentTo("desktop_usage_set_money")`), [{ settings: { main_number: "tokens", prices: "off", project_limits: "shown" } }]);
   });
 });
+
+const textContrast = (selector) => `(() => {
+  ${ratioHelpers}
+  const node = document.querySelector(${JSON.stringify(selector)});
+  let back = node;
+  while (back && getComputedStyle(back).backgroundColor.match(/[\\d.]+/g)?.[3] === "0") back = back.parentElement;
+  return ratio(luminance(getComputedStyle(node).color), luminance(getComputedStyle(back ?? document.body).backgroundColor));
+})()`;
+
+for (const theme of ["light", "dark"]) {
+  test(`the Account limits card ends with the free resets and credits line, read from what is stored, at 4.5 to 1 in ${theme}`, async () => {
+    await withPage(async (page) => {
+      await open(page, theme);
+      const line = await page.evaluate(`document.querySelector("section.usage-limits .usage-extras")?.textContent ?? ""`);
+      assert.equal(line, "2 free resets (5-hour) (may break) \u00b7 Credits: $12.00 of $50.00 used this month");
+      const asks = await page.evaluate(`Fixture.sentTo("desktop_usage_extras")`);
+      assert.ok(asks.length >= 1, JSON.stringify(asks));
+      assert.ok(asks.every((args) => args.detail === false), "Metrics never asks for the detail rows");
+      const ratio = await page.evaluate(textContrast("section.usage-limits .usage-extras"));
+      assert.ok(ratio >= 4.5, `free resets line contrast ${ratio} in ${theme}`);
+    });
+  });
+}
