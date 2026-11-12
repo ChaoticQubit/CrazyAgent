@@ -591,15 +591,23 @@ fn b18_the_owner_sees_switches_and_wakes_a_finished_agent() {
         screen.contains("It comes back in the team tree."),
         "{screen}"
     );
-    let stored = count(
-        &db,
-        "SELECT count(*) FROM team_wake_requests WHERE agent=?1",
-        agent,
-    );
-    assert_eq!(
-        stored, 1,
-        "w stores one wake request for the team runtime's next tick"
-    );
+    let asked = Instant::now();
+    loop {
+        let pending = count(
+            &db,
+            "SELECT count(*) FROM team_wake_requests WHERE agent=?1",
+            agent,
+        );
+        assert!(pending <= 1, "w stores one wake request, not {pending}");
+        if pending == 0 {
+            break;
+        }
+        assert!(
+            asked.elapsed() < SCREEN_TIME,
+            "the engine's team runtime takes the stored wake request on its next tick"
+        );
+        std::thread::sleep(POLL_TIME);
+    }
     let stopped = count(
         &db,
         "SELECT count(*) FROM team_agents WHERE id=?1 AND status='stopped'",
@@ -607,7 +615,7 @@ fn b18_the_owner_sees_switches_and_wakes_a_finished_agent() {
     );
     assert_eq!(
         stopped, 1,
-        "this engine runs no team runtime, so the agent stays stopped until one takes the wake"
+        "the taken wake starts nothing here, with no account to run it on, so the agent stays stopped"
     );
     drop(pty);
     drop(db);
