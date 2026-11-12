@@ -4575,3 +4575,27 @@ async fn each_console_master_turn_counts_one_turn_on_its_project_s_master_row() 
     drop(prepared);
     case.finish().await;
 }
+
+/// A stand-in Claude Code that refuses the master model a turn names: one assistant
+/// message carrying Claude Code's `model_not_found` error, then an error result.
+const MODEL_REFUSING_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"refused-1","session_id":"native-session","parent_tool_use_id":null,"error":"model_not_found","message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"There is an issue with the selected model."}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":true,"result":"There is an issue with the selected model."}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A master turn whose real Claude host refused the master model ends as `model_refused`
+/// with its own cause, never a bare turn failure, so the owner reads what happened and the
+/// engine can record the refusal (DEC-150 M-10).
+#[tokio::test]
+async fn a_master_turn_whose_harness_refused_the_model_ends_as_model_refused() {
+    let (ended, stored) = tools_turn_on(MODEL_REFUSING_HARNESS, StepLimit::NoLimit).await;
+    assert_eq!(ended, "error master_model_refused");
+    let stored = stored.expect("the refused turn is stored");
+    assert_eq!(stored.phase, MasterTurnPhase::Failed);
+    assert_eq!(stored.reason, Some(MasterReason::ModelRefused));
+    assert_eq!(stored.cause.as_deref(), Some("master_model_refused"));
+}
