@@ -375,6 +375,116 @@ fn launchd_round_trip_runs_stops_starts_and_removes_a_uniquely_labelled_engine()
 }
 
 #[cfg(target_os = "macos")]
+const UNPROVEN: Duration = Duration::from_secs(2);
+
+#[cfg(target_os = "macos")]
+const SLOW_START: Duration = Duration::from_secs(6);
+
+/// A uniquely labelled launchd service for an engine root that runs a shell script in place
+/// of the engine, so a row can make the start slow or failing. The script sits in a folder
+/// beside the test binary, since a service may not run anything under `/tmp`. Inputs: the
+/// row's temporary folder, the root, the folder for the script and its body. Output: the
+/// service, not installed.
+#[cfg(target_os = "macos")]
+fn scripted_service(temp: &Path, root: &Path, beside: &Path, body: &str) -> Service {
+    let script = beside.join("engine-start");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let label = format!(
+        "dev.crazyagent.test.{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    Service {
+        platform: Platform::MacOs,
+        name: label.clone(),
+        executable: script,
+        root: root.to_path_buf(),
+        path: OsString::from(BARE_PATH),
+        definition: temp.join(format!("{label}.plist")),
+        user: None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_service_engine_slow_to_start_is_waited_for_while_launchd_still_runs_it() {
+    assert!(!BIN.contains('\''));
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let beside = tempfile::tempdir_in(Path::new(BIN).parent().unwrap()).unwrap();
+    let layout = Layout::new(temp.path().join("engine")).unwrap();
+    let service = scripted_service(
+        temp.path(),
+        layout.root(),
+        beside.path(),
+        &format!("sleep {}\nexec '{BIN}' \"$@\"", SLOW_START.as_secs()),
+    );
+    let installed = Installed(service.clone());
+    service.install().unwrap();
+    let started = Instant::now();
+    let outcome = runtime().block_on(crazyagent::service::ensure_running(
+        &layout,
+        &service,
+        Path::new(BIN),
+        Some(OsStr::new(BARE_PATH)),
+        UNPROVEN,
+    ));
+    assert_eq!(
+        outcome,
+        Ok(Started::Service),
+        "after {:?}\nservice: {:?}\nlog:\n{}",
+        started.elapsed(),
+        service.status(),
+        std::fs::read_to_string(layout.engine_log()).unwrap_or_default()
+    );
+    assert!(started.elapsed() >= UNPROVEN);
+    assert!(crazyagent::service::answering(&layout.socket()));
+    assert_eq!(check(layout.root()), ready_version());
+    drop(installed);
+    wait_silent(&layout.socket());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_service_engine_that_exits_while_starting_is_reported_at_once_not_waited_for() {
+    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let beside = tempfile::tempdir_in(Path::new(BIN).parent().unwrap()).unwrap();
+    let layout = Layout::new(temp.path().join("engine")).unwrap();
+    let service = scripted_service(
+        temp.path(),
+        layout.root(),
+        beside.path(),
+        &format!("sleep {}\nexit 3", UNPROVEN.as_secs() + 1),
+    );
+    let installed = Installed(service.clone());
+    service.install().unwrap();
+    let started = Instant::now();
+    let error = runtime()
+        .block_on(crazyagent::service::ensure_running(
+            &layout,
+            &service,
+            Path::new(BIN),
+            Some(OsStr::new(BARE_PATH)),
+            UNPROVEN,
+        ))
+        .unwrap_err();
+    assert!(
+        error.0.contains("the engine stopped while starting"),
+        "after {:?}: {error}",
+        started.elapsed()
+    );
+    assert!(
+        error.0.contains(&layout.engine_log().display().to_string()),
+        "{error}"
+    );
+    assert!(started.elapsed() < READY_TIMEOUT);
+    drop(installed);
+}
+
+#[cfg(target_os = "macos")]
 #[test]
 fn service_status_for_another_data_root_names_its_own_label_not_the_default() {
     let temp = tempfile::tempdir_in("/tmp").unwrap();
