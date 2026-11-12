@@ -160,6 +160,10 @@ fn rcli_failures_keep_capture_budget_and_approval_reasons() {
             MasterReason::ConnectionChanged,
         ),
         (
+            "rcli_master_key_setup_required",
+            MasterReason::ConnectionChanged,
+        ),
+        (
             "native_profile_binding_conflict",
             MasterReason::ConnectionChanged,
         ),

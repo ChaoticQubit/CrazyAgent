@@ -164,6 +164,14 @@ impl MasterTurnPhase {
     }
 }
 
+/// The cause a master turn stops with when the engine could not write a pooled keyed RCLI
+/// account's saved API key into its generated home before the launch (KY-M1).
+pub const RCLI_KEY_SETUP_CAUSE: &str = "rcli_master_key_setup_required";
+
+/// The line both apps show for a turn stopped with RCLI_KEY_SETUP_CAUSE (DEC-141): each
+/// app's way to set the account up again.
+pub const RCLI_KEY_SETUP_LINE: &str = "The master could not set this account's API key up for agents. Set it up again: in the app, Settings, Pools, Get ready for agents; in the terminal app, Model access, k Private profile setup.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MasterReason {

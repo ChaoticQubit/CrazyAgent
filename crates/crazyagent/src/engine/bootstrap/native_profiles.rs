@@ -27,7 +27,7 @@ use configured_rcli::lock;
 use staging::{ROOT_STAGING, STAGING, Staging, step};
 
 const ROOT: &str = "native-profiles";
-pub(crate) use retire::{remove_generated_home, remove_sign_in};
+pub(crate) use retire::{generated_home_needs_key, remove_generated_home, remove_sign_in};
 
 const MANIFEST: &str = "identity.json";
 const MAX_MANIFEST: usize = 4096;
