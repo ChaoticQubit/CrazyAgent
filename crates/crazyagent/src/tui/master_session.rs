@@ -3267,6 +3267,7 @@ fn reason_text(reason: &MasterReason) -> &'static str {
             "close it (F4), open it again (F2, Enter), then send again"
         ),
         MasterReason::ScopeRevoked => "Access to this project was revoked",
+        MasterReason::ModelUnserved => "Its provider does not serve the master model",
         MasterReason::CapacityUnavailable => "Another turn is still running; wait for it",
         MasterReason::BudgetExhausted => "Budget exhausted",
         MasterReason::ProfileBusy => "Account is busy with a sign-in or sign-out",

@@ -177,6 +177,7 @@ pub enum MasterReason {
     TransientFailure,
     ConnectionChanged,
     ScopeRevoked,
+    ModelUnserved,
     CapacityUnavailable,
     BudgetExhausted,
     ProfileBusy,

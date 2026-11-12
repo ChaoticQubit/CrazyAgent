@@ -363,6 +363,11 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
     {
         return Some(format!("{harness} stopped: {detail} ({code}){retry}"));
     }
+    if turn.reason == Some(MasterReason::ModelUnserved)
+        && let Some(detail) = &turn.detail
+    {
+        return Some(format!("{detail} ({code}){retry}"));
+    }
     let why = match turn.reason {
         Some(MasterReason::ReadinessUnknown | MasterReason::ReadinessStale) => {
             "the account is not signed in. Sign in again in Settings, Accounts."
@@ -385,6 +390,9 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::ProfileBusy) => "its account is busy signing in or out.",
         Some(MasterReason::ConnectionChanged) => "its settings changed while it was open.",
         Some(MasterReason::ScopeRevoked) => "it no longer has access to this project.",
+        Some(MasterReason::ModelUnserved) => {
+            "no account in its pool can run its master model. Change the master model in Settings, Harnesses, RCLI, Models."
+        }
         Some(MasterReason::RuntimeUnavailable) => {
             "it could not start. Check it in Settings, Harnesses."
         }

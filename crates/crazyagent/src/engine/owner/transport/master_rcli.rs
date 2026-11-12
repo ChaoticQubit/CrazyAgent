@@ -142,6 +142,7 @@ fn rcli_failure_observation(error: &EngineError) -> MasterRuntimeObservation {
         | "gateway_connection_changed_or_denied" => MasterReason::ConnectionChanged,
         "owner_runtime_stale" | "master_runtime_scope_revoked" => MasterReason::ScopeRevoked,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
+        "rcli_master_model_unserved" => MasterReason::ModelUnserved,
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_invalid_authentication" => MasterReason::InvalidAuthentication,
         "gateway_health_unknown" => MasterReason::ReadinessUnknown,

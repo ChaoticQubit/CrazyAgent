@@ -298,6 +298,8 @@ struct Preparation {
     auth: MasterBootstrapAuth,
     worktree_lease: RequestId,
     lease: WorktreeLease,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2179,14 +2181,72 @@ fn master_members<'a>(config: &'a EffectiveConfig, session: &MasterSessionView) 
 }
 
 /// Lists the members a turn may try, in the owner's schedule order, the same for every
-/// master harness (PA-6, DEC-091). Inputs: the transaction, settings and session.
-/// Output: each member with its settings or schedule gap and whether the owner chose it.
+/// master harness (PA-6, DEC-091). With an RCLI master model, a member whose provider does
+/// not serve it gets a ModelUnserved gap; settings and schedule gaps come first (DEC-150
+/// M-5). Inputs: the transaction, settings, session and the master model. Output: each
+/// member with its gap and whether the owner chose it.
 fn candidates<'a>(
     tx: &Transaction<'_>,
     config: &'a EffectiveConfig,
     session: &MasterSessionView,
+    model: Option<&str>,
 ) -> Result<Vec<Member<'a>>, EngineError> {
-    scheduled(tx, config, session, master_members(config, session))
+    let members = scheduled(tx, config, session, master_members(config, session))?;
+    let Some(model) = model else {
+        return Ok(members);
+    };
+    assert_eq!(session.selection.backend, MasterBackend::Rcli);
+    Ok(members
+        .into_iter()
+        .map(|(connection, gap, chosen)| {
+            let gap = gap.or_else(|| {
+                (!crate::model_choice::rcli_serves(model, connection)).then(|| {
+                    (
+                        MasterReason::ModelUnserved,
+                        "master_model_unserved".to_owned(),
+                    )
+                })
+            });
+            (connection, gap, chosen)
+        })
+        .collect())
+}
+
+/// Reads the master model a turn of an RCLI master runs on (DEC-150 M-5): the project's
+/// master slot, then the app's, none for each account's own model or another backend.
+/// Read once per preparation, in its transaction. Inputs: the transaction and session.
+/// Output: the model, or `model_choice_unavailable`.
+fn master_model(
+    tx: &Transaction<'_>,
+    session: &MasterSessionView,
+) -> Result<Option<String>, EngineError> {
+    if session.selection.backend != MasterBackend::Rcli {
+        return Ok(None);
+    }
+    let model = crate::model_choice::store::launch_model(
+        tx,
+        "rcli",
+        &crate::model_choice::catalog("rcli"),
+        Some(&session.project_id),
+        crate::model_choice::Slot::Master,
+    )?;
+    assert!(
+        model
+            .as_deref()
+            .is_none_or(|id| crate::model_choice::model_valid("rcli", id))
+    );
+    Ok(model)
+}
+
+/// The plain line a turn blocked on a master model no pool account serves shows, the same
+/// on desktop and TUI (DEC-141). Input: the model id. Output: the line.
+pub(crate) fn unserved_line(model: &str) -> String {
+    assert!(crate::model_choice::model_valid("rcli", model));
+    let line = format!(
+        "No account in this master's pool can run {model}. Add an account whose provider serves it to the pool, or change the master model in Settings, Harnesses, RCLI, Models."
+    );
+    assert!(line.len() <= 256 + crate::model_choice::MODEL_BYTES_MAX);
+    line
 }
 
 /// Orders a native master's pool members by the owner's schedule (DEC-096 item 8): the
@@ -2412,9 +2472,11 @@ fn other_ready(
 
 /// Blocks a queued turn that no member of its harness can run, naming each member and
 /// why plus the ready accounts of other harnesses. Inputs: the transaction, settings,
-/// host, session, turn and the members' gaps in member order. Output: the blocked turn,
-/// persisted with the owner-chosen member's reason and code, or ConnectionChanged with
-/// native_profile_connection_missing when that member is gone.
+/// host, session, turn, the members' gaps in member order and the RCLI master model.
+/// Output: the blocked turn, persisted with the owner-chosen member's reason and code,
+/// ModelUnserved when no member serves the master model, or ConnectionChanged with
+/// native_profile_connection_missing when the chosen member is gone. A ModelUnserved turn
+/// carries the line naming the model.
 fn block_on_gaps(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2422,17 +2484,30 @@ fn block_on_gaps(
     session: &mut MasterSessionView,
     turn: &mut MasterTurnView,
     gaps: &[(&ModelConnection, Gap, bool)],
+    model: Option<&str>,
 ) -> Result<(), EngineError> {
     assert_eq!(turn.phase, MasterTurnPhase::Queued);
+    let unserved = !gaps.is_empty()
+        && gaps
+            .iter()
+            .all(|(_, (reason, _), _)| *reason == MasterReason::ModelUnserved);
     let (reason, cause) = gaps.iter().find(|(_, _, chosen)| *chosen).map_or_else(
-        || {
-            (
+        || match unserved {
+            true => (
+                MasterReason::ModelUnserved,
+                "master_model_unserved".to_owned(),
+            ),
+            false => (
                 MasterReason::ConnectionChanged,
                 "native_profile_connection_missing".to_owned(),
-            )
+            ),
         },
         |(_, gap, _)| gap.clone(),
     );
+    assert!(reason != MasterReason::ModelUnserved || model.is_some());
+    if let (MasterReason::ModelUnserved, Some(model)) = (reason, model) {
+        turn.detail = Some(unserved_line(model));
+    }
     let mut accounts: Vec<_> = gaps
         .iter()
         .map(|(connection, (reason, _), _)| MasterAccountState {
@@ -2982,7 +3057,7 @@ fn bundle(
         steps: crate::master_step_limit::load(tx)?.limit,
         time: crate::master_time_limit::load(tx)?.limit,
         frames: crate::master_frame_limit::load(tx)?.limit,
-        model: None,
+        model: record.model,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -3084,8 +3159,9 @@ fn prepare_turn(
     if !preflight_turn(tx, config, session, turn)? {
         return Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())));
     }
+    let model = master_model(tx, session)?;
     let mut gaps = Vec::new();
-    for (member, gap, chosen) in candidates(tx, config, session)? {
+    for (member, gap, chosen) in candidates(tx, config, session, model.as_deref())? {
         let auth = match member_auth(tx, config, host, session, custody, member, gap)? {
             Ok(auth) => auth,
             Err(gap) => {
@@ -3119,6 +3195,7 @@ fn prepare_turn(
             auth,
             worktree_lease,
             lease,
+            model: model.clone(),
         };
         let inserted = tx
             .execute(
@@ -3137,7 +3214,7 @@ fn prepare_turn(
         current_scope(tx, config, sources, host, session, turn)?;
         return bundle(tx, config, session.clone(), turn);
     }
-    block_on_gaps(tx, config, host, session, turn, &gaps)?;
+    block_on_gaps(tx, config, host, session, turn, &gaps, model.as_deref())?;
     Ok(MasterRuntimeResult::Turn(Box::new(turn.clone())))
 }
 
@@ -3421,9 +3498,10 @@ fn provision_bootstrap(
         tx.commit().map_err(error)?;
         return Ok(None);
     }
+    let model = master_model(&tx, &session)?;
     let mut gaps = Vec::new();
     let mut ready = None;
-    for (member, gap, chosen) in candidates(&tx, config, &session)? {
+    for (member, gap, chosen) in candidates(&tx, config, &session, model.as_deref())? {
         match member_auth(&tx, config, host, &session, custody, member, gap)? {
             Ok(auth) => {
                 ready = Some(auth);
@@ -3433,7 +3511,15 @@ fn provision_bootstrap(
         }
     }
     let Some(auth) = ready else {
-        block_on_gaps(&tx, config, host, &mut session, &mut turn, &gaps)?;
+        block_on_gaps(
+            &tx,
+            config,
+            host,
+            &mut session,
+            &mut turn,
+            &gaps,
+            model.as_deref(),
+        )?;
         tx.commit().map_err(error)?;
         return Ok(None);
     };
