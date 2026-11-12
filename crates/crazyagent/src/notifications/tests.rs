@@ -1226,3 +1226,141 @@ fn every_kind_has_its_own_short_label_that_every_client_shows() {
     assert_eq!(NoticeKind::ChangeSetLanded.label(), "Change set landed");
     assert_eq!(NoticeKind::TeamAlert.label(), "Team alert");
 }
+
+fn fold_of(item: &Notice, filter: NoticeFilter) -> NoticeFold {
+    NoticeFold {
+        kind: item.kind,
+        project_id: item.project_id.clone(),
+        filter,
+        newest: item.id,
+    }
+}
+
+fn folds(fold: NoticeFold, change: FoldChange) -> NoticeAction {
+    NoticeAction::Folds {
+        folds: vec![fold],
+        change,
+    }
+}
+
+#[test]
+fn reading_and_deleting_a_fold_reaches_every_item_it_holds_past_its_listed_ids() {
+    let (_folder, mut connection) = store();
+    for n in 0..40 {
+        finished(
+            &mut connection,
+            "p1",
+            &format!("activity:{n}:1"),
+            NOW_MS + n,
+        )
+        .unwrap();
+    }
+    let folded = listed(
+        &connection,
+        &NoticeQuery {
+            fold: true,
+            ..query(NoticeFilter::All)
+        },
+    );
+    let row = fold_of(&folded.items[0], NoticeFilter::All);
+    assert_eq!(
+        (folded.items[0].folded, folded.items[0].ids.len()),
+        (40, FOLD_IDS_MAX)
+    );
+    let later = finished(&mut connection, "p1", "activity:40:1", NOW_MS + 40).unwrap();
+    let read = act(
+        &mut connection,
+        folds(row.clone(), FoldChange::Read),
+        NOW_MS + 50,
+    );
+    assert_eq!(read, Outcome::Applied);
+    let unread = listed(&connection, &query(NoticeFilter::Unread));
+    assert_eq!(unread.counts.unread, 1, "every item of the fold is read");
+    assert_eq!(texts(&unread).len(), 1);
+    assert_eq!(
+        unread.items[0].id, later,
+        "an item newer than the fold is left"
+    );
+    act(
+        &mut connection,
+        folds(row.clone(), FoldChange::Unread),
+        NOW_MS + 51,
+    );
+    assert_eq!(
+        listed(&connection, &query(NoticeFilter::Unread))
+            .counts
+            .unread,
+        41
+    );
+    act(&mut connection, folds(row, FoldChange::Delete), NOW_MS + 52);
+    assert_eq!(rows(&connection), 1, "the fold's 40 items are gone");
+    assert_eq!(
+        listed(&connection, &query(NoticeFilter::All)).items[0].id,
+        later
+    );
+}
+
+#[test]
+fn deleting_a_fold_of_pending_actions_hides_them_until_their_state_clears() {
+    let (_folder, mut connection) = store();
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[
+            question("p1", "question:q1", "First"),
+            question("p1", "question:q2", "Second"),
+        ],
+        NOW_MS,
+    );
+    let folded = listed(
+        &connection,
+        &NoticeQuery {
+            fold: true,
+            ..query(NoticeFilter::Pending)
+        },
+    );
+    let row = fold_of(&folded.items[0], NoticeFilter::Pending);
+    act(&mut connection, folds(row, FoldChange::Delete), NOW_MS + 1);
+    let pending = listed(&connection, &query(NoticeFilter::Pending));
+    assert!(pending.items.is_empty());
+    assert_eq!(pending.counts.pending, 0);
+    assert_eq!(
+        rows(&connection),
+        2,
+        "a pending Action stays as a hidden row"
+    );
+}
+
+#[test]
+fn a_fold_change_with_no_folds_too_many_or_a_negative_bound_is_refused() {
+    let (_folder, mut connection) = store();
+    let id = finished(&mut connection, "p1", "activity:1:1", NOW_MS).unwrap();
+    let fold = NoticeFold {
+        kind: NoticeKind::AgentFinished,
+        project_id: Some(project("p1")),
+        filter: NoticeFilter::All,
+        newest: id,
+    };
+    let empty = NoticeAction::Folds {
+        folds: Vec::new(),
+        change: FoldChange::Read,
+    };
+    let many = NoticeAction::Folds {
+        folds: vec![fold.clone(); usize::from(PAGE_MAX) + 1],
+        change: FoldChange::Read,
+    };
+    let negative = folds(NoticeFold { newest: -1, ..fold }, FoldChange::Delete);
+    for action in [empty, many, negative] {
+        assert_eq!(
+            act(&mut connection, action, NOW_MS + 1),
+            rejected("notification_folds_invalid")
+        );
+    }
+    assert_eq!(
+        listed(&connection, &query(NoticeFilter::Unread))
+            .counts
+            .unread,
+        1
+    );
+    assert_eq!(rows(&connection), 1);
+}
