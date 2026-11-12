@@ -7,6 +7,90 @@ fn private_root() -> tempfile::TempDir {
     root
 }
 
+/// Setup finds a tool exactly where a launch finds it, in the tool resolver's places: a tmux
+/// only in ~/.local/bin shows the entry and version the launch would run, and a tool found
+/// nowhere, or a script whose interpreter is missing, gives the resolver's own answer for
+/// that reason, whose line the setup row and the launch's failure both say.
+#[test]
+fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
+    let root = private_root();
+    let home = root.path().join("home");
+    let local = home.join(".local/bin");
+    std::fs::create_dir_all(&local).unwrap();
+    let places = crate::tools::Places::new(
+        vec![root.path().join("setup/bin"), local.clone()],
+        Some(home),
+    );
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
+    let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
+    assert_eq!(missing, crate::tools::resolve("tmux", &places).unwrap_err());
+    assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+    let script = |name: &str, text: &str| {
+        let file = local.join(name);
+        std::fs::write(&file, text).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    script("tmux", "#!/bin/sh\necho 'tmux 3.5a'\n");
+    let launch = crate::tools::resolve("tmux", &places).unwrap();
+    assert_eq!(
+        installer.locate(Dependency::Tmux),
+        Some((launch.entry, Version::parse("3.5a").unwrap()))
+    );
+    assert_eq!(
+        installer.lookup(Dependency::Tmux).unwrap(),
+        Ok(Version::parse("3.5a").unwrap())
+    );
+    script(
+        "graphify",
+        "#!/usr/bin/env crazyagent-test-missing-python\nprint('graphify 0.9.9')\n",
+    );
+    let needs = installer.lookup(Dependency::Graphify).unwrap().unwrap_err();
+    assert_eq!(needs.reason, crate::tools::Reason::NeedsInterpreter);
+    assert_eq!(
+        needs,
+        crate::tools::resolve("graphify", &places).unwrap_err()
+    );
+}
+
+/// Setup reads the version of the copy the tool resolver finds first, the one a launch runs,
+/// and never passes over it to a later copy: a first copy that reports no version shows
+/// Failed with the plain reason, while the good copy later in the places stays unused.
+#[test]
+fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
+    let root = private_root();
+    let first = root.path().join("first");
+    let later = root.path().join("later");
+    for (folder, text) in [
+        (&first, "#!/bin/sh\nexit 1\n"),
+        (&later, "#!/bin/sh\necho 'tmux 3.5a'\n"),
+    ] {
+        std::fs::create_dir_all(folder).unwrap();
+        let tmux = folder.join("tmux");
+        std::fs::write(&tmux, text).unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let places = crate::tools::Places::new(vec![first, later], None);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
+    let unreadable = InstallError("setup_version_unreadable");
+    assert_eq!(installer.lookup(Dependency::Tmux), Err(unreadable));
+    assert_eq!(installer.find(Dependency::Tmux), Err(unreadable));
+    assert_eq!(installer.locate(Dependency::Tmux), None);
+    let progress = crate::setup::progress::Progress {
+        checked: Some(crate::setup::progress::Checked {
+            at: std::time::Instant::now(),
+            found: vec![(Dependency::Tmux, installer.lookup(Dependency::Tmux))],
+        }),
+        ..crate::setup::progress::Progress::default()
+    };
+    let rows = crate::setup::progress::dependency_rows(&progress);
+    assert_eq!(
+        rows[0].state,
+        crate::setup::DependencyState::Failed {
+            reason: crate::setup::plain_reason("setup_version_unreadable").to_owned()
+        }
+    );
+}
+
 fn found(name: &str) -> PathBuf {
     let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())

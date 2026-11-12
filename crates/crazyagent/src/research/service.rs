@@ -495,8 +495,9 @@ where
 /// database's `research_jobs` table that project creation fills, agent state
 /// in `<runtime>/research`, one folder per project in `<runtime>/projects`,
 /// pool assignment read live from the engine's settings files, with a
-/// terminal host every agent in its own pane, and with the engine's agent
-/// register each running job named as a holder of the account it signs in with.
+/// terminal host every agent in its own pane, a look for that host again at each
+/// agent's start while it has none, and with the engine's agent register each
+/// running job named as a holder of the account it signs in with.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -506,6 +507,7 @@ pub fn start_for_engine(
     codex: Option<&Path>,
     claude: Option<&Path>,
     terminal: Option<Arc<dyn crate::terminal::Host>>,
+    probe: Option<crate::team::runtime::TerminalProbe>,
     agents: Option<Arc<crate::agents::Agents>>,
     lookup: Option<crate::paths::HarnessLookup>,
     reproving: Option<Arc<AtomicBool>>,
@@ -554,6 +556,9 @@ pub fn start_for_engine(
             .with_terminal(host)
             .map_err(|error| error.to_string())?;
     }
+    if let Some(probe) = probe {
+        runner = runner.with_terminal_probe(probe);
+    }
     if let Some(agents) = agents {
         runner = runner.with_agents(agents);
     }
@@ -569,8 +574,8 @@ pub fn start_for_engine(
 }
 
 /// Refuses engine research where its 0700 state folders and private database cannot be
-/// made or checked. Takes the runtime, settings files, harness paths, terminal host and
-/// agent register, all unused. Returns `research_runtime_unavailable`.
+/// made or checked. Takes the runtime, settings files, harness paths, terminal host, its
+/// probe and agent register, all unused. Returns `research_runtime_unavailable`.
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
 pub fn start_for_engine(
@@ -580,6 +585,7 @@ pub fn start_for_engine(
     _codex: Option<&Path>,
     _claude: Option<&Path>,
     _terminal: Option<Arc<dyn crate::terminal::Host>>,
+    _probe: Option<crate::team::runtime::TerminalProbe>,
     _agents: Option<Arc<crate::agents::Agents>>,
     _lookup: Option<crate::paths::HarnessLookup>,
     _reproving: Option<Arc<AtomicBool>>,

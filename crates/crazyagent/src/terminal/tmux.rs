@@ -109,7 +109,6 @@ const LEAD_SHELL: &str = "/bin/sh";
 const AGENT_TAG: &str = "@crazyagent";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
-const SEARCH: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 const VERSION_MIN: (u32, u32) = (3, 2);
 const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
@@ -196,18 +195,14 @@ enum Pending {
     },
 }
 
-/// Finds the tmux program the engine uses: setup's own copy first, then the usual system folders.
-/// Takes the engine root and searches `<root>/setup/bin`, Homebrew, `/usr/local/bin`, `/usr/bin`, `/bin`.
-/// Returns the canonical program, or none when tmux is not installed.
+/// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
+/// the app's folder, `<root>/setup/bin`, then everywhere [`crate::tools::Places`] looks.
+/// Takes the engine root. Returns the real program, or none when tmux is not installed.
 pub fn installed(engine_root: &Path) -> Option<PathBuf> {
-    std::iter::once(engine_root.join("setup/bin"))
-        .chain(SEARCH.iter().map(PathBuf::from))
-        .map(|folder| folder.join("tmux"))
-        .find(|program| {
-            std::fs::metadata(program)
-                .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
-        })
-        .and_then(|program| program.canonicalize().ok())
+    let places = crate::tools::Places::from_environment(Some(engine_root));
+    crate::tools::resolve("tmux", &places)
+        .ok()
+        .map(|tmux| tmux.program)
 }
 
 impl Tmux {

@@ -173,6 +173,14 @@ pub struct Team {
     master_live: Option<bool>,
     want: Option<bool>,
     refused: Option<String>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the overdue master wait that w-v240-l2 lands"
+        )
+    )]
+    waiting_since: Option<i64>,
     paused: bool,
     graph: Load<Box<TeamGraph>>,
     cursor: usize,
@@ -205,6 +213,7 @@ impl Team {
             master_live: None,
             want: None,
             refused: None,
+            waiting_since: None,
             paused: false,
             graph: Load::Loading,
             cursor: 0,

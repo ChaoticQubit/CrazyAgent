@@ -60,20 +60,44 @@ export function runningHarness(team: Result<TeamStatus> | undefined, projectId: 
 
 /** The live master's state as this area knows it: starting, not in this build, refused by
  * the engine with its code and plain copy, stopped with why the master last could not start,
- * or running with the master's terminal node once the team lists one. */
+ * or running with the master's terminal node once the team lists one, and while it lists
+ * none, since when the area has waited for that terminal. */
 export type Live =
   | { kind: "starting" }
   | { kind: "not_ready" }
   | { kind: "refused"; code: string; copy: string }
   | { kind: "stopped"; problem: string | null; idle: boolean }
   | { kind: "paused" }
-  | { kind: "running"; node: GraphNode | null };
+  | { kind: "running"; node: GraphNode | null; since: number | null };
 
 const NO_TERMINAL = "team_master_no_terminal";
 const STOPPED = "The live master is stopped. It starts again when you open this tab or start a new session.";
 const PAUSED = "The team is stopped (Stop all). Start the team to run the master.";
 const WAITING = "Waiting for the master's terminal. It opens once the master signs in and starts.";
 const NO_SESSION = "No master session opened, so this conversation won't be in Sessions.";
+const OVERDUE = "The master's terminal hasn't opened after a minute.";
+
+/** How long the area waits for the master's terminal before it stops waiting and offers Try
+ * again with the engine's line, in milliseconds, so no wait for the terminal is endless. */
+export const OPEN_LIMIT_MS = 60_000;
+
+/** Whether the wait for the master's terminal is over its limit. Inputs: when the area first
+ * saw the master on with no terminal, null while a terminal is open, and the time now in
+ * milliseconds. Output: true once `OPEN_LIMIT_MS` passed. */
+export function openOverdue(since: number | null, now: number): boolean {
+  return since !== null && now - since >= OPEN_LIMIT_MS;
+}
+
+/** The area's state after one team graph read while the switch is on: running with the
+ * master's terminal node, or with none while it has no terminal, keeping when that wait
+ * began so a start or a closed terminal restarts the clock; a refused or missing start stays.
+ * Inputs: the state before, the master node read and the time now. Output: the state. */
+export function runningState(prior: Live, node: GraphNode | null, now: number): Live {
+  if (prior.kind === "refused" || prior.kind === "not_ready") return prior;
+  if (node?.terminal) return { kind: "running", node, since: null };
+  const since = prior.kind === "running" && prior.since !== null ? prior.since : now;
+  return { kind: "running", node: null, since };
+}
 
 /** Whether the latest good team read of this project says the team is stopped (Stop all),
  * when the engine runs none of its agents and the live master cannot start. Inputs: the team
@@ -334,7 +358,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
       if (graph.kind === "not_ready") return setLive({ kind: "not_ready" });
       if (graph.kind !== "ok") return;
       const node = masterNode(graph.value.nodes);
-      setLive((prior) => prior.kind === "refused" || prior.kind === "not_ready" ? prior : { kind: "running", node: node?.terminal ? node : null });
+      setLive((prior) => runningState(prior, node, Date.now()));
     };
     void read();
     const timer = window.setInterval(() => void read(), POLL_MS);
@@ -442,6 +466,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   }, []);
   const moved = live.kind === "running" ? movedNote(data.team.result, data.id, now) : null;
   const limits = live.kind === "running" ? masterLimitsLine(data.team.result, data.id, now) : null;
+  const overdue = live.kind === "running" && !live.node && openOverdue(live.since, now);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
   const startTeam = async () => {
@@ -483,6 +508,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
     {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
       {live.idle && <Button size="small" variant="primary" onClick={() => void onStart()}>Start again</Button>}
+      {!live.idle && live.problem && <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>}
     </div>}
     {live.kind === "paused" && <div className="pj-note warn" role="status">
       <p>{PAUSED}</p>
@@ -495,7 +521,11 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
-    {live.kind === "running" && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
+    {overdue && <div className="pj-note warn" role="alert">
+      <p>{waits === null ? OVERDUE : `${OVERDUE} ${displayText(waits)}`}</p>
+      <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>
+    </div>}
+    {live.kind === "running" && !overdue && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
     {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded follow />}
   </div>;
 }
