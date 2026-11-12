@@ -201,26 +201,20 @@ mod own_turns {
 
     const DONE: TranscriptEvent = TranscriptEvent::TurnFinished { success: true };
 
-    /// SETSID-L2 r1 L1: a Full access pane follows its lineage once `FOLLOWER_PACE` has passed
-    /// since its last follow, not only after `FOLLOW_EVERY`, so beside a follower's 1 s reads
-    /// its stop's own read stays within the gap a stop checks and a clean stop reads checked.
+    /// BL-PANE-FOLLOW-GAP, replacing SETSID-L2 r1 L1's poll pace: a Full access pane follows
+    /// its lineage on a thread of its own from its start, at the follower's pace, so reading
+    /// its events is not what keeps it followed; a confined pane its host keeps has none.
     #[test]
-    fn a_full_access_pane_follows_its_lineage_every_follower_pace() {
-        use crate::harnesses::leftovers::FOLLOWER_PACE;
-
-        let mut pane = start_at("follow-pace-1", true);
+    fn a_full_access_pane_follows_its_lineage_on_a_thread_of_its_own() {
+        let pane = start_at("follow-own-1", true);
         assert!(
-            matches!(pane.session.lineage, Some(Ok(_))),
-            "a Full access pane has a lineage to follow"
+            pane.session.lineage.is_some(),
+            "a Full access pane has a follower"
         );
-        let due = Instant::now()
-            .checked_sub(FOLLOWER_PACE + Duration::from_millis(50))
-            .unwrap();
-        pane.session.followed = due;
-        pane.session.next_event(Duration::from_millis(100)).unwrap();
+        let confined = start_at("follow-own-2", false);
         assert!(
-            pane.session.followed > due,
-            "a pane one follower pace past its last follow did not follow"
+            confined.session.lineage.is_none(),
+            "a confined pane its host keeps has no lineage to follow"
         );
     }
 

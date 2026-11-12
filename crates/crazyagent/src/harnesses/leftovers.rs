@@ -1092,11 +1092,11 @@ enum Following {
     Taken,
 }
 
-/// A Full access headless run's processes, followed from its start on a thread of its own,
-/// since such a run has no poll that could follow them while it waits (SETSID-L2): the thread
-/// takes the first read, then the engine's shared table every [`FOLLOWER_PACE`], so a process
-/// a table showed in the run stays known once it leaves the run's session and loses its
-/// parent. One that does both between two tables it took, up to the pace plus the table's age
+/// A Full access headless run's or pane's processes, followed from its start on a thread of
+/// its own, since neither may be polled while it waits (SETSID-L2, BL-PANE-FOLLOW-GAP): the
+/// thread takes the first read, or a pane's own, then the engine's shared table every
+/// [`FOLLOWER_PACE`], so a process a table showed in the run stays known once it leaves the
+/// run's session and loses its parent. One that does both between two tables it took, up to the pace plus the table's age
 /// plus the reads, is never seen, and only its token can still find it at the stop: the
 /// SECAUDIT-SETSID-LEFTOVER option (a) residual. The lineage sits under a lock taken only to
 /// apply a table, so a stop never waits for a read in flight. Holds the leader, the launch's
@@ -1123,6 +1123,35 @@ impl Follower {
             let _ = std::thread::Builder::new()
                 .name("full-access-follow".into())
                 .spawn(move || follow_run(leader, first, &followed, &woken));
+        }
+        #[cfg(not(unix))]
+        drop(woken);
+        Self {
+            leader,
+            token,
+            lineage,
+            _wake: wake,
+        }
+    }
+
+    /// Follows, on a thread of its own, a lineage its owner already read, such as a pane's
+    /// from its start, so following never waits on the owner reading the pane's events
+    /// (BL-PANE-FOLLOW-GAP). When no thread starts, the lineage stays as first read and its
+    /// stop finds the gap and reports it unchecked. Inputs: the leader, the launch's token
+    /// and the first read. Output: the follower.
+    pub(crate) fn following(
+        leader: u32,
+        token: Option<LineageToken>,
+        first: Result<Lineage, Unstopped>,
+    ) -> Self {
+        let lineage = Arc::new(Mutex::new(Following::Read(first)));
+        let (wake, woken) = std::sync::mpsc::channel();
+        #[cfg(unix)]
+        {
+            let followed = Arc::clone(&lineage);
+            let _ = std::thread::Builder::new()
+                .name("pane-follow".into())
+                .spawn(move || follow_table(&followed, &woken));
         }
         #[cfg(not(unix))]
         drop(woken);
@@ -1174,6 +1203,15 @@ fn follow_run(
         }
         *slot = Following::Read(first);
     }
+    follow_table(lineage, woken);
+}
+
+/// Takes the shared table every [`FOLLOWER_PACE`] into a lineage already read, until its
+/// stop disconnects `woken` or takes the lineage, or the first read found none. Each read runs
+/// with no lock held, and the lock is taken only to apply it. Inputs: the lineage's lock and
+/// the receiver the stop disconnects. Output: none.
+#[cfg(unix)]
+fn follow_table(lineage: &Mutex<Following>, woken: &std::sync::mpsc::Receiver<()>) {
     while woken.recv_timeout(FOLLOWER_PACE) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
         let Some(read) = shared_rows() else {
             continue;
