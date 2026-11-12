@@ -673,6 +673,7 @@ case "$1 $2 $3" in
     echo '{"ref":"refs/tags/dev"}'
     exit 0 ;;
   "api repos/example/fake-repo/git/matching-refs/tags/dev --jq")
+    if [ -e "$state/answer" ]; then cat "$state/answer"; exit 0; fi
     printf '%s' "$refs" | jq "$4"
     exit $? ;;
 esac
@@ -727,10 +728,11 @@ function logged(state, name) {
 /**
  * Runs the dev publish step's shell against a stand-in `gh` that holds no token and can reach no
  * repository: `stale` tag reads still show the dev tag after the release delete, the ref DELETE
- * always answers 422 "Reference does not exist", and `readFails` makes every tag read error.
+ * always answers 422 "Reference does not exist", `readFails` makes every tag read error, and
+ * `answer`, when given, is printed as every tag read's output instead of the filtered refs.
  * Inputs: the step's shell and the stand-in state. Output: the exit status, output, `gh` calls and sleeps.
  */
-function publishDev(body, { stale, readFails = false }) {
+function publishDev(body, { stale, readFails = false, answer = null }) {
   const root = mkdtempSync(join(tmpdir(), "ca-relwf-"));
   try {
     const state = join(root, "state");
@@ -740,6 +742,7 @@ function publishDev(body, { stale, readFails = false }) {
     mkdirSync(join(root, "home"));
     writeFileSync(join(state, "stale"), `${stale}\n`);
     if (readFails) writeFileSync(join(state, "read-fails"), "");
+    if (answer !== null) writeFileSync(join(state, "answer"), `${answer}\n`);
     writeFileSync(join(work, "notes.txt"), "Dev build\n");
     writeFileSync(join(work, "dist", "CrazyAgent.dmg"), "");
     writeFileSync(join(root, "step.sh"), body);
@@ -786,12 +789,25 @@ function hdiutil(args, { fails, status = 1, existing = false }) {
   }
 }
 
+/** The dev publish step's shell from release.yml. Output: the run body of "Publish dev prerelease". */
+async function devPublishBody() {
+  return runBody(steps(await workflow("release.yml"), "publish").find((step) => step.includes("- name: Publish dev prerelease")));
+}
+
+/** How many dev tag reads a dev publish run made. Input: a `publishDev` result. Output: the count. */
+function reads(run) {
+  return run.calls.filter((call) => call.startsWith("api repos/example/fake-repo/git/matching-refs/tags/dev ")).length;
+}
+
+/** How many times a dev publish run created the dev release. Input: a `publishDev` result. Output: the count. */
+function created(run) {
+  return run.calls.filter((call) => call.startsWith("release create dev ")).length;
+}
+
 test("the dev publish tolerates a tag delete that finds the tag already gone and waits, bounded, until the tag reads gone before it creates the dev release", async () => {
   const jq = spawnSync("/bin/bash", ["-c", "command -v jq"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
   assert.equal(jq.status, 0, "the stand-in gh runs the step's --jq filter with jq, which must be on /usr/bin:/bin");
-  const body = runBody(steps(await workflow("release.yml"), "publish").find((step) => step.includes("- name: Publish dev prerelease")));
-  const reads = (run) => run.calls.filter((call) => call.startsWith("api repos/example/fake-repo/git/matching-refs/tags/dev ")).length;
-  const created = (run) => run.calls.filter((call) => call.startsWith("release create dev ")).length;
+  const body = await devPublishBody();
 
   const stale = publishDev(body, { stale: 2 });
   assert.equal(stale.status, 0, `${stale.stdout}${stale.stderr}`);
@@ -810,6 +826,19 @@ test("the dev publish tolerates a tag delete that finds the tag already gone and
   const broken = publishDev(body, { stale: 0, readFails: true });
   assert.notEqual(broken.status, 0, "a tag read that errors fails the publish and never counts as gone");
   assert.equal(created(broken), 0);
+});
+
+test("the dev publish fails at once with an error, deleting and publishing nothing, when a dev tag read gives anything but 0 or 1", async () => {
+  const body = await devPublishBody();
+  for (const answer of ["2", "not-a-count"]) {
+    const run = publishDev(body, { stale: 0, answer });
+    assert.notEqual(run.status, 0, `a read of '${answer}' fails the publish`);
+    assert(run.stdout.split("\n").includes(`::error::reading the dev tag gave '${answer}', not 0 or 1`), `${run.stdout}${run.stderr}`);
+    assert.equal(reads(run), 1, "the first bad read stops the step");
+    assert(!run.calls.some((call) => call.startsWith("api -X DELETE")), "no tag is deleted on a bad read");
+    assert.equal(created(run), 0, "nothing is published on a bad read");
+    assert.deepEqual(run.sleeps, []);
+  }
 });
 
 test("on macOS the release build puts the hdiutil retry first on PATH before Tauri builds, so a busy hdiutil create is retried inside the dmg step without signing or notarizing the app again", async () => {
