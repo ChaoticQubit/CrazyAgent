@@ -1,4 +1,4 @@
-use super::run::{reported_version, run_bounded};
+use super::run::run_bounded;
 use super::{Dependency, InstallError, Installer, Pin, Version};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -18,16 +18,7 @@ pub const SYSTEM_PATH: [&str; 4] = [
     "/home/linuxbrew/.linuxbrew/bin",
 ];
 
-const TMUX_DIRS: &[&str] = &[
-    "/usr/bin",
-    "/usr/local/bin",
-    "/bin",
-    "/home/linuxbrew/.linuxbrew/bin",
-    "/run/current-system/sw/bin",
-    "/nix/var/nix/profiles/default/bin",
-];
 const INSTALL_LIMIT: Duration = Duration::from_secs(15 * 60);
-const VERSION_LIMIT: Duration = Duration::from_secs(10);
 const FORMULA_BYTES_MAX: usize = 64;
 
 /// A distribution package manager setup may use for tmux, only when the engine already runs
@@ -99,20 +90,6 @@ pub fn tmux_command(
     }
 }
 
-/// The installed tmux at one of the fixed install folders, with the version `tmux -V`
-/// reports. Output: none when tmux is not installed, or `setup_version_unreadable`.
-pub fn tmux_version() -> Result<Option<Version>, InstallError> {
-    let Some(tmux) = TMUX_DIRS
-        .iter()
-        .map(|dir| Path::new(dir).join("tmux"))
-        .find(|path| path.is_file())
-    else {
-        return Ok(None);
-    };
-    let report = run_bounded(Command::new(&tmux).arg("-V"), VERSION_LIMIT, true)?;
-    reported_version(&report).map(Some)
-}
-
 /// The Linux installer. tmux comes from Homebrew on Linux, or from apt or dnf when the
 /// engine already runs as root; setup never calls sudo. uv and Graphify go through the
 /// shared pinned installer, the same checksum-verified path as macOS.
@@ -130,17 +107,11 @@ impl LinuxInstaller {
 
 impl Installer for LinuxInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
-        match dep {
-            Dependency::Tmux => tmux_version(),
-            Dependency::Uv | Dependency::Graphify => self.common.find(dep),
-        }
+        self.common.find(dep)
     }
 
     fn lookup(&self, dep: Dependency) -> super::Lookup {
-        match dep {
-            Dependency::Tmux => Ok(tmux_version()?.ok_or_else(|| dep.not_found())),
-            Dependency::Uv | Dependency::Graphify => self.common.lookup(dep),
-        }
+        self.common.lookup(dep)
     }
 
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
@@ -166,7 +137,9 @@ impl Installer for LinuxInstaller {
             PackageManager::detect(),
         )?;
         run_bounded(&mut command, INSTALL_LIMIT, false)?;
-        tmux_version()?.ok_or(InstallError("setup_version_unreadable"))
+        self.common
+            .find(Dependency::Tmux)?
+            .ok_or(InstallError("setup_version_unreadable"))
     }
 }
 
@@ -306,28 +279,30 @@ mod tests {
         }
     }
 
+    /// Setup's tmux row and the live master's start ask the same resolver on this machine:
+    /// setup finds tmux exactly when [`crate::terminal::tmux::installed`] does and names the
+    /// same program, and a missing tmux gives the resolver's tmux line.
     #[test]
-    fn tmux_is_found_with_the_version_it_reports() {
-        let found = tmux_version().unwrap();
-        let installed = TMUX_DIRS
-            .iter()
-            .map(|dir| Path::new(dir).join("tmux"))
-            .find(|path| path.is_file());
-        match installed {
-            Some(tmux) => {
-                let report = crate::spawn_gate::output(
-                    Command::new(tmux)
-                        .arg("-V")
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::piped()),
-                )
-                .unwrap()
-                .stdout;
-                let report = String::from_utf8(report).unwrap();
-                assert!(report.contains(found.unwrap().as_str()), "{report}");
+    fn setup_finds_tmux_exactly_when_the_live_start_does() {
+        let root = tempfile::tempdir().unwrap();
+        let places = crate::tools::Places::from_environment(Some(root.path()));
+        let shared = PinnedInstaller::with_places(root.path(), vec![], places);
+        let installer = LinuxInstaller::new(Box::new(shared));
+        let started = crate::terminal::tmux::installed(root.path());
+        let found = installer.program("tmux");
+        assert_eq!(
+            found.map(|entry| entry.canonicalize().unwrap()),
+            started
+                .as_ref()
+                .map(|program| program.canonicalize().unwrap())
+        );
+        match installer.lookup(Dependency::Tmux) {
+            Ok(Ok(_)) => assert!(started.is_some()),
+            Ok(Err(missing)) => {
+                assert!(started.is_none());
+                assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
             }
-            None => assert_eq!(found, None),
+            Err(code) => assert_eq!(code, InstallError("setup_version_unreadable")),
         }
     }
 }
