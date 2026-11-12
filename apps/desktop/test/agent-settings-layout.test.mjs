@@ -15,14 +15,14 @@ const rows = await import("../src/screens/team/setup-rows.tsx").catch(() => ({})
 const GROUPS = [
   ["model", "Model and harness", ["Master harness", "Sub-agent harnesses", "Keep sub-agents ready", "Reuse idle agents", "On master harness switch", "Spread harnesses across accounts", "Max harnesses per project", "Max teammates per harness"]],
   ["access", "Access and merging", ["Agent access", "Under Full access, merging into main", "Master accepts change sets", "Agent branches", "After you accept, the agent's branch restarts from main", "Master's branch", "Land on", "Sub-agent work lands on its lead's branch", "Refuse a change set when one new folder adds more than"]],
-  ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply"]],
+  ["tools", "Skills and tools", ["Skills per role", "MCP servers", "Workflow nudges", "Task-start reminder", "Counted tools", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["coord", "Coordination", ["Claude Code sub-agents", "Codex sub-agents", "rcli sub-agents", "Sub-agent depth", "Sub-agent questions go to", "Overlapping edits", "Terminals per window", "Catch up with main", "Finished agents", "Terminal display", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents"]],
   ["limits", "Limits", ["Each task may run", "Each agent session may run", "Stop an idle sub-agent after", "Background commands at task end", "Left running after a stop", "Token budget", "Master run time", "Sub-agent rounds per message"]],
 ];
 const MASTER_GROUPS = [
   ["Master", ["Harness", "Account", "Live terminal"]],
   ["Conversation", ["On master harness switch", "Stop the master when idle after", "Apply a master harness change"]],
-  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply"]],
+  ["Messages", ["Sub-agent questions go to", "Messages to Claude Code agents", "Messages to Codex agents", "Messages to rcli agents", "Re-ask a sub-agent's empty reply", "End a turn after done"]],
   ["Access", ["Full access"]],
 ];
 const MERGE = "Under Full access, merging into main";
