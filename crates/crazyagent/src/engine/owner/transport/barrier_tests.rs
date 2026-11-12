@@ -134,6 +134,22 @@ fn occupy_storage(owner: &Usage) -> (PathBuf, oneshot::Receiver<Result<(), Engin
     (swept, sweep)
 }
 
+/// Holds the storage actor until the returned sender sends or drops, so every storage job
+/// sent after this call outlasts any owner wait, however fast the disk and the machine are.
+/// Input: the engine. Output: the sender that lets storage go on.
+fn hold_storage(owner: &Usage) -> oneshot::Sender<()> {
+    let (release, held) = oneshot::channel();
+    owner
+        .runtime()
+        .engine
+        .storage
+        .sender
+        .try_send(crate::storage::Job::Hold(held))
+        .unwrap();
+    assert!(!release.is_closed(), "storage took the hold");
+    release
+}
+
 /// Waits until storage has answered every job queued before this call, so a change it ran
 /// after the owner stopped waiting is committed. Input: the engine.
 async fn storage_settled(owner: &Usage) {
@@ -639,14 +655,16 @@ async fn a_late_publication_never_replaces_a_newer_registration_or_reopens_a_clo
     owner.stop().await;
 }
 
+/// Storage is held for both controls, so each one outlasts its owner wait on any machine: one
+/// sweep that had to outlast two waits ended inside the second on a fast hosted Linux disk,
+/// and the revocation got storage's stale answer instead of the lapse (BL-DBLOCK).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot() {
-    let _disk = super::usage_tests::busy_storage().await;
     let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
     let runtime = owner.runtime();
     let revoked = revoke_settled(&owner, "revoke-before-both").await;
     assert!(!revoked.active);
-    let (swept, sweep) = occupy_storage(&owner);
+    let release = hold_storage(&owner);
     let reactivated = runtime
         .control(reactivation(
             "reactivate-before-revoke",
@@ -672,12 +690,7 @@ async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot()
     );
     assert!(!admitted(runtime, &owner.client));
 
-    tokio::time::timeout(SWEEP_TIME_MAX, sweep)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    assert!(!swept.exists());
+    release.send(()).unwrap();
     storage_settled(&owner).await;
     assert!(
         published(runtime, revoked.owner_epoch + 1).await,

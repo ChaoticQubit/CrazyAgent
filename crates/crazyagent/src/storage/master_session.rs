@@ -3390,7 +3390,13 @@ fn provision_bootstrap(
     else {
         return Ok(None);
     };
-    let tx = db.transaction().map_err(error)?;
+    assert!(matches!(
+        runtime_behavior(command),
+        TransactionBehavior::Immediate
+    ));
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(error)?;
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
     current_scope(&tx, config, sources, host, &session, &turn)?;
     if turn.phase != MasterTurnPhase::Queued {
@@ -3819,7 +3825,9 @@ fn register_rcli_profile(
         registration.configured_home,
         revision,
     )?;
-    let tx = db.transaction().map_err(error)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(error)?;
     let proof = publish_rcli_profile(&tx, config, sources, host, &original, candidate)?;
     tx.commit().map_err(error)?;
     Ok(proof)
@@ -3919,7 +3927,9 @@ fn refresh_rcli_profile(
     record: ConfiguredRegistration,
 ) -> Result<(), EngineError> {
     let sources = sources.ok_or_else(|| error("master_settings_sources_required"))?;
-    let tx = db.transaction().map_err(error)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(error)?;
     let session = registration_session(
         &tx,
         config,
@@ -4217,6 +4227,30 @@ pub(super) fn apply_rcli_profile_registration(
     Ok(applied)
 }
 
+/// How a master runtime command opens its transaction. A command that may write takes the
+/// write lock before it reads, so the storage busy wait covers it: SQLite refuses a read
+/// transaction's first write at once, with no wait, while another engine connection holds
+/// the lock (BL-DBLOCK). A command that only reads stays deferred and never waits.
+/// Input: the command. Output: the behavior.
+fn runtime_behavior(command: &MasterRuntimeCommand) -> TransactionBehavior {
+    match command {
+        MasterRuntimeCommand::Inspect { .. }
+        | MasterRuntimeCommand::Policy { .. }
+        | MasterRuntimeCommand::ServeMemory { .. } => TransactionBehavior::Deferred,
+        #[cfg(all(test, unix))]
+        MasterRuntimeCommand::RegisterRcliProfile { .. } => TransactionBehavior::Immediate,
+        MasterRuntimeCommand::Route { .. }
+        | MasterRuntimeCommand::Prepare { .. }
+        | MasterRuntimeCommand::AcquireProfile { .. }
+        | MasterRuntimeCommand::RecordChild { .. }
+        | MasterRuntimeCommand::Observe { .. }
+        | MasterRuntimeCommand::Fail { .. }
+        | MasterRuntimeCommand::Changes { .. }
+        | MasterRuntimeCommand::StartWaiting { .. }
+        | MasterRuntimeCommand::Checked { .. } => TransactionBehavior::Immediate,
+    }
+}
+
 pub(super) fn runtime(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -4287,7 +4321,10 @@ pub(super) fn runtime(
             prepare: command,
         })));
     }
-    let tx = db.transaction().map_err(error)?;
+    let written = db.total_changes();
+    let tx = db
+        .transaction_with_behavior(runtime_behavior(&command))
+        .map_err(error)?;
     let (host, project_id, session_id, turn_id) = match &command {
         #[cfg(all(test, unix))]
         MasterRuntimeCommand::RegisterRcliProfile { .. } => unreachable!(),
@@ -4399,12 +4436,14 @@ pub(super) fn runtime(
             {
                 verify_preparation(&tx, config, host, &session, &turn)?;
             }
+            assert_eq!(tx.total_changes(), written, "an inspection writes nothing");
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
         MasterRuntimeCommand::Policy { ref host, .. } => {
             current_scope(&tx, config, sources, host, &session, &turn)?;
             let policy = crate::sandbox::policy::load(&tx, session.project_id.as_str()).ok();
+            assert_eq!(tx.total_changes(), written, "a policy read writes nothing");
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Policy(Box::new(policy)))
         }
@@ -4455,6 +4494,11 @@ pub(super) fn runtime(
             if turn.phase != MasterTurnPhase::Running || !turn_tools(&tx, &session)? {
                 return Err(error("master_memory_turn_not_running"));
             }
+            assert_eq!(
+                tx.total_changes(),
+                written,
+                "a memory turn check writes nothing"
+            );
             tx.commit().map_err(error)?;
             crate::team::master::serve_memory_calls(db, &session.project_id, mailbox)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
