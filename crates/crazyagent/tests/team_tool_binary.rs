@@ -665,7 +665,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
     assert_eq!(
         text(&answers[0]),
         (
-            "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
+            "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
             false
         )
     );

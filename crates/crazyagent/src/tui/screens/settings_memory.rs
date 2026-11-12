@@ -4,7 +4,7 @@ use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, Screen, SettingsSection};
 use crate::memory::library::{
-    AgentWrites, MemoryOrigin, MemoryScope, NOTE_BYTES_MAX, SavedMemory, validate_note,
+    AgentScope, AgentWrites, MemoryOrigin, MemoryScope, NOTE_BYTES_MAX, SavedMemory, validate_note,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob, Suggestion};
@@ -175,6 +175,8 @@ pub struct Memory {
     waiting: bool,
     writes: Option<AgentWrites>,
     setting: bool,
+    reach: Option<AgentScope>,
+    scoping: bool,
     approving: bool,
     deleting: bool,
     suggesting: bool,
@@ -206,6 +208,8 @@ impl Memory {
             waiting: false,
             writes: None,
             setting: false,
+            reach: None,
+            scoping: false,
             approving: false,
             deleting: false,
             suggesting: false,
@@ -247,6 +251,9 @@ impl Memory {
             if !self.setting {
                 send(ctx, SettingsJob::AgentWrites { set: None });
             }
+            if !self.scoping {
+                send(ctx, SettingsJob::AgentScope { set: None });
+            }
         }
         self.reload_suggestions(ctx);
     }
@@ -264,6 +271,24 @@ impl Memory {
         send(
             ctx,
             SettingsJob::AgentWrites {
+                set: Some((next, generation)),
+            },
+        );
+    }
+
+    fn toggle_scope(&mut self, ctx: &mut Ctx) {
+        if self.scoping {
+            return;
+        }
+        let next = match self.reach.unwrap_or_default() {
+            AgentScope::Project => AgentScope::Agent,
+            AgentScope::Agent => AgentScope::Project,
+        };
+        self.scoping = true;
+        let generation = ctx.next_generation();
+        send(
+            ctx,
+            SettingsJob::AgentScope {
                 set: Some((next, generation)),
             },
         );
@@ -294,6 +319,11 @@ impl Memory {
             Some(AgentWrites::Save) => "Save directly",
             Some(AgentWrites::Ask) => "Ask me first",
         };
+        let place = match self.reach {
+            None => "Loading",
+            Some(AgentScope::Project) => "This project only",
+            Some(AgentScope::Agent) => "Agent chooses",
+        };
         let mut line = join([
             styled("Agent memory writes  ", Role::Heading, theme),
             Line::raw(format!("{} {chosen} {}", ctx.glyphs.left, ctx.glyphs.right)),
@@ -303,9 +333,19 @@ impl Memory {
         } else {
             line = join([line, styled("  w to change", Role::Muted, theme)]);
         }
+        line = join([
+            line,
+            styled("   Saved in  ", Role::Heading, theme),
+            Line::raw(format!("{} {place} {}", ctx.glyphs.left, ctx.glyphs.right)),
+        ]);
+        if self.scoping {
+            line = join([line, styled("  Saving", Role::Muted, theme)]);
+        } else {
+            line = join([line, styled("  p to change", Role::Muted, theme)]);
+        }
         if line.width() > limit {
             return Line::raw(cut(
-                &format!("Agent memory writes: {chosen}"),
+                &format!("Agent memory writes: {chosen}; saved in: {place}"),
                 limit,
                 ctx.glyphs.ellipsis,
             ));
@@ -999,6 +1039,7 @@ impl Screen for Memory {
         };
         hints.push(hint("a", "Add"));
         hints.push(hint("w", "Agent memory writes"));
+        hints.push(hint("p", "Where agents save"));
         hints.push(hint("i", "Import"));
         if !self.memories.is_empty() || self.open().next().is_some() {
             hints.push(hint("/", "Filter"));
@@ -1050,6 +1091,7 @@ impl Screen for Memory {
             Key::Char('r') if matches!(self.load, Load::Failed(_)) => self.reload(ctx),
             Key::Char('a') if ready && !self.adding => self.open_composer(),
             Key::Char('w') if ready => self.toggle_writes(ctx),
+            Key::Char('p') if ready => self.toggle_scope(ctx),
             Key::Char('y') if saved => self.approve(ctx),
             Key::Char('i') if ready && !self.importing => self.open_importer(ctx),
             Key::Char('/') if !self.memories.is_empty() || self.open().next().is_some() => {
@@ -1131,6 +1173,30 @@ impl Screen for Memory {
                     }
                     Err(code) if asked => ctx.say(Message::error(
                         "Could not change Agent memory writes.",
+                        memory_plain(code),
+                    )),
+                    Err(_) => {}
+                }
+            }
+            Some(SettingsEvent::AgentScope(result)) => {
+                let asked = std::mem::take(&mut self.scoping);
+                match result {
+                    Ok(reach) => {
+                        self.reach = Some(*reach);
+                        if asked {
+                            let lead = match reach {
+                                AgentScope::Project => {
+                                    "Agents now save memories in their own project only."
+                                }
+                                AgentScope::Agent => {
+                                    "Agents now choose where a memory is saved, app-wide included."
+                                }
+                            };
+                            ctx.say(Message::success(lead, ""));
+                        }
+                    }
+                    Err(code) if asked => ctx.say(Message::error(
+                        "Could not change where agents save memories.",
                         memory_plain(code),
                     )),
                     Err(_) => {}

@@ -37,6 +37,10 @@ CREATE INDEX IF NOT EXISTS memory_library_scope ON memory_library(project, ordin
 CREATE TABLE IF NOT EXISTS memory_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     agent_writes TEXT NOT NULL CHECK(agent_writes IN ('save','ask'))
+);
+CREATE TABLE IF NOT EXISTS memory_agent_scope (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    scope TEXT NOT NULL CHECK(scope IN ('project','agent'))
 );";
 
 /// Where a saved memory applies: everywhere, or inside one project only.
@@ -110,6 +114,35 @@ impl AgentWrites {
     }
 }
 
+/// Where an agent's `remember` call saves, the owner's Where agents save memories setting:
+/// always in the agent's own project, an app-wide ask included, or where the agent asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentScope {
+    #[default]
+    Project,
+    Agent,
+}
+
+impl AgentScope {
+    /// The stored word for the choice. Output: `project` or `agent`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// What one agent `remember` call stored: whether it waits for the owner's approval, and
+/// whether an app-wide ask was kept in the agent's project by the Where agents save memories
+/// setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentSaved {
+    pub waiting: bool,
+    pub narrowed: bool,
+}
+
 /// One memory the owner saved by hand or promoted to global memory.
 /// `ordinal` is only a paging cursor and is never shown to the owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +162,8 @@ pub struct MemoryPage {
     pub items: Vec<SavedMemory>,
     pub next: Option<u64>,
     pub agent_writes: AgentWrites,
+    #[serde(default)]
+    pub agent_scope: AgentScope,
 }
 
 /// An explicit owner change to saved memory. Agents add to this store only through their
@@ -174,6 +209,9 @@ pub enum LibraryAction {
     AgentWrites {
         writes: AgentWrites,
     },
+    AgentScope {
+        scope: AgentScope,
+    },
 }
 
 impl LibraryAction {
@@ -213,7 +251,8 @@ impl LibraryAction {
             | Self::Delete { .. }
             | Self::Forget { .. }
             | Self::Approve { .. }
-            | Self::AgentWrites { .. } => Ok(()),
+            | Self::AgentWrites { .. }
+            | Self::AgentScope { .. } => Ok(()),
         }
     }
 }
@@ -419,9 +458,45 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
     }
 }
 
+const ORPHAN_AGENT_ROW: &str = "project IS NOT NULL
+    AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)
+    AND (CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind') END)='agent'";
+
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    connection.execute_batch(TABLE).map_err(error)
+    connection.execute_batch(TABLE).map_err(error)?;
+    let forgotten = forget_orphan_agent_memories(connection)?;
+    if forgotten > 0 {
+        eprintln!("memory_orphan_agent_rows_removed count={forgotten}");
+    }
+    Ok(())
+}
+
+/// Deletes the memories agents saved for projects CrazyAgent no longer has, so a trial or
+/// removed project's agent notes never reach a project added later under the same id. Owner
+/// notes, research, selections, imports, memories waiting for approval and app-wide memories
+/// stay. Input: the engine connection or an open transaction. Output: the rows deleted.
+pub(crate) fn forget_orphan_agent_memories(
+    connection: &rusqlite::Connection,
+) -> Result<usize, EngineError> {
+    let orphans: i64 = connection
+        .query_row(
+            &format!("SELECT COUNT(*) FROM memory_library WHERE {ORPHAN_AGENT_ROW}"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if orphans == 0 {
+        return Ok(0);
+    }
+    let forgotten = connection
+        .execute(
+            &format!("DELETE FROM memory_library WHERE {ORPHAN_AGENT_ROW}"),
+            [],
+        )
+        .map_err(error)?;
+    assert!(i64::try_from(forgotten).is_ok_and(|count| count <= orphans));
+    Ok(forgotten)
 }
 
 fn rejected(code: &str) -> Result<Outcome, EngineError> {
@@ -477,6 +552,7 @@ pub(crate) fn execute(
         } => import(tx, project_id, file, text),
         LibraryAction::Approve { memory_id } => approve(tx, memory_id),
         LibraryAction::AgentWrites { writes } => set_agent_writes(tx, *writes),
+        LibraryAction::AgentScope { scope } => set_agent_scope(tx, *scope),
     }
 }
 
@@ -536,6 +612,36 @@ fn set_agent_writes(tx: &Transaction<'_>, writes: AgentWrites) -> Result<Outcome
     Ok(Outcome::Applied)
 }
 
+/// Saves the owner's Where agents save memories setting. Input: the transaction and the
+/// choice. Output: Applied.
+fn set_agent_scope(tx: &Transaction<'_>, scope: AgentScope) -> Result<Outcome, EngineError> {
+    tx.execute(
+        "INSERT INTO memory_agent_scope(singleton,scope) VALUES(1,?1)
+        ON CONFLICT(singleton) DO UPDATE SET scope=excluded.scope",
+        [scope.as_str()],
+    )
+    .map_err(error)?;
+    assert_eq!(agent_scope(tx)?, scope);
+    Ok(Outcome::Applied)
+}
+
+/// Reads the owner's Where agents save memories setting, This project only until the owner
+/// chose. Input: the engine connection. Output: the choice.
+pub(crate) fn agent_scope(connection: &rusqlite::Connection) -> Result<AgentScope, EngineError> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT scope FROM memory_agent_scope WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(match stored.as_deref() {
+        Some("agent") => AgentScope::Agent,
+        _ => AgentScope::Project,
+    })
+}
+
 /// Reads the owner's Agent memory writes setting, Save directly until the owner chose.
 /// Input: the engine connection. Output: the choice.
 pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWrites, EngineError> {
@@ -554,17 +660,18 @@ pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWri
 }
 
 /// Saves one memory an agent gave with its `remember` tool, with the agent named as its
-/// origin: held for the owner's approval under Ask me first, else saved at once. The text is
-/// untrusted and checked like a hand-written note. Inputs: the engine connection, the
-/// agent's project, its label, whether the memory is app-wide and the text. Output: whether
-/// it waits for approval, or a refusal code `plain_problem` explains.
+/// origin: held for the owner's approval under Ask me first, else saved at once, and an
+/// app-wide ask kept in the agent's project under This project only. The text is untrusted
+/// and checked like a hand-written note. Inputs: the engine connection, the agent's project,
+/// its label, whether it asked for app-wide and the text. Output: what was stored, or a
+/// refusal code `plain_problem` explains.
 pub(crate) fn agent_remember(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
     agent: &str,
     app: bool,
     text: &str,
-) -> Result<Result<bool, String>, EngineError> {
+) -> Result<Result<AgentSaved, String>, EngineError> {
     let text = text.trim();
     if let Err(problem) = validate_note(text) {
         return Ok(Err(problem.0));
@@ -582,7 +689,8 @@ pub(crate) fn agent_remember(
     if !project_exists(&tx, project)? {
         return Ok(Err("memory_project_missing".into()));
     }
-    let scope = if app {
+    let narrowed = app && agent_scope(&tx)? == AgentScope::Project;
+    let scope = if app && !narrowed {
         MemoryScope::Global
     } else {
         MemoryScope::Project {
@@ -606,7 +714,11 @@ pub(crate) fn agent_remember(
     };
     insert(&tx, &id, &scope, &origin, text)?;
     tx.commit().map_err(error)?;
-    Ok(Ok(ask))
+    assert!(!narrowed || scope.project().is_some());
+    Ok(Ok(AgentSaved {
+        waiting: ask,
+        narrowed,
+    }))
 }
 
 /// Finds the saved memories an agent of a project may read for its `recall` tool: the
@@ -1205,6 +1317,7 @@ pub(crate) fn page(
             items,
             next,
             agent_writes: agent_writes(tx)?,
+            agent_scope: agent_scope(tx)?,
         },
     })
 }

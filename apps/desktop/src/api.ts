@@ -1,9 +1,9 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
 import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
-import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
+import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
-export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
+export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
 export type { HookView, McpServerSpec, McpServerView, PluginScope, SkillDetail, SkillFile, SkillView, ImportCandidate, ImportFrom, ImportList, ImportState, ImportedSkill } from "./engine-client";
 export type { CoordHarness, CoordinationView, CoordSettings, Delivery, HarnessCoordination, Overlaps, QuestionsTo, SubagentMode, ToolSwitch, ToolView } from "./engine-client";
 export type { AccountUse, AgentRole, AgentState, AgentView, Holder } from "./engine-client";
@@ -343,6 +343,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_delete: "deleting a memory",
   memory_approve: "approving a memory",
   memory_agent_writes: "saving agent memory writes",
+  memory_agent_scope: "saving where agents save memories",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
@@ -1132,6 +1133,12 @@ export function approveMemory(id: string): Promise<Result<void>> {
  * Input: the choice. Output: ok once saved. */
 export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<void>> {
   return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
+}
+
+/** Saves the owner's Where agents save memories setting: in the agent's own project only, or
+ * where the agent asks, app-wide included. Input: the choice. Output: ok once saved. */
+export function setAgentMemoryScope(scope: AgentMemoryScope): Promise<Result<void>> {
+  return change("desktop_set_agent_memory_scope", { scope, generation: nextGeneration() });
 }
 
 /** Picks the research memories in a project nobody reviewed yet. Inputs: the project and its

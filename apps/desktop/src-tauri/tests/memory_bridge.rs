@@ -559,6 +559,27 @@ async fn agent_writes_flow(root: &Path) -> Result<(), Box<dyn Error>> {
         bridge.memories(None, None, None).await?.agent_writes,
         AgentWrites::Save
     );
+
+    use crazyagent::memory::library::AgentScope;
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_scope,
+        AgentScope::Project,
+        "F34: agent memories stay in their project until the owner chooses"
+    );
+    let chose = bridge.set_agent_memory_scope(AgentScope::Agent, 8).await?;
+    assert!(matches!(chose.outcome, ActionOutcome::Applied), "{chose:?}");
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_scope,
+        AgentScope::Agent
+    );
+    let kept = bridge
+        .set_agent_memory_scope(AgentScope::Project, 9)
+        .await?;
+    assert!(matches!(kept.outcome, ActionOutcome::Applied), "{kept:?}");
+    assert_eq!(
+        bridge.memories(None, None, None).await?.agent_scope,
+        AgentScope::Project
+    );
     assert!(bridge.pending_intent()?.is_none());
     Ok(())
 }

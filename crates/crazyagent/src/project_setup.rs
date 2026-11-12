@@ -2631,8 +2631,8 @@ fn set_agent_policy(
 /// ended agents are deleted, so a waiting step is never
 /// claimed and a running one stops; its read folders, agent access, agent settings and its
 /// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
-/// per-project switches are cleared too, so a new project reusing the id never inherits
-/// them. The versions of its read folders, agent access, agent settings, project
+/// per-project switches are cleared too, and so are the memories its agents saved, so a new
+/// project reusing the id never inherits them. The versions of its read folders, agent access, agent settings, project
 /// instructions, team settings and project wake rule move on once more, so a project added
 /// again under the same id refuses a save from a screen read before the removal (V2V-1,
 /// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
@@ -2701,6 +2701,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
+    crate::memory::library::forget_orphan_agent_memories(tx)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }

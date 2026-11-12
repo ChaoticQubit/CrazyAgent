@@ -12,8 +12,8 @@ use crate::engine::owner::{
 use crate::harnesses::HarnessEntry;
 use crate::harnesses::update::{HarnessVersions, UpdateSettings};
 use crate::memory::library::{
-    AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX,
-    SavedMemory,
+    AgentScope, AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX,
+    SCOPE_ITEMS_MAX, SavedMemory,
 };
 use crate::memory::{KnowledgeStatus, ReviewDecision};
 use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
@@ -74,6 +74,9 @@ pub(in crate::tui) enum SettingsJob {
     },
     AgentWrites {
         set: Option<(AgentWrites, u64)>,
+    },
+    AgentScope {
+        set: Option<(AgentScope, u64)>,
     },
     AddMemory {
         scope: MemoryScope,
@@ -222,6 +225,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::DeleteMemory { .. } => "DeleteMemory",
             Self::ApproveMemory { .. } => "ApproveMemory",
             Self::AgentWrites { .. } => "AgentWrites",
+            Self::AgentScope { .. } => "AgentScope",
             Self::AddMemory { .. } => "AddMemory",
             Self::ImportMemory { .. } => "ImportMemory",
             Self::Suggestions { .. } => "Suggestions",
@@ -344,6 +348,7 @@ pub(in crate::tui) enum SettingsEvent {
     MemoryDeleted(Result<(), String>),
     MemoryApproved(Result<(), String>),
     AgentWrites(Result<AgentWrites, String>),
+    AgentScope(Result<AgentScope, String>),
     MemoryAdded(Result<(), String>),
     MemoryImported(Result<crate::memory::import::ImportReport, String>),
     Suggestions(Result<Vec<Suggestion>, String>),
@@ -401,6 +406,7 @@ impl SettingsEvent {
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
             SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
             SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
+            SettingsJob::AgentScope { .. } => Self::AgentScope(Err(problem)),
             SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
             SettingsJob::ImportMemory { .. } => Self::MemoryImported(Err(problem)),
             SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
@@ -827,6 +833,9 @@ impl NativeOwner {
             SettingsJob::AgentWrites { set } => {
                 SettingsEvent::AgentWrites(self.agent_writes(set, lost).await)
             }
+            SettingsJob::AgentScope { set } => {
+                SettingsEvent::AgentScope(self.agent_scope(set, lost).await)
+            }
         }
     }
 
@@ -1081,6 +1090,32 @@ impl NativeOwner {
             .memories(MemoryScope::Global, None, None)
             .await
             .map(|page| page.agent_writes)
+            .map_err(|error| problem(&error, lost))
+    }
+
+    /// Saves the owner's Where agents save memories setting when asked, then reads it back.
+    /// Inputs: the choice with its client generation, if any, and the lost-connection
+    /// flag. Output: the setting the engine now holds, or the plain problem code.
+    pub(super) async fn agent_scope(
+        &mut self,
+        set: Option<(AgentScope, u64)>,
+        lost: &mut bool,
+    ) -> Result<AgentScope, String> {
+        let controller = self.settings_controller()?;
+        if let Some((scope, generation)) = set {
+            applied(
+                controller
+                    .change_memory(LibraryAction::AgentScope { scope }, generation)
+                    .await,
+                "memory_outcome_unknown",
+                lost,
+            )?;
+        }
+        let controller = self.settings_controller()?;
+        controller
+            .memories(MemoryScope::Global, None, None)
+            .await
+            .map(|page| page.agent_scope)
             .map_err(|error| problem(&error, lost))
     }
 
@@ -2069,6 +2104,20 @@ mod tests {
             SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))
         ));
 
+        let scope = |set| SettingsJob::AgentScope { set };
+        assert!(matches!(
+            native.settings(scope(None)).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Project))
+        ));
+        assert!(matches!(
+            native.settings(scope(Some((AgentScope::Agent, 1)))).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Agent))
+        ));
+        assert!(matches!(
+            native.settings(scope(None)).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Agent))
+        ));
+
         let mut db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
         db.busy_timeout(Duration::from_secs(5)).unwrap();
         db.execute("INSERT INTO projects(id,body) VALUES ('alpha','{}')", [])
@@ -2082,7 +2131,10 @@ mod tests {
                 "Ship on Fridays.",
             )
             .unwrap(),
-            Ok(true)
+            Ok(crate::memory::library::AgentSaved {
+                waiting: true,
+                narrowed: false
+            })
         );
         drop(db);
         let agent = "Ada (@lead-a)".to_owned();
@@ -2127,6 +2179,10 @@ mod tests {
         assert!(matches!(
             native.settings(writes(Some((AgentWrites::Save, 4)))).await,
             SettingsEvent::AgentWrites(Ok(AgentWrites::Save))
+        ));
+        assert!(matches!(
+            native.settings(scope(Some((AgentScope::Project, 5)))).await,
+            SettingsEvent::AgentScope(Ok(AgentScope::Project))
         ));
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())

@@ -1872,7 +1872,8 @@ fn land_on_lead(
 }
 
 /// Answers one saved-memory call of a project's agent: `remember` saves under the owner's
-/// Agent memory writes setting and `recall` searches what agents may read. Takes the
+/// Agent memory writes and Where agents save memories settings and `recall` searches what
+/// agents may read. Takes the
 /// engine database, the project, the agent's label and the call. Returns the text and
 /// whether it is an error, or a SQLite failure; none for any other call.
 pub(super) fn memory_answer(
@@ -1898,12 +1899,20 @@ fn remember(
     let app = scope == tool::MemoryReach::App;
     Ok(
         match crate::memory::library::agent_remember(connection, project, agent, app, text)? {
-            Ok(true) => (
-                "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
-                false,
-            ),
-            Ok(false) => (
-                "Saved to memory. recall finds it now, and agents started from now on get it.".to_owned(),
+            Ok(saved) => (
+                format!(
+                    "{}{}",
+                    if saved.narrowed {
+                        "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. "
+                    } else {
+                        ""
+                    },
+                    if saved.waiting {
+                        "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
+                    } else {
+                        "Saved to memory. recall finds it now, and agents started from now on get it."
+                    }
+                ),
                 false,
             ),
             Err(code) => (

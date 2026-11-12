@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { AGENT_WRITES_OPTIONS, MemoryView, SuggestionEditor, memorySource, scopeOptions } = await import("../src/screens/settings/memory.tsx");
+const { AGENT_SCOPE_OPTIONS, AGENT_WRITES_OPTIONS, MemoryView, SuggestionEditor, memorySource, scopeOptions } = await import("../src/screens/settings/memory.tsx");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const names = new Map([["project-harbor", "Harbor Notes"]]);
@@ -162,4 +162,18 @@ test("Agent memory writes is a select with both choices and says what each one d
   assert.match(save, /Agents&#x27; memories are saved at once\./);
   assert.match(render(page("ask")), /Agents&#x27; memories wait here until you approve them\./);
   assert.doesNotMatch(render({ saved: { kind: "ok", value: { items: [saved()], next: null, agent_writes: "save" } } }), /Agent memory writes/);
+});
+
+test("F34: Where agents save memories is a select with both choices, This project only first, and says what each one does", () => {
+  assert.deepEqual(AGENT_SCOPE_OPTIONS, [{ value: "project", label: "This project only" }, { value: "agent", label: "Agent chooses" }]);
+  const page = (reach) => ({ saved: { kind: "ok", value: { items: [saved()], next: null, agent_writes: "save", agent_scope: reach } }, onApprove: forbidden, onWrites: forbidden, onReach: forbidden });
+  const project = render(page("project"));
+  assert.match(project, /Where agents save memories/);
+  assert.match(project, /id="memory-agent-scope"/);
+  assert.match(project, /This project only/);
+  assert.match(project, /Agent chooses/);
+  assert.match(project, /An agent&#x27;s memory stays in its own project, even when it asks to save it app-wide\./);
+  assert.match(render(page("agent")), /Agents may save a memory app-wide, where every project&#x27;s agents read it\./);
+  const without = { saved: { kind: "ok", value: { items: [saved()], next: null, agent_writes: "save", agent_scope: "project" } }, onWrites: forbidden };
+  assert.doesNotMatch(render(without), /memory-agent-scope/);
 });

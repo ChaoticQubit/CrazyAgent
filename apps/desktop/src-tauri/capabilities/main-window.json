@@ -138,6 +138,7 @@
     "allow-desktop-delete-memory",
     "allow-desktop-approve-memory",
     "allow-desktop-set-agent-memory-writes",
+    "allow-desktop-set-agent-memory-scope",
     "allow-desktop-forget-memory",
     "allow-desktop-remember-research",
     "allow-desktop-save-selection-to-memory",

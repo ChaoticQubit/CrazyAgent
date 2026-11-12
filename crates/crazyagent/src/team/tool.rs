@@ -643,7 +643,7 @@ fn spec(name: &str) -> Value {
             json!({"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false}),
         ),
         REMEMBER_TOOL => (
-            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app shares it with every project. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
+            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app asks to share it with every project, and the owner's setting may keep it in this project instead. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
             json!({"type": "object", "properties": {"text": {"type": "string", "description": "The memory in plain words, up to 2000 bytes."}, "scope": {"type": "string", "enum": ["project", "app"], "description": "project (the default) or app."}}, "required": ["text"], "additionalProperties": false}),
         ),
         RECALL_TOOL => (

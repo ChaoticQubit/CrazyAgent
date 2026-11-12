@@ -297,6 +297,10 @@ fn add_memory_saves_a_note_for_the_chosen_projects() {
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
     ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
 
     screen.key(&Key::Char('a'), &mut ctx);
@@ -316,6 +320,10 @@ fn research_suggestions_come_first_and_save_for_every_project() {
     assert!(matches!(
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
+    ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
     ));
     match job(&mut ctx) {
         SettingsJob::Suggestions { projects } => assert_eq!(projects.len(), 3),
@@ -380,6 +388,10 @@ fn research_suggestions_come_first_and_save_for_every_project() {
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
     ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
+    ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
 }
 
@@ -421,6 +433,10 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
     assert!(matches!(
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
+    ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
     ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
     screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
@@ -623,6 +639,10 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
     assert!(matches!(
         job(&mut ctx),
         SettingsJob::AgentWrites { set: None }
+    ));
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope { set: None }
     ));
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
@@ -882,4 +902,61 @@ fn the_agent_memory_writes_row_shows_the_engine_choice_and_how_to_change_it() {
         assert!(shown.contains(chosen), "{shown}");
         assert!(shown.contains("w to change"), "{shown}");
     }
+}
+
+/// F34: the memory settings row shows where agents save, `p` switches between This project
+/// only and Agent chooses one change at a time, and each answer says what agents now do.
+#[test]
+fn p_switches_where_agents_save_memories_between_both_options() {
+    let mut shell = Shell::with(memory_ctx(120, 36), Box::new(Memory::with(memories())));
+    let row = |shell: &mut Shell| {
+        render(shell, 120, 36)
+            .into_iter()
+            .find(|row| row.contains("Saved in"))
+            .unwrap_or_else(|| panic!("no Saved in row"))
+    };
+    for (reach, chosen) in [
+        (AgentScope::Project, "This project only"),
+        (AgentScope::Agent, "Agent chooses"),
+    ] {
+        shell.arrive(settings(SettingsEvent::AgentScope(Ok(reach))));
+        let shown = row(&mut shell);
+        assert!(shown.contains(chosen), "{shown}");
+        assert!(shown.contains("p to change"), "{shown}");
+    }
+
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::with(memories());
+    screen.key(&Key::Char('p'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope {
+            set: Some((AgentScope::Agent, generation))
+        } if generation > 0
+    ));
+    screen.key(&Key::Char('p'), &mut ctx);
+    assert_eq!(ctx.queued(), 0, "one change at a time");
+    screen.arrive(
+        &settings(SettingsEvent::AgentScope(Ok(AgentScope::Agent))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Agents now choose where a memory is saved, app-wide included."
+    );
+    screen.key(&Key::Char('p'), &mut ctx);
+    assert!(matches!(
+        job(&mut ctx),
+        SettingsJob::AgentScope {
+            set: Some((AgentScope::Project, _))
+        }
+    ));
+    screen.arrive(
+        &settings(SettingsEvent::AgentScope(Ok(AgentScope::Project))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Agents now save memories in their own project only."
+    );
 }

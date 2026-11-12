@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
-  addMemory, approveMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryWrites,
-  MEMORY_TEXT_BYTES_MAX, type AgentMemoryWrites, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
+  addMemory, approveMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryScope, setAgentMemoryWrites,
+  MEMORY_TEXT_BYTES_MAX, type AgentMemoryScope, type AgentMemoryWrites, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
 } from "../../api";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, EmptyState, Icon, LoadError, NotReady, Notice, SearchField, Select, SettingSection, Skeleton, TextArea } from "../../ui";
@@ -28,6 +28,12 @@ export function memorySource(memory: SavedMemory, names: Map<string, string>): s
 export const AGENT_WRITES_OPTIONS: { value: AgentMemoryWrites; label: string }[] = [
   { value: "save", label: "Save directly" },
   { value: "ask", label: "Ask me first" },
+];
+
+/** The Where agents save memories choices, the default first. */
+export const AGENT_SCOPE_OPTIONS: { value: AgentMemoryScope; label: string }[] = [
+  { value: "project", label: "This project only" },
+  { value: "agent", label: "Agent chooses" },
 ];
 
 /** The Show filter: app-wide memory, then each project. Input: the projects.
@@ -185,7 +191,7 @@ function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onAp
  * scope with search and older pages, and forms to add and import memory. Inputs: the reads, the
  * first page's read the writes setting came from (older pages merged in make a new object, which
  * no read made), filters, last failure and the actions. */
-export function MemoryView({ saved, writesRead, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites }: {
+export function MemoryView({ saved, writesRead, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites, onReach }: {
   saved: Loaded<SavedMemoryPage>;
   writesRead: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
@@ -206,8 +212,10 @@ export function MemoryView({ saved, writesRead, suggested, scope, projects, sear
   onRetry: () => void;
   onApprove?: (memory: SavedMemory) => void;
   onWrites?: (writes: AgentMemoryWrites) => Promise<string>;
+  onReach?: (reach: AgentMemoryScope) => Promise<string>;
 }) {
   const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null, Object.is, writesRead);
+  const [reach, holdReach] = useHeld<AgentMemoryScope | null>(saved.kind === "ok" ? saved.value.agent_scope : null, Object.is, writesRead);
   const names = new Map(projects.map((project) => [project.id, project.name]));
   const where = scope ? `${names.get(scope) ?? "this project"} only` : "app-wide";
   const filters = <span className="row">
@@ -229,6 +237,17 @@ export function MemoryView({ saved, writesRead, suggested, scope, projects, sear
             void onWrites(chosen).then(settled);
           }} />
       </SettingRow>
+      {onReach && <SettingRow label="Where agents save memories">
+        <Select id="memory-agent-scope" label="Where agents save memories" value={reach ?? saved.value.agent_scope} options={AGENT_SCOPE_OPTIONS}
+          helper={(reach ?? saved.value.agent_scope) === "agent"
+            ? "Agents may save a memory app-wide, where every project's agents read it."
+            : "An agent's memory stays in its own project, even when it asks to save it app-wide."}
+          onValue={(value) => {
+            const chosen = value === "agent" ? "agent" : "project";
+            const settled = holdReach(chosen);
+            void onReach(chosen).then(settled);
+          }} />
+      </SettingRow>}
     </SettingSection>}
     <SuggestedSection suggested={suggested} busy={busy} onSave={onSave} onSaveEdited={onSaveEdited} onDismiss={onDismiss} />
     <SettingSection title="Saved memories" actions={filters}>
@@ -256,7 +275,7 @@ export function MemorySettings() {
   useEffect(() => setOlder(undefined), [first]);
 
   const saved: Loaded<SavedMemoryPage> = first.kind === "ok" && older
-    ? { kind: "ok", value: { items: [...first.value.items, ...older.items], next: older.next, agent_writes: first.value.agent_writes } } : first;
+    ? { kind: "ok", value: { items: [...first.value.items, ...older.items], next: older.next, agent_writes: first.value.agent_writes, agent_scope: first.value.agent_scope } } : first;
   const plain = (result: Result<unknown>) => result.kind === "not_ready" ? NOT_READY : result.kind === "error" ? result.message : "";
 
   async function act(id: string, action: () => Promise<Result<void>>, done: string, reload: () => void): Promise<string> {
@@ -274,7 +293,7 @@ export function MemorySettings() {
   const more = async () => {
     if (saved.kind !== "ok" || saved.value.next === null) return;
     const page = session.noteResult(await savedMemories(scope || null, search, saved.value.next));
-    if (page.kind === "ok") setOlder({ items: [...(older?.items ?? []), ...page.value.items], next: page.value.next, agent_writes: page.value.agent_writes });
+    if (page.kind === "ok") setOlder({ items: [...(older?.items ?? []), ...page.value.items], next: page.value.next, agent_writes: page.value.agent_writes, agent_scope: page.value.agent_scope });
     else setFailure(plain(page));
   };
 
@@ -283,6 +302,7 @@ export function MemorySettings() {
       onSearch={setSearch} onScope={setScope} onRetry={reloadSaved} onMore={() => void more()} onDelete={setDeleting}
       onApprove={(memory) => void act(memory.id, () => approveMemory(memory.id), "Memory approved. Agents get it from their next launch.", reloadSaved)}
       onWrites={(writes) => act("agent-writes", () => setAgentMemoryWrites(writes), writes === "ask" ? "Agents now ask you before a memory is saved." : "Agents now save memories directly.", reloadSaved)}
+      onReach={(reach) => act("agent-scope", () => setAgentMemoryScope(reach), reach === "agent" ? "Agents now choose where a memory is saved, app-wide included." : "Agents now save memories in their own project only.", reloadSaved)}
       onAdd={async (text) => {
         setFailure("");
         const result = session.noteResult(await addMemory(scope || null, text));

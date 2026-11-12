@@ -1944,7 +1944,10 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
             "  Use cargo nextest.  "
         )
         .unwrap(),
-        Ok(false)
+        Ok(AgentSaved {
+            waiting: false,
+            narrowed: false
+        })
     );
     let saved = memory_with_text(&mut db, "Use cargo nextest.");
     assert_eq!(
@@ -1973,6 +1976,16 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
     );
     assert_eq!(agent_writes(&db).unwrap(), AgentWrites::Ask);
     assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentScope {
+                scope: AgentScope::Agent
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(
         agent_remember(
             &mut db,
             &alpha,
@@ -1981,7 +1994,10 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
             "Run make check before commits."
         )
         .unwrap(),
-        Ok(true)
+        Ok(AgentSaved {
+            waiting: true,
+            narrowed: false
+        })
     );
     let requested = memory_with_text(&mut db, "Run make check before commits.");
     assert_eq!(
@@ -2050,7 +2066,7 @@ fn an_agent_memory_is_saved_at_once_or_held_for_the_owners_approval_by_the_setti
 
 #[test]
 fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
-    let (_directory, mut db, _config) = agent_library();
+    let (_directory, mut db, config) = agent_library();
     let alpha = ProjectId::new("alpha").unwrap();
     agent_remember(&mut db, &alpha, "Ada", false, "Keep tests real.")
         .unwrap()
@@ -2087,6 +2103,16 @@ fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
             "{text:?} by {agent:?}"
         );
     }
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentScope {
+                scope: AgentScope::Agent
+            }
+        ),
+        Outcome::Applied
+    );
     agent_remember(&mut db, &alpha, "Bo", true, "Keep tests real.")
         .unwrap()
         .unwrap();
@@ -2105,6 +2131,154 @@ fn an_agent_memory_and_recall_query_are_checked_before_anything_is_stored() {
             "{query:?}"
         );
     }
+}
+
+/// F34: under the default This project only an agent's app-wide ask is kept in its own
+/// project and the answer says so; Agent chooses saves it app-wide again. Each option is
+/// read back through the owner's Memory page.
+#[test]
+fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_choose() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    let page_scope = |db: &mut rusqlite::Connection| {
+        let tx = db.transaction().unwrap();
+        let OwnerData::Memories { page } =
+            page(&tx, &MemoryScope::Global, None, None, PAGE_ITEMS_MAX).unwrap()
+        else {
+            panic!("a memory page expected");
+        };
+        page.agent_scope
+    };
+    assert_eq!(agent_scope(&db).unwrap(), AgentScope::Project);
+    assert_eq!(page_scope(&mut db), AgentScope::Project);
+
+    assert_eq!(
+        agent_remember(&mut db, &alpha, "Master", true, "Gotcha in the parser.").unwrap(),
+        Ok(AgentSaved {
+            waiting: false,
+            narrowed: true
+        })
+    );
+    let kept = memory_with_text(&mut db, "Gotcha in the parser.");
+    assert_eq!(kept.scope, project_scope(&alpha));
+    assert_eq!(
+        recalled(&mut db, &alpha, "parser"),
+        ["Gotcha in the parser."]
+    );
+    assert!(
+        recalled(&mut db, &beta, "parser").is_empty(),
+        "another project never reads it"
+    );
+    assert_eq!(
+        agent_remember(&mut db, &alpha, "Master", false, "Project fact.").unwrap(),
+        Ok(AgentSaved {
+            waiting: false,
+            narrowed: false
+        }),
+        "a project ask is never called narrowed"
+    );
+
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentScope {
+                scope: AgentScope::Agent
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(page_scope(&mut db), AgentScope::Agent);
+    assert_eq!(
+        agent_remember(&mut db, &alpha, "Master", true, "Plain commits.").unwrap(),
+        Ok(AgentSaved {
+            waiting: false,
+            narrowed: false
+        })
+    );
+    assert_eq!(
+        memory_with_text(&mut db, "Plain commits.").scope,
+        MemoryScope::Global
+    );
+    assert_eq!(recalled(&mut db, &beta, "commits"), ["Plain commits."]);
+
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentScope {
+                scope: AgentScope::Project
+            }
+        ),
+        Outcome::Applied
+    );
+    assert_eq!(agent_scope(&db).unwrap(), AgentScope::Project);
+    let stored: String = db
+        .query_row("SELECT scope FROM memory_agent_scope", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, "project");
+}
+
+/// F34: the start sweep forgets only what agents saved for projects that are gone, the
+/// trial rows among them; an owner note, a memory waiting for approval, an app-wide agent
+/// memory, a live project's agent memory and a row whose origin is not JSON all stay, and a
+/// second sweep finds nothing.
+#[test]
+fn agent_memories_of_projects_that_are_gone_are_forgotten_and_every_other_memory_stays() {
+    let (_directory, db, _config) = agent_library();
+    for (id, project, origin) in [
+        (
+            "trial-agent",
+            Some("ca-trial-4f"),
+            r#"{"kind":"agent","agent":"Master"}"#,
+        ),
+        (
+            "trial-asked",
+            Some("ca-trial-4b"),
+            r#"{"kind":"requested","agent":"Master"}"#,
+        ),
+        ("gone-note", Some("gone"), r#"{"kind":"written"}"#),
+        (
+            "gone-import",
+            Some("gone"),
+            r#"{"kind":"imported","file":"a.md"}"#,
+        ),
+        ("gone-broken", Some("gone"), "{x"),
+        ("global-agent", None, r#"{"kind":"agent","agent":"Master"}"#),
+        (
+            "alpha-agent",
+            Some("alpha"),
+            r#"{"kind":"agent","agent":"Ada"}"#,
+        ),
+    ] {
+        db.execute(
+            "INSERT INTO memory_library(id,project,origin,text) VALUES (?1,?2,?3,?1)",
+            params![id, project, origin],
+        )
+        .unwrap();
+    }
+    assert_eq!(forget_orphan_agent_memories(&db).unwrap(), 1);
+    let left: Vec<String> = db
+        .prepare("SELECT id FROM memory_library ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        left,
+        [
+            "alpha-agent",
+            "global-agent",
+            "gone-broken",
+            "gone-import",
+            "gone-note",
+            "trial-asked"
+        ]
+    );
+    crate::memory::initialize(&db).unwrap();
+    assert_eq!(forget_orphan_agent_memories(&db).unwrap(), 0);
 }
 
 #[test]
