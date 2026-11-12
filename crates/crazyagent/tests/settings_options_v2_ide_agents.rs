@@ -200,8 +200,11 @@ async fn ide_agents_newest_12_opens_the_project_and_the_newest_twelve_agents() {
     assert_eq!(opened(&written.path), expected(&team.folder, &shown));
 
     team.engine.restart();
-    team.engine_opens(&expected(&team.folder, &[]), "the agents the restart stopped")
-        .await;
+    team.engine_opens(
+        &expected(&team.folder, &[]),
+        "the agents the restart stopped",
+    )
+    .await;
     team.start_again(AGENTS + 1);
     team.engine_opens(&expected(&team.folder, &shown), "the agents started again")
         .await;
@@ -235,8 +238,11 @@ async fn ide_agents_show_all_opens_every_agent_and_survives_a_restart() {
     );
 
     team.engine.restart();
-    team.engine_opens(&expected(&team.folder, &[]), "the agents the restart stopped")
-        .await;
+    team.engine_opens(
+        &expected(&team.folder, &[]),
+        "the agents the restart stopped",
+    )
+    .await;
     team.start_again(AGENTS);
     team.engine_opens(&expected(&team.folder, &agents), "the agents started again")
         .await;
