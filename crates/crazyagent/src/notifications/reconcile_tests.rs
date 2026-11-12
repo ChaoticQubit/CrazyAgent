@@ -94,6 +94,39 @@ fn ask(connection: &Connection, project_id: &str, coord: Option<i64>, text: &str
     connection.last_insert_rowid()
 }
 
+fn ask_as(connection: &Connection, id: i64, project_id: &str, text: &str) {
+    connection
+        .execute(
+            "INSERT INTO questions_log(id,project,asker,source,question,options_json,status,turn_floor,created_ms)
+             VALUES (?1,?2,'Master','master',?3,'[]','pending',0,?4)",
+            params![id, project_id, text, NOW_MS],
+        )
+        .unwrap();
+}
+
+fn waiting(connection: &Connection, project_id: &str, agent: i64) {
+    connection
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,?2,'sub','codex',0,'running',?3,?3)",
+            params![agent, project_id, NOW_MS],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO coord_activity(agent,last_seen,waiting,waiting_since) VALUES (?1,?2,'question',?2)",
+            params![agent, NOW_MS],
+        )
+        .unwrap();
+}
+
+fn open_in(connection: &Connection, project_id: &str) -> Vec<Notice> {
+    all(connection)
+        .into_iter()
+        .filter(|item| item.project_id == Some(project(project_id)) && item.resolved_ms.is_none())
+        .collect()
+}
+
 fn research(connection: &Connection, project_id: &str, status: &str) -> i64 {
     connection
         .execute(
@@ -217,6 +250,52 @@ fn a_team_question_keeps_its_item_when_it_is_linked_into_the_questions_log() {
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].id, before[0].id);
     assert_eq!(after[0].resolved_ms, None);
+}
+
+#[test]
+fn a_pending_question_past_the_source_cap_stays_pending_while_the_cap_hides_it() {
+    let (_folder, mut connection) = engine();
+    ask_as(&connection, 100_000, "p1", "Which database should we use?");
+    reconcile(&mut connection, &nobody(), NOW_MS).unwrap();
+    let before = open_in(&connection, "p1");
+    assert_eq!(before.len(), 1);
+    for id in 1..=super::reconcile::SOURCE_ROWS_MAX as i64 {
+        ask_as(&connection, id, "p2", &format!("Question {id}?"));
+    }
+    reconcile(&mut connection, &nobody(), NOW_MS + 1).unwrap();
+    let after = open_in(&connection, "p1");
+    assert_eq!(after.len(), 1, "the hidden question is still pending");
+    assert_eq!(after[0].id, before[0].id);
+    connection
+        .execute(
+            "UPDATE questions_log SET status='answered' WHERE project='p2'",
+            [],
+        )
+        .unwrap();
+    reconcile(&mut connection, &nobody(), NOW_MS + 2).unwrap();
+    assert!(open_in(&connection, "p2").is_empty());
+    assert_eq!(open_in(&connection, "p1")[0].id, before[0].id);
+}
+
+#[test]
+fn an_agent_waiting_in_a_team_project_past_the_project_cap_stays_pending() {
+    let (_folder, mut connection) = engine();
+    waiting(&connection, "zz-last", 1_000);
+    reconcile(&mut connection, &nobody(), NOW_MS).unwrap();
+    let before = open_in(&connection, "zz-last");
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].kind, NoticeKind::Question);
+    for agent in 1..=64 {
+        waiting(&connection, &format!("p{agent:02}"), agent);
+    }
+    reconcile(&mut connection, &nobody(), NOW_MS + 1).unwrap();
+    let after = open_in(&connection, "zz-last");
+    assert_eq!(
+        after.len(),
+        1,
+        "the waiting agent past the cap is still pending"
+    );
+    assert_eq!(after[0].id, before[0].id);
 }
 
 #[test]

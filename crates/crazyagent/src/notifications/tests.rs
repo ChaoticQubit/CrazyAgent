@@ -44,7 +44,13 @@ fn memories(project_id: &str, text: &str) -> Condition {
 
 fn synced(connection: &mut Connection, kinds: &[NoticeKind], live: &[Condition], now: i64) {
     let tx = connection.transaction().unwrap();
-    sync(&tx, kinds, live, now).unwrap();
+    sync(&tx, kinds, &[], live, now).unwrap();
+    tx.commit().unwrap();
+}
+
+fn synced_in_part(connection: &mut Connection, kinds: &[NoticeKind], live: &[Condition], now: i64) {
+    let tx = connection.transaction().unwrap();
+    sync(&tx, kinds, kinds, live, now).unwrap();
     tx.commit().unwrap();
 }
 
@@ -212,6 +218,27 @@ fn a_kind_whose_source_could_not_be_read_resolves_none_of_its_items() {
     let pending = listed(&connection, &query(NoticeFilter::Pending));
     assert_eq!(texts(&pending), ["Which port?"]);
     assert_eq!(pending.counts.pending, 1);
+}
+
+#[test]
+fn a_kind_its_source_read_only_in_part_opens_new_items_and_resolves_none() {
+    let (_folder, mut connection) = store();
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q1", "Which port?")],
+        NOW_MS,
+    );
+    synced_in_part(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question("p1", "question:q2", "Which host?")],
+        NOW_MS + 5,
+    );
+    let pending = listed(&connection, &query(NoticeFilter::Pending));
+    assert_eq!(texts(&pending), ["Which host?", "Which port?"]);
+    assert_eq!(pending.counts.pending, 2);
+    assert!(texts(&listed(&connection, &query(NoticeFilter::Done))).is_empty());
 }
 
 #[test]
@@ -1153,7 +1180,10 @@ fn every_kind_has_its_own_short_label_that_every_client_shows() {
     for kind in NoticeKind::ALL {
         let label = kind.label();
         assert!(!label.is_empty() && label.len() <= 32, "{label}");
-        assert!(label.chars().next().unwrap().is_ascii_uppercase(), "{label}");
+        assert!(
+            label.chars().next().unwrap().is_ascii_uppercase(),
+            "{label}"
+        );
         assert!(seen.insert(label), "{label} is shared");
     }
     assert_eq!(NoticeKind::Question.label(), "Question");
