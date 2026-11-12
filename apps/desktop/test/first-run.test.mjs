@@ -54,3 +54,17 @@ test("Welcome renders the first-run form with real labels, defaults and no sideb
   assert.doesNotMatch(markup, /class="sidebar"/);
   assert.doesNotMatch(markup, /role="alert"/);
 });
+
+test("the last first-run page offers Learn CrazyAgent, ticked, under Add account and Skip for now", () => {
+  const markup = renderToStaticMarkup(createElement(Welcome, { onSaved: () => {}, initialStep: "accounts" }));
+  assert.match(markup, /<h1>Add an account<\/h1>/);
+  assert.match(markup, /<p>Agents need a model account to work\. Sign in with ChatGPT or Claude, or add an API key or a local model\.<\/p>/);
+  const add = markup.indexOf("Add account</button>");
+  const skip = markup.indexOf("Skip for now</button>");
+  const offer = markup.indexOf('<h2 id="learn-offer-title">Learn CrazyAgent</h2>');
+  assert.ok(add > 0 && skip > add && offer > skip, markup);
+  assert.match(markup, /aria-labelledby="learn-offer-title"/);
+  assert.match(markup, /<p>A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets\. Its first step is an optional demo project\.<\/p>/);
+  assert.match(markup, /<label class="checkbox"><input type="checkbox" checked=""\/><span>Show the guide on Home<\/span><\/label>/);
+  assert.doesNotMatch(markup, /role="alert"/);
+});
