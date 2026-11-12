@@ -83,9 +83,10 @@ fn private(path: &Path) -> PathBuf {
     path.canonicalize().unwrap()
 }
 
-/// Finds the installed Codex and checks it is a release the bridge was checked against.
-/// Input: nothing. Output: the canonical executable; panics when Codex is absent or is
-/// not one of `codex::VERSIONS`.
+/// Finds the installed Codex and checks it is a release the bridge runs on: one of
+/// `codex::VERSIONS` or a later minor the range rule lets run with a warning (F38).
+/// Input: nothing. Output: the canonical executable; panics when Codex is absent or is a
+/// release the bridge refuses.
 fn installed_codex() -> PathBuf {
     let entries = catalog(&Search::from_environment());
     let entry = entries.iter().find(|entry| entry.id == "codex").unwrap();
@@ -104,11 +105,17 @@ fn installed_codex() -> PathBuf {
     )
     .unwrap();
     let version = String::from_utf8(output.stdout).unwrap();
+    let release = version
+        .trim()
+        .rsplit(' ')
+        .next()
+        .and_then(|text| {
+            let mut parts = text.split(['.', '-']).map(str::parse::<u64>);
+            Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
+        });
     assert!(
-        codex::VERSIONS
-            .iter()
-            .any(|(major, minor)| version.contains(&format!(" {major}.{minor}."))),
-        "UNAVAILABLE: the bridge was not checked against {version}"
+        release.is_some_and(|release| codex::support(release) != codex::Support::Refused),
+        "UNAVAILABLE: the bridge refuses {version}"
     );
     executable
 }
@@ -284,7 +291,7 @@ fn greet(home: &Path, pane: Option<u32>) {
     let deadline = Instant::now() + START;
     loop {
         match codex::deliver(home, GREETING, true, pane) {
-            Bridged::Delivered(_) => break,
+            Bridged::Delivered(..) => break,
             Bridged::Unavailable(reason) => {
                 assert!(
                     Instant::now() < deadline,
@@ -400,14 +407,14 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
 
     assert!(matches!(
         codex::deliver(&home, BUSY_TURN, true, pane),
-        Bridged::Delivered(_)
+        Bridged::Delivered(..)
     ));
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
     });
     assert!(matches!(
         codex::deliver(&home, STEER, false, pane),
-        Bridged::Delivered(_)
+        Bridged::Delivered(..)
     ));
     if let Err(problem) =
         steered(TURN, &home, BUSY_TURN, &[STEER]).and_then(|()| joined(&home, BUSY_TURN, &[STEER]))
@@ -456,7 +463,7 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
     greet(&home, pane);
     assert!(matches!(
         codex::deliver(&home, BUSY_TURN, true, pane),
-        Bridged::Delivered(_)
+        Bridged::Delivered(..)
     ));
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
@@ -555,7 +562,7 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
     let (_server, host) = start_app(&base, &home, &agent);
     let pane = host.pane_pid(&agent).unwrap();
     greet(&home, pane);
-    let Bridged::Delivered(Some(busy)) = codex::deliver(&home, BUSY_TURN, true, pane) else {
+    let Bridged::Delivered(Some(busy), _) = codex::deliver(&home, BUSY_TURN, true, pane) else {
         panic!("the busy turn started with no turn id named");
     };
     until(TURN, "the busy turn to start", || {

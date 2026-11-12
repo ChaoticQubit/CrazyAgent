@@ -28,9 +28,10 @@ const SKILLS: [&str; 2] = ["meal-tips", "release-notes"];
 const LIST_ID: &str = "skills-list";
 const REPLY_TIME_MAX: Duration = Duration::from_secs(30);
 
-/// Finds the real Codex on PATH and checks it is a release the engine supports.
+/// Finds the real Codex on PATH and checks it is a release the engine supports: one of
+/// `codex::VERSIONS` or a later minor the range rule lets run with a warning (F38).
 /// Input: nothing. Output: the canonical executable; panics UNAVAILABLE when Codex is
-/// absent or its version is not one of `codex::VERSIONS`.
+/// absent or its release is one the bridge refuses.
 fn installed_codex() -> PathBuf {
     let executable = std::env::var_os("PATH")
         .iter()
@@ -49,11 +50,16 @@ fn installed_codex() -> PathBuf {
     )
     .unwrap();
     let version = String::from_utf8(output.stdout).unwrap();
+    let release = version
+        .trim()
+        .strip_prefix("codex-cli ")
+        .and_then(|text| {
+            let mut parts = text.split(['.', '-']).map(str::parse::<u64>);
+            Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
+        });
     assert!(
-        codex::VERSIONS
-            .iter()
-            .any(|(major, minor)| version.starts_with(&format!("codex-cli {major}.{minor}."))),
-        "UNAVAILABLE: {version:?} is not one of the Codex releases in codex::VERSIONS"
+        release.is_some_and(|release| codex::support(release) != codex::Support::Refused),
+        "UNAVAILABLE: {version:?} is a Codex release the bridge refuses"
     );
     executable
 }
