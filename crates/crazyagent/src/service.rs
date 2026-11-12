@@ -11,10 +11,8 @@ pub const LAUNCHD_LABEL: &str = "dev.crazyagent.engine";
 pub const SYSTEMD_UNIT: &str = "crazyagent-engine.service";
 /// The logon scheduled task on Windows.
 pub const WINDOWS_TASK: &str = "CrazyAgent Engine";
-/// How long a client waits for a starting engine to answer. An owner engine with months of
-/// data took up to 38 s from spawn to its socket (v2.4.0 update bug), so a 15 s bound reported
-/// "didn't start" for an engine that came up, and a retry stopped it mid-start.
-pub const READY_TIMEOUT: Duration = Duration::from_secs(90);
+/// How long a client waits for a starting engine to answer.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
