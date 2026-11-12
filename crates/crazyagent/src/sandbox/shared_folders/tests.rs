@@ -444,6 +444,32 @@ fn the_closed_tops_rule_keeps_the_own_folder_open_and_refuses_names_out_of_shape
     assert!(kept < closed, "{profile}");
 }
 
+/// L4 r1 L3: a shared-back secret the choice keeps closed shows as not reachable: every one
+/// under None, under Chosen folders the ones outside a picked folder, none under All.
+#[test]
+fn a_shared_back_secret_outside_the_shared_folders_shows_as_not_reachable() {
+    let secrets = vec![
+        ".env".to_owned(),
+        "program/.env".to_owned(),
+        "config/key.pem".to_owned(),
+    ];
+    let all = SharedFolders {
+        secrets: secrets.clone(),
+        ..SharedFolders::default()
+    };
+    assert!(all.unreachable_secrets().is_empty());
+    let picked = SharedFolders {
+        secrets: secrets.clone(),
+        ..chosen(&["program"])
+    };
+    assert_eq!(picked.unreachable_secrets(), vec![".env", "config/key.pem"]);
+    let none = SharedFolders {
+        scope: SharedScope::None,
+        ..picked
+    };
+    assert_eq!(none.unreachable_secrets(), secrets);
+}
+
 /// Read-write opens only shared top-level folders git does not track at all: a folder with
 /// tracked files, a link and a folder not picked stay closed to writes.
 #[cfg(unix)]

@@ -10,7 +10,7 @@ use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, IdeAgentFiles, LevelView, NetworkView, PolicyView, ToolchainView,
 };
 use crate::sandbox::shared_folders::{
-    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope,
+    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
 use crate::sandbox::toolchains::Toolchain;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -559,6 +559,10 @@ fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
     assert!(words.contains(SHARED_FOLDERS));
     assert!(words.contains(SHARED_SECRETS_LINE), "{words}");
     assert!(words.contains("Shared back for reading: .env."), "{words}");
+    assert!(
+        words.contains(&format!("{UNREACHABLE_SECRETS_LINE} .env.")),
+        "Chosen folders without a picked folder around it keeps .env closed: {words}"
+    );
     assert!(words.contains(SHARED_FOLDERS_NEXT_START), "{words}");
     assert!(words.contains(OFF_MACOS_LINE), "{words}");
     assert!(!words.contains(SHARED_FOLDERS_IGNORED_UNDER_FULL));
@@ -573,4 +577,12 @@ fn the_access_box_keeps_shared_back_secrets_and_says_what_stays_closed() {
         SharedFolders::default(),
         "All with Read-only by default"
     );
+    let all = AccessEdit::of(&shared_view(
+        SharedFolders {
+            secrets: vec![".env".into()],
+            ..SharedFolders::default()
+        },
+        &["program"],
+    ));
+    assert!(!shown_words(&all).contains(UNREACHABLE_SECRETS_LINE));
 }

@@ -314,6 +314,14 @@ test("secret paths are read one per line, the picker keeps a picked folder that 
   assert.deepEqual(access.sharedSecretsOf("  .env\n\nkeys/server.pem \n.env\n"), [".env", "keys/server.pem"]);
   assert.deepEqual(access.sharedSecretsOf(""), []);
   assert.deepEqual(access.pickableFolders(["program", "build"], ["old", "build"]), ["build", "old", "program"]);
+  const sharedBack = [".env", "program/.env", "config/key.pem"];
+  assert.deepEqual(access.unreachableSecrets("all", [], sharedBack), [], "All reaches every shared-back secret");
+  assert.deepEqual(access.unreachableSecrets("chosen", ["program"], sharedBack), [".env", "config/key.pem"], "Chosen folders reaches only the ones in a picked folder");
+  assert.deepEqual(access.unreachableSecrets("none", ["program"], sharedBack), sharedBack, "None reaches none");
+  const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
+  assert.match(card, /unreachable\.length > 0 && <p className="pj-note" role="note">{SHARED_SECRETS_UNREACHABLE} {unreachable\.join\(", "\)}\.<\/p>}/);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/shared_folders.rs", import.meta.url), "utf8");
+  assert.ok(engine.includes(`"${access.SHARED_SECRETS_UNREACHABLE}"`), "the unreachable line reads as the engine states it");
   assert.equal(access.sameShared(SHARED, { ...SHARED }), true);
   assert.equal(access.sameShared(SHARED, { ...SHARED, chosen: ["program"] }), false);
   assert.equal(access.sameShared(SHARED, { ...SHARED, access: "read_write" }), false);

@@ -113,6 +113,9 @@ export const SHARED_SECRETS_LINE = "Secret files stay closed to agents wherever 
 /** How the owner shares a secret back for reading. */
 export const SHARED_SECRETS_HOW = "To let agents read one, add its path inside the project folder, one per line.";
 
+/** The line before the shared-back secrets the choice cannot reach, the engine's UNREACHABLE_SECRETS_LINE. */
+export const SHARED_SECRETS_UNREACHABLE = "Still closed, since this choice does not share their folder:";
+
 /** What the Linux and Windows sandboxes can and can't do with this setting, the engine's OFF_MACOS_LINE. */
 export const SHARED_FOLDERS_OFF_MACOS = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";
 
@@ -127,6 +130,14 @@ export const SHARED_FOLDERS_IGNORED_UNDER_FULL = "Full access runs agents withou
 export function sharedSecretsOf(text: string): string[] {
   const paths = text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
   return paths.filter((path, index) => paths.indexOf(path) === index);
+}
+
+/** The shared-back secrets a choice cannot reach, as the engine's unreachable_secrets: under
+ * None each one, under Chosen folders each one whose top-level folder is not picked. Inputs:
+ * the scope, the picked folders and the secret paths. Output: the paths, in the order given. */
+export function unreachableSecrets(scope: SharedScope, chosen: string[], secrets: string[]): string[] {
+  if (scope === "all") return [];
+  return secrets.filter((path) => scope === "none" || !chosen.includes(path.split("/")[0]));
 }
 
 /** The top-level folders the owner may pick: the ones the engine found and any picked before
@@ -274,8 +285,8 @@ export function IdeAgentFilesChoices({ name, value, access, onChange }: {
 
 /** The shared folders choice: which local folders agents see as radio cards, the top-level
  * folders to pick for Chosen folders, Read-only or Read-write, and the secret paths shared
- * back, with what stays closed, the Linux and Windows gap, when a change applies and a note
- * when Full access makes it moot. Inputs: the id prefix, the choice, the secret paths text,
+ * back, with what stays closed and the shared-back ones the choice cannot reach, the Linux
+ * and Windows gap, when a change applies and a note when Full access makes it moot. Inputs: the id prefix, the choice, the secret paths text,
  * the engine's top-level folders, the chosen access level and the change handlers. Output:
  * the fieldset. */
 export function SharedFoldersChoices({ prefix, value, secretsText, local, access, onChange, onSecretsText }: {
@@ -284,6 +295,7 @@ export function SharedFoldersChoices({ prefix, value, secretsText, local, access
 }) {
   const folders = pickableFolders(local, value.chosen);
   const full = value.chosen.length >= SHARED_CHOSEN_MAX;
+  const unreachable = unreachableSecrets(value.scope, value.chosen, sharedSecretsOf(secretsText));
   return <fieldset className="pj-field">
     <legend>{SHARED_FOLDERS}</legend>
     <div className="pj-radio-cards" role="radiogroup" aria-label={SHARED_FOLDERS}>
@@ -319,6 +331,7 @@ export function SharedFoldersChoices({ prefix, value, secretsText, local, access
     <textarea id={`${prefix}-shared-secrets`} className="pj-input" rows={3} value={secretsText} spellCheck={false} aria-describedby={`${prefix}-shared-secrets-help`}
       onChange={(event) => onSecretsText(event.target.value)} />
     {sharedSecretsOf(secretsText).length > SHARED_SECRETS_MAX && <p className="pj-error" role="alert">At most {SHARED_SECRETS_MAX} secret paths.</p>}
+    {unreachable.length > 0 && <p className="pj-note" role="note">{SHARED_SECRETS_UNREACHABLE} {unreachable.join(", ")}.</p>}
     <p className="pj-help">{SHARED_FOLDERS_NEXT_START} {SHARED_FOLDERS_OFF_MACOS}</p>
     {access === "full" && <p className="pj-note" role="note">{SHARED_FOLDERS_IGNORED_UNDER_FULL}</p>}
   </fieldset>;

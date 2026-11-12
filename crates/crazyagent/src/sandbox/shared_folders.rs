@@ -35,6 +35,11 @@ pub const NEEDS_MACOS: &str = "shared_folders_need_macos";
 /// The refusal code for a policy whose shared folders choice is out of shape.
 pub const INVALID: &str = "agent_policy_invalid";
 
+/// The line before the shared-back secrets a choice cannot reach, the same in the desktop
+/// app (L4 r1 L3).
+pub const UNREACHABLE_SECRETS_LINE: &str =
+    "Still closed, since this choice does not share their folder:";
+
 /// What the owner sees about the Linux and Windows gap, the same in the desktop app.
 pub const OFF_MACOS_LINE: &str = "On Linux and Windows agents read the whole project folder, secret files included, and only All with Read-only can start them.";
 
@@ -200,6 +205,18 @@ impl SharedFolders {
     /// and Windows boundaries can start. Takes the choice. Returns the answer.
     pub fn plain_reach(&self) -> bool {
         self.scope == SharedScope::All && self.access == SharedAccess::ReadOnly
+    }
+
+    /// The shared-back secrets this choice cannot reach (L4 r1 L3): under None each one, and
+    /// under Chosen folders each one whose top-level folder is not picked, since the folder
+    /// kept out around it wins over the share. Takes the choice. Returns the paths, in the
+    /// owner's order.
+    pub fn unreachable_secrets(&self) -> Vec<&str> {
+        self.secrets
+            .iter()
+            .map(String::as_str)
+            .filter(|path| !self.shares(path.split('/').next().unwrap_or_default()))
+            .collect()
     }
 
     /// Whether the owner's top-level folder `top` is shared under this choice. Takes the

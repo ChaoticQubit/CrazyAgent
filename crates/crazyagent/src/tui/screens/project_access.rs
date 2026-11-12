@@ -4,7 +4,7 @@ use crate::sandbox::policy::{
     AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ToolchainChoice,
 };
 use crate::sandbox::shared_folders::{
-    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope,
+    CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -446,8 +446,8 @@ impl AccessEdit {
 
     /// The shared folders lines: the choice with its help, one switch per top-level folder
     /// while Chosen folders is picked, Read-only or Read-write with its help, what stays closed
-    /// with the secrets shared back, when a change applies, the Linux and Windows gap, and the
-    /// Full access note. Inputs: the look, the lines so far, and the cursor's line and the
+    /// with the secrets shared back and the ones the choice cannot reach, when a change
+    /// applies, the Linux and Windows gap, and the Full access note. Inputs: the look, the lines so far, and the cursor's line and the
     /// last line of its help, moved here when the cursor is on one of these rows.
     fn shared_form(&self, look: &Look, body: &mut Vec<Row>, at: &mut usize, end: &mut usize) {
         let mark = |row: usize| if self.cursor == row { "> " } else { "  " };
@@ -534,6 +534,20 @@ impl AccessEdit {
                 wrap_words(&text, TEXT_WIDTH)
                     .into_iter()
                     .map(|line| Row::of(format!("  {line}"), look.muted)),
+            );
+        }
+        let unreachable = self.shared.unreachable_secrets();
+        if !unreachable.is_empty() {
+            let listed = unreachable.join(", ");
+            let shown = if listed.len() > SECRETS_SHOWN_BYTES_MAX {
+                format!("{} paths", unreachable.len())
+            } else {
+                listed
+            };
+            body.extend(
+                wrap_words(&format!("{UNREACHABLE_SECRETS_LINE} {shown}."), TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(format!("  {line}"), look.warning)),
             );
         }
         if self.access == AgentAccess::Full {
