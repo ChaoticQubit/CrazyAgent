@@ -125,7 +125,7 @@ describe("Settings, Pools: the two spend settings and the free reset spend on th
     await until(() => says("dialog[open] h2", `${SPEND} on ${BRAVO}?`), UI_MS, "the confirm did not open");
     assert.deepEqual(attempts(), [], "nothing is asked before the confirm");
     await shot("spend-confirm");
-    await click("dialog[open] button=Use free reset");
+    await click('//dialog[@open]//button[normalize-space(.)="Use free reset"]');
     await until(async () => !(await shown("dialog[open]")), UI_MS, "the confirm did not close");
     await until(async () => [QUEUED, NOT_SIGNED_IN].includes(await spendLine()), UI_MS, "the spend line did not show");
     assert.deepEqual(attempts().map((row) => [row.account, row.origin]), [[ids[BRAVO], "owner"]]);

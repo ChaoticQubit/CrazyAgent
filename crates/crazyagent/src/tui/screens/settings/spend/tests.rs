@@ -1,6 +1,5 @@
 use super::*;
 use crate::pools::{MemberStatus, PoolMember, PoolSummary};
-use crate::tui::ctx::Load;
 use crate::tui::screens::settings_accounts::tests::ctx;
 use crate::tui::seam::{AccountRow, Request};
 use crate::usage::spend::Origin;
@@ -346,4 +345,50 @@ fn the_terminal_says_every_spend_outcome_and_help_line_in_the_desktop_words() {
             "{code}"
         );
     }
+}
+
+#[test]
+fn the_spend_view_is_read_once_a_minute_or_every_5_s_while_a_spend_is_out() {
+    let usage_reads = |ctx: &mut Ctx| {
+        let mut reads = 0;
+        while let Some(request) = ctx.next_request() {
+            if let Request::Settings(job) = request
+                && matches!(*job, SettingsJob::Usage { .. })
+            {
+                reads += 1;
+            }
+        }
+        reads
+    };
+    let (mut spend, mut ctx) = ready(view(
+        settings(SpendConfirm::OneClick, AllLimited::Notice),
+        Vec::new(),
+    ));
+    spend.view = None;
+    spend.shown(&mut ctx, NOW);
+    assert_eq!(usage_reads(&mut ctx), 1);
+    spend.view = Some(view(
+        settings(SpendConfirm::OneClick, AllLimited::Notice),
+        Vec::new(),
+    ));
+    spend.shown(&mut ctx, NOW + OPEN_READ_EVERY_MS);
+    assert_eq!(
+        usage_reads(&mut ctx),
+        0,
+        "the shell's 5 s show reads nothing new"
+    );
+    spend.shown(&mut ctx, NOW + READ_EVERY_MS);
+    assert_eq!(usage_reads(&mut ctx), 1, "a minute on");
+    spend.view = Some(view(
+        settings(SpendConfirm::OneClick, AllLimited::Notice),
+        vec![attempt(AttemptState::Queued, None)],
+    ));
+    spend.shown(&mut ctx, NOW + READ_EVERY_MS + OPEN_READ_EVERY_MS);
+    assert_eq!(usage_reads(&mut ctx), 1, "every 5 s while a spend is out");
+    spend.shown(&mut ctx, NOW);
+    assert_eq!(
+        usage_reads(&mut ctx),
+        1,
+        "a clock that went back reads again"
+    );
 }

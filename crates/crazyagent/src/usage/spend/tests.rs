@@ -722,6 +722,43 @@ fn a_stale_count_after_a_spend_gives_no_second_auto_spend_in_the_same_limit_wind
 }
 
 #[test]
+fn only_a_poll_and_a_count_both_newer_than_the_last_spend_let_auto_spend_run() {
+    let (_root, db) = store();
+    let pool = access(&[("codex-a", "codex")]);
+    let window_end = NOW + 3 * HOUR;
+    polled(&db, "codex-a", 100.0, LimitSource::Poll, NOW, window_end);
+    resets(&db, "codex-a", 2, NOW);
+    request(&db, &r("codex-a"), NOW + 1).unwrap();
+    let owner = queued(&db).unwrap().remove(0);
+    mark_sent(&db, owner.id, NOW + 2).unwrap();
+    sent(&db, &owner, &Ok(Outcome::Reset), NOW + 3).unwrap();
+    write(&db, settings(SpendConfirm::OneClick, AllLimited::AutoSpend)).unwrap();
+    track_pools(&db, &pool, NOW + 4).unwrap();
+    assert!(
+        open_attempts(&db).is_empty(),
+        "the poll and the count are older than the owner's spend"
+    );
+    polled(
+        &db,
+        "codex-a",
+        100.0,
+        LimitSource::Poll,
+        NOW + 5,
+        window_end,
+    );
+    track_pools(&db, &pool, NOW + 6).unwrap();
+    assert!(
+        open_attempts(&db).is_empty(),
+        "a fresh poll but the count is older than the owner's spend"
+    );
+    resets(&db, "codex-a", 1, NOW + 7);
+    track_pools(&db, &pool, NOW + 8).unwrap();
+    let open = open_attempts(&db);
+    assert_eq!(open.len(), 1, "a fresh poll and a fresh count");
+    assert_eq!(open[0].1, "auto");
+}
+
+#[test]
 fn a_failed_poll_is_never_fresh_enough_for_an_auto_spend() {
     let (_root, db) = store();
     let pool = access(&[("codex-a", "codex")]);

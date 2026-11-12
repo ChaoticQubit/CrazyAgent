@@ -497,8 +497,9 @@ impl Screen for Pools {
         ctx.request(Request::Projects);
         ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
         ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
-        self.spend.shown(ctx);
-        self.ask_detail(ctx, crate::tui::clock::now_ms());
+        let now_ms = crate::tui::clock::now_ms();
+        self.spend.shown(ctx, now_ms);
+        self.ask_detail(ctx, now_ms);
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {

@@ -1,7 +1,7 @@
 use crate::pools::MemberKind;
 use crate::protocol::CredentialRef;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
-use crate::tui::ctx::Ctx;
+use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, Modal, hint};
 use crate::tui::keys::Key;
 use crate::tui::screens::Flow;
@@ -20,6 +20,8 @@ use std::collections::HashMap;
 const READ_SINCE_MS: i64 = 60 * 60 * 1000;
 const MODAL_TEXT: usize = 50;
 const POOLS_SHOWN_MAX: usize = 8;
+const READ_EVERY_MS: i64 = 60 * 1000;
+const OPEN_READ_EVERY_MS: i64 = 5 * 1000;
 
 /// The spend part of Settings, Pools in the terminal (DEC-154 slice 3): the two spend
 /// settings, the notice for a pool whose every account is at its limit, and "Use a free
@@ -27,6 +29,7 @@ const POOLS_SHOWN_MAX: usize = 8;
 pub(in crate::tui) struct Spend {
     view: Option<SpendView>,
     asking: Option<Ask>,
+    read_ms: Option<i64>,
 }
 
 struct Ask {
@@ -189,26 +192,49 @@ impl Spend {
         Self {
             view: None,
             asking: None,
+            read_ms: None,
         }
     }
 
-    /// Reads the spend view with the usage report, and the account names when none are
-    /// loaded. Input: the context. Output: none.
-    pub(in crate::tui) fn shown(&mut self, ctx: &mut Ctx) {
-        if ctx.store.accounts.ready().is_none() {
+    /// Reads the spend view with the usage report when it is due, and the account names
+    /// once. The shell shows Pools again every 5 s, so a read is due a minute after the last
+    /// one, or 5 s after it while a spend is still out. Inputs: the context and the time.
+    /// Output: none.
+    pub(in crate::tui) fn shown(&mut self, ctx: &mut Ctx, now_ms: i64) {
+        if matches!(ctx.store.accounts, Load::NotReady | Load::Idle) {
             load_accounts(ctx);
         }
-        self.reload(ctx);
+        let every = if self.open() {
+            OPEN_READ_EVERY_MS
+        } else {
+            READ_EVERY_MS
+        };
+        if self
+            .read_ms
+            .is_some_and(|at| at <= now_ms && now_ms - at < every)
+        {
+            return;
+        }
+        self.reload(ctx, now_ms);
     }
 
-    fn reload(&self, ctx: &mut Ctx) {
+    fn reload(&mut self, ctx: &mut Ctx, now_ms: i64) {
         send(
             ctx,
             SettingsJob::Usage {
-                since_ms: Some(crate::tui::clock::now_ms() - READ_SINCE_MS),
+                since_ms: Some(now_ms - READ_SINCE_MS),
                 offset_minutes: 0,
             },
         );
+        self.read_ms = Some(now_ms);
+    }
+
+    fn open(&self) -> bool {
+        self.view.as_ref().is_some_and(|view| {
+            view.attempts
+                .iter()
+                .any(|attempt| attempt.state != AttemptState::Settled)
+        })
     }
 
     fn names(ctx: &Ctx) -> HashMap<String, String> {
@@ -338,7 +364,7 @@ impl Spend {
     pub(in crate::tui) fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) {
         match settings_event(arrival) {
             Some(SettingsEvent::Usage(Ok(report))) => self.view = Some(report.spend.clone()),
-            Some(SettingsEvent::SpendSet(Ok(()))) => self.reload(ctx),
+            Some(SettingsEvent::SpendSet(Ok(()))) => self.reload(ctx, crate::tui::clock::now_ms()),
             Some(SettingsEvent::SpendSet(Err(code))) => ctx.say(Message::error(
                 "Could not change the setting.",
                 refusal(code),
@@ -348,7 +374,7 @@ impl Spend {
                     "Using a free reset.",
                     "Its outcome shows under Free resets.",
                 ));
-                self.reload(ctx);
+                self.reload(ctx, crate::tui::clock::now_ms());
             }
             Some(SettingsEvent::Spent(Err(code))) => ctx.say(Message::error(
                 "Could not use the free reset.",
