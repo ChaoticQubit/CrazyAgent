@@ -160,6 +160,7 @@ pub struct Search {
     directories: Vec<PathBuf>,
     home: Option<PathBuf>,
     home_places: Vec<PathBuf>,
+    engine: Option<PathBuf>,
     registered: Vec<(String, PathBuf)>,
 }
 
@@ -189,6 +190,7 @@ impl Search {
             directories,
             home,
             home_places,
+            engine: None,
             registered,
         }
     }
@@ -266,6 +268,7 @@ impl Search {
                 <= SEARCH_DIRECTORIES_MAX
                     + HOME_PLACES_MAX
                     + LOCATIONS_MAX
+                    + 1
                     + SHIM_DIRECTORIES.len()
         );
         folders
@@ -277,14 +280,19 @@ impl Search {
         self.home.as_deref()
     }
 
-    /// The folders searched for one spec, in order: the search folders, the HOME folders and
-    /// the spec's own install folders under HOME. Input: the spec. Output: the folders.
+    /// The folders searched for one spec, in order: the search folders, the HOME folders, the
+    /// spec's own install folders under HOME, and last the engine's npm prefix `bin`
+    /// ([`Search::with_engine`]), so an owner's install always wins over the app's.
+    /// Input: the spec. Output: the folders.
     fn places(&self, spec: &HarnessSpec) -> Vec<PathBuf> {
         assert!(spec.locations.len() <= LOCATIONS_MAX);
         let mut folders: Vec<PathBuf> = self.directories.clone();
         folders.extend(self.home_places.iter().cloned());
         if let Some(home) = &self.home {
             folders.extend(spec.locations.iter().map(|relative| below(home, relative)));
+        }
+        if let Some(engine) = self.engine.as_ref().filter(|engine| !folders.contains(engine)) {
+            folders.push(engine.clone());
         }
         folders
     }
@@ -298,21 +306,17 @@ impl Search {
         self
     }
 
-    /// Adds the `bin` folder of the engine's own npm prefix
-    /// ([`crate::setup::harness_prefix`]), where an npm harness the engine installed lives,
-    /// after the PATH and system folders and before the HOME folders, once, even before the
-    /// first install makes it; a folder others can change is left out. Input: the engine
-    /// root. Output: the search, still bounded.
+    /// Sets the `bin` folder of the engine's own npm prefix
+    /// ([`crate::setup::harness_prefix`]), where an npm harness the engine installed lives, as
+    /// the last folder looked in, after every folder of the owner, even before the first
+    /// install makes it; a folder others can change is left out. Input: the engine root.
+    /// Output: the search.
     pub fn with_engine(mut self, engine_root: &Path) -> Self {
         let folder = crate::setup::harness_prefix(engine_root).join("bin");
-        let kept = usable_path(&folder)
-            && !self.directories.contains(&folder)
-            && self.directories.len() < SEARCH_DIRECTORIES_MAX
-            && crate::service::changeable_by_others(&folder).is_none();
-        if kept {
-            self.directories.push(folder);
-        }
-        assert!(self.directories.len() <= SEARCH_DIRECTORIES_MAX);
+        let kept =
+            usable_path(&folder) && crate::service::changeable_by_others(&folder).is_none();
+        self.engine = kept.then_some(folder);
+        assert!(self.engine.iter().all(|engine| engine.is_absolute()));
         self
     }
 
