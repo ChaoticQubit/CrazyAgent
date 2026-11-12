@@ -1505,7 +1505,7 @@ fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_
             codex,
             NativeAuthPhase::Unavailable,
             Some("native_auth_host_unavailable"),
-            "CrazyAgent didn't find a Codex it can run on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.",
+            "CrazyAgent didn't find a Codex it can run on this Mac, so ChatGPT sign-in isn't available. Install Codex, then choose Check again, or choose its file.",
         ),
         (
             claude,
