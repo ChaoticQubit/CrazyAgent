@@ -212,24 +212,35 @@ pub(crate) const RESERVED_PROVIDER_IDS: &[&str] = &[
     "google-gemini",
 ];
 
-/// Projects a logical connection into the supported isolated SDK selection.
-/// Takes the complete connection without configuration or project revisions.
-/// Returns a physical selection while retaining the original connection.
+/// Projects a logical connection into the supported isolated SDK selection. An
+/// OpenAI-compatible connection, and a keyed one saved under a provider id rcli keeps for a
+/// builtin, get a provider id hashed from the whole connection, so none shadows a builtin.
+/// Takes the complete connection without configuration or project revisions. Returns a
+/// physical selection while retaining the original connection.
 pub(crate) fn configured_sdk_connection(
     connection: &ModelConnection,
 ) -> Result<ModelConnection, ProtocolError> {
     let mut selection = connection.clone();
+    let hashed = || -> Result<CredentialRef, ProtocolError> {
+        let bytes =
+            serde_json::to_vec(connection).map_err(|_| error("rcli_master_profile_mismatch"))?;
+        CredentialRef::new(hash_bytes(&bytes))
+    };
     match connection.protocol.as_str() {
         "openai-compatible" => {
-            let bytes = serde_json::to_vec(connection)
-                .map_err(|_| error("rcli_master_profile_mismatch"))?;
-            selection.provider = CredentialRef::new(hash_bytes(&bytes))?;
+            selection.provider = hashed()?;
             selection.protocol = CredentialRef::new("openai-chat")?;
             assert_eq!(selection.provider.as_str().len(), 64);
         }
-        "openai-chat" | "openai-responses" | "anthropic-messages" => {}
+        "openai-chat" | "openai-responses" | "anthropic-messages" => {
+            if RESERVED_PROVIDER_IDS.contains(&connection.provider.as_str()) {
+                selection.provider = hashed()?;
+                assert_eq!(selection.provider.as_str().len(), 64);
+            }
+        }
         _ => return Err(error("rcli_master_profile_mismatch")),
     }
+    assert!(!RESERVED_PROVIDER_IDS.contains(&selection.provider.as_str()));
     assert_eq!(selection.id, connection.id);
     assert_eq!(selection.account_ref, connection.account_ref);
     Ok(selection)
