@@ -75,6 +75,34 @@ pub fn request_confirm(db: &Connection, now_ms: i64) -> rusqlite::Result<bool> {
     Ok(asked == 1)
 }
 
+/// What one step polls: every account, with the private Claude detail reads when they are
+/// due; only those detail reads, leaving the last poll's time alone; or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PollPlan {
+    Every { detail: bool },
+    DetailOnly,
+    Nothing,
+}
+
+/// Chooses what one step polls. Inputs: the last poll's time, the owner's last refresh ask,
+/// whether the detail reads are due and the time. Output: the plan.
+pub(crate) fn poll_plan(
+    polled_ms: Option<i64>,
+    refresh: Option<i64>,
+    detail: bool,
+    now_ms: i64,
+) -> PollPlan {
+    let due = match polled_ms {
+        None => true,
+        Some(polled) => now_ms - polled >= POLL_EVERY_MS || refresh.is_some_and(|at| at > polled),
+    };
+    if due || detail {
+        PollPlan::Every { detail }
+    } else {
+        PollPlan::Nothing
+    }
+}
+
 fn refresh_requested(db: &Connection) -> Result<Option<i64>, EngineError> {
     db.query_row(
         "SELECT requested_ms FROM usage_refresh WHERE singleton=1",
@@ -266,20 +294,16 @@ impl Usage {
         let access = (self.access)().unwrap_or_default();
         let refresh = refresh_requested(&self.db)?;
         let detail = extras::detail_due(&self.db, self.detail_ms, now_ms)?;
-        let due = detail
-            || match self.polled_ms {
-                None => true,
-                Some(polled) => {
-                    now_ms - polled >= POLL_EVERY_MS || refresh.is_some_and(|at| at > polled)
+        match poll_plan(self.polled_ms, refresh, detail, now_ms) {
+            PollPlan::Every { detail } => {
+                self.polled_ms = Some(now_ms);
+                if detail {
+                    self.detail_ms = Some(now_ms);
                 }
-            };
-        if due {
-            self.polled_ms = Some(now_ms);
-            if detail {
-                self.detail_ms = Some(now_ms);
+                self.poll_all(&access, now_ms, detail)?;
+                self.completed(UsageStep::Poll, now_ms)?;
             }
-            self.poll_all(&access, now_ms, detail)?;
-            self.completed(UsageStep::Poll, now_ms)?;
+            PollPlan::DetailOnly | PollPlan::Nothing => {}
         }
         self.doing = UsageStep::Team;
         self.scan_team(&access, now_ms)?;
