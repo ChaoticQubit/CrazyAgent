@@ -182,7 +182,7 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
         (vec![global, tools.clone(), other.clone()], true)
     );
     assert_eq!(
-        probed(&[other.clone()], places(), &home, "owner"),
+        probed(std::slice::from_ref(&other), places(), &home, "owner"),
         (vec![other.clone()], true),
         "no npm found, the login folders alone, and nothing failed"
     );
@@ -248,7 +248,7 @@ fn the_folder_probes_run_again_only_after_a_failure_or_a_miss_backing_off_to_ten
     probes.finish(vec![b.clone()], true, at);
     assert_eq!(
         probes.found,
-        [b.clone()],
+        std::slice::from_ref(&b),
         "a complete run replaces the folders"
     );
     assert!(!probes.start(at + BACKOFF_MAX, false));
@@ -331,29 +331,47 @@ fn a_folder_run_that_panics_is_recorded_as_failed_so_a_later_one_can_start() {
             .join()
     });
     assert!(outcome.is_err());
+    {
+        let probes = lock(&probes);
+        assert!(!probes.running, "the run no longer counts as going");
+        assert_eq!(probes.last.map(|run| run.complete), Some(false));
+    }
+    assert!(lock(&probes).start_now());
+    let found = PathBuf::from("/a/bin");
+    Running::new(&probes).finish(vec![found.clone()], true);
     let probes = lock(&probes);
-    assert!(!probes.running, "the run no longer counts as going");
-    assert_eq!(probes.last.map(|run| run.complete), Some(false));
+    assert!(!probes.running, "a run that finished records its folders");
+    assert_eq!(probes.found, [found]);
+    assert_eq!(probes.last.map(|run| run.complete), Some(true));
 }
+
+/// A program that leaves a daemon holding its output. The daemon leaves the run's process
+/// group first and marks `<program>.ready`, which the program waits for before it exits,
+/// so the run's group kill cannot reach it however slowly perl starts. It then waits for
+/// `<program>.go`, written once the run has ended, prints to the output and writes
+/// `<program>.late` as "open" or "closed"; it gives up after 30 seconds.
+const DAEMON: &str = r#"#!/bin/sh
+/usr/bin/perl -MPOSIX -e 'POSIX::setsid() or exit 1; $SIG{PIPE} = "IGNORE"; $| = 1; open(my $r, ">", "$ARGV[0].ready") or exit 1; close $r; my $tries = 0; until (-e "$ARGV[0].go") { exit 1 if ++$tries > 1500; select(undef, undef, undef, 0.02) } my $open = print STDOUT "late\n"; open(my $f, ">", "$ARGV[0].part") or exit 1; print $f ($open ? "open" : "closed"); close $f; rename("$ARGV[0].part", "$ARGV[0].late") or exit 1' "$0" &
+while [ ! -e "$0.ready" ]; do /bin/sleep 0.02; done
+echo done
+"#;
 
 #[test]
 fn a_daemon_holding_the_output_neither_keeps_the_run_waiting_nor_the_output_open() {
     let (_folder, root) = scratch();
-    let daemon = program(
-        &root.join("daemon"),
-        "#!/bin/sh\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); $SIG{PIPE} = \"IGNORE\"; $| = 1; sleep 2; my $open = print STDOUT \"late\\n\"; open(my $f, \">\", $ARGV[0]) or exit 1; print $f ($open ? \"open\" : \"closed\"); close $f' \"$0.late\" &\necho done\n",
-    );
+    let daemon = program(&root.join("daemon"), DAEMON);
     let started = Instant::now();
     assert_eq!(
-        run_timed(&mut Command::new(&daemon), Duration::from_secs(10)).as_deref(),
+        run_timed(&mut Command::new(&daemon), Duration::from_secs(30)).as_deref(),
         Some(&b"done\n"[..])
     );
     assert!(
-        started.elapsed() < Duration::from_secs(2),
+        started.elapsed() < Duration::from_secs(15),
         "the run ends a short grace after its program, not at the limit"
     );
+    std::fs::write(root.join("daemon.go"), b"").unwrap();
     let late = root.join("daemon.late");
-    while !late.exists() && started.elapsed() < Duration::from_secs(10) {
+    while !late.exists() && started.elapsed() < Duration::from_secs(60) {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(
