@@ -2107,5 +2107,28 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
         new.canonicalize().ok(),
         "the prefix node follows brew's own link to the new keg"
     );
-    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix.clone()));
+    let [project, home, tmp] = ["project", "agent-home", "agent-tmp"].map(|name| {
+        let folder = root.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    });
+    let sandbox = crate::sandbox::ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_node_for(&script)
+    .unwrap();
+    let package = prefix.join("lib/node_modules/@openai/codex");
+    assert!(
+        sandbox
+            .tool_roots()
+            .iter()
+            .chain(sandbox.read_roots())
+            .any(|granted| *granted == package),
+        "a sandboxed agent can still read the harness package"
+    );
 }
