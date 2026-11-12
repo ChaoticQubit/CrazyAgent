@@ -920,7 +920,7 @@ impl AgentContext {
     ) -> Result<Self, LaunchError> {
         let before = self.instructions.len();
         let section = crate::team::tool::tracker::rules(connection, project)
-            .map_err(|problem| LaunchError(problem.0))?;
+            .map_err(|problem| LaunchError(problem.0, None))?;
         if let Some(section) = section {
             assert!(section.len() <= crate::team::tool::tracker::RULES_BYTES_MAX);
             self.instructions.push_str(&section);
@@ -1048,7 +1048,11 @@ impl AgentContext {
             transcripts: false,
             off_tools: Vec::new(),
             native_team: None,
+            native_threads: None,
             relay: None,
+            model_proxy: None,
+            terminal_display: TerminalDisplay::Classic,
+            catch_up_main: false,
             settings: Applied::default(),
         }
     }
@@ -2296,6 +2300,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         arguments: Vec::new(),
         files: None,
         transcripts: false,
+        settings: Applied::default(),
         hooks: false,
         relay: false,
         denied: Vec::new(),
