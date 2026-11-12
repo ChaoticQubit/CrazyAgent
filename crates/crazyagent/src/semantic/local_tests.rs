@@ -171,7 +171,7 @@ fn a_file_is_used_only_at_its_pinned_size_and_sha256() {
     assert!(verified(&path, bytes.len() as u64, &sha).is_ok());
     assert_eq!(
         verified(&path, bytes.len() as u64 + 1, &sha).err(),
-        Some("search_model_hash"),
+        Some("search_model_mismatch"),
         "a size other than the pinned one"
     );
     let mut changed = bytes.clone();
@@ -179,7 +179,7 @@ fn a_file_is_used_only_at_its_pinned_size_and_sha256() {
     write_file(folder.path(), "model.safetensors", &changed);
     assert_eq!(
         verified(&path, bytes.len() as u64, &sha).err(),
-        Some("search_model_hash"),
+        Some("search_model_mismatch"),
         "one changed byte at the pinned size"
     );
     assert_eq!(
@@ -223,7 +223,26 @@ fn the_pinned_files_are_the_reviewed_revision_on_huggingface_co() {
 }
 
 #[test]
+fn the_local_model_is_shared_between_the_indexer_and_queries() {
+    fn shared<T: Send + Sync>() {}
+    shared::<LocalModel>();
+    shared::<Downloads>();
+}
+
+#[test]
 fn every_local_model_code_has_a_plain_sentence() {
+    assert_eq!(
+        CODES,
+        [
+            "search_model_confirm",
+            "search_model_downloading",
+            "search_model_download_failed",
+            "search_model_mismatch",
+            "search_model_store_unavailable",
+            "search_model_missing",
+        ],
+        "the codes agreed with w-v3-plugins, plus the confirm leader QC asked for"
+    );
     for code in CODES {
         assert!(code.starts_with("search_model_"), "{code}");
         assert!(

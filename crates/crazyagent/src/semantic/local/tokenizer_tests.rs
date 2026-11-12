@@ -182,19 +182,19 @@ fn a_tokenizer_file_that_is_not_the_pinned_bert_uncased_wordpiece_is_refused() {
         assert_ne!(text, &good, "case {at} changes the file");
         assert_eq!(
             Tokenizer::from_json(text.as_bytes(), FIXTURE_SHAPE.rows).err(),
-            Some("search_model_format"),
+            Some("search_model_mismatch"),
             "case {at}"
         );
     }
     assert_eq!(
         Tokenizer::from_json(good.as_bytes(), FIXTURE_SHAPE.rows + 1).err(),
-        Some("search_model_format"),
+        Some("search_model_mismatch"),
         "the vocabulary must have one id per model row"
     );
     let padded = format!("{good}{}", " ".repeat(TOKENIZER_BYTES_MAX));
     assert_eq!(
         Tokenizer::from_json(padded.as_bytes(), FIXTURE_SHAPE.rows).err(),
-        Some("search_model_format"),
+        Some("search_model_mismatch"),
         "a file past TOKENIZER_BYTES_MAX is not parsed"
     );
 }

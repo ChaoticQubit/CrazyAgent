@@ -104,7 +104,7 @@ fn a_file_that_is_not_one_f32_tensor_of_the_pinned_shape_filling_the_file_is_ref
     for (case, bytes) in refused {
         assert_eq!(
             open_bytes(&bytes).err(),
-            Some("search_model_format"),
+            Some("search_model_mismatch"),
             "{case}"
         );
     }
@@ -121,11 +121,11 @@ fn a_row_with_a_value_that_is_not_finite_is_refused_when_read() {
     let mut sum = vec![0.0; FIXTURE_SHAPE.dims];
     assert_eq!(
         rows.add(3, 1.0, &mut sum).err(),
-        Some("search_model_format")
+        Some("search_model_mismatch")
     );
     assert_eq!(
         rows.add(4, 1.0, &mut sum).err(),
-        Some("search_model_format")
+        Some("search_model_mismatch")
     );
     let mut fine = vec![0.0; FIXTURE_SHAPE.dims];
     rows.add(5, 1.0, &mut fine).unwrap();

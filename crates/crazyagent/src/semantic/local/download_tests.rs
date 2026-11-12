@@ -158,9 +158,9 @@ fn a_file_is_kept_only_when_its_size_and_sha256_match_the_pin() {
     longer.push(b' ');
     let shorter = &bytes[..bytes.len() - 1];
     let cases: [(&str, &[u8], &str); 3] = [
-        ("one changed byte", &changed, "search_model_hash"),
-        ("one byte over", &longer, "search_model_too_large"),
-        ("one byte short", shorter, "search_model_hash"),
+        ("one changed byte", &changed, "search_model_mismatch"),
+        ("one byte over", &longer, "search_model_mismatch"),
+        ("one byte short", shorter, "search_model_mismatch"),
     ];
     for (case, sent, code) in cases {
         let done = AtomicU64::new(0);
@@ -214,7 +214,7 @@ fn a_download_lands_both_files_in_the_model_folder_and_the_model_opens_from_them
     std::fs::write(models.join("model.safetensors"), b"swapped").unwrap();
     assert_eq!(
         LocalModel::open_pinned(root.path(), &pins, &FIXTURE_SHAPE).err(),
-        Some("search_model_hash"),
+        Some("search_model_mismatch"),
         "every open re-hashes"
     );
 }
@@ -259,13 +259,13 @@ fn a_failed_fetch_reads_failed_with_its_code_and_clears_stale_parts() {
     let phase = wait_for(&downloads, |phase| {
         !matches!(phase, Phase::Downloading { .. })
     });
-    assert_eq!(phase, Phase::Failed("search_model_unreachable"));
+    assert_eq!(phase, Phase::Failed("search_model_download_failed"));
     match downloads.state() {
         ModelState::Failed {
             problem,
             size_bytes,
         } => {
-            assert_eq!(problem.code, "search_model_unreachable");
+            assert_eq!(problem.code, "search_model_download_failed");
             assert_eq!(size_bytes, pins[0].bytes + pins[1].bytes);
         }
         other => panic!("{other:?}"),
@@ -275,18 +275,85 @@ fn a_failed_fetch_reads_failed_with_its_code_and_clears_stale_parts() {
 
 #[cfg(unix)]
 #[test]
-fn a_second_start_or_a_delete_while_downloading_is_refused() {
+fn a_second_start_keeps_the_running_download_and_a_delete_while_it_runs_is_refused() {
     let scripts = tempfile::tempdir().unwrap();
-    let curl = stand_in(scripts.path(), "exec /bin/sleep 60");
+    let curl = stand_in(scripts.path(), "printf partial\nexec /bin/sleep 60");
     let root = tempfile::tempdir().unwrap();
     let pins = fixture_pins();
     let total = pins[0].bytes + pins[1].bytes;
     let downloads = Downloads::with_curl(root.path().to_path_buf(), curl, pins);
     downloads.start(total).unwrap();
-    assert_eq!(downloads.start(total), Err("search_model_busy"));
-    assert_eq!(downloads.delete(), Err("search_model_busy"));
+    wait_for(&downloads, |phase| {
+        phase == Phase::Downloading { done_bytes: 7 }
+    });
+    assert_eq!(
+        downloads.start(total),
+        Ok(()),
+        "a second click is not an error"
+    );
+    assert_eq!(
+        downloads.phase(),
+        Phase::Downloading { done_bytes: 7 },
+        "the running download goes on, its progress kept"
+    );
+    assert_eq!(downloads.delete(), Err("search_model_downloading"));
     downloads.cancel();
     wait_for(&downloads, |phase| phase == Phase::NotDownloaded);
+}
+
+#[test]
+fn a_start_with_both_files_ready_starts_nothing() {
+    let root = tempfile::tempdir().unwrap();
+    let models = folder(root.path());
+    std::fs::create_dir_all(&models).unwrap();
+    for pinned in PINNED {
+        std::fs::File::create(models.join(pinned.name))
+            .unwrap()
+            .set_len(pinned.bytes)
+            .unwrap();
+    }
+    let downloads = Downloads::new(root.path().to_path_buf());
+    assert_eq!(downloads.start(DOWNLOAD_BYTES), Ok(()));
+    assert_eq!(downloads.phase(), Phase::Ready, "no curl child was started");
+}
+
+#[test]
+fn the_engine_calls_refuse_an_unconfirmed_start_and_read_one_download_per_root() {
+    let root = tempfile::tempdir().unwrap();
+    assert_eq!(
+        start_download(root.path(), 0).map_err(|error| error.0),
+        Err("search_model_confirm".to_owned())
+    );
+    assert_eq!(
+        state(root.path()),
+        ModelState::NotDownloaded {
+            size_bytes: DOWNLOAD_BYTES
+        }
+    );
+    let models = folder(root.path());
+    std::fs::create_dir_all(&models).unwrap();
+    for pinned in PINNED {
+        std::fs::File::create(models.join(pinned.name))
+            .unwrap()
+            .set_len(pinned.bytes)
+            .unwrap();
+    }
+    assert_eq!(
+        state(root.path()),
+        ModelState::Ready {
+            size_bytes: DOWNLOAD_BYTES
+        }
+    );
+    assert!(start_download(root.path(), DOWNLOAD_BYTES).is_ok());
+    cancel_download(root.path());
+    delete(root.path()).unwrap();
+    assert!(names_in(&models).is_empty());
+    assert_eq!(
+        state(root.path()),
+        ModelState::NotDownloaded {
+            size_bytes: DOWNLOAD_BYTES
+        }
+    );
 }
 
 #[test]
