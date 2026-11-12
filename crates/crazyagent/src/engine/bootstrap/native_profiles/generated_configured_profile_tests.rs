@@ -161,3 +161,92 @@ fn imp1035_api_key_configuration_requires_private_secret_before_creating_home() 
         1
     );
 }
+
+/// The case's connection as a keyed OpenAI account saved before DEC-150 addendum 9a, under
+/// the builtin provider id rcli keeps. The key reference is synthetic. Input: the case.
+/// Output: the connection.
+fn keyed_under_builtin(case: &ConfiguredCase) -> ModelConnection {
+    ModelConnection {
+        provider: reference("openai"),
+        auth: ModelAuthentication::ApiKey {
+            credential_ref: reference("synthetic-key-ref-legacy"),
+        },
+        ..case.connection.clone()
+    }
+}
+
+/// Writes the SDK home account setup generated for a keyed connection before DEC-150
+/// addendum 9a: the engine's config naming the builtin provider id, and no profile slot,
+/// as a save refused at its profile step left it. Inputs: the case, the connection and
+/// the model id the config names. Output: the config's path.
+fn legacy_home(case: &ConfiguredCase, connection: &ModelConnection, model: &str) -> PathBuf {
+    let homes = case.root.path().join("state/configured-sdk-homes");
+    private_dir(&homes);
+    let home = homes.join(digest(case.profile.as_str().as_bytes()));
+    private_dir(&home);
+    private_dir(&home.join(".backboard"));
+    let ModelEndpoint::Http { url } = &connection.endpoint else {
+        panic!("a keyed RCLI connection has an HTTP endpoint");
+    };
+    let config = home.join(".backboard/config.json");
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "model": { "provider": connection.provider.as_str(), "model": model },
+        "providers": [{
+            "id": connection.provider.as_str(), "name": "Configured provider",
+            "protocol": connection.protocol.as_str(), "baseUrl": url,
+            "auth": { "type": "apiKey" }
+        }]
+    }))
+    .unwrap();
+    private_file(&config, &bytes);
+    config
+}
+
+fn synthetic_secret() -> crate::engine::owner::AccountSecret {
+    crate::engine::owner::AccountSecret::new(b"synthetic-key-not-a-real-key".to_vec()).unwrap()
+}
+
+#[test]
+fn a_keyed_account_saved_before_the_builtin_id_fix_sets_up_again_on_its_hashed_provider_id() {
+    let mut case = ConfiguredCase::new(true, false);
+    let keyed = keyed_under_builtin(&case);
+    let config = legacy_home(&case, &keyed, &keyed.model.id);
+    let metadata = case
+        .custody
+        .prepare_configured_rcli_profile(
+            &case.host,
+            &keyed,
+            &case.profile,
+            Some(&synthetic_secret()),
+        )
+        .unwrap();
+    let bytes = std::fs::read(&config).unwrap();
+    assert_eq!(digest(&bytes), metadata.profile_config_sha256);
+    let hashed = crate::rcli_host::configured_sdk_connection(&keyed)
+        .unwrap()
+        .provider;
+    assert_ne!(hashed, keyed.provider);
+    let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(written["model"]["provider"], hashed.as_str());
+    assert_eq!(written["providers"][0]["id"], hashed.as_str());
+    assert!(!config.with_file_name("keys.json").exists());
+}
+
+#[test]
+fn a_slotless_home_that_is_not_the_engine_s_old_config_for_the_account_stays_refused() {
+    let mut case = ConfiguredCase::new(true, false);
+    let keyed = keyed_under_builtin(&case);
+    let config = legacy_home(&case, &keyed, "another-model");
+    let before = std::fs::read(&config).unwrap();
+    let refused = case
+        .custody
+        .prepare_configured_rcli_profile(
+            &case.host,
+            &keyed,
+            &case.profile,
+            Some(&synthetic_secret()),
+        )
+        .unwrap_err();
+    assert_eq!(refused.0, "native_profile_custody_unsafe");
+    assert_eq!(std::fs::read(&config).unwrap(), before);
+}

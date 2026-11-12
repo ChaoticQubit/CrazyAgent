@@ -5593,6 +5593,19 @@ auth = { method = "none" }"#;
         crate::config::configured_profile_ref(&spare_connection()).unwrap()
     }
 
+    /// The pool's RCLI key as a keyed OpenAI account saved before DEC-150 addendum 9a,
+    /// under the builtin provider id rcli keeps, as Fixture::legacy_keyed's settings hold
+    /// it. The key reference is synthetic. Output: the connection.
+    fn legacy_keyed_connection() -> ModelConnection {
+        ModelConnection {
+            provider: reference("openai"),
+            auth: ModelAuthentication::ApiKey {
+                credential_ref: reference("synthetic-key-ref-legacy"),
+            },
+            ..local_connection()
+        }
+    }
+
     struct Fixture {
         storage: Storage,
         config: EffectiveConfig,
@@ -5777,6 +5790,22 @@ auth = { method = "none" }"#;
             ] {
                 assert!(config.contains(&replaced), "{replaced}");
             }
+            Self::build_with(&config, true, false, PROMPT).await
+        }
+
+        /// A master whose pool's RCLI key is legacy_keyed_connection: a keyed OpenAI
+        /// account saved before DEC-150 addendum 9a under the builtin provider id.
+        async fn legacy_keyed() -> Self {
+            let provider = "id = \"local-connection\"\nprovider = \"openai\"";
+            let auth =
+                r#"auth = { method = "api_key", credential_ref = "synthetic-key-ref-legacy" }"#;
+            let config = CONFIG
+                .replace(
+                    "id = \"local-connection\"\nprovider = \"local-provider\"",
+                    provider,
+                )
+                .replace(r#"auth = { method = "none" }"#, auth);
+            assert!(config.contains(provider) && config.contains(auth));
             Self::build_with(&config, true, false, PROMPT).await
         }
 
@@ -6312,6 +6341,42 @@ auth = { method = "none" }"#;
         home
     }
 
+    /// Writes the SDK home account setup generated for a keyed RCLI key before DEC-150
+    /// addendum 9a: the engine's own config naming the builtin provider id, and no profile
+    /// slot, as a save refused at its profile step left it. Inputs: the fixture, the key
+    /// and the model id the config names. Output: the config's path.
+    fn legacy_generated_home(case: &Fixture, connection: &ModelConnection, model: &str) -> PathBuf {
+        let profile = super::super::account_profile::configured_profile_ref(connection).unwrap();
+        let homes = case.root.path().join("configured-sdk-homes");
+        if !homes.exists() {
+            std::fs::create_dir(&homes).unwrap();
+            std::fs::set_permissions(&homes, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let home = homes.join(format!("{:x}", Sha256::digest(profile.as_str().as_bytes())));
+        let sdk = home.join(".backboard");
+        std::fs::create_dir_all(&sdk).unwrap();
+        for directory in [&home, &sdk] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let ModelEndpoint::Http { url } = &connection.endpoint else {
+            panic!("a keyed RCLI key has an HTTP endpoint");
+        };
+        let config = sdk.join("config.json");
+        private_file(
+            &config,
+            &serde_json::to_vec(&serde_json::json!({
+                "model": { "provider": connection.provider.as_str(), "model": model },
+                "providers": [{
+                    "id": connection.provider.as_str(), "name": "Configured provider",
+                    "protocol": connection.protocol.as_str(), "baseUrl": url,
+                    "auth": { "type": "apiKey" }
+                }]
+            }))
+            .unwrap(),
+        );
+        config
+    }
+
     /// Queues the fixture session's next turn and names it. Inputs: the fixture and the
     /// send's id. Output: the queued turn's prepare command.
     async fn next_turn(case: &Fixture, id: &str) -> MasterRuntimeCommand {
@@ -6668,6 +6733,55 @@ auth = { method = "none" }"#;
             case.session.selection.target_profile_ref
         );
         drop(tx);
+        case.close().await;
+    }
+
+    /// KY-M1 (DEC-150 addendum 9a): a keyed RCLI key saved under an rcli builtin provider id
+    /// before the fix, already in the pool, left a slot-less generated home naming that id.
+    /// The next master turn rewrites it to the hashed id and runs, with no owner action.
+    #[tokio::test]
+    async fn a_pooled_keyed_rcli_key_saved_before_the_builtin_id_fix_runs_the_master_unaided() {
+        let case = Fixture::legacy_keyed().await;
+        let connection = legacy_keyed_connection();
+        assert_eq!(
+            case.config
+                .settings
+                .model_access
+                .as_ref()
+                .unwrap()
+                .connections[0],
+            connection
+        );
+        let config = legacy_generated_home(&case, &connection, &connection.model.id);
+        let result = case.runtime(case.prepare()).await.unwrap();
+        let MasterRuntimeResult::Prepared(prepared) = result else {
+            panic!("the legacy keyed home must be repaired and prepare the first turn");
+        };
+        assert_eq!(prepared.attempt.connection, connection);
+        let hashed = crate::rcli_host::configured_sdk_connection(&connection)
+            .unwrap()
+            .provider;
+        assert_ne!(hashed, connection.provider);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        assert_eq!(written["model"]["provider"], hashed.as_str());
+        assert_eq!(written["providers"][0]["id"], hashed.as_str());
+        case.close().await;
+    }
+
+    /// KY-M1: only the engine's exact old config for the key is repaired; a slot-less home
+    /// holding anything else still stops the master and is left as it was.
+    #[tokio::test]
+    async fn a_slotless_keyed_home_that_is_not_the_engine_s_old_config_still_stops_the_master() {
+        let case = Fixture::legacy_keyed().await;
+        let connection = legacy_keyed_connection();
+        let config = legacy_generated_home(&case, &connection, "another-model");
+        let before = std::fs::read(&config).unwrap();
+        let Err(refused) = case.runtime(case.prepare()).await else {
+            panic!("a slot-less home that is not the engine's old config must stop the master");
+        };
+        assert_eq!(refused.0, "rcli_profile_configuration_invalid");
+        assert_eq!(std::fs::read(&config).unwrap(), before);
         case.close().await;
     }
 
