@@ -1860,6 +1860,7 @@ mod tests {
                     &executable,
                     &native,
                     &policy,
+                    crate::trust::Trust::Reviewed,
                     &[],
                 )
                 .err()
@@ -2576,6 +2577,7 @@ mod tests {
             &ModelEndpoint::Native {},
             &engine,
             &none,
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .err()
@@ -2591,6 +2593,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &none,
+            crate::trust::Trust::Reviewed,
             &[],
         )
         .map(|sandbox| sandbox.sandbox().profile());
@@ -2986,9 +2989,12 @@ mod tests {
         let temporary = private_root();
         let engine = temporary.path().join("crazyagent");
         let drop = temporary.path().join(crate::team::tool::DROP_FILE);
+        let mailbox = drop.with_file_name(crate::team::tool::MAILBOX_FOLDER);
         let tools = crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &drop,
+            mailbox: &mailbox,
+            off: &[],
         };
         for (name, tools) in [("off", None), ("on", Some(tools))] {
             let home = temporary.path().join(name);
