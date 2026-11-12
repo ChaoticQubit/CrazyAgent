@@ -6,6 +6,7 @@ use std::path::Path;
 
 pub mod local;
 pub mod settings;
+pub mod vectors;
 
 /// The lowercase hex SHA-256 of some bytes. Input: the bytes. Output: 64 hex digits.
 pub fn sha256_hex(bytes: &[u8]) -> String {
