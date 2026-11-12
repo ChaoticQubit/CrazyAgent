@@ -17,6 +17,15 @@ const VERSION_ENTRIES_MAX: usize = 64;
 const VERSIONS_PER_MANAGER_MAX: usize = 4;
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// Linux package folders often missing from the engine's PATH: Linuxbrew, where setup
+/// installs tmux, and the NixOS system and default profiles. They are looked in before the
+/// system folders, under the same entry checks as every other place.
+#[cfg(target_os = "linux")]
+const LINUX_FOLDERS: [&str; 3] = [
+    "/home/linuxbrew/.linuxbrew/bin",
+    "/run/current-system/sw/bin",
+    "/nix/var/nix/profiles/default/bin",
+];
 /// Node version managers' real install folders under HOME, as (versions folder, bin folder
 /// inside one version): the files their shims start, never the shims themselves.
 const NODE_VERSION_FOLDERS: [(&str, &str); 5] = [
@@ -108,6 +117,8 @@ impl Places {
                     .map(|relative| below(home, relative)),
             );
         }
+        #[cfg(target_os = "linux")]
+        folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
         Self::new(folders, home)
     }
