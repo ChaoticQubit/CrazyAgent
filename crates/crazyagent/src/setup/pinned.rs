@@ -41,6 +41,7 @@ pub fn system_folders(fixed: &[&str]) -> Vec<PathBuf> {
 pub struct PinnedInstaller {
     setup: PathBuf,
     search: Vec<PathBuf>,
+    places: crate::tools::Places,
 }
 
 impl PinnedInstaller {
@@ -56,7 +57,28 @@ impl PinnedInstaller {
             }
         }
         assert!(!search.is_empty());
-        Self { setup, search }
+        let places =
+            crate::tools::Places::new(search.clone(), std::env::var_os("HOME").map(PathBuf::from));
+        Self {
+            setup,
+            search,
+            places,
+        }
+    }
+
+    /// Same as [`PinnedInstaller::with_paths`], finding programs wherever the tool resolver
+    /// looks in `places` ([`crate::tools::resolve`]), so setup finds a tool exactly where a
+    /// launch that needs it does. Inputs: the engine root, the folders the programs setup
+    /// starts search after `setup/bin`, and the places. Output: the installer.
+    pub fn with_places(
+        engine_root: &Path,
+        system: Vec<PathBuf>,
+        places: crate::tools::Places,
+    ) -> Self {
+        Self {
+            places,
+            ..Self::with_paths(engine_root, system)
+        }
     }
 
     /// Returns the private install folder, `<engine root>/setup`.

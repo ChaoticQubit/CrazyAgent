@@ -291,7 +291,7 @@ fn pack_word(state: &PackState) -> &'static str {
 fn tool_word(state: &DependencyState) -> String {
     match state {
         DependencyState::Checking => "Checking".into(),
-        DependencyState::Missing => "Not installed".into(),
+        DependencyState::Missing { .. } => "Not installed".into(),
         DependencyState::Found { version } => format!("Found {}", version.as_str()),
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
@@ -599,7 +599,7 @@ impl AppSetup {
             .filter(|tool| {
                 matches!(
                     tool.state,
-                    DependencyState::Missing | DependencyState::Failed { .. }
+                    DependencyState::Missing { .. } | DependencyState::Failed { .. }
                 )
             })
             .count();

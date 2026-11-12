@@ -1536,7 +1536,7 @@ export type DependencyName = "tmux" | "uv" | "graphify";
 
 export type DependencyState =
   | { state: "checking" }
-  | { state: "missing" }
+  | { state: "missing"; line?: string }
   | { state: "found"; version: string }
   | { state: "installing" }
   | { state: "installed"; version: string }

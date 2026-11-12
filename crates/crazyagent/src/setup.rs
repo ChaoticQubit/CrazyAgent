@@ -123,6 +123,17 @@ impl Dependency {
         }
     }
 
+    /// Why this dependency cannot run when no answer names another reason: it is found
+    /// nowhere the tool resolver looks. Output: the missing tool, with its owner line.
+    pub fn not_found(self) -> crate::tools::Missing {
+        crate::tools::Missing {
+            tool: self.program().to_owned(),
+            reason: crate::tools::Reason::NotFound,
+            needs: None,
+            looked: Vec::new(),
+        }
+    }
+
     /// The plain name the setup screen shows, such as `Graphify command`, kept apart
     /// from the pack entry of the same tool.
     pub fn label(self) -> &'static str {
@@ -221,15 +232,26 @@ pub enum Pin {
 
 /// Where one dependency stands on the setup screen. `Checking` means its version check
 /// is still running in the background; the screen reads the status again to see it.
+/// `Missing` carries the tool resolver's owner line for why the tool cannot run
+/// ([`crate::tools::Missing::line`]), the same words a launch that needs it says.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DependencyState {
     Checking,
-    Missing,
-    Found { version: Version },
+    Missing {
+        #[serde(default)]
+        line: String,
+    },
+    Found {
+        version: Version,
+    },
     Installing,
-    Installed { version: Version },
-    Failed { reason: String },
+    Installed {
+        version: Version,
+    },
+    Failed {
+        reason: String,
+    },
 }
 
 /// One dependency as the setup screen lists it: which tool, its plain name and its state.
@@ -364,6 +386,16 @@ pub fn locked_tool_args(
 /// Implementations never use sudo and never change global configuration.
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
+
+    /// Finds a dependency as [`Installer::find`] does, naming why it cannot run when it is
+    /// missing ([`crate::tools::Missing`]), the answer the setup screen shows. Input: the
+    /// dependency. Output: its version, why it cannot run, or the check's code.
+    fn lookup(
+        &self,
+        dep: Dependency,
+    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+        Ok(self.find(dep)?.ok_or_else(|| dep.not_found()))
+    }
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;
 
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
