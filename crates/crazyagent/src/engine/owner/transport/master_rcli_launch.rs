@@ -50,6 +50,7 @@ impl OwnerRuntimeHandle {
             cwd: prepared.cwd.clone(),
             profile_config_sha256,
             instructions: None,
+            model: None,
         })
     }
 }

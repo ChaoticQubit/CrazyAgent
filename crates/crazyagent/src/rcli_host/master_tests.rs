@@ -45,6 +45,7 @@ impl Case {
             cwd,
             profile_config_sha256: String::new(),
             instructions: None,
+            model: None,
         };
         let mut case = Self {
             _root: root,
@@ -524,6 +525,59 @@ fn an_instructions_file_adds_one_flag_and_only_a_private_single_link_file_outsid
     rejection(case.launch.command(), "rcli_master_file_rejected");
     case.launch.instructions = Some(file);
     assert_eq!(case.launch.command().unwrap().get_args().count(), 10);
+}
+
+/// DEC-150 M-5: a chosen RCLI master model adds one `--model <profile provider>/<id>` flag
+/// after every other flag. No model, or the account's own model, keeps today's argv, and a
+/// model the account's provider does not serve, or one the store would not save, never
+/// launches.
+#[test]
+fn a_chosen_master_model_adds_one_provider_qualified_flag_last_and_only_when_served() {
+    let mut case = Case::new();
+    let mut value = config();
+    value["providers"][0]["protocol"] = json!("anthropic-messages");
+    case.config(value);
+    case.launch.binding.connection.protocol = credential("anthropic-messages");
+    let args = |case: &Case| -> Vec<std::ffi::OsString> {
+        let command = case.launch.command().unwrap();
+        assert_eq!(
+            command.get_envs().count(),
+            1,
+            "the model adds no environment"
+        );
+        command.get_args().map(|value| value.to_owned()).collect()
+    };
+    assert_eq!(args(&case).len(), 8);
+    case.launch.model = Some("selected-model".into());
+    assert_eq!(args(&case).len(), 8, "the account's own model adds no flag");
+    case.launch.model = Some("claude-opus-5-5".into());
+    let plain = args(&case);
+    assert_eq!(plain.len(), 10);
+    assert_eq!(plain[8], "--model");
+    assert_eq!(plain[9], "local-a/claude-opus-5-5");
+    let runtime = case.launch.cwd.parent().unwrap().join("master-runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let file = runtime.join("instructions.md");
+    fs::write(&file, "OWNER-RULE-86\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    case.launch.instructions = Some(file.clone());
+    let both = args(&case);
+    assert_eq!(both.len(), 12);
+    assert_eq!(both[8], "--instructions-file");
+    assert_eq!(both[9], file.as_os_str());
+    assert_eq!(both[10], "--model");
+    assert_eq!(both[11], "local-a/claude-opus-5-5");
+    for refused in [
+        "gpt-6.1-sol",
+        "anthropic/claude-opus-5.5",
+        "-claude-opus-5-5",
+        "claude opus",
+        "",
+    ] {
+        case.launch.model = Some(refused.into());
+        rejection(case.launch.command(), "rcli_master_model_unserved");
+    }
 }
 
 /// One frame of a prompted turn as its host reads it, for the capture rows. Inputs: the
