@@ -1,6 +1,7 @@
 use super::client::OwnerEvent;
 use super::client::app_setup::AppSetupEvent;
 use super::client::changes::{ChangesQuery, ChangesView};
+use super::client::notifications::{NoticesEvent, NoticesQuery, NoticesReply};
 use super::client::questions::{QuestionsEvent, QuestionsQuery, QuestionsReply};
 use super::client::settings::SettingsEvent;
 use super::clock;
@@ -291,6 +292,8 @@ impl Shell {
         if self.ctx.link == Link::Ready {
             self.ctx
                 .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+            self.ctx
+                .request(Request::Notices(Box::new(NoticesQuery::counts())));
         }
         let ctx = &mut self.ctx;
         self.stack
@@ -300,8 +303,8 @@ impl Shell {
     }
 
     /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
-    /// many change sets wait for the owner, in all and in the top screen's project, then
-    /// refreshes the top screen.
+    /// many change sets wait for the owner, in all and in the top screen's project, and the
+    /// header's notification counts, then refreshes the top screen.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn tick(&mut self) {
         let project = self.top().project();
@@ -309,6 +312,8 @@ impl Shell {
             .request(Request::Changes(Box::new(ChangesQuery::Waiting {
                 project,
             })));
+        self.ctx
+            .request(Request::Notices(Box::new(NoticesQuery::counts())));
         self.refresh();
     }
 
@@ -628,6 +633,11 @@ impl Shell {
                 {
                     self.questions(event);
                 }
+                if let Arrival::Owner(event) = &arrival
+                    && let OwnerEvent::Notices(event) = event.as_ref()
+                {
+                    self.notices(event);
+                }
             }
             _ => {}
         }
@@ -682,6 +692,24 @@ impl Shell {
             (QuestionsQuery::Answer { .. } | QuestionsQuery::Dismiss { .. }, Ok(_)) => {
                 self.ctx
                     .request(Request::Questions(Box::new(QuestionsQuery::Counts)));
+            }
+            _ => {}
+        }
+    }
+
+    /// Keeps the header's notification counts from every read over the whole store; a read
+    /// of one project leaves them, a failed read keeps the last counts, and a change that
+    /// took effect reads them again. Input: one notification reply. Output: none.
+    fn notices(&mut self, event: &NoticesEvent) {
+        match (&event.query, &event.result) {
+            (NoticesQuery::Page(query), Ok(NoticesReply::Page(page)))
+                if query.project_id.is_none() =>
+            {
+                self.ctx.store.notices = Some(page.counts);
+            }
+            (NoticesQuery::Act { .. }, Ok(_)) => {
+                self.ctx
+                    .request(Request::Notices(Box::new(NoticesQuery::counts())));
             }
             _ => {}
         }
@@ -893,6 +921,7 @@ impl Shell {
         let top = self.stack.last().expect("the stack is never empty");
         let waiting = waiting_text(self.ctx.store.waiting.as_ref(), top.project().as_ref());
         let status = with_waiting(waiting, top.status(&self.ctx), &theme);
+        let status = with_notices(self.ctx.store.notices.as_ref(), status, &theme);
         let header_line = header(width, &top.crumbs(), status, &theme, glyphs);
         draw_lines(frame.buffer_mut(), head, &[header_line]);
         draw_lines(
@@ -992,8 +1021,36 @@ fn waiting_text(
 /// items and pending Actions, each left out at zero. Input: the last counts read, none
 /// before the first read. Output: "N unread, M pending", or None when both are zero.
 fn notice_text(counts: Option<&crate::notifications::NoticeCounts>) -> Option<String> {
-    let _ = counts;
-    None
+    let counts = counts?;
+    let parts: Vec<String> = [(counts.unread, "unread"), (counts.pending, "pending")]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, word)| format!("{count} {word}"))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(", "))
+}
+
+/// The header status with the notification counts in front of it, in the warning color
+/// while an Action is pending. Inputs: the last counts read, the status so far and the
+/// theme. Output: the status line; no counts leave the status as it is.
+fn with_notices(
+    counts: Option<&crate::notifications::NoticeCounts>,
+    status: Line<'static>,
+    theme: &Theme,
+) -> Line<'static> {
+    let Some(text) = notice_text(counts) else {
+        return status;
+    };
+    let style = if counts.is_some_and(|counts| counts.pending > 0) {
+        theme.warning
+    } else {
+        theme.accent
+    };
+    let note = Line::from(Span::styled(text, style));
+    if status.width() == 0 {
+        return note;
+    }
+    join([note, Line::raw("  "), status])
 }
 
 /// Counts change sets in one sentence. Inputs: the count and where they wait.

@@ -155,6 +155,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Notices(query) => connection.notices(*query).unwrap(),
                 other => panic!("Settings pools never send {other:?}"),
             }
         }

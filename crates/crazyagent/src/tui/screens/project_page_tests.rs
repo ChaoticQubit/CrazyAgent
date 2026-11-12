@@ -193,6 +193,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                 {
                     connection.questions(*query).unwrap();
                 }
+                Request::Notices(query) => connection.notices(*query).unwrap(),
                 Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
                 other => panic!("project pages never send {other:?}"),
             }
@@ -743,6 +744,9 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                 **query,
                 QuestionsQuery::Counts | QuestionsQuery::List { .. }
             ),
+            Request::Notices(query) => {
+                **query == crate::tui::client::notifications::NoticesQuery::counts()
+            }
             other => matches!(
                 other,
                 Request::Pools
