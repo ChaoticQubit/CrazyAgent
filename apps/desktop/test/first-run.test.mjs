@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { validateProfile, emptyProfileDraft, draftFromProfile, Welcome } = await import("../src/screens/first-run/index.tsx");
+const { validateProfile, emptyProfileDraft, draftFromProfile, Welcome, skipGuideNote } = await import("../src/screens/first-run/index.tsx");
 
 const draft = (patch = {}) => ({ ...emptyProfileDraft(), name: "Mira Okafor", ...patch });
 
@@ -67,4 +67,11 @@ test("the last first-run page offers Learn CrazyAgent, ticked, under Add account
   assert.match(markup, /<p>A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets\. Its first step is an optional demo project\.<\/p>/);
   assert.match(markup, /<label class="checkbox"><input type="checkbox" checked=""\/><span>Show the guide on Home<\/span><\/label>/);
   assert.doesNotMatch(markup, /role="alert"/);
+});
+
+test("skipping the guide says nothing when saved and says it stays on Home when it did not save", () => {
+  assert.equal(skipGuideNote({ kind: "ok", value: undefined }), undefined);
+  assert.equal(skipGuideNote({ kind: "not_ready" }), "Skipping the guide isn't ready in this build, so it stays on Home.");
+  assert.equal(skipGuideNote({ kind: "error", code: "uncertain", message: "CrazyAgent did not answer in time. Try again." }),
+    "Couldn't skip the guide, so it stays on Home. CrazyAgent did not answer in time. Try again.");
 });
