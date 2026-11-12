@@ -219,7 +219,7 @@ fn earlier_keychains(directory: &Path) -> Result<Vec<PathBuf>, EngineError> {
             earlier.push(path);
         }
     }
-    assert!(earlier.len() < FOLDER_ENTRIES_MAX);
+    assert!(earlier.len() <= FOLDER_ENTRIES_MAX);
     Ok(earlier)
 }
 
