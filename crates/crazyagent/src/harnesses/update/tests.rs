@@ -2080,3 +2080,32 @@ fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver
     );
     assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
 }
+
+#[test]
+fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
+    let machine = Machine::new();
+    let root = machine.root.path();
+    let prefix = crate::setup::harness_prefix(root);
+    let brew_bin = root.join("brew/bin");
+    let old = machine.program("brew/Cellar/node/26.0.0/bin/node", 0o755);
+    machine.program("brew/bin/npm", 0o755);
+    std::os::unix::fs::symlink(&old, brew_bin.join("node")).unwrap();
+    let places = crate::tools::Places::new(vec![brew_bin.clone()], None);
+    let npm = super::state::engine_npm_at(root, &places).unwrap();
+    crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
+    let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();
+    let script = machine.program(
+        &format!("{relative}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let new = machine.program("brew/Cellar/node/26.1.0/bin/node", 0o755);
+    std::fs::remove_file(brew_bin.join("node")).unwrap();
+    std::os::unix::fs::symlink(&new, brew_bin.join("node")).unwrap();
+    std::fs::remove_dir_all(root.join("brew/Cellar/node/26.0.0")).unwrap();
+    assert_eq!(
+        std::fs::canonicalize(prefix.join("bin/node")).ok(),
+        new.canonicalize().ok(),
+        "the prefix node follows brew's own link to the new keg"
+    );
+    assert_eq!(crate::harnesses::node_prefix(&script), Some(prefix));
+}
