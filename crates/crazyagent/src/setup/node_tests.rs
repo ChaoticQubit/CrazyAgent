@@ -269,6 +269,7 @@ fn a_usable_node_is_a_node_and_an_npm_the_resolver_finds_and_neither_alone_count
         usable(&places(vec![bin.clone()])),
         Some(Usable {
             node: bin.join("node"),
+            real_node: bin.join("node").canonicalize().unwrap(),
             npm: bin.join("npm"),
         })
     );
@@ -298,6 +299,7 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
         usable(&only_engine),
         Some(Usable {
             node: setup_bin.join("node"),
+            real_node: node.program.clone(),
             npm: setup_bin.join("npm"),
         })
     );

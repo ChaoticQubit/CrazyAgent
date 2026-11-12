@@ -75,10 +75,12 @@ impl NodeRuntime {
 }
 
 /// A Node the tool resolver finds whole: the `node` entry and an `npm` entry whose own
-/// interpreter resolves too, as found on the places, before any link is followed.
+/// interpreter resolves too, as found on the places before any link is followed, and the
+/// real file `node` runs, which a link to it must name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Usable {
     pub node: PathBuf,
+    pub real_node: PathBuf,
     pub npm: PathBuf,
 }
 
@@ -154,8 +156,10 @@ pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
     let node = crate::tools::resolve("node", places).ok()?;
     let npm = crate::tools::resolve("npm", places).ok()?;
     assert!(node.entry.is_absolute() && npm.entry.is_absolute());
+    assert!(node.program.is_absolute());
     Some(Usable {
         node: node.entry,
+        real_node: node.program,
         npm: npm.entry,
     })
 }

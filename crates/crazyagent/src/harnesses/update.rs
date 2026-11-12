@@ -176,9 +176,9 @@ pub struct Roots {
     pub npm: Option<NpmInstall>,
 }
 
-/// The npm an npm harness installs with and the node beside it, found by the one Node test
-/// of setup (`crate::setup::node::usable`), the folders its run puts first (Node's own, then
-/// the prefix's `bin`) and the engine-owned prefix it installs into, never a global one.
+/// The npm an npm harness installs with and the real node file it runs, found by the one
+/// Node test of setup (`crate::setup::node::usable`), the folders its run puts first (Node's
+/// own, then the prefix's `bin`) and the engine-owned prefix it installs into, never global.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NpmInstall {
     pub node: PathBuf,
