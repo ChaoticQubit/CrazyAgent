@@ -79,15 +79,10 @@ pub(crate) fn remove_key_in(root: &Path, folder: &str, name: &str) -> Result<(),
     }
 }
 
-/// Opens the engine root's key folder for one key name, refusing a name that is not a plain
-/// credential reference. Inputs: the engine root and the key name. Output: the folder, none
-/// when it does not exist, `account_key_reference_invalid`, or `account_key_store_unsafe`
-/// for a folder that is not this user's 0700 directory.
-#[cfg(unix)]
-fn key_folder(root: &Path, name: &str) -> Result<Option<std::fs::File>, EngineError> {
-    key_folder_in(root, ACCOUNT_KEYS, name)
-}
-
+/// Opens one key folder of the engine root for one key name, refusing a name that is not a
+/// plain credential reference. Inputs: the engine root, the folder name and the key name.
+/// Output: the folder, none when it does not exist, `account_key_reference_invalid`, or
+/// `account_key_store_unsafe` for a folder that is not this user's 0700 directory.
 #[cfg(unix)]
 fn key_folder_in(
     root: &Path,

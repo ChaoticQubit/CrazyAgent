@@ -187,10 +187,10 @@ struct Served {
 }
 
 fn serve_once(status: &'static str, body: Vec<u8>) -> (u16, std::thread::JoinHandle<Served>) {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        let (stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut request_line = String::new();
         reader.read_line(&mut request_line).unwrap();
@@ -278,7 +278,7 @@ fn a_host_that_fails_or_redirects_is_a_failed_call() {
         );
         served.join().unwrap();
     }
-    let closed = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let closed = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = closed.local_addr().unwrap().port();
     drop(closed);
     let plugin = loaded(&near(

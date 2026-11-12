@@ -751,9 +751,13 @@ pub fn secret_value(
         .ok_or_else(|| error("app_plugin_needs_key"))
 }
 
+/// One user plugin file the folder listing returns: its file name and its bytes, or the
+/// refusal that kept it unread.
+type UserFile = (String, Result<Vec<u8>, Problem>);
+
 #[cfg(unix)]
 mod folder {
-    use super::{Problem, USER_PLUGINS_MAX, error, yaml};
+    use super::{Problem, USER_PLUGINS_MAX, UserFile, error, yaml};
     use crate::app_plugins::FOLDER;
     use crate::engine::EngineError;
     use rustix::fs::{AtFlags, Mode, OFlags};
@@ -826,9 +830,7 @@ mod folder {
     /// The user's plugin files by name, at most `USER_PLUGINS_MAX`, each read without
     /// following a link. Input: the engine root. Output: (name, bytes or file refusal)
     /// pairs, whether more files exist, or the folder's refusal.
-    pub(super) fn entries(
-        root: &Path,
-    ) -> Result<(Vec<(String, Result<Vec<u8>, Problem>)>, bool), EngineError> {
+    pub(super) fn entries(root: &Path) -> Result<(Vec<UserFile>, bool), EngineError> {
         let Some(directory) = open(root, false)? else {
             return Ok((Vec::new(), false));
         };
@@ -952,14 +954,12 @@ mod folder {
 
 #[cfg(not(unix))]
 mod folder {
-    use super::{Problem, error};
+    use super::{Problem, UserFile, error};
     use crate::engine::EngineError;
     use std::path::Path;
 
     /// No user plugins folder off Unix: nothing is listed. Output: an empty listing.
-    pub(super) fn entries(
-        _root: &Path,
-    ) -> Result<(Vec<(String, Result<Vec<u8>, Problem>)>, bool), EngineError> {
+    pub(super) fn entries(_root: &Path) -> Result<(Vec<UserFile>, bool), EngineError> {
         Ok((Vec::new(), false))
     }
 
