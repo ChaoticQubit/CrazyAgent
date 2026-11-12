@@ -3,7 +3,7 @@ import { accountLabels, listAccounts, type Result } from "../../api";
 import { loadAdoption, type Adoption, type AgentAdoption } from "../../api-process";
 import { loadTeamStatus } from "../../api-projects";
 import type { TeamStatus } from "../../engine-client";
-import { decideRecount, loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type Metrics, type MoneySettings, type MoneyView, type RecountStatus, type Tokens, type UsageReport, type UsageRow } from "../../api-usage";
+import { decideRecount, loadExtras, loadMetrics, loadNotices, loadUsage, setMoney, usageNotReady, usageRefusal, type AccountLimits, type LimitExtras, type Metrics, type MoneySettings, type MoneyView, type RecountStatus, type Tokens, type UsageReport, type UsageRow } from "../../api-usage";
 import { useLoad, type Loaded } from "../../state";
 import { EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Select, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -73,12 +73,14 @@ const RESULTS: Record<string, string> = {
   needs_pool: "Waiting",
 };
 
-/** Names shown in place of usage keys: agents by usage key and accounts by id, and the
- * accounts with no 5-hour or weekly window, each with what it has instead. */
+/** Names shown in place of usage keys: agents by usage key and accounts by id, the accounts
+ * with no 5-hour or weekly window, each with what it has instead, and each account's free
+ * resets and credits as stored, by account id. */
 export interface MetricsNames {
   agents: Map<string, string>;
   accounts: Map<string, string>;
   noWindow?: readonly NoWindow[];
+  extras?: ReadonlyMap<string, LimitExtras>;
 }
 
 /** What makes a Metrics page the app page: the engine's projects, the action that picks one,
@@ -416,7 +418,7 @@ function AppNotices({ usage, failure, nowMs, accountWide }: { usage: UsageReport
 function AccountWide({ usage, filter, names, nowMs, accountWide }: { usage: UsageReport; filter: MetricsFilter; names: MetricsNames; nowMs: number; accountWide: boolean }) {
   if (!accountWide) return <p className="muted">{LIMITS_HIDDEN_NOTE}</p>;
   return <>
-    <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} noWindow={names.noWindow} />
+    <AccountLimitsPanel limits={usage.limits} name={(key) => rowName(names.accounts, key)} nowMs={nowMs} controls={filter.limits} noWindow={names.noWindow} extras={names.extras} />
     {filter.limits.next}
   </>;
 }
@@ -640,6 +642,7 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   const [adoption] = useLoad<Adoption | null>(() => projectId === null || filter ? Promise.resolve({ kind: "ok" as const, value: null }) : loadAdoption(projectId), [projectId, reload, Boolean(filter)]);
   const [statuses] = useLoad(() => teamStatuses(named), [named.join("\n"), reload]);
   const [accounts] = useLoad(listAccounts, [], "accounts");
+  const [extrasRead] = useLoad(() => filter ? loadExtras(false) : Promise.resolve({ kind: "ok" as const, value: [] }), [reload, revision, Boolean(filter)]);
   const [notices] = useLoad(loadNotices, []);
   useEffect(() => {
     const timer = setInterval(() => { setNowMs(Date.now()); setTicks((old) => old + 1); }, TICK_MS);
@@ -655,7 +658,8 @@ export function MetricsView({ projectId, filter }: { projectId: string | null; f
   }
   const listed = accounts.kind === "ok" ? accounts.value : [];
   const plain = listed.flatMap((account) => { const note = noWindow(account); return note === null ? [] : [{ account: account.id, note }]; });
-  const names: MetricsNames = { agents, accounts: accountLabels(listed), noWindow: plain };
+  const extras = extrasRead.kind === "ok" ? new Map(extrasRead.value.map((row) => [row.account, row.extras])) : undefined;
+  const names: MetricsNames = { agents, accounts: accountLabels(listed), noWindow: plain, extras };
   const adopted: Loaded<Adoption> | null = adoption.kind === "ok" ? (adoption.value === null ? null : { kind: "ok", value: adoption.value }) : adoption;
   return <MetricsPage projectId={projectId} usage={usage} metrics={metrics} adoption={adopted} range={range} by={by} names={names}
     sinceMs={sinceMs} nowMs={nowMs} updatedMs={updatedMs} offset={offsetMinutes(new Date(nowMs))} filter={filter} notices={notices.kind === "ok" ? notices.value : ""}
