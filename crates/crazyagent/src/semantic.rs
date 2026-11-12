@@ -7,6 +7,19 @@ use std::path::Path;
 pub mod local;
 pub mod settings;
 
+/// The lowercase hex SHA-256 of some bytes. Input: the bytes. Output: 64 hex digits.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String does not fail");
+    }
+    assert_eq!(hex.len(), 64);
+    hex
+}
+
 /// The wall clock in milliseconds since the Unix epoch, 0 before it.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
