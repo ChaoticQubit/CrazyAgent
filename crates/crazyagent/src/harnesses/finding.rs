@@ -45,7 +45,9 @@ const AGENT_TABLES: [(&str, Names, &str); 4] = [
     (
         "team_worktrees",
         Names::Path,
-        "SELECT repository FROM team_worktrees UNION SELECT worktree FROM team_worktrees LIMIT ?1",
+        "SELECT repository FROM team_worktrees UNION SELECT worktree FROM team_worktrees
+         WHERE instr(worktree, '/.crazyagent/') = 0
+         AND substr(worktree, 1, length(repository) + 1) <> (repository || '/') LIMIT ?1",
     ),
     (
         "worktree_leases",
@@ -55,7 +57,9 @@ const AGENT_TABLES: [(&str, Names, &str); 4] = [
 ];
 
 /// How one engine table names a folder agents can write: a setup body with the project
-/// folder, a project body with the repositories it declares, or a stored path.
+/// folder, a project body with the repositories it declares, or a stored path. An agent
+/// worktree inside its repository or a `.crazyagent` folder is covered already and not read,
+/// so kept agents never fill [`AGENT_ROWS_MAX`].
 #[derive(Debug, Clone, Copy)]
 enum Names {
     Setup,
