@@ -1,0 +1,582 @@
+use super::store::{self, Begun, Pick};
+use super::*;
+use crate::harness_settings::{Access, Scope, Source};
+use crate::protocol::ProjectId;
+use rusqlite::Connection;
+use serde_json::{Value, json};
+
+const PROJECT: &str = "alpha";
+
+/// An engine database holding the authority tables and one set-up project, in a private
+/// temporary folder. Output: the folder, kept alive by the caller, and the connection.
+fn engine() -> (tempfile::TempDir, Connection) {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-model-choice-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let folder = base.join("project");
+    std::fs::create_dir(&folder).unwrap();
+    let db = Connection::open(base.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
+    (tmp, db)
+}
+
+fn alpha() -> Scope {
+    Scope::Project(ProjectId::new(PROJECT).unwrap())
+}
+
+fn catalog(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+fn row(models: &Models, slot: Slot) -> &Row {
+    models
+        .rows
+        .iter()
+        .find(|row| row.slot == slot)
+        .unwrap_or_else(|| panic!("no {slot:?} row"))
+}
+
+fn saved(written: Written) -> Row {
+    match written {
+        Written::Saved { row } => row,
+        other => panic!("not saved: {other:?}"),
+    }
+}
+
+fn set(
+    db: &Connection,
+    harness: &str,
+    ids: &[&str],
+    scope: &Scope,
+    slot: Slot,
+    value: Value,
+) -> Result<Written, crate::engine::EngineError> {
+    let models = store::values(db, harness, &catalog(ids), scope).unwrap();
+    let version = row(&models, slot).version;
+    store::set(db, harness, &catalog(ids), scope, slot, &value, version)
+}
+
+#[test]
+fn a_model_id_is_checked_before_it_reaches_a_command_line() {
+    for good in [
+        "gpt-5.6-sol",
+        "claude-opus-5-5",
+        "openai/gpt-4o",
+        "qwen3:32b",
+        "a",
+    ] {
+        assert!(model_valid("codex", good), "{good}");
+        assert!(model_valid("claude-code", good), "{good}");
+    }
+    assert!(model_valid("claude-code", "opus[1m]"));
+    assert!(!model_valid("codex", "opus[1m]"));
+    let long = "m".repeat(MODEL_BYTES_MAX + 1);
+    for bad in [
+        "",
+        "-c",
+        "--model",
+        "has space",
+        "model\"\nfeatures.shell_tool=true",
+        "quote\"",
+        "back\\slash",
+        "tab\tid",
+        "[1m]",
+        "ünïcode",
+        long.as_str(),
+    ] {
+        assert!(!model_valid("codex", bad), "{bad:?}");
+        assert!(!model_valid("claude-code", bad), "{bad:?}");
+    }
+    assert!(model_valid("codex", &"m".repeat(MODEL_BYTES_MAX)));
+}
+
+#[test]
+fn with_nothing_set_every_slot_leaves_the_model_to_the_account() {
+    let (_tmp, db) = engine();
+    for scope in [Scope::App, alpha()] {
+        let models = store::values(&db, "codex", &catalog(&["a", "b"]), &scope).unwrap();
+        assert_eq!(models.harness, "codex");
+        assert_eq!(models.rows.len(), 3);
+        for slot in [Slot::Master, Slot::Agent] {
+            let row = row(&models, slot);
+            assert_eq!(row.here, None);
+            assert_eq!(row.effective, Value::Null);
+            assert_eq!(row.source, Source::Default);
+            assert_eq!(row.version, 0);
+            assert_eq!(row.access, Access::Editable);
+        }
+        let allowed = row(&models, Slot::Allowed);
+        assert_eq!(allowed.effective, json!([]));
+        assert_eq!(allowed.source, Source::Default);
+    }
+    assert_eq!(
+        store::launch_model(&db, "codex", &catalog(&["a"]), None, Slot::Agent).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_project_override_beats_the_app_value_and_a_reset_falls_back() {
+    let (_tmp, db) = engine();
+    let ids = ["gpt-a", "gpt-b", "gpt-c"];
+    let project = ProjectId::new(PROJECT).unwrap();
+    saved(set(&db, "codex", &ids, &Scope::App, Slot::Agent, json!("gpt-a")).unwrap());
+    saved(
+        set(
+            &db,
+            "codex",
+            &ids,
+            &Scope::App,
+            Slot::Master,
+            json!("gpt-c"),
+        )
+        .unwrap(),
+    );
+    let here = saved(set(&db, "codex", &ids, &alpha(), Slot::Agent, json!("gpt-b")).unwrap());
+    assert_eq!(here.here, Some(json!("gpt-b")));
+    assert_eq!(here.effective, json!("gpt-b"));
+    assert_eq!(here.source, Source::Project);
+    assert_eq!(here.version, 1);
+
+    let app = store::values(&db, "codex", &catalog(&ids), &Scope::App).unwrap();
+    assert_eq!(row(&app, Slot::Agent).effective, json!("gpt-a"));
+    assert_eq!(row(&app, Slot::Agent).source, Source::App);
+    let mine = store::values(&db, "codex", &catalog(&ids), &alpha()).unwrap();
+    assert_eq!(row(&mine, Slot::Master).here, None);
+    assert_eq!(row(&mine, Slot::Master).effective, json!("gpt-c"));
+    assert_eq!(row(&mine, Slot::Master).source, Source::App);
+    assert_eq!(
+        store::launch_model(&db, "codex", &catalog(&ids), Some(&project), Slot::Agent).unwrap(),
+        Some("gpt-b".to_owned())
+    );
+    assert_eq!(
+        store::launch_model(&db, "codex", &catalog(&ids), None, Slot::Agent).unwrap(),
+        Some("gpt-a".to_owned())
+    );
+
+    let reset = store::reset(&db, "codex", &catalog(&ids), &alpha(), Slot::Agent, 1).unwrap();
+    let reset = saved(reset);
+    assert_eq!(reset.here, None);
+    assert_eq!(reset.effective, json!("gpt-a"));
+    assert_eq!(reset.source, Source::App);
+    assert_eq!(reset.version, 2);
+    assert_eq!(
+        store::launch_model(&db, "codex", &catalog(&ids), Some(&project), Slot::Agent).unwrap(),
+        Some("gpt-a".to_owned())
+    );
+}
+
+#[test]
+fn a_value_outside_the_harness_models_or_its_shape_is_refused() {
+    let (_tmp, db) = engine();
+    let ids = ["gpt-a", "gpt-b"];
+    let cases = [
+        (Slot::Agent, json!("gpt-z")),
+        (Slot::Agent, json!(["gpt-a"])),
+        (Slot::Agent, json!(7)),
+        (Slot::Agent, json!("bad id")),
+        (Slot::Master, json!(null)),
+        (Slot::Allowed, json!("gpt-a")),
+        (Slot::Allowed, json!(["gpt-a", "gpt-a"])),
+        (Slot::Allowed, json!(["gpt-a", "gpt-z"])),
+        (Slot::Allowed, json!(["gpt-a", 3])),
+    ];
+    for (slot, value) in cases {
+        let refused = set(&db, "codex", &ids, &Scope::App, slot, value.clone()).unwrap_err();
+        assert_eq!(refused.0, "model_choice_value_invalid", "{slot:?} {value}");
+    }
+    let many: Vec<String> = (0..=ALLOWED_MAX).map(|n| format!("m{n}")).collect();
+    let names: Vec<&str> = many.iter().map(String::as_str).collect();
+    let refused = set(
+        &db,
+        "codex",
+        &names,
+        &Scope::App,
+        Slot::Allowed,
+        json!(many),
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "model_choice_value_invalid");
+    let models = store::values(&db, "codex", &catalog(&ids), &Scope::App).unwrap();
+    assert!(
+        models
+            .rows
+            .iter()
+            .all(|row| row.version == 0 && row.here.is_none())
+    );
+
+    let allowed = saved(
+        set(
+            &db,
+            "codex",
+            &ids,
+            &Scope::App,
+            Slot::Allowed,
+            json!(["gpt-b", "gpt-a"]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(allowed.effective, json!(["gpt-b", "gpt-a"]));
+    let none = saved(set(&db, "codex", &ids, &alpha(), Slot::Allowed, json!([])).unwrap());
+    assert_eq!(none.effective, json!([]));
+    assert_eq!(none.source, Source::Project);
+}
+
+#[test]
+fn a_stale_set_is_refused_with_the_current_row() {
+    let (_tmp, db) = engine();
+    let ids = catalog(&["gpt-a", "gpt-b"]);
+    saved(
+        store::set(
+            &db,
+            "codex",
+            &ids,
+            &Scope::App,
+            Slot::Agent,
+            &json!("gpt-a"),
+            0,
+        )
+        .unwrap(),
+    );
+    match store::set(
+        &db,
+        "codex",
+        &ids,
+        &Scope::App,
+        Slot::Agent,
+        &json!("gpt-b"),
+        0,
+    )
+    .unwrap()
+    {
+        Written::Stale { row } => {
+            assert_eq!(row.here, Some(json!("gpt-a")));
+            assert_eq!(row.version, 1);
+        }
+        other => panic!("not stale: {other:?}"),
+    }
+}
+
+#[test]
+fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
+    let (_tmp, db) = engine();
+    let models = store::values(&db, "rcli", &catalog(&["local"]), &Scope::App).unwrap();
+    for slot in [Slot::Master, Slot::Agent, Slot::Allowed] {
+        assert_eq!(
+            row(&models, slot).access,
+            Access::ReadOnly {
+                reason: NOT_SUPPORTED.into()
+            },
+            "{slot:?}"
+        );
+    }
+    for slot in [Slot::Master, Slot::Agent] {
+        match set(&db, "rcli", &["local"], &Scope::App, slot, json!("local")).unwrap() {
+            Written::Refused { code, row } => {
+                assert_eq!(code, "model_choice_not_supported");
+                assert_eq!(row.here, None);
+            }
+            other => panic!("not refused: {other:?}"),
+        }
+    }
+    let unknown = store::values(&db, "nope", &catalog(&["a"]), &Scope::App).unwrap_err();
+    assert_eq!(unknown.0, "model_choice_harness_unknown");
+    let alias = store::values(&db, "claude", &catalog(&["sonnet"]), &Scope::App).unwrap();
+    assert_eq!(alias.harness, "claude-code");
+}
+
+#[test]
+fn an_unknown_project_is_refused() {
+    let (_tmp, db) = engine();
+    let other = Scope::Project(ProjectId::new("beta").unwrap());
+    let refused = store::values(&db, "codex", &catalog(&["a"]), &other).unwrap_err();
+    assert_eq!(refused.0, "model_choice_project_unknown");
+    let refused = store::set(
+        &db,
+        "codex",
+        &catalog(&["a"]),
+        &other,
+        Slot::Agent,
+        &json!("a"),
+        0,
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "model_choice_project_unknown");
+}
+
+#[test]
+fn an_added_model_is_usable_only_after_its_test_launch_passes() {
+    let (_tmp, db) = engine();
+    let ids = catalog(&["gpt-a"]);
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "gpt-a").unwrap(),
+        Begun::Listed
+    );
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "bad id")
+            .unwrap_err()
+            .0,
+        "model_choice_value_invalid"
+    );
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        Begun::Pending
+    );
+    let models = store::values(&db, "codex", &ids, &Scope::App).unwrap();
+    let mine = models
+        .candidates
+        .iter()
+        .find(|c| c.id == "my-model")
+        .unwrap();
+    assert_eq!(mine.origin, Origin::Pending);
+    let refused = store::set(
+        &db,
+        "codex",
+        &ids,
+        &Scope::App,
+        Slot::Agent,
+        &json!("my-model"),
+        0,
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "model_choice_value_invalid");
+
+    store::custom_checked(&db, "codex", "my-model", false).unwrap();
+    let models = store::values(&db, "codex", &ids, &Scope::App).unwrap();
+    let mine = models
+        .candidates
+        .iter()
+        .find(|c| c.id == "my-model")
+        .unwrap();
+    assert_eq!(mine.origin, Origin::Failed);
+    assert_eq!(
+        store::custom_checked(&db, "codex", "my-model", true)
+            .unwrap_err()
+            .0,
+        "model_choice_custom_not_pending"
+    );
+
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        Begun::Pending
+    );
+    store::custom_checked(&db, "codex", "my-model", true).unwrap();
+    let row = saved(
+        store::set(
+            &db,
+            "codex",
+            &ids,
+            &Scope::App,
+            Slot::Agent,
+            &json!("my-model"),
+            0,
+        )
+        .unwrap(),
+    );
+    assert_eq!(row.effective, json!("my-model"));
+    assert_eq!(
+        store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
+        Some("my-model".to_owned())
+    );
+    let other = store::values(&db, "claude-code", &catalog(&["sonnet"]), &Scope::App).unwrap();
+    assert!(other.candidates.iter().all(|c| c.id != "my-model"));
+
+    assert!(store::custom_remove(&db, "codex", "my-model").unwrap());
+    assert!(!store::custom_remove(&db, "codex", "my-model").unwrap());
+    let models = store::values(&db, "codex", &ids, &Scope::App).unwrap();
+    assert_eq!(row_here(&models, Slot::Agent), Some(json!("my-model")));
+    assert_eq!(
+        super::store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
+        None
+    );
+}
+
+fn row_here(models: &Models, slot: Slot) -> Option<Value> {
+    row(models, slot).here.clone()
+}
+
+#[test]
+fn added_models_stop_at_their_bound() {
+    let (_tmp, db) = engine();
+    let ids = catalog(&["gpt-a"]);
+    for n in 0..CUSTOM_MAX {
+        assert_eq!(
+            store::custom_begin(&db, "codex", &ids, &format!("own-{n}")).unwrap(),
+            Begun::Pending
+        );
+    }
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "one-more")
+            .unwrap_err()
+            .0,
+        "model_choice_custom_full"
+    );
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "own-0").unwrap(),
+        Begun::Pending
+    );
+}
+
+#[test]
+fn a_stored_model_the_harness_no_longer_lists_is_passed_over() {
+    let (_tmp, db) = engine();
+    saved(
+        set(
+            &db,
+            "codex",
+            &["old", "new"],
+            &Scope::App,
+            Slot::Agent,
+            json!("old"),
+        )
+        .unwrap(),
+    );
+    saved(
+        set(
+            &db,
+            "codex",
+            &["old", "new"],
+            &Scope::App,
+            Slot::Allowed,
+            json!(["old", "new"]),
+        )
+        .unwrap(),
+    );
+    let models = store::values(&db, "codex", &catalog(&["new"]), &Scope::App).unwrap();
+    let agent = row(&models, Slot::Agent);
+    assert_eq!(agent.here, Some(json!("old")));
+    assert_eq!(agent.effective, Value::Null);
+    assert_eq!(agent.source, Source::Default);
+    let allowed = row(&models, Slot::Allowed);
+    assert_eq!(allowed.effective, json!(["new"]));
+    assert_eq!(allowed.source, Source::App);
+    assert_eq!(
+        store::launch_model(&db, "codex", &catalog(&["new"]), None, Slot::Agent).unwrap(),
+        None
+    );
+    let reset = store::reset(
+        &db,
+        "codex",
+        &catalog(&["new"]),
+        &Scope::App,
+        Slot::Agent,
+        1,
+    );
+    assert_eq!(saved(reset.unwrap()).here, None);
+}
+
+#[test]
+fn a_spawn_pick_runs_only_from_the_allowed_list_or_the_default() {
+    let (_tmp, db) = engine();
+    let ids = ["gpt-a", "gpt-b", "gpt-c"];
+    let project = ProjectId::new(PROJECT).unwrap();
+    let pick =
+        |picked: Option<&str>| store::pick(&db, "codex", &catalog(&ids), &project, picked).unwrap();
+    assert_eq!(pick(None), Pick::Run(None));
+    assert_eq!(
+        pick(Some("gpt-a")),
+        Pick::Refused {
+            allowed: Vec::new(),
+            default: None
+        }
+    );
+
+    saved(set(&db, "codex", &ids, &Scope::App, Slot::Agent, json!("gpt-c")).unwrap());
+    saved(
+        set(
+            &db,
+            "codex",
+            &ids,
+            &Scope::App,
+            Slot::Allowed,
+            json!(["gpt-a", "gpt-b"]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(pick(None), Pick::Run(Some("gpt-c".into())));
+    assert_eq!(pick(Some("gpt-a")), Pick::Run(Some("gpt-a".into())));
+    assert_eq!(pick(Some("gpt-c")), Pick::Run(Some("gpt-c".into())));
+    assert_eq!(
+        pick(Some("gpt-z")),
+        Pick::Refused {
+            allowed: vec!["gpt-a".into(), "gpt-b".into()],
+            default: Some("gpt-c".into())
+        }
+    );
+
+    saved(
+        set(
+            &db,
+            "codex",
+            &ids,
+            &alpha(),
+            Slot::Allowed,
+            json!(["gpt-b"]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        pick(Some("gpt-a")),
+        Pick::Refused {
+            allowed: vec!["gpt-b".into()],
+            default: Some("gpt-c".into())
+        }
+    );
+    assert_eq!(pick(Some("gpt-b")), Pick::Run(Some("gpt-b".into())));
+
+    let rcli = store::pick(&db, "rcli", &catalog(&["local"]), &project, Some("local")).unwrap();
+    assert_eq!(rcli, Pick::Unsupported);
+    let none = store::pick(&db, "rcli", &catalog(&["local"]), &project, None).unwrap();
+    assert_eq!(none, Pick::Run(None));
+}
+
+#[test]
+#[should_panic(expected = "codex: bad id")]
+fn a_catalog_with_an_id_no_launch_accepts_is_a_broken_caller() {
+    let (_tmp, db) = engine();
+    let _ = store::values(&db, "codex", &catalog(&["gpt-a", "bad id"]), &Scope::App);
+}
+
+#[test]
+#[should_panic(expected = "codex: gpt-a")]
+fn a_catalog_with_a_repeated_id_is_a_broken_caller() {
+    let (_tmp, db) = engine();
+    let _ = store::values(&db, "codex", &catalog(&["gpt-a", "gpt-a"]), &Scope::App);
+}
+
+#[test]
+fn every_refusal_code_is_listed() {
+    let (_tmp, db) = engine();
+    let codes = [
+        store::values(&db, "nope", &catalog(&["a"]), &Scope::App)
+            .unwrap_err()
+            .0,
+        store::values(
+            &db,
+            "codex",
+            &catalog(&["a"]),
+            &Scope::Project(ProjectId::new("beta").unwrap()),
+        )
+        .unwrap_err()
+        .0,
+        store::custom_begin(&db, "codex", &catalog(&["a"]), "bad id")
+            .unwrap_err()
+            .0,
+        store::custom_checked(&db, "codex", "never", true)
+            .unwrap_err()
+            .0,
+    ];
+    for code in codes {
+        assert!(MODEL_CHOICE_CODES.contains(&code.as_str()), "{code}");
+    }
+    for code in [
+        "model_choice_not_supported",
+        "model_choice_custom_full",
+        "model_choice_unavailable",
+    ] {
+        assert!(MODEL_CHOICE_CODES.contains(&code), "{code}");
+    }
+}
