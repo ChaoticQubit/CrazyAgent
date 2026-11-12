@@ -33,14 +33,22 @@ pub(crate) struct Round {
     caught_up: bool,
 }
 
+/// What one round did for a project: whether it is caught up, and whether it read
+/// anything new, so a project that moved but is still behind gets its next round sooner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Progress {
+    pub(crate) caught_up: bool,
+    pub(crate) moved: bool,
+}
+
 /// Indexes one project's new messages within the engine's bounds. Inputs: the database, the
-/// agents folder, the project and the time. Output: whether the project is caught up.
+/// agents folder, the project and the time. Output: what the round did.
 pub(crate) fn index_project(
     db: &mut Connection,
     agents: &Path,
     project: &ProjectId,
     now_ms: i64,
-) -> Result<bool, EngineError> {
+) -> Result<Progress, EngineError> {
     index_within(
         db,
         agents,
@@ -53,7 +61,7 @@ pub(crate) fn index_project(
 
 /// Indexes one project's new messages within given bounds: reads with no transaction
 /// open, then stores in one. Inputs: the database, the agents folder, the project, the
-/// time and the most chunks and bytes. Output: whether the project is caught up.
+/// time and the most chunks and bytes. Output: what the round did.
 pub(crate) fn index_within(
     db: &mut Connection,
     agents: &Path,
@@ -61,9 +69,11 @@ pub(crate) fn index_within(
     now_ms: i64,
     chunks_max: usize,
     bytes_max: u64,
-) -> Result<bool, EngineError> {
+) -> Result<Progress, EngineError> {
     let round = read_round(db, agents, project, now_ms, chunks_max, bytes_max)?;
-    store_round(db, round, now_ms)
+    let moved = !round.reads.is_empty();
+    let caught_up = store_round(db, round, now_ms)?;
+    Ok(Progress { caught_up, moved })
 }
 
 /// Reads one project's new messages within bounds, storing nothing: every listed
@@ -334,21 +344,8 @@ pub(crate) fn tick(
     let mut behind = false;
     let mut failed = None;
     for project in projects(db)? {
-        match read_round(
-            db,
-            agents,
-            &project,
-            now_ms,
-            CHUNKS_PER_ROUND,
-            BYTES_PER_ROUND,
-        ) {
-            Ok(round) => {
-                let moved = !round.reads.is_empty();
-                match store_round(db, round, now_ms) {
-                    Ok(caught_up) => behind |= moved && !caught_up,
-                    Err(problem) => failed = failed.or(Some(problem)),
-                }
-            }
+        match index_project(db, agents, &project, now_ms) {
+            Ok(progress) => behind |= progress.moved && !progress.caught_up,
             Err(problem) => failed = failed.or(Some(problem)),
         }
         crate::semantic::embed_pending(db, root, &project);
