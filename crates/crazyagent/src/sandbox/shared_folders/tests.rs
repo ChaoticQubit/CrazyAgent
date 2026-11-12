@@ -296,6 +296,41 @@ fn a_wider_choice_is_refused_off_macos() {
     }
 }
 
+/// A launch whose own folder is the project folder itself gets no exemption for it, so the
+/// secret names stay closed there too; only `.git` is exempt.
+#[test]
+fn a_launch_working_in_the_project_folder_itself_keeps_its_secrets_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    let tmp = root.join("tmp");
+    let project = root.join("project");
+    for folder in [&home, &tmp, &project] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let sandbox = ProjectSandbox::new(
+        &project,
+        &home,
+        &tmp,
+        super::super::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .keep_project_secrets(&project, &[])
+    .unwrap();
+    let profile = sandbox.profile();
+    assert!(profile.contains(&format!(
+        "(require-not (subpath \"{}/.git\"))",
+        project.display()
+    )));
+    assert!(
+        !profile.contains(&format!(
+            "(require-not (subpath \"{}\"))",
+            project.display()
+        )),
+        "{profile}"
+    );
+}
+
 /// The project context names the folder and what each choice shares, keeps secrets closed,
 /// says toolchains are never installed, and stays within its bound with the longest folder
 /// and every picked name.

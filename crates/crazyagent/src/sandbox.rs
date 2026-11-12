@@ -1527,7 +1527,7 @@ impl ProjectSandbox {
     /// (DEC-147.9): contents, attribute values, writes, runs, links and clones of every path
     /// there with a name in [`shared_folders::SECRET_NAMES`], in any letter case, are denied,
     /// names and sizes stay visible, except under `root/.git` and inside the agent's own
-    /// writable roots there, its worktree or clone. Each of `revealed`, the secrets the owner
+    /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
     /// shared back, is readable again, never writable. The deny comes before every older
     /// deny in the profile, so none of those gives way. Inputs: a clean canonical folder the
     /// sandbox already reads and at most [`shared_folders::SECRETS_MAX`] clean paths strictly
@@ -1629,7 +1629,10 @@ impl ProjectSandbox {
             root.display()
         );
         for own in self.writable_roots().filter(|own| {
-            own.starts_with(root) && !self.shared_writes.contains(own) && clean_absolute(own)
+            own.starts_with(root)
+                && own.as_path() != root.as_path()
+                && !self.shared_writes.contains(own)
+                && clean_absolute(own)
         }) {
             text.push_str(&format!(
                 "\n    (require-not (subpath \"{}\"))",
