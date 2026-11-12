@@ -515,10 +515,20 @@ impl ResearchRunner {
     /// one its probe finds, kept once its earlier panes end ([`end_left_panes`]). Output:
     /// the host, or none while no terminal program is found, so the agent runs headless.
     fn terminal(&self) -> Option<Arc<dyn Host>> {
-        self.terminal
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        let mut held = self.terminal.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.is_none() {
+            let probe = self.terminal_probe.as_ref()?;
+            let host = (probe.lock().unwrap_or_else(PoisonError::into_inner))()?;
+            match end_left_panes(host.as_ref()) {
+                Ok(()) => *held = Some(host),
+                Err(problem) => {
+                    eprintln!(
+                        "research terminal found but not used ({problem}); agents run headless"
+                    );
+                }
+            }
+        }
+        held.clone()
     }
 
     /// Names each running research job in the engine's agent register as a holder of the
