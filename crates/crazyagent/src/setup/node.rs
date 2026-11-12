@@ -75,9 +75,9 @@ impl NodeRuntime {
     }
 }
 
-/// A Node the tool resolver finds whole: the `node` entry and an `npm` entry whose own
-/// interpreter resolves too, as found on the places before any link is followed, and the
-/// real file `node` runs, which a link to it must name.
+/// A Node the tool resolver finds whole in one folder: the `node` entry and the `npm` entry
+/// beside it, whose own interpreter resolves too, as found on the places before any link is
+/// followed, and the real file `node` runs, which a link to it must name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Usable {
     pub node: PathBuf,
@@ -149,15 +149,23 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
 }
 
 /// The one test of whether this machine has Node, used by the setup row, the setup run and
-/// npm harness installs alike: the tool resolver finds `node`, and finds `npm` with the
-/// interpreter its first line names. The engine's own Node is found the same way, through
-/// its links in `setup/bin`. Nothing is run. Input: the places. Output: the Node, or none
-/// when node or npm is missing or unusable.
+/// npm harness installs alike: the first folder on the places where the tool resolver
+/// accepts both `node` and `npm`, npm with the interpreter its first line names, so npm runs
+/// with the node of its own install and never pairs with a node from another. The engine's
+/// own Node is found the same way, through its links in `setup/bin`. Nothing is run.
+/// Input: the places. Output: the Node, or none when no folder holds both.
 pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
-    let node = crate::tools::resolve("node", places).ok()?;
-    let npm = crate::tools::resolve("npm", places).ok()?;
-    assert!(node.entry.is_absolute() && npm.entry.is_absolute());
-    assert!(node.program.is_absolute());
+    let found = places.folders().iter().find_map(|folder| {
+        let node = crate::tools::resolve_entry(&folder.join("node"), places).ok()?;
+        let npm = crate::tools::resolve_entry(&folder.join("npm"), places).ok()?;
+        Some((node, npm))
+    });
+    let Some((node, npm)) = found else {
+        crate::tools::probe::missed();
+        return None;
+    };
+    assert_eq!(node.entry.parent(), npm.entry.parent());
+    assert!(node.entry.is_absolute() && node.program.is_absolute());
     Some(Usable {
         node: node.entry,
         real_node: node.program,
