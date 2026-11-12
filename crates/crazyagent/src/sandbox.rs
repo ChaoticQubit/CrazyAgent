@@ -1279,29 +1279,59 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Lets a Node script harness find the `node` beside it, as its sign-in does: for a program
-    /// under an npm prefix ([`crate::harnesses::node_prefix`]) the prefix becomes readable when
-    /// no read root covers its `bin` and `lib` yet, and its `bin` goes first on PATH after the
-    /// agent's own tools. Any other program leaves the sandbox as it is. Input: the canonical
-    /// program. Output: the sandbox, or a refusal of the prefix as a read root.
+    /// Lets a Node script harness find the `node` beside it, as its sign-in does: under an npm
+    /// prefix ([`crate::harnesses::node_prefix`]) only `bin` and the harness's package folder
+    /// become readable, Seatbelt denying credential names such as `etc/npmrc` below each, and
+    /// `bin` goes first on PATH; a prefix in the project or agent-writable is skipped. Input:
+    /// the canonical program. Output: the sandbox, or a refusal of either folder.
     pub fn allow_node_for(mut self, program: &Path) -> Result<Self, SandboxError> {
         let Some(prefix) = crate::harnesses::node_prefix(program) else {
             return Ok(self);
         };
-        let covered = [prefix.join("bin"), prefix.join("lib")]
-            .iter()
-            .all(|folder| {
-                SYSTEM_READ_ROOTS
-                    .iter()
-                    .map(Path::new)
-                    .chain(self.read_roots.iter().map(PathBuf::as_path))
-                    .any(|root| folder.starts_with(root))
-            });
-        if !covered {
-            self = self.allow_read(&canonical(&prefix)?)?;
+        let Some(package) = node_package(&prefix, program) else {
+            return Ok(self);
+        };
+        let folders = [canonical(&prefix.join("bin"))?, canonical(&package)?];
+        let agents = folders.iter().any(|folder| {
+            crate::harnesses::in_crazyagent_folder(folder)
+                || folder.starts_with(&self.project_root)
+                || self
+                    .writable_roots()
+                    .any(|root| folder.starts_with(root) || root.starts_with(folder))
+        });
+        if agents {
+            return Ok(self);
+        }
+        for folder in folders {
+            let covered = SYSTEM_READ_ROOTS
+                .iter()
+                .map(Path::new)
+                .chain(self.read_roots.iter().map(PathBuf::as_path))
+                .chain(self.tool_roots.iter().map(PathBuf::as_path))
+                .any(|root| folder.starts_with(root));
+            if !covered {
+                self = self.allow_node_folder(&folder)?;
+            }
         }
         self.node_bin = Some(prefix.join("bin"));
         assert!(self.node_bin.as_deref().is_some_and(Path::is_absolute));
+        Ok(self)
+    }
+
+    /// Grants one folder of a Node script harness read-only: under Seatbelt as a toolchain
+    /// folder, so every credential name below it stays denied, elsewhere as a read root.
+    /// Input: a canonical existing folder. Output: the widened sandbox, or a refusal when the
+    /// folder fails [`Self::allow_read`]'s checks or the toolchain folders are full.
+    fn allow_node_folder(mut self, folder: &Path) -> Result<Self, SandboxError> {
+        if !cfg!(target_os = "macos") {
+            return self.allow_read(folder);
+        }
+        if self.tool_roots.len() >= TOOL_ROOTS_MAX {
+            return Err(invalid("too many toolchain folders"));
+        }
+        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        self.tool_roots.push(folder.to_path_buf());
+        assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
         Ok(self)
     }
 
@@ -3396,6 +3426,22 @@ fn windows_clean_text(text: &str) -> bool {
 /// `canonicalize` adds to a drive path is removed, so the result equals the plain drive path;
 /// any other verbatim form stays as it is and fails [`clean_absolute`]. Input: the path.
 /// Output: the canonical path, or the I/O error.
+/// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
+/// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
+/// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
+/// folder, or none when the program is not inside one.
+fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
+    let modules = prefix.join("lib").join("node_modules");
+    let mut parts = program.strip_prefix(&modules).ok()?.components();
+    let first = parts.next()?.as_os_str();
+    let package = if first.to_str()?.starts_with('@') {
+        modules.join(first).join(parts.next()?.as_os_str())
+    } else {
+        modules.join(first)
+    };
+    (program != package.as_path() && program.starts_with(&package)).then_some(package)
+}
+
 pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
     #[cfg(target_os = "windows")]
