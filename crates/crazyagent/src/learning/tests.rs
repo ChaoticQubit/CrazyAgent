@@ -270,3 +270,25 @@ fn a_latch_keeps_every_ticked_step_once_its_rows_go_and_ticks_nothing_else() {
     let names: Vec<String> = marks(&db).into_iter().map(|(name, _)| name).collect();
     assert_eq!(names, ["agents", "master", "process", "project"]);
 }
+
+#[test]
+fn a_failed_latch_keeps_none_of_its_marks_and_leaves_the_transaction_usable() {
+    let mut db = Connection::open_in_memory().unwrap();
+    tables(&db);
+    db.execute_batch(
+        "INSERT INTO projects VALUES ('p1','{}');
+         INSERT INTO conversation_entries VALUES ('p1','message','Hi.');
+         CREATE TRIGGER learning_marks_fail BEFORE INSERT ON learning_marks WHEN NEW.step='master'
+         BEGIN SELECT RAISE(ABORT, 'learning_marks_fail'); END;",
+    )
+    .unwrap();
+    let tx = db.transaction().unwrap();
+    let _ = latch(&tx);
+    tx.execute("DELETE FROM projects", []).unwrap();
+    tx.commit().unwrap();
+    assert!(
+        marks(&db).is_empty(),
+        "a failed latch keeps none of its marks"
+    );
+    assert_eq!(count(&read(&mut db), StepId::Project), 0);
+}

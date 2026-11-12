@@ -1313,3 +1313,39 @@ async fn delete_everything_keeps_the_learning_ticks_the_projects_rows_gave() {
     drop(owner);
     engine.stop().await;
 }
+
+const LATCH_FAILS: &str = "CREATE TRIGGER learning_marks_fail BEFORE INSERT ON learning_marks
+     BEGIN SELECT RAISE(ABORT, 'learning_marks_fail'); END;";
+
+#[tokio::test]
+async fn a_failing_learning_latch_never_blocks_remove_from_dashboard() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, _) = project(&mut owner).await;
+    write_db(&engine, LATCH_FAILS);
+    let removed = owner.remove_project(project, 2).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0, "the records go though the latch failed");
+    assert_eq!(engine.rows("SELECT count(*) FROM learning_marks"), 0);
+    drop(owner);
+    engine.stop().await;
+}
+
+/// A learning latch that fails never blocks Delete everything: the project's records still go
+/// once its folders reached the Trash, and no learning mark is kept (DEC-153, LE2-L1). Runs on
+/// macOS only, the one platform that offers Delete everything (DEC-118).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_failing_learning_latch_never_blocks_delete_everything() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let (project, folder) = project(&mut owner).await;
+    write_db(&engine, LATCH_FAILS);
+    std::fs::remove_dir_all(&folder).unwrap();
+    let response = owner.delete_project(project, NAME.into(), 2).await.unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(kept(&engine), 0, "the records go though the latch failed");
+    assert_eq!(engine.rows("SELECT count(*) FROM learning_marks"), 0);
+    drop(owner);
+    engine.stop().await;
+}
