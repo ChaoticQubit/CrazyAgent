@@ -32,6 +32,16 @@ pub(crate) enum NativeProfileUsePurpose {
     Check,
 }
 
+/// Matches the Unix check for a generated SDK home missing its key file. No generated home
+/// exists without native profile custody. Inputs: the engine root and the credential
+/// reference, unused. Output: false.
+pub(crate) fn generated_home_needs_key(
+    _root: &Path,
+    _profile_ref: &CredentialRef,
+) -> Result<bool, EngineError> {
+    Ok(false)
+}
+
 /// Native profile custody, which cannot exist without Unix directory-relative file custody.
 /// No value is ever made: `capture` reports `native_profile_custody_unavailable`, so every
 /// method below is unreachable by construction.

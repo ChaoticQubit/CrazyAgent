@@ -3343,6 +3343,9 @@ fn observe_turn(
             turn.phase = MasterTurnPhase::Failed;
             turn.reason = Some(reason);
             turn.cause = Some(cause_code(&cause));
+            if cause == crate::master_session::RCLI_KEY_SETUP_CAUSE {
+                turn.detail = Some(crate::master_session::RCLI_KEY_SETUP_LINE.into());
+            }
             if pauses(reason)
                 && let Some(attempt) = &turn.attempt
             {

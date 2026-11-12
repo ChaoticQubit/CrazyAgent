@@ -638,6 +638,7 @@ export function minutesOfCause(cause: string | null | undefined): number | null 
  * turn ends with its code. Input: the turn. Output: the line. */
 export function turnLine(turn: MasterTurn): string {
   const code = ` (${stopCode(turn)})`;
+  if (turn.cause === "rcli_master_key_setup_required" && turn.detail) return `${turn.detail}${code}`;
   const steps = turn.reason === "step_limit" ? stepsOfCause(turn.cause) : null;
   if (steps !== null) return `Stopped after ${steps} steps; reply with 'continue' to go on.${code}`;
   const minutes = turn.reason === "time_limit" ? minutesOfCause(turn.cause) : null;

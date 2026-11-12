@@ -4,7 +4,7 @@ use crate::engine::owner::AccountSecret;
 use std::io::Write;
 
 pub(super) const HOMES: &str = "configured-sdk-homes";
-const CONFIG: &str = "config.json";
+pub(super) const CONFIG: &str = "config.json";
 
 /// Writes the generated SDK config as a new private file inside a staging directory.
 /// Inputs: the staging directory and the config bytes. Output: Ok once the file holds

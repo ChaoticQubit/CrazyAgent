@@ -358,6 +358,11 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         ));
     }
     let retry = if latest { " Press r to try again." } else { "" };
+    if turn.cause.as_deref() == Some(crate::master_session::RCLI_KEY_SETUP_CAUSE)
+        && let Some(detail) = &turn.detail
+    {
+        return Some(format!("{detail} ({code}){retry}"));
+    }
     if turn.reason == Some(MasterReason::RepositoryConfigRefused)
         && let Some(detail) = &turn.detail
     {
