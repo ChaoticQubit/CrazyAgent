@@ -306,7 +306,7 @@ impl Service {
 </dict>\n\
 </plist>\n",
                 label = xml(&self.name),
-                executable = xml(&executable),
+                executable = self.written_executable(),
                 root = xml(&root),
                 path = xml(&self.path.to_string_lossy()),
                 log = xml(&log),
@@ -326,7 +326,7 @@ StandardError=append:{log}\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-                executable = systemd_quoted(&executable),
+                executable = self.written_executable(),
                 root = systemd_quoted(&root),
                 path = systemd_quoted(&format!("PATH={}", self.path.to_string_lossy())),
                 log = systemd_specifiers(&log),
@@ -557,20 +557,32 @@ WantedBy=default.target\n",
         self.executable != bundled && !self.current()
     }
 
+    /// The executable as [`Self::definition_text`] writes it on this platform: XML-escaped in
+    /// a plist, quoted for systemd, quoted for cmd and then XML-escaped in a Windows task.
+    /// Output: the text that names the executable in the definition.
+    fn written_executable(&self) -> String {
+        let executable = self.executable.to_string_lossy();
+        match self.platform {
+            Platform::MacOs => xml(&executable),
+            Platform::Linux => systemd_quoted(&executable),
+            Platform::Windows => xml(&windows_quoted(&executable)),
+        }
+    }
+
     /// Whether the installed definition runs another program than this service's engine, as
     /// an install script's layout or an older app location does: the line of
-    /// [`Self::definition_text`] naming the executable is not in the file. A different PATH
-    /// or setting does not count. Output: false when nothing readable is installed.
+    /// [`Self::definition_text`] naming the executable, as written there, is not in the file.
+    /// A different PATH or setting does not count. Output: false when nothing readable is
+    /// installed.
     pub fn runs_another_program(&self) -> bool {
         let Ok(text) = self.definition_text() else {
             return false;
         };
-        let executable = self.executable.to_string_lossy();
-        let Some(own) = text.lines().find(|line| line.contains(executable.as_ref())) else {
-            return false;
-        };
+        let written = self.written_executable();
+        let own = text.lines().find(|line| line.contains(written.as_str()));
+        assert!(own.is_some(), "a definition names its executable");
         std::fs::read_to_string(&self.definition)
-            .is_ok_and(|installed| !installed.lines().any(|line| line == own))
+            .is_ok_and(|installed| !installed.lines().any(|line| Some(line) == own))
     }
 
     fn loaded(&self) -> Result<bool, ServiceError> {

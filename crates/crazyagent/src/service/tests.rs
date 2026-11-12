@@ -936,6 +936,35 @@ fn a_definition_that_runs_another_program_is_told_apart_from_one_with_another_pa
     }
 }
 
+/// rv-code F1: the definition writes the executable escaped (XML in a plist, quoted for
+/// systemd), so an app kept in a folder named with `&` or `$` is still found in its own
+/// definition and still told apart from an install script's.
+#[test]
+fn an_executable_path_with_escaped_characters_is_still_found_in_its_definition() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = temp
+            .path()
+            .join("Tools & $Apps")
+            .join("CrazyAgent.app")
+            .join("crazyagent");
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert!(!own.runs_another_program());
+        let mut script = own.clone();
+        script.executable = temp.path().join("bin").join("engine-start");
+        write_definition(
+            &own.definition,
+            &script.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(own.runs_another_program());
+    }
+}
+
 #[test]
 fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     let temp = tempfile::tempdir().unwrap();
