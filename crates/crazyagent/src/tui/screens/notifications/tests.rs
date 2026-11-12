@@ -472,6 +472,88 @@ fn enter_on_an_agents_question_opens_its_team_with_the_questions_box_on_that_age
 }
 
 #[test]
+fn enter_on_a_change_set_notice_opens_changes_with_that_set_picked() {
+    use crate::landing::{
+        AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
+    };
+    use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
+    let set = |digit: char, message: &str| ChangeSetView {
+        id: ChangeSetId::new(digit.to_string().repeat(32)).unwrap(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-1".into(),
+            label: crate::team::AgentRole::Sub.agent_label(1),
+        },
+        state: ChangeState::Pending,
+        base: "b".repeat(40),
+        head: digit.to_string().repeat(40),
+        files: 1,
+        added: 1,
+        removed: 0,
+        last_outcome: TurnOutcome::Succeeded,
+        checked: false,
+        created_ms: 1,
+        updated_ms: 2,
+        restorable_until_ms: None,
+        conflicts: Vec::new(),
+        message: message.into(),
+        waiting: false,
+        outside: false,
+        regenerated: Vec::new(),
+        number: None,
+        landing_result: LandingResult::None,
+    };
+    let item = notice(
+        7,
+        NoticeKind::ChangeSetReview,
+        Some(TIDEPOOL),
+        NoticeTarget::ChangeSet {
+            project_id: id(TIDEPOOL),
+            change_set: Some(ChangeSetId::new("2".repeat(32)).unwrap()),
+        },
+    );
+    let mut shell = loaded(vec![item]);
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: id(TIDEPOOL),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Changes,
+        })
+    );
+    let list = ChangesQuery::List {
+        project: id(TIDEPOOL),
+    };
+    let asked: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        asked
+            .iter()
+            .any(|request| matches!(request, Request::Changes(query) if **query == list)),
+        "the Changes tab reads its list: {asked:?}"
+    );
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Changes(Box::new(
+        ChangesEvent {
+            query: list,
+            result: Ok(ChangesView::List(vec![
+                set('1', "Add the first page"),
+                set('2', "Add the second page"),
+            ])),
+        },
+    )))));
+    let shown = screen(&mut shell);
+    let line = |text: &str| {
+        shown
+            .lines()
+            .find(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text} is listed:\n{shown}"))
+            .to_owned()
+    };
+    assert!(line("Add the second page").contains("> "), "{shown}");
+    assert!(!line("Add the first page").contains("> "), "{shown}");
+}
+
+#[test]
 fn enter_stays_and_says_why_for_an_update_or_a_project_no_longer_listed() {
     let mut update = question(7);
     update.target = NoticeTarget::Updates;
