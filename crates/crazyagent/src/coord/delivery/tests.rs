@@ -321,9 +321,9 @@ fn a_tick_keeps_why_a_codex_agent_s_bridge_was_refused() {
 }
 
 /// F38: a Codex bridge that runs on a release newer than the checked ones leaves one
-/// engine notice in that agent's Messages timeline, naming the release numbers, and the
-/// same release on later deliveries leaves no second one; another agent gets its own, and a
-/// refusal in between lets the warning come back once the bridge runs again.
+/// engine notice in that agent's Messages timeline, naming the release numbers, once per
+/// release: later deliveries, a bridge refusal in between and an engine restart, which
+/// keeps no memory here, leave no second one; another agent and another release get their own.
 #[test]
 fn a_newer_codex_release_is_named_once_in_the_agents_messages() {
     let fixture = Fixture::new();
@@ -341,22 +341,33 @@ fn a_newer_codex_release_is_named_once_in_the_agents_messages() {
             .collect::<Result<_, _>>()
             .unwrap()
     };
-    let warned = |refused: &mut BTreeMap<AgentId, &'static str>, agent| {
-        warn_newer(&fixture.db, &project(), agent, (0, 167, 1), refused, 5).unwrap()
-    };
-    assert!(warned(&mut refused, first));
-    assert!(!warned(&mut refused, first));
-    assert!(!warned(&mut refused, first));
+    let warned = |agent, release| warn_newer(&fixture.db, &project(), agent, release, 5).unwrap();
+    assert!(warned(first, (0, 167, 1)));
+    assert!(!warned(first, (0, 167, 1)));
+    assert!(!warned(first, (0, 167, 1)));
     assert_eq!(notices(first), vec![codex::newer_notice((0, 167, 1))]);
-    assert!(warned(&mut refused, second));
+    assert!(warned(second, (0, 167, 1)));
     assert_eq!(notices(second).len(), 1);
     assert!(note_refusal(
         &mut refused,
         first,
         Some("codex_bridge_not_running")
     ));
-    assert!(warned(&mut refused, first));
+    assert!(!note_refusal(&mut refused, first, None));
+    assert!(!warned(first, (0, 167, 1)), "a refusal in between");
+    assert_eq!(notices(first).len(), 1);
+    assert!(warned(first, (0, 168, 0)), "another release");
+    assert_eq!(
+        notices(first),
+        vec![
+            codex::newer_notice((0, 167, 1)),
+            codex::newer_notice((0, 168, 0))
+        ]
+    );
+    assert!(!warned(first, (0, 168, 0)));
+    assert!(!warned(first, (0, 167, 1)));
     assert_eq!(notices(first).len(), 2);
+    assert_eq!(notices(second).len(), 1);
     assert!(
         notices(first)
             .iter()
