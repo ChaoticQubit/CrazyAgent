@@ -174,6 +174,29 @@ test("every GitHub-hosted CI Rust job keeps its build cache with the pinned rust
   }
 });
 
+test("a release builds the bundled tmux from its pinned script before staging sidecars and the Tauri bundle, on macOS and Linux only, and checks it is signed on macOS (DEC-157)", async () => {
+  const release = await workflow("release.yml");
+  const build = steps(release, "build");
+  const index = (name) => build.findIndex((step) => new RegExp(`^\\s*(- )?name: ${name}$`, "m").test(step));
+  const tmux = index("Build bundled tmux");
+  const stage = index("Stage desktop sidecars");
+  const bundle = index("Build desktop bundle");
+  const verify = index("Check the bundled tmux signature");
+  assert(tmux >= 0 && stage >= 0 && bundle >= 0 && verify >= 0, "all four steps exist");
+  assert(tmux < stage && stage < bundle && bundle < verify, "tmux is built, then staged, then bundled, then checked");
+  assert.match(build[tmux], /^ {8}if: matrix\.os != 'windows'$/m);
+  assert.match(build[tmux], /scripts\/release\/build-tmux\.sh --target "\$TARGET" --work "\$work\/build" --out "\$work\/crazyagent-tmux"/);
+  assert.match(build[tmux], /TMUX_SIDECAR=\$work\/crazyagent-tmux" >> "\$GITHUB_ENV"/);
+  assert.match(build[stage], /--tmux "\$TMUX_SIDECAR"/);
+  assert.match(build[index("Install Linux build packages")], /--no-install-recommends [^\n]*\bbison\b[^\n]*\bmusl-tools\b/);
+  assert.match(build[verify], /^ {8}if: matrix\.os == 'macos'$/m);
+  assert.match(build[verify], /Contents\/MacOS\/crazyagent-tmux/);
+  assert.match(build[verify], /codesign --verify --strict/);
+  assert.match(build[verify], /flags=.*runtime/);
+  const ci = await workflow("ci.yml");
+  assert(!/TMUX_(VERSION|SHA256)/.test(ci), "lint-only CI builds no tmux, so it pins none (DEC-143)");
+});
+
 test("every badal job refuses to run under Rosetta before anything else", async () => {
   const [ci] = steps(await workflow("ci.yml"), "macos");
   assert.match(ci, new RegExp(`^ {6}- name: ${ROSETTA}\n {8}run: \\|`));
