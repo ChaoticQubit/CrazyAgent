@@ -189,6 +189,7 @@ fn sample(id: u64, status: QuestionStatus, question: &str) -> Question {
         answered_by: None,
         created_ms: 1,
         settled_ms: None,
+        closed_by: None,
     }
 }
 
@@ -1871,4 +1872,422 @@ fn asks_from_json_stops_at_the_cap_and_reads_nothing_from_another_shape() {
     ] {
         assert!(asks_from_json(&other, "c").is_empty(), "{other}");
     }
+}
+
+/// F14: a log made before this engine gains the link, closer, relay and re-ask columns,
+/// keeps its rows, and marks only the pending engine questions without options as due to
+/// be asked again as choices.
+#[test]
+fn an_old_log_gains_the_new_columns_and_marks_old_engine_text_questions_for_reask() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Connection::open(dir.path().join("engine.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE questions_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project TEXT NOT NULL,
+            asker TEXT NOT NULL,
+            source TEXT NOT NULL CHECK(source IN ('master','session','agent','engine','terminal')),
+            question TEXT NOT NULL,
+            options_json TEXT NOT NULL,
+            recommended TEXT,
+            context TEXT,
+            status TEXT NOT NULL CHECK(status IN ('pending','answered','dismissed','answered_in_terminal')),
+            answer TEXT,
+            answered_by TEXT CHECK(answered_by IN ('owner','chat')),
+            message INTEGER,
+            turn_floor INTEGER NOT NULL,
+            noted_ms INTEGER,
+            created_ms INTEGER NOT NULL,
+            settled_ms INTEGER,
+            kind TEXT NOT NULL DEFAULT ''
+        );
+        INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms)
+        VALUES ('alpha','engine:planning','engine','Which stack?','[]','pending',0,1),
+               ('alpha','engine:planning','engine','Which host?','[\"A\",\"B\"]','pending',0,2),
+               ('alpha','master:4','master','Ship it?','[]','pending',0,3),
+               ('alpha','engine:research:market','engine','Old answered?','[]','answered',0,4);",
+    )
+    .unwrap();
+    initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    let reask: Vec<(String, i64)> = db
+        .prepare("SELECT question, reask FROM questions_log ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        reask,
+        [
+            ("Which stack?".to_owned(), 1),
+            ("Which host?".to_owned(), 0),
+            ("Ship it?".to_owned(), 0),
+            ("Old answered?".to_owned(), 0),
+        ]
+    );
+    let columns: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('questions_log')
+             WHERE name IN ('coord_message','closed_by','relay_key_ms','reask')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 4);
+    let index: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='questions_log_coord'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index, 1);
+}
+
+/// F12, DEC-147.8: the owner dismisses many questions at once; one already settled comes
+/// back stale, and an empty or too long list is refused before anything is written.
+#[test]
+fn the_owner_dismisses_many_questions_at_once_and_each_reports_its_outcome() {
+    let case = Case::new();
+    let first = case.ask(&MASTER, "Ship on Friday?");
+    let second = case.ask(&Asker::Agent(7), "Which region?");
+    let gone = case.ask(&MASTER, "Rename the repo?");
+    assert_eq!(dismiss(&case.db, gone, 0).unwrap(), Settlement::Settled);
+    let outcome = dismiss_many(&case.db, &[(first, 0), (second, 0), (gone, 0)]).unwrap();
+    assert_eq!(outcome.settled, [first, second]);
+    assert_eq!(outcome.stale, [gone]);
+    assert!(outcome.refused.is_empty());
+    for id in [first, second] {
+        assert_eq!(case.get(id).status, QuestionStatus::Dismissed);
+    }
+    assert_eq!(code(dismiss_many(&case.db, &[])), "questions_bulk_invalid");
+    let many: Vec<(u64, u64)> = (1..=LISTED_MAX as u64 + 1).map(|id| (id, 0)).collect();
+    assert_eq!(
+        code(dismiss_many(&case.db, &many)),
+        "questions_bulk_invalid"
+    );
+}
+
+/// F12: a master withdraws its own question and a sub-agent's, never an engine step's or a
+/// terminal box; the master gets no message, the sub-agent is told once that the master
+/// withdrew it.
+#[test]
+fn a_master_withdraws_its_own_and_its_sub_agents_questions_only() {
+    let case = Case::new();
+    let own = case.ask(&MASTER, "Ship on Friday?");
+    let sub = case.ask(&Asker::Agent(7), "Which region?");
+    let engine = raise(
+        &case.db,
+        &case.project,
+        &EngineSource::Planning,
+        &bare("Which stack?"),
+    )
+    .unwrap();
+    let before = case.messages().len();
+    assert_eq!(
+        withdraw(&case.db, &case.project, &MASTER, own, 0).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        withdraw(&case.db, &case.project, &MASTER, sub, 0).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        case.messages().len(),
+        before,
+        "a withdrawal sends no chat message"
+    );
+    for id in [own, sub] {
+        let question = case.get(id);
+        assert_eq!(question.status, QuestionStatus::Dismissed);
+        assert_eq!(question.closed_by, Some(ClosedBy::Master));
+    }
+    assert_eq!(
+        code(withdraw(&case.db, &case.project, &MASTER, engine, 0)),
+        "questions_not_found"
+    );
+    assert_eq!(
+        withdraw(&case.db, &case.project, &MASTER, own, 0).unwrap(),
+        Settlement::Stale
+    );
+    let notes = agent_notes(&case.db, &case.project, 7).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.starts_with("The master withdrew"),
+        "{}",
+        notes[0].text
+    );
+    let session = Asker::Session(SessionId::new("session-1").unwrap());
+    let other = case.ask(&Asker::Master(42), "Other master?");
+    assert_eq!(
+        code(withdraw(&case.db, &case.project, &session, other, 0)),
+        "questions_not_found"
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("\nWithdrawn by the master.\n").count(),
+        2,
+        "{page}"
+    );
+    assert!(!page.contains("Dismissed by the owner."), "{page}");
+}
+
+/// F12: the master reports an answer the owner typed into its terminal only after the
+/// owner typed there since the question was asked, one owner key time answers one
+/// question, and the record reads as the master's report, never as the owner's words.
+#[test]
+fn a_master_relays_an_answer_typed_in_its_terminal_once_per_owner_key() {
+    let case = Case::new();
+    let own = case.ask(&MASTER, "Ship on Friday?");
+    let sub = case.ask(&Asker::Agent(7), "Which region?");
+    let master = 41;
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            own,
+            0,
+            "Yes, Friday.",
+            Some(1)
+        )),
+        "questions_owner_not_typed"
+    );
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            own,
+            0,
+            "Yes, Friday.",
+            None
+        )),
+        "questions_owner_not_typed"
+    );
+    let key = now_ms() + 60_000;
+    assert_eq!(
+        relay(
+            &case.db,
+            &case.project,
+            master,
+            own,
+            0,
+            "Yes, Friday.",
+            Some(key)
+        )
+        .unwrap(),
+        Settlement::Settled
+    );
+    let relayed = case.get(own);
+    assert_eq!(relayed.status, QuestionStatus::AnsweredInTerminal);
+    assert_eq!(relayed.closed_by, Some(ClosedBy::Relay));
+    assert_eq!(relayed.answer.as_deref(), Some("Yes, Friday."));
+    assert_eq!(
+        relayed.answered_by, None,
+        "never stored as the owner's own answer"
+    );
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            sub,
+            0,
+            "EU.",
+            Some(key)
+        )),
+        "questions_owner_turn_used"
+    );
+    assert_eq!(
+        relay(
+            &case.db,
+            &case.project,
+            master,
+            sub,
+            0,
+            "EU.",
+            Some(key + 1)
+        )
+        .unwrap(),
+        Settlement::Settled
+    );
+    let notes = agent_notes(&case.db, &case.project, 7).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.contains("in the master's terminal"),
+        "{}",
+        notes[0].text
+    );
+    assert!(notes[0].text.ends_with("EU."), "{}", notes[0].text);
+    let terminal = ask(
+        &case.db,
+        &case.project,
+        &Asker::Terminal(9),
+        &bare("Allow?"),
+    )
+    .unwrap();
+    assert_eq!(
+        code(relay(
+            &case.db,
+            &case.project,
+            master,
+            terminal,
+            0,
+            "Yes",
+            Some(key + 2)
+        )),
+        "questions_in_terminal"
+    );
+    let page = case.page();
+    assert!(
+        page.contains("\nAnswered by the owner in the master's terminal. The master reports:\n\n"),
+        "{page}"
+    );
+}
+
+/// F14, DEC-147.8: an old free-text engine question is asked again as a choice: the old one
+/// closes as re-asked with no message, the new one keeps the engine asker so its cap of 8
+/// is never crossed, and only a text question of the caller or an engine step is replaced
+/// by a single or multi question.
+#[test]
+fn an_old_free_text_question_is_asked_again_as_a_choice_under_its_engine_asker() {
+    let case = Case::new();
+    let mut old = Vec::new();
+    for n in 0..PENDING_PER_ASKER_MAX {
+        let text = format!("Which stack for part {n}?");
+        old.push(
+            raise(
+                &case.db,
+                &case.project,
+                &EngineSource::Planning,
+                &bare(&text),
+            )
+            .unwrap(),
+        );
+    }
+    let before = case.messages().len();
+    let choice = asked(QuestionKind::Single, &["Rust", "Go"], Some("Rust"));
+    let new = reask(&case.db, &case.project, &MASTER, &choice, old[0]).unwrap();
+    let closed = case.get(old[0]);
+    assert_eq!(closed.status, QuestionStatus::Dismissed);
+    assert_eq!(closed.closed_by, Some(ClosedBy::Replaced));
+    let asked_again = case.get(new);
+    assert_eq!(asked_again.asker, "engine:planning");
+    assert_eq!(asked_again.kind, QuestionKind::Single);
+    assert_eq!(asked_again.status, QuestionStatus::Pending);
+    assert_eq!(
+        case.messages().len(),
+        before,
+        "re-asking sends no chat message"
+    );
+    let text = asked(QuestionKind::Text, &[], None);
+    assert_eq!(
+        code(reask(&case.db, &case.project, &MASTER, &text, old[1])),
+        "questions_replace_invalid"
+    );
+    assert_eq!(
+        code(reask(&case.db, &case.project, &MASTER, &choice, new)),
+        "questions_replace_invalid",
+        "a choice question is never replaced"
+    );
+    assert_eq!(
+        code(reask(
+            &case.db,
+            &case.project,
+            &Asker::Agent(7),
+            &choice,
+            old[1]
+        )),
+        "questions_replace_invalid",
+        "a sub-agent never asks an engine step's question again"
+    );
+    assert_eq!(case.get(old[1]).status, QuestionStatus::Pending);
+    let mine_text = ask(&case.db, &case.project, &MASTER, &bare("Mine?")).unwrap();
+    let foreign_text = ask(
+        &case.db,
+        &case.project,
+        &Asker::Master(42),
+        &bare("Not mine?"),
+    )
+    .unwrap();
+    assert_eq!(
+        code(reask(
+            &case.db,
+            &case.project,
+            &MASTER,
+            &choice,
+            foreign_text
+        )),
+        "questions_replace_invalid"
+    );
+    let mine = reask(&case.db, &case.project, &MASTER, &choice, mine_text).unwrap();
+    assert_eq!(case.get(mine).asker, MASTER.name());
+    assert_eq!(
+        code(reask(&case.db, &case.project, &MASTER, &choice, 999_999)),
+        "questions_replace_invalid"
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("\nAsked again as a choice question.\n")
+            .count(),
+        2,
+        "{page}"
+    );
+}
+
+/// F14, DEC-147.8: the master is sent one engine note per project listing the old
+/// free-text engine questions due, each once, with the words that tell it to use replaces.
+#[test]
+fn the_master_is_told_once_to_ask_the_old_free_text_questions_again() {
+    let case = Case::new();
+    let due = raise(
+        &case.db,
+        &case.project,
+        &EngineSource::Planning,
+        &bare("Which stack?"),
+    )
+    .unwrap();
+    let fresh = raise(
+        &case.db,
+        &case.project,
+        &EngineSource::Planning,
+        &bare("Which host?"),
+    )
+    .unwrap();
+    case.db
+        .execute(
+            "UPDATE questions_log SET reask=1 WHERE id=?1",
+            [column(due)],
+        )
+        .unwrap();
+    let before = case.messages().len();
+    let tx = case.db.unchecked_transaction().unwrap();
+    assert_eq!(send_reask_notes(&tx).unwrap(), 1);
+    assert_eq!(
+        send_reask_notes(&tx).unwrap(),
+        0,
+        "each question is listed once"
+    );
+    tx.commit().unwrap();
+    let messages = case.messages();
+    assert_eq!(messages.len(), before + 1);
+    let (author, text, _) = &messages[before];
+    assert_eq!(author, "engine");
+    assert!(text.contains(&format!("{due} \"Which stack?\"")), "{text}");
+    assert!(text.contains("replaces"), "{text}");
+    assert!(!text.contains("Which host?"), "{text}");
+    let reask: i64 = case
+        .db
+        .query_row(
+            "SELECT reask FROM questions_log WHERE id=?1",
+            [column(fresh)],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        reask, 0,
+        "a new free-text question is never re-asked by itself"
+    );
 }

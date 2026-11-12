@@ -681,6 +681,7 @@ pub struct TeamRuntime {
     resuming: Option<(i64, Resume)>,
     settled: bool,
     naming: Option<i64>,
+    fresh_start: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
     claims_next: BTreeMap<ProjectId, Instant>,
@@ -986,6 +987,7 @@ impl TeamRuntime {
             resuming: None,
             settled: false,
             naming: None,
+            fresh_start: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
@@ -1412,7 +1414,58 @@ impl TeamRuntime {
         self.sweep()?;
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
-        super::questions::tick(&mut self.connection, now_ms())
+        let questions = super::questions::tick(&mut self.connection, now_ms());
+        let lanes = self.lanes();
+        questions.and(lanes)
+    }
+
+    /// Moves every project's heavy lane one step (F28): the lane folders of each project's
+    /// agents that are not stopping, read with that project's coordination settings, and
+    /// every project whose lane still holds a command with no such agent left, which clears
+    /// it. Every project is served before the first failure is returned, so one unreadable
+    /// lane holds up no other project's.
+    fn lanes(&self) -> Result<(), EngineError> {
+        use crate::coord::lane::{FOLDER, Holder};
+        let mut projects: BTreeMap<ProjectId, Vec<Holder>> = BTreeMap::new();
+        for (id, worker) in &self.workers {
+            if worker.stopping {
+                continue;
+            }
+            projects
+                .entry(worker.project.clone())
+                .or_default()
+                .push(Holder {
+                    agent: *id,
+                    folder: self.agent_folder(*id).join("tmp").join(FOLDER),
+                });
+        }
+        let mut first = None;
+        match crate::coord::lane::projects(&self.connection) {
+            Ok(stored) => {
+                for project in stored {
+                    projects.entry(project).or_default();
+                }
+            }
+            Err(problem) => {
+                first.get_or_insert(problem);
+            }
+        }
+        for (project, holders) in &projects {
+            let moved =
+                crate::coord::settings::read(&self.connection, project).and_then(|settings| {
+                    crate::coord::lane::tick(
+                        &self.connection,
+                        project,
+                        holders,
+                        &settings,
+                        now_ms(),
+                    )
+                });
+            if let Err(problem) = moved {
+                first.get_or_insert(problem);
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
@@ -2263,6 +2316,31 @@ impl TeamRuntime {
             Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
             Err(_) => Ok(()),
         }
+    }
+
+    /// Tells whoever sent a task to a retired sub-agent, its lead or else the project's live
+    /// master, that the agent started again under the same name in a new worktree with a
+    /// fresh conversation, so it is briefed again (F10). Takes the project, the task's lead
+    /// if any and the agent. Returns any coordination store failure.
+    fn tell_restarted(
+        &self,
+        project: &ProjectId,
+        lead: Option<i64>,
+        agent: i64,
+    ) -> Result<(), EngineError> {
+        let to = match lead {
+            Some(lead) => Some(lead),
+            None => super::master::live_master(&self.connection, project)?,
+        };
+        let Some(to) = to.filter(|to| *to != agent) else {
+            return Ok(());
+        };
+        let name = names::name(&self.connection, agent)?;
+        self.note_lead(
+            project,
+            to,
+            restarted_note(&names::label(AgentRole::Sub, agent, name.as_ref())),
+        )
     }
 
     /// Tells each running lead which of its sub-agents the owner or the master just stopped,
@@ -5539,6 +5617,10 @@ impl TeamRuntime {
                         self.fail_task(task, reason)?;
                         continue;
                     }
+                    if super::cleanup::retiring(&self.connection, project, pinned)? {
+                        continue;
+                    }
+                    let retired = self.retired(project, pinned)?;
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
@@ -5550,7 +5632,11 @@ impl TeamRuntime {
                     else {
                         continue;
                     };
-                    let layout = self.agent_layout(project, pinned).map_err(error)?;
+                    let layout = if retired {
+                        self.git_layout(project)
+                    } else {
+                        self.agent_layout(project, pinned).map_err(error)?
+                    };
                     let refused = crate::sandbox::policy::load(&self.connection, project.as_str())
                         .is_ok_and(|policy| confinement(layout, policy.access).is_err());
                     if refused
@@ -5565,9 +5651,15 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    match self.wake(stored, pinned, &harness, slot.tools, &account, None)? {
+                    self.fresh_start = retired.then_some(pinned);
+                    let woken = self.wake(stored, pinned, &harness, slot.tools, &account, None);
+                    self.fresh_start = None;
+                    match woken? {
                         Ok((agent, resumed)) => {
                             woken_fresh = !resumed;
+                            if retired {
+                                self.tell_restarted(project, parent, agent)?;
+                            }
                             agent
                         }
                         Err(problem) => {
@@ -5664,6 +5756,7 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            crate::landing::tell_main_moved(&self.connection, project, agent);
             let (waiting, carried) = match self.workers[&agent].fresh {
                 Some(started) if prompt == super::master::WAKE_TASK => {
                     crate::coord::delivery::next_turn_unread(&self.connection, agent, started)?
@@ -6254,7 +6347,11 @@ impl TeamRuntime {
             _ => None,
         };
         let again = again.or(own.as_ref());
-        let resume = self.kept_conversation(id, harness, &account.connection)?;
+        let resume = if self.fresh_start == Some(id) {
+            None
+        } else {
+            self.kept_conversation(id, harness, &account.connection)?
+        };
         let resuming = resume.is_some();
         self.resuming = resume.map(|resume| (id, resume));
         let revived = self.revive(stored, id, AgentRole::Sub, harness, tools, account, again);
@@ -6309,7 +6406,9 @@ impl TeamRuntime {
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
     /// or the plain reason it could not start; the worktree must still be the one recorded
-    /// when it first started.
+    /// when it first started, except for a retired sub-agent whose pinned task the route
+    /// loop marked in `fresh_start`, which starts under its own id and name in a new
+    /// worktree on the current tip (F10).
     #[allow(clippy::too_many_arguments)]
     fn revive(
         &mut self,
@@ -6335,9 +6434,19 @@ impl TeamRuntime {
             )
             .optional()
             .map_err(error)?;
-        let Some((repository, worktree, git_dir)) = kept else {
-            return Ok(Err("the agent's worktree is no longer known".into()));
-        };
+        let kept = kept.map(|(repository, worktree, git_dir)| [repository, worktree, git_dir]);
+        if kept.is_none() {
+            if role != AgentRole::Sub || self.fresh_start != Some(id) {
+                return Ok(Err("the agent's worktree is no longer known".into()));
+            }
+            if super::cleanup::retiring(&self.connection, &stored.project_id, id)? {
+                return Ok(Err("the agent's old worktree is still being removed".into()));
+            }
+            self.resuming = None;
+            self.connection
+                .execute("DELETE FROM team_agent_conversations WHERE agent=?1", [id])
+                .map_err(error)?;
+        }
         let changed = self
             .connection
             .execute(
@@ -6353,8 +6462,23 @@ impl TeamRuntime {
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
-        let kept = [repository, worktree, git_dir];
-        self.launch(stored, id, role, harness, tools, account, again, Some(kept))
+        self.launch(stored, id, role, harness, tools, account, again, kept)
+    }
+
+    /// Says whether a sub-agent's worktree record is gone, as cleanup leaves an agent it
+    /// retired: [`TeamRuntime::revive`] then starts it under its own id and name in a new
+    /// worktree on the current tip, with a fresh harness conversation (F10). Takes the
+    /// project and the agent. Returns the answer.
+    fn retired(&self, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
+        let known: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_worktrees WHERE agent=?1 AND project=?2)",
+                params![id, project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        Ok(!known)
     }
 
     /// Prepares and starts the agent of one `team_agents` row as `start_agent` does, then
@@ -7914,6 +8038,7 @@ impl TeamRuntime {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
         }
+        let _ = private_directory(&tmp.join(crate::coord::lane::FOLDER));
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
         let task_start = match role {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
@@ -8377,6 +8502,26 @@ impl TeamRuntime {
             ),
             _ => context,
         };
+        let context = match &self.delegation_tool {
+            Some(engine) => {
+                let resources = crate::coord::settings::read(&self.connection, project)
+                    .map_err(|e| {
+                        with_code("the coordination settings could not be read", Some(&e.0))
+                    })?
+                    .shared_resources;
+                context.with_heavy_lane(
+                    engine
+                        .verified_path()
+                        .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
+                    &self
+                        .agent_folder(id)
+                        .join("tmp")
+                        .join(crate::coord::lane::FOLDER),
+                    &resources,
+                )
+            }
+            None => context,
+        };
         Ok(context)
     }
 
@@ -8409,7 +8554,8 @@ impl TeamRuntime {
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
     /// off or deleted for the project, for a sub-agent the owner's Sub-agent depth setting
     /// keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway, and for every
-    /// sub-agent `record_answer`, since only the master records an owner chat answer. Takes
+    /// sub-agent `record_answer`, since only the master records an owner chat answer, and
+    /// `discard`, since only the master discards a change set (DEC-147 S3.6). Takes
     /// the project, the agent and its role. Returns the names, or a SQLite failure.
     fn off_tools(
         &self,
@@ -8429,7 +8575,8 @@ impl TeamRuntime {
             }
         }
         if role != AgentRole::Master {
-            off.push(tool::RECORD_TOOL.to_owned());
+            off.extend(tool::MASTER_QUESTION_TOOLS.map(str::to_owned));
+            off.push(tool::DISCARD_TOOL.to_owned());
         }
         assert!(tool::known_tools(&off));
         Ok(off)
@@ -9138,6 +9285,18 @@ impl TeamRuntime {
         let task = turn
             .strip_prefix("task-")
             .and_then(|task| task.parse::<i64>().ok());
+        let summary = match task {
+            Some(task) => self
+                .connection
+                .query_row(
+                    "SELECT COALESCE(result,'') FROM team_tasks WHERE id=?1",
+                    [task],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(error)?,
+            None => None,
+        };
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -9150,6 +9309,15 @@ impl TeamRuntime {
         let landed = crate::landing::open(&self.root).and_then(|db| {
             let landed =
                 crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
+            if let (Ok(crate::landing_turns::Landed::Added(set)), Some(summary)) =
+                (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, set, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -9650,12 +9818,13 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat, and the same tool with answer in place of owner_turn records one the owner typed here in your terminal; {}(question, version) takes a question you no longer need off the owner's list. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
             tool::SPAWN_TOOL,
             tool::UPDATE_WORK_TOOL,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::INSPECT_WORK_TOOL
         )
     } else {
@@ -11124,6 +11293,15 @@ fn conversation_note(ended: &EndedTask) -> String {
 }
 
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+
+/// The note a lead or the master gets when a task sent to a retired sub-agent started it
+/// again (F10). Input: the agent's label. Output: the note.
+fn restarted_note(label: &str) -> String {
+    format!(
+        "{label} was retired and its old worktree removed, so it started again under the same name in a new worktree on the current main, with a fresh conversation. It remembers nothing of its earlier work: brief it again in full."
+    )
+}
+
 /// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
 /// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
 /// the master asked for the lead that takes it.

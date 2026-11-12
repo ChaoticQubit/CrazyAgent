@@ -1330,6 +1330,49 @@ fn a_work_question_alert_counts_as_unseen_but_not_as_a_pending_question() {
     );
 }
 
+/// F12: a work question linked into the questions log is counted there as pending, so its
+/// team alert, Normal or High, counts as a question notification and the project's flag
+/// counts the question once.
+#[test]
+fn a_linked_work_question_alert_counts_as_a_question_notification() {
+    let fixture = Fixture::new();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    let mut alerts = Vec::new();
+    for (message, kind) in [
+        (9, NotificationKind::Question),
+        (10, NotificationKind::UrgentQuestion),
+        (11, NotificationKind::Question),
+    ] {
+        let text = format!("Ada asks you: question {message}?");
+        let alert = notify(&tx, &project(), kind, &text, message).unwrap();
+        tx.execute(
+            "INSERT INTO team_owner_alerts(source,ref,since,project,agent,notification) VALUES ('question',?3,2,?1,7,?2)",
+            params![PROJECT, alert, message],
+        )
+        .unwrap();
+        alerts.push(alert);
+    }
+    for message in [9, 10] {
+        tx.execute(
+            "INSERT INTO questions_log(project,asker,source,question,options_json,status,turn_floor,created_ms,kind,coord_message)
+             VALUES (?1,'agent:7','agent','Which port?','[]','pending',0,2,'text',?2)",
+            params![PROJECT, message],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(alerts.len(), 3);
+    assert_eq!(
+        app(&fixture.connection).unwrap().projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: 3,
+            questions: 2,
+        }],
+        "the two linked alerts are question notifications, the unlinked one is not"
+    );
+}
+
 #[test]
 fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let fixture = Fixture::new();

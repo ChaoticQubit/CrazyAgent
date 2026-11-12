@@ -314,6 +314,7 @@ mod tests {
             answered_by: None,
             created_ms: 1,
             settled_ms: None,
+            closed_by: None,
         }
     }
 

@@ -258,6 +258,9 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
         r#"{"questions":{"kind":"ask","project":"alpha","question":"x"}}"#,
         r#"{"questions":{"kind":"answer","id":"1","version":0,"comment":"x"}}"#,
         r#"{"questions":{"kind":"counts","project":"alpha"}}"#,
+        r#"{"questions":{"kind":"dismiss_many","items":[[1]]}}"#,
+        r#"{"questions":{"kind":"dismiss_many","items":[{"id":1,"version":0}]}}"#,
+        r#"{"questions":{"kind":"dismiss_many"}}"#,
     ] {
         assert_eq!(
             parse(body.as_bytes()).unwrap_err().0,
@@ -277,6 +280,54 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
     let bytes = serde_json::to_vec(&largest).unwrap();
     assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
     assert!(parse(&bytes).is_ok());
+    let items = vec![[u64::MAX, u64::MAX]; questions::LISTED_MAX];
+    let widest = json!({"questions": {"kind": "dismiss_many", "items": items}});
+    let bytes = serde_json::to_vec(&widest).unwrap();
+    assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
+    assert!(parse(&bytes).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_owner_dismisses_many_questions_in_one_request_and_hears_each_outcome() {
+    let (_tmp, root, project) = engine();
+    let db = questions::open(&root).unwrap();
+    let master = Asker::Master(41);
+    let first = questions::ask(&db, &project, &master, &asked("Ship on Friday?")).unwrap();
+    let second = questions::ask(&db, &project, &master, &asked("Rename the app?")).unwrap();
+    let dismiss_many = |items: serde_json::Value| {
+        send(
+            &root,
+            json!({"questions": {"kind": "dismiss_many", "items": items}}),
+        )
+    };
+    match dismiss_many(json!([[first, 0], [second, 3], [9999, 0]])).unwrap() {
+        Reply::Dismissed { outcome } => {
+            assert_eq!(outcome.settled, [first]);
+            assert_eq!(outcome.stale, [second]);
+            assert_eq!(outcome.refused, [(9999, "questions_not_found".to_owned())]);
+        }
+        other => panic!("expected the outcome of each, got {other:?}"),
+    }
+    let page = listed(&root, None);
+    let pending: Vec<u64> = page
+        .items
+        .iter()
+        .filter(|question| question.status == QuestionStatus::Pending)
+        .map(|question| question.id)
+        .collect();
+    assert_eq!(pending, [second]);
+    assert_eq!(
+        dismiss_many(json!([])).unwrap_err().0,
+        "questions_bulk_invalid"
+    );
+    let too_many: Vec<[u64; 2]> = (1..=questions::LISTED_MAX as u64 + 1)
+        .map(|id| [id, 0])
+        .collect();
+    assert_eq!(
+        dismiss_many(json!(too_many)).unwrap_err().0,
+        "questions_bulk_invalid"
+    );
 }
 
 #[test]

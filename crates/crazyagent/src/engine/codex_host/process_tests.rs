@@ -609,6 +609,7 @@ async fn a_codex_master_protocol_failure_keeps_the_refused_frame_and_frames_with
         Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
         "stand-in instructions",
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -649,6 +650,34 @@ async fn stand_in_master(
     crate::engine::master_host_fixture::MasterFixture,
     super::CodexHost,
 ) {
+    let (fixture, host) = stand_in_master_framed(
+        name,
+        body,
+        limits,
+        crate::master_frame_limit::FrameSize::default(),
+        "stand-in instructions",
+    )
+    .await;
+    let host = host.unwrap();
+    assert!(host.diagnostic().fault.is_none());
+    (fixture, host)
+}
+
+/// Starts a Codex master host as `stand_in_master` does, under a master frame size limit
+/// and with the given instructions. Inputs: the name, script, budget, frame size and
+/// instructions. Output: the fixture, which owns the folders, and the host or the code
+/// its start ended with.
+#[cfg(unix)]
+async fn stand_in_master_framed(
+    name: &str,
+    body: &str,
+    limits: ResourceBudget,
+    frames: crate::master_frame_limit::FrameSize,
+    instructions: &str,
+) -> (
+    crate::engine::master_host_fixture::MasterFixture,
+    Result<super::CodexHost, crate::engine::EngineError>,
+) {
     use crate::adapters::{NativeAction, NativeHarness};
     use crate::engine::master_host_fixture::MasterFixture;
     use crate::protocol::{CredentialRef, RequestId, SessionId};
@@ -678,12 +707,105 @@ async fn stand_in_master(
         CredentialRef::new("group-master-account").unwrap(),
         Some(Duration::from_millis(limits.wall_time_ms)),
         limits,
-        "stand-in instructions",
+        instructions,
+        frames,
     )
-    .await
-    .unwrap();
-    assert!(host.diagnostic().fault.is_none());
+    .await;
     (fixture, host)
+}
+
+/// A stand-in Codex app-server that answers initialize, the master thread and the turn in
+/// Codex 0.164's shapes, then replies with the byte lengths of the thread start and turn
+/// start lines it read, as `thread=<bytes> turn=<bytes>`, and ends the turn.
+#[cfg(unix)]
+const FRAME_SIZE_APP_SERVER: &str = r#"#!/bin/sh
+IFS= read -r line
+printf '%s\n' "{\"id\":1,\"result\":{\"userAgent\":\"stand-in\",\"codexHome\":\"$CODEX_HOME\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\"}}"
+IFS= read -r line
+IFS= read -r line
+thread=${#line}
+cwd=$(pwd)
+printf '%s\n' "{\"id\":2,\"result\":{\"thread\":{\"id\":\"stand-in-thread\",\"cwd\":\"$cwd\",\"turns\":[],\"status\":{\"type\":\"idle\"}},\"cwd\":\"$cwd\",\"model\":\"stand-in-model\",\"modelProvider\":\"openai\",\"approvalPolicy\":\"on-request\",\"approvalsReviewer\":\"user\",\"sandbox\":{\"type\":\"readOnly\",\"networkAccess\":false}}}"
+IFS= read -r line
+turn=${#line}
+printf '%s\n' '{"id":3,"result":{"turn":{"id":"stand-in-turn","items":[],"status":"inProgress"}}}'
+printf '%s\n' "{\"method\":\"item/agentMessage/delta\",\"params\":{\"threadId\":\"stand-in-thread\",\"turnId\":\"stand-in-turn\",\"itemId\":\"item-1\",\"delta\":\"thread=$thread turn=$turn\"}}"
+printf '%s\n' '{"method":"turn/completed","params":{"threadId":"stand-in-thread","turn":{"id":"stand-in-turn","status":"completed","items":[{"id":"item-1"}]}}}'
+exec /bin/sleep 30
+"#;
+
+/// A Codex master host writes frames as large as the owner's master frame size limit
+/// allows (F39): instructions whose escaped thread start passes the 64 KiB engine wire size
+/// stop the start under 64 KiB with `codex_host_protocol_frame_too_large`, and reach the
+/// harness whole under 256 KiB and 1 MiB, as does a turn close to the chosen limit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_master_starts_its_thread_and_turn_up_to_its_frame_size_limit() {
+    use crate::adapters::codex::{DEVELOPER_INSTRUCTIONS_BYTES_MAX, FRAME_BYTES_MAX};
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::master_frame_limit::FrameSize;
+    use crate::protocol::RequestId;
+
+    let limits = || ResourceBudget {
+        output_bytes: 1_048_576,
+        wall_time_ms: 30_000,
+        ..budget()
+    };
+    let instructions = "\"".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
+    let (_fixture, refused) = stand_in_master_framed(
+        "frame-refused",
+        FRAME_SIZE_APP_SERVER,
+        limits(),
+        FrameSize::Kib64,
+        &instructions,
+    )
+    .await;
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("codex_host_protocol_frame_too_large")
+    );
+    for limit in [FrameSize::Kib256, FrameSize::Mib1] {
+        let (_fixture, host) = stand_in_master_framed(
+            "frame-taken",
+            FRAME_SIZE_APP_SERVER,
+            limits(),
+            limit,
+            &instructions,
+        )
+        .await;
+        let mut host = host.unwrap();
+        let text = "x".repeat(limit.bytes() - 1024);
+        host.start_turn(RequestId::new("frame-turn").unwrap(), &text)
+            .await
+            .unwrap();
+        let mut said = String::new();
+        let ended = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                match host.next_event().await.unwrap().kind {
+                    EventKind::AssistantDelta { text, .. } => said.push_str(&text),
+                    EventKind::TurnFinished { outcome, .. } => break outcome,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(ended, TurnOutcome::Success);
+        let lengths: Vec<usize> = said
+            .split(' ')
+            .map(|part| part.split_once('=').unwrap().1.parse().unwrap())
+            .collect();
+        assert_eq!(lengths.len(), 2, "{said}");
+        assert!(
+            lengths[0] > FRAME_BYTES_MAX && lengths[0] < limit.bytes(),
+            "{said}"
+        );
+        assert!(
+            lengths[1] > limit.bytes() - 1024 && lengths[1] < limit.bytes(),
+            "{said}"
+        );
+        let _ = host.close().await;
+    }
 }
 
 /// A stand-in Codex app-server that answers initialize, the master thread and the turn in

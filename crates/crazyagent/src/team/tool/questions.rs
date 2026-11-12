@@ -1,4 +1,4 @@
-use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL};
+use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL, WITHDRAW_TOOL};
 use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
@@ -12,10 +12,14 @@ pub const ASKS_PER_REPLY_MAX: usize = 8;
 pub const ASK_DROP_BYTES_MAX: u64 = ASKS_PER_REPLY_MAX as u64 * super::CALL_BYTES_MAX;
 const ASK_LOGGED: &str = "Recorded. When your reply ends, the engine logs this question in the project's questions and notifies the owner, unless 8 of your questions are still open. Their answer or dismissal comes back to you once on a later turn, so do not ask it again.";
 const RECORD_TAKEN: &str = "Noted. When your reply ends, the engine records the owner's message as the answer, taking the words from that message and never from yours, if the question is still open and the message is the owner's.";
-const ASK_ONLY: &str = "Not sent: this tool only takes a question or a recorded answer.";
+const WITHDRAW_TAKEN: &str = "Noted. When your reply ends, the engine takes the question off the owner's list if it is still open and was asked by you or by a sub-agent of this project.";
+const RELAY_LIVE_ONLY: &str = "Not sent: only a master in the owner's terminal records an answer as its own words. Name the owner's message with owner_turn instead.";
+const ASK_ONLY: &str =
+    "Not sent: this tool only takes a question, a recorded answer or a withdrawal.";
 const ASKS_FULL: &str = "Not sent: the engine takes at most 8 question calls from one reply. Make the next one in a later reply.";
 const ASK_UNWRITABLE: &str = "Not sent: the engine's question record could not be written.";
 const AGENT_ASKS_ONLY: &str = "Not recorded: the owner answers a sub-agent's questions in the Questions view, so only the master records an answer from chat.";
+const AGENT_WITHDRAW_REFUSED: &str = "Not withdrawn: only the master takes a question off the owner's list. Tell your master the question is no longer needed.";
 
 pub const NOTES_BYTES_MAX: usize = 8192;
 pub const OPEN_LINE_BYTES_MAX: usize = 4096;
@@ -30,6 +34,14 @@ const _: () = assert!(NOTES_BYTES_MAX >= 2 * crate::questions::ANSWER_BYTES_MAX)
 pub(super) fn ask_listing() -> Value {
     let listed = super::ask_tool();
     assert_eq!(listed["name"], ASK_TOOL);
+    listed
+}
+
+/// The `withdraw_question` tool's listing, as the live master's list shows it (F12).
+/// Output: the tool's JSON entry, named `WITHDRAW_TOOL`.
+pub(super) fn withdraw_listing() -> Value {
+    let listed = super::withdraw_tool();
+    assert_eq!(listed["name"], WITHDRAW_TOOL);
     listed
 }
 
@@ -70,32 +82,50 @@ pub fn ask_file(drop: &Path) -> PathBuf {
     drop.with_file_name(ASK_DROP_FILE)
 }
 
-/// Answers one `tools/call` of the `ask` or `record_answer` tool on the drop-file server:
-/// the call is checked as the live server checks it and recorded for the engine, which
-/// takes it when the reply ends. Inputs: the call's params and the absolute drop file.
-/// Output: none for another tool, else the text the master reads and whether it is an error.
+/// Answers one `tools/call` of the `ask`, `record_answer` or `withdraw_question` tool on
+/// the drop-file server: the call is checked as the live server checks it and recorded for
+/// the engine, which takes it when the reply ends. An answer given as the master's own
+/// words is refused, since a drop-file master has no terminal the owner types into. Inputs:
+/// the call's params and the absolute drop file. Output: none for another tool, else the
+/// text the master reads and whether it is an error.
 pub(super) fn drop_call(params: Option<&Value>, drop: &Path) -> Option<(String, bool)> {
     let params = params?;
     let name = params.get("name")?.as_str()?;
-    if name != ASK_TOOL && name != RECORD_TOOL {
+    if name != ASK_TOOL && name != RECORD_TOOL && name != WITHDRAW_TOOL {
         return None;
     }
     Some(match super::live_call(name, params.get("arguments"))? {
         Err(refused) => (refused.to_owned(), true),
-        Ok(call @ (Call::Ask { .. } | Call::RecordAnswer { .. })) => {
-            match record_ask(drop, &call) {
-                Ok(true) if matches!(call, Call::Ask { .. }) => (ASK_LOGGED.to_owned(), false),
-                Ok(true) => (RECORD_TAKEN.to_owned(), false),
-                Ok(false) => (ASKS_FULL.to_owned(), true),
-                Err(_) => (ASK_UNWRITABLE.to_owned(), true),
-            }
-        }
+        Ok(Call::RelayAnswer { .. }) => (RELAY_LIVE_ONLY.to_owned(), true),
+        Ok(call) if taken(&call) => match record_ask(drop, &call) {
+            Ok(true) => (
+                match call {
+                    Call::Ask { .. } => ASK_LOGGED,
+                    Call::Withdraw { .. } => WITHDRAW_TAKEN,
+                    _ => RECORD_TAKEN,
+                }
+                .to_owned(),
+                false,
+            ),
+            Ok(false) => (ASKS_FULL.to_owned(), true),
+            Err(_) => (ASK_UNWRITABLE.to_owned(), true),
+        },
         Ok(_) => (ASK_ONLY.to_owned(), true),
     })
 }
 
+/// Says whether a question call is one the engine takes from a drop-file or conversation
+/// master's record: an ask, an answer recorded from the owner's message or a withdrawal.
+/// Input: the call. Output: the answer.
+fn taken(call: &Call) -> bool {
+    matches!(
+        call,
+        Call::Ask { .. } | Call::RecordAnswer { .. } | Call::Withdraw { .. }
+    )
+}
+
 fn record_ask(drop: &Path, call: &Call) -> std::io::Result<bool> {
-    assert!(matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }));
+    assert!(taken(call));
     let mut file = super::open_drop(&ask_file(drop))?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -117,7 +147,7 @@ fn record_ask(drop: &Path, call: &Call) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Takes the question calls, asks and recorded answers, a drop-file master made during one
+/// Takes the question calls, asks, recorded answers and withdrawals, a drop-file master made during one
 /// reply, and clears the record. Each is checked again, since the master's side could have
 /// written the file. Input: the master's delegation drop file; a link or other non-file is
 /// never read. Output: at most `ASKS_PER_REPLY_MAX` calls in call order.
@@ -143,7 +173,7 @@ pub fn take_asks(drop: &Path) -> Vec<Call> {
         .split(|byte| *byte == b'\n')
         .filter_map(|line| serde_json::from_slice::<Call>(line).ok())
         .filter_map(|call| super::checked(call).ok())
-        .filter(|call| matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }))
+        .filter(taken)
         .take(ASKS_PER_REPLY_MAX)
         .collect();
     assert!(found.len() <= ASKS_PER_REPLY_MAX);
@@ -207,6 +237,11 @@ pub fn apply_master_calls(
             version,
             crate::questions::record_from_chat(db, project, master, question, version, owner_turn),
         ),
+        Call::Withdraw { question, version } => not_withdrawn(
+            question,
+            version,
+            crate::questions::withdraw(db, project, &asker, question, version),
+        ),
         _ => unreachable!("take_asks returns only question calls"),
     })
 }
@@ -253,6 +288,11 @@ pub fn apply_session_calls(
                 "Your record of question {question} was not taken: message {owner_turn} is not the owner's message of that turn."
             )),
         },
+        Call::Withdraw { question, version } => not_withdrawn(
+            question,
+            version,
+            crate::questions::withdraw(db, project, &asker, question, version),
+        ),
         _ => unreachable!("take_asks returns only question calls"),
     })
 }
@@ -264,13 +304,44 @@ fn applied(calls: Vec<Call>, apply: impl FnMut(Call) -> Option<String>) -> Vec<S
     refused
 }
 
+/// Logs one question a drop-file or conversation master asked, or asks it in place of an
+/// old free-text one when it names one to replace (F14). Inputs: the engine connection, the
+/// project, the master as asker and its `ask` call. Output: none when it was logged, else
+/// the sentence for the master's next turn.
 fn logged_ask(db: &Connection, project: &ProjectId, asker: &Asker, call: Call) -> Option<String> {
+    let (ask, replaces) = split_ask(call);
+    let asked = match replaces {
+        Some(old) => crate::questions::reask(db, project, asker, &ask, old),
+        None => crate::questions::ask(db, project, asker, &ask),
+    };
+    let problem = asked.err()?;
+    let why = match problem.0.as_str() {
+        "questions_asker_full" => "8 of your questions are still open",
+        "questions_full" => "64 questions of this project are still open",
+        "questions_replace_invalid" => {
+            "the question it replaces is not an open free-text question of this project asked by you or by an engine step, or the new one is not of kind single or multi"
+        }
+        "questions_ask_invalid" | "questions_text_invalid" => {
+            "it is not one plain question of kind single or multi with 2 to 6 one-line options and one of them recommended, or of kind text with no options"
+        }
+        _ => "the questions log could not be written",
+    };
+    Some(format!(
+        "Your question {} was not logged for the owner: {why}.",
+        quoted(&ask.question)
+    ))
+}
+
+/// Splits a checked `ask` call into the question for the store and the number of the old
+/// question it replaces, if any. Input: the call, which must be an ask. Output: both parts.
+fn split_ask(call: Call) -> (crate::questions::Ask, Option<u64>) {
     let Call::Ask {
         question,
         kind,
         options,
         recommended,
         context,
+        replaces,
     } = call
     else {
         unreachable!("only a question is logged");
@@ -282,18 +353,29 @@ fn logged_ask(db: &Connection, project: &ProjectId, asker: &Asker, call: Call) -
         recommended,
         context,
     };
-    let problem = crate::questions::ask(db, project, asker, &ask).err()?;
-    let why = match problem.0.as_str() {
-        "questions_asker_full" => "8 of your questions are still open",
-        "questions_full" => "64 questions of this project are still open",
-        "questions_ask_invalid" | "questions_text_invalid" => {
-            "it is not one plain question of kind single or multi with 2 to 6 one-line options and one of them recommended, or of kind text with no options"
+    (ask, replaces)
+}
+
+/// The sentence a drop-file or conversation master reads on a later turn when its
+/// withdrawal was not taken. Inputs: the question, the version it read and the store's
+/// outcome. Output: none when the question was withdrawn, else the sentence.
+fn not_withdrawn(
+    question: u64,
+    version: u64,
+    outcome: Result<Settlement, EngineError>,
+) -> Option<String> {
+    let why = match outcome {
+        Ok(Settlement::Settled) => return None,
+        Ok(Settlement::Stale) => {
+            format!("it is already answered or dismissed, or changed since version {version}")
         }
-        _ => "the questions log could not be written",
+        Err(problem) if problem.0 == "questions_not_found" => {
+            "it is not an open question of this project asked by you or by a sub-agent".to_owned()
+        }
+        Err(_) => "the questions log could not be written".to_owned(),
     };
     Some(format!(
-        "Your question {} was not logged for the owner: {why}.",
-        quoted(&ask.question)
+        "Your withdrawal of question {question} was not taken: {why}."
     ))
 }
 
@@ -337,39 +419,29 @@ pub fn clear_asks(drop: &Path) {
 }
 
 /// Logs the question a sub-agent asked through the `ask` tool of its team server, with the
-/// sub-agent as the asker; a sub-agent's `record_answer` is refused. Inputs: the engine
-/// connection, the project, the sub-agent's team id and its checked call, `ask` or
-/// `record_answer`. Output: the sentence the sub-agent reads and whether it is an error.
+/// sub-agent as the asker, in place of an old free-text question of its own when it names
+/// one; a sub-agent's `record_answer` and `withdraw_question` are refused. Inputs: the
+/// engine connection, the project, the sub-agent's team id and its checked question call.
+/// Output: the sentence the sub-agent reads and whether it is an error.
 pub(in crate::team) fn agent_ask(
     db: &Connection,
     project: &ProjectId,
     agent: i64,
     call: Call,
 ) -> (String, bool) {
-    assert!(matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }));
-    let Call::Ask {
-        question,
-        kind,
-        options,
-        recommended,
-        context,
-    } = call
-    else {
-        return (AGENT_ASKS_ONLY.to_owned(), true);
-    };
-    let ask = crate::questions::Ask {
-        question,
-        kind,
-        options,
-        recommended,
-        context,
-    };
-    logged(crate::questions::ask(
-        db,
-        project,
-        &Asker::Agent(agent),
-        &ask,
-    ))
+    match call {
+        Call::Ask { .. } => {
+            let (ask, replaces) = split_ask(call);
+            let asker = Asker::Agent(agent);
+            logged(match replaces {
+                Some(old) => crate::questions::reask(db, project, &asker, &ask, old),
+                None => crate::questions::ask(db, project, &asker, &ask),
+            })
+        }
+        Call::RecordAnswer { .. } | Call::RelayAnswer { .. } => (AGENT_ASKS_ONLY.to_owned(), true),
+        Call::Withdraw { .. } => (AGENT_WITHDRAW_REFUSED.to_owned(), true),
+        _ => unreachable!("only question calls reach agent_ask"),
+    }
 }
 
 /// The sentence a sub-agent reads once its question was logged, or why it was not.
@@ -389,6 +461,9 @@ fn logged(outcome: Result<u64, EngineError>) -> (String, bool) {
             ),
             "questions_full" => refused(
                 "Not asked: 64 questions of this project are still open. Wait for the owner's answers before asking more.",
+            ),
+            "questions_replace_invalid" => refused(
+                "Not asked: the question it replaces is not an open free-text question you asked in this project, or the new one is not of kind single or multi.",
             ),
             "questions_ask_invalid" | "questions_text_invalid" => (
                 format!(

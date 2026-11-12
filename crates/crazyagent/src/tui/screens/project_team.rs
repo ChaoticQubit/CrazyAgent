@@ -7,8 +7,9 @@ use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    NativeSubAgents, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
-    TaskStart, TerminalDisplay, native_scope, native_sub_agents,
+    HeavyLane, NativeSubAgents, Nudges, Overlaps, QuestionsTo, RESOURCE_NAME_BYTES_MAX,
+    ROLE_SKILLS_MAX, SHARED_RESOURCES_MAX, SharedResource, SkillRole, SubagentMode, TaskStart,
+    TerminalDisplay, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
 use crate::harnesses::HarnessEntry;
@@ -20,9 +21,9 @@ use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, R
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding,
-    CoordinationView, DelegationPath, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle, SwitchApply,
-    SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness,
-    TeamStatus, TeamTask,
+    CoordinationView, DelegationPath, LandingMode, MASTER_BRANCH_BYTES_MAX, MasterLands, ReuseIdle,
+    SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction, TeamAgent,
+    TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
@@ -167,8 +168,8 @@ pub(in crate::tui) struct CoordEdit {
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
 /// the one terminal display of every harness (N-D9, DEC-141), where sub-agent questions go,
 /// overlapping edits, whether agents may catch up with main (OS-8), workflow nudges, the
-/// Task-start reminder (T3-15), the counted tools or the skills one team role gets (DEC-111
-/// R3).
+/// Task-start reminder (T3-15), the counted tools, the skills one team role gets (DEC-111
+/// R3), the heavy lane size or the shared resources (F28).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -182,9 +183,12 @@ pub(in crate::tui) enum CoordRow {
     Counted,
     Skills(SkillRole),
     ReuseIdle,
+    LandingMode,
+    HeavyLane,
+    Resources,
 }
 
-const COORD_ROWS: [CoordRow; 17] = [
+const COORD_ROWS: [CoordRow; 20] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -202,7 +206,11 @@ const COORD_ROWS: [CoordRow; 17] = [
     CoordRow::Skills(SkillRole::Lead),
     CoordRow::Skills(SkillRole::Worker),
     CoordRow::ReuseIdle,
+    CoordRow::LandingMode,
+    CoordRow::HeavyLane,
+    CoordRow::Resources,
 ];
+const RESOURCES_TEXT_BYTES_MAX: usize = SHARED_RESOURCES_MAX * (RESOURCE_NAME_BYTES_MAX + 6);
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 4] = [
     Overlaps::Warn,
@@ -2008,7 +2016,8 @@ impl TeamView {
         })
     }
 
-    /// Flips "Ask me before merging into the master's branch" between Off and On.
+    /// Flips "Master accepts change sets" between Itself and Only when I click or say accept
+    /// all (DEC-147.7).
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn ask_before_merge(&mut self) -> TeamReply {
         if self.status.is_some() && self.still_saving() {
@@ -2021,9 +2030,9 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+                "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
             } else {
-                "The master now merges a finished harness without asking."
+                "The master now accepts change sets itself."
             }
             .to_owned(),
         );
@@ -2312,6 +2321,7 @@ impl TeamView {
                 }
                 KeyCode::Enter => match COORD_ROWS[edit.row] {
                     CoordRow::Skills(role) => self.save_skills(role),
+                    CoordRow::Resources => self.save_resources(),
                     _ => self.save_counted(),
                 },
                 _ => {
@@ -2351,6 +2361,15 @@ impl TeamView {
             KeyCode::Enter | KeyCode::Char(' ') if row == CoordRow::Counted => {
                 let mut input = TextInput::single(COUNTED_TEXT_BYTES_MAX);
                 input.set(&view.settings.counted_tools.join(", "));
+                self.coord = Some(CoordEdit {
+                    row: edit.row,
+                    input: Some(input),
+                });
+                TeamReply::Handled
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if row == CoordRow::Resources => {
+                let mut input = TextInput::single(RESOURCES_TEXT_BYTES_MAX);
+                input.set(&resources_text(&view.settings.shared_resources));
                 self.coord = Some(CoordEdit {
                     row: edit.row,
                     input: Some(input),
@@ -2529,6 +2548,24 @@ impl TeamView {
                 };
                 (TeamAction::ReuseIdle { project_id, mode }, done.to_owned())
             }
+            CoordRow::LandingMode => {
+                let mode = match self.status.as_ref().map(|status| status.landing_mode) {
+                    Some(LandingMode::Merge) => LandingMode::Squash,
+                    Some(LandingMode::Squash) | None => LandingMode::Merge,
+                };
+                let done = match mode {
+                    LandingMode::Merge => {
+                        "Landing is Merge commit: accepted changes land as a merge commit that keeps every agent commit in your history."
+                    }
+                    LandingMode::Squash => {
+                        "Landing is Squash: each accepted change set lands as one commit."
+                    }
+                };
+                (
+                    TeamAction::LandingMode { project_id, mode },
+                    done.to_owned(),
+                )
+            }
             CoordRow::Nudges => {
                 settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
                 let done = format!(
@@ -2557,7 +2594,21 @@ impl TeamView {
                     done,
                 )
             }
-            CoordRow::Counted => return TeamReply::Handled,
+            CoordRow::HeavyLane => {
+                settings.heavy_lane = cycle(&HeavyLane::ALL, settings.heavy_lane, forward);
+                let done = format!(
+                    "Heavy lane: {}.",
+                    settings.heavy_lane.words().to_lowercase()
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
+            CoordRow::Counted | CoordRow::Resources => return TeamReply::Handled,
             CoordRow::Skills(role) => {
                 if settings.role_skills.of(role).is_none() {
                     if let Some(at) = self.coord.as_ref().map(|edit| edit.row) {
@@ -2681,6 +2732,45 @@ impl TeamView {
         )
     }
 
+    /// Sends the shared resources typed on their row (F28): `name` or `name:slots` entries
+    /// split on commas or spaces, one slot when none is given, checked with the engine's
+    /// rule first; an empty line removes them all. Output: the change, or Handled with the
+    /// reason they can't be saved.
+    fn save_resources(&mut self) -> TeamReply {
+        let Some(typed) = self
+            .coord
+            .as_ref()
+            .and_then(|edit| edit.input.as_ref())
+            .map(|input| input.value().to_owned())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(mut settings) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.as_ref())
+            .map(|view| view.settings.clone())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(resources) = resources_typed(&typed) else {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        };
+        settings.shared_resources = resources;
+        if settings.validate().is_err() {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        }
+        self.coord_change(
+            TeamAction::CoordSettings {
+                project_id: self.project.clone(),
+                settings,
+            },
+            "Shared resources saved.".to_owned(),
+        )
+    }
+
     fn coord_change(&mut self, action: TeamAction, done: String) -> TeamReply {
         if self.still_saving() {
             return TeamReply::Handled;
@@ -2792,6 +2882,15 @@ impl TeamView {
                     .to_owned(),
                     "",
                 ),
+                CoordRow::LandingMode => (
+                    "Landing".to_owned(),
+                    match self.status.as_ref().map(|status| status.landing_mode) {
+                        Some(LandingMode::Merge) => "Merge commit",
+                        Some(LandingMode::Squash) | None => "Squash",
+                    }
+                    .to_owned(),
+                    "",
+                ),
                 CoordRow::Nudges => (
                     "Workflow nudges".to_owned(),
                     view.settings.nudges.words().to_owned(),
@@ -2805,6 +2904,25 @@ impl TeamView {
                 CoordRow::Counted => (
                     "Counted tools".to_owned(),
                     view.settings.counted_tools.join(", "),
+                    "",
+                ),
+                CoordRow::HeavyLane => (
+                    "Heavy lane".to_owned(),
+                    format!(
+                        "{}  {} running, {} waiting",
+                        view.settings.heavy_lane.words(),
+                        view.lane.running.len(),
+                        view.lane.waiting.len()
+                    ),
+                    "",
+                ),
+                CoordRow::Resources => (
+                    "Shared resources".to_owned(),
+                    if view.settings.shared_resources.is_empty() {
+                        "None".to_owned()
+                    } else {
+                        resources_text(&view.settings.shared_resources)
+                    },
                     "",
                 ),
                 CoordRow::Skills(role) => (
@@ -2837,6 +2955,9 @@ impl TeamView {
             Row::of(
                 match COORD_ROWS[edit.row] {
                     CoordRow::Skills(_) => "No skills: type names separated by commas",
+                    CoordRow::Resources => {
+                        "No shared resources: type name or name:slots, such as ollama:1"
+                    }
                     _ => "No tools counted",
                 },
                 look.muted,
@@ -3106,7 +3227,7 @@ impl TeamView {
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3235,8 +3356,13 @@ impl TeamView {
                     .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
-                "Ask before merge",
-                if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+                "Master accepts change sets",
+                if status.ask_before_merge {
+                    "Only when I click or say accept all"
+                } else {
+                    "Itself"
+                }
+                .to_owned(),
             ),
         ];
         let master_lands = status.master_lands.map(|lands| {
@@ -3565,6 +3691,7 @@ impl TeamView {
                 CoordRow::Skills(_) => {
                     help.extend([("Space", "All or chosen"), ("Enter", "Edit skills")]);
                 }
+                CoordRow::Resources => help.push(("Enter", "Edit resources")),
                 _ => help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]),
             }
             help.push(("Esc", "Close"));
@@ -3626,7 +3753,7 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("L", "Land on"),
-            ("g", "Ask before merge"),
+            ("g", "Master accepts change sets"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
             ("I", "Stop the master when idle after"),
@@ -3716,6 +3843,40 @@ fn budget_words(budget: Option<u64>, used: Option<u64>) -> String {
             crate::team::token_words(budget)
         ),
     }
+}
+
+/// Writes shared resources as their row shows and edits them: `name:slots` entries joined
+/// by ", ". Takes the resources. Returns the text.
+fn resources_text(resources: &[SharedResource]) -> String {
+    resources
+        .iter()
+        .map(|resource| format!("{}:{}", resource.name, resource.slots))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Reads typed shared resources: `name` or `name:slots` entries split on commas or spaces,
+/// one slot when none is given, at most `SHARED_RESOURCES_MAX + 1` entries read so a long
+/// line is refused by the engine's rule. Takes the text. Returns the resources, or None for
+/// slots that are not a number.
+fn resources_typed(typed: &str) -> Option<Vec<SharedResource>> {
+    let mut found = Vec::new();
+    for entry in typed
+        .split([',', ' ', '\t'])
+        .filter(|entry| !entry.is_empty())
+        .take(SHARED_RESOURCES_MAX + 1)
+    {
+        let (name, slots) = match entry.split_once(':') {
+            Some((name, slots)) => (name, slots.parse::<u8>().ok()?),
+            None => (entry, 1),
+        };
+        found.push(SharedResource {
+            name: name.to_owned(),
+            slots,
+        });
+    }
+    assert!(found.len() <= SHARED_RESOURCES_MAX + 1);
+    Some(found)
 }
 
 /// The choice after or before `current` in `all`, wrapping at both ends.
