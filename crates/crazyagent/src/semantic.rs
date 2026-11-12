@@ -5,6 +5,7 @@ use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -140,15 +141,17 @@ type LocalSlot = Option<(
 )>;
 static LOCAL: Mutex<LocalSlot> = Mutex::new(None);
 
-/// The projects waiting for an HTTP plugin's turn, whether the embedding thread runs, and
-/// the wait after failed sends (rv-code2 HYB2-M1).
+/// The projects waiting for an HTTP plugin's turn, the one served last, whether the
+/// embedding thread runs, and the wait after failed sends (rv-code2 HYB2-M1, HYB2R2-L1).
 struct HttpQueue {
     wanted: BTreeSet<String>,
+    last: Option<String>,
     running: bool,
     backoff: vectors::Backoff,
 }
 static HTTP: Mutex<HttpQueue> = Mutex::new(HttpQueue {
     wanted: BTreeSet::new(),
+    last: None,
     running: false,
     backoff: vectors::Backoff::new(),
 });
@@ -317,8 +320,16 @@ pub fn embed_pending(connection: &mut Connection, root: &Path, project: &Project
 /// HYB2R2-L1). Inputs: the waiting projects and the last served. Output: the project, or
 /// none when none waits.
 pub(crate) fn take_next(wanted: &mut BTreeSet<String>, last: Option<&str>) -> Option<String> {
-    let _ = (wanted, last);
-    unimplemented!("rv-code2 HYB2R2-L1")
+    let after = last.and_then(|last| {
+        wanted
+            .range::<str, _>((Bound::Excluded(last), Bound::Unbounded))
+            .next()
+            .cloned()
+    });
+    let next = after.or_else(|| wanted.first().cloned())?;
+    let taken = wanted.remove(&next);
+    assert!(taken);
+    Some(next)
 }
 
 /// Queues a project for the HTTP embedding thread and starts the thread when none runs,
@@ -350,8 +361,8 @@ enum Turn {
     Failed(String),
 }
 
-/// The HTTP embedding thread: its own connection, one turn per waiting project in name
-/// order until none waits; a failed send starts the plugin's backoff and empties the queue.
+/// The HTTP embedding thread: its own connection, one turn per waiting project round robin
+/// after the last served until none waits; a failed send starts the plugin's backoff and empties the queue.
 /// Input: the engine root. Output: none.
 fn http_thread(root: &Path) {
     let opened = Connection::open(root.join("engine.db")).and_then(|connection| {
@@ -362,7 +373,14 @@ fn http_thread(root: &Path) {
     loop {
         let next = {
             let mut queue = HTTP.lock().unwrap_or_else(PoisonError::into_inner);
-            let next = connection.as_ref().and(queue.wanted.pop_first());
+            let next = if connection.is_some() {
+                let last = queue.last.take();
+                let next = take_next(&mut queue.wanted, last.as_deref());
+                queue.last = next.clone().or(last);
+                next
+            } else {
+                None
+            };
             if next.is_none() {
                 queue.wanted.clear();
                 queue.running = false;
