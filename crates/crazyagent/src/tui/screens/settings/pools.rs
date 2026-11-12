@@ -79,12 +79,12 @@ impl Pools {
     }
 
     /// Asks the engine for every account's extras with the detail rows, which it reads only
-    /// while Pools is open (DEC-154), unless it asked within `DETAIL_ASK_EVERY_MS`. Inputs:
-    /// the context and now.
+    /// while Pools is open (DEC-154), unless it asked within `DETAIL_ASK_EVERY_MS`; a clock
+    /// that went back asks again. Inputs: the context and now.
     fn ask_detail(&mut self, ctx: &mut Ctx, now_ms: i64) {
         if self
             .detail_asked_ms
-            .is_some_and(|at| now_ms - at <= DETAIL_ASK_EVERY_MS)
+            .is_some_and(|at| at <= now_ms && now_ms - at <= DETAIL_ASK_EVERY_MS)
         {
             return;
         }
@@ -1569,5 +1569,12 @@ mod tests {
         screen.detail_asked_ms = Some(crate::tui::clock::now_ms() - DETAIL_ASK_EVERY_MS - 1);
         screen.shown(&mut ctx);
         assert_eq!(extras_asks(&mut ctx), 1, "a minute on, the ask is renewed");
+        screen.detail_asked_ms = Some(crate::tui::clock::now_ms() + DETAIL_ASK_EVERY_MS);
+        screen.shown(&mut ctx);
+        assert_eq!(
+            extras_asks(&mut ctx),
+            1,
+            "a clock that went back asks again"
+        );
     }
 }
