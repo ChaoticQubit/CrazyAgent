@@ -197,6 +197,79 @@ async fn a_reconcile_of_a_save_whose_reply_was_lost_stops_the_projects_running_i
     owner.stop().await;
 }
 
+/// CU-1: lowering a repository to Untrusted stops the project's running IDE, which started
+/// with VS Code workspace trust on, as a Save of the agent policy does; the tab's next open
+/// starts it again in Restricted Mode. The project keeps the default Sandboxed policy with
+/// hooks off, so only the trust level changes.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lowering_a_projects_trust_stops_its_running_ide() {
+    let owner = Usage::start().await;
+    let project = ProjectId::new("lowered-trust").unwrap();
+    let revision = || {
+        let query = OwnerRead::Capabilities;
+        let request = owner_request("lowered-trust-read", 0, OwnerOperation::Read { query });
+        let client = &owner.client;
+        async move {
+            let reply = client.request(request).await.unwrap();
+            let OwnerResponse::Read { state } = reply.response else {
+                panic!("the owner read failed: {reply:?}");
+            };
+            state.revision.value()
+        }
+    };
+    let created = owner
+        .client
+        .request(owner_request(
+            "lowered-trust-project",
+            revision().await,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::CreateProject {
+                    project_id: project.clone(),
+                    spec: ProjectSpec {
+                        name: "lowered trust".into(),
+                        repositories: vec![],
+                    },
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert_applied(&created);
+    let checkout = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let runtime = owner.runtime();
+    let servers = runtime.ide_servers();
+    servers
+        .open(
+            &project,
+            &std::fs::canonicalize(checkout.path()).unwrap(),
+            &crate::ide::server::tests::cached_build(),
+        )
+        .await
+        .unwrap();
+    let group = servers.group(&project).expect("the IDE runs");
+    let lowered = owner
+        .client
+        .request(owner_request(
+            "lowered-trust-save",
+            revision().await,
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::SetProjectTrust {
+                    project_id: project.clone(),
+                    version: 0,
+                    trust: crate::trust::Trust::Untrusted,
+                    confirm_raise: false,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    assert_applied(&lowered);
+    crate::ide::server::tests::gone(group).await;
+    assert_eq!(servers.group(&project), None);
+    owner.stop().await;
+}
+
 #[cfg(unix)]
 fn pack_checkout(setup: &std::path::Path, id: &str) -> std::path::PathBuf {
     let manifest = crate::setup::pack::default_pack().unwrap();
