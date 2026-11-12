@@ -8751,7 +8751,7 @@ impl TeamRuntime {
                     self.workers
                         .get_mut(&id)
                         .expect("worker exists")
-                        .stop_for("engine_stop:turn_ended");
+                        .stop_for(continuity::TURN_ENDED);
                 }
                 self.mark_agent(id, AgentStatus::Idle, None)?;
                 Ok(false)
@@ -10633,8 +10633,8 @@ fn serve(
             TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
         ) && (end != TurnEnd::Interrupted || session.background_running() == 0)
             && !session.held();
-        if end == TurnEnd::Closed {
-            problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
+        if let Some(ended) = turn_problem(end, cause.as_deref()) {
+            problem = Some(ended);
         }
         if !named && let Some(conversation) = session.conversation() {
             named = reports.send(Report::Conversation(conversation)).is_ok();
@@ -10765,7 +10765,7 @@ fn per_turn(
         let closed = settle_end(
             stopped,
             Some((credential, profile)),
-            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref())),
+            turn_problem(end, cause.as_deref()),
             reports,
             by,
         );
@@ -10777,6 +10777,16 @@ fn per_turn(
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
+
+/// The problem a sub-agent's turn leaves on its agent: the closed process with the turn's
+/// code for a turn that closed it, or for a turn the engine ended at one of its own bounds
+/// (`continuity::engine_bound`), so the agent's end row names that bound; none for any
+/// other end. Takes the turn's end and its cause. Returns the problem.
+fn turn_problem(end: TurnEnd, cause: Option<&str>) -> Option<String> {
+    let bound = cause.is_some_and(continuity::engine_bound);
+    assert!(!bound || matches!(end, TurnEnd::TimedOut | TurnEnd::Closed));
+    (end == TurnEnd::Closed || bound).then(|| with_code(PROCESS_CLOSED, cause))
+}
 /// What a task the owner's interrupt ends says when commands its agent started still ran.
 const BACKGROUND_INTERRUPTED: &str = "The owner's interrupt ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// What a task cut by a time limit says when commands its agent started still ran.

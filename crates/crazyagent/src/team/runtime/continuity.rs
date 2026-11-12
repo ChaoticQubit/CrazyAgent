@@ -38,28 +38,37 @@ const ENGINE_LIMITS: [(&str, &str); 2] = [
     ),
 ];
 
+/// The stop the engine asks for after a turn that ended so the agent cannot take another.
+pub(super) const TURN_ENDED: &str = "engine_stop:turn_ended";
+
 /// Names why an agent's terminal ended. Inputs: the cause the engine recorded when it asked
 /// the agent to stop, if it did, whether the agent got as far as ready, and the problem it
 /// ended with. Output: `owner_stop`, `rate_limited`, `engine_stop:<why>`, `takeover_failed`,
-/// `engine_limit:<code>` when the problem closes with a code of [`ENGINE_LIMITS`],
-/// `start_failed` or `ended_by_itself`.
+/// `engine_limit:<code>` when the problem closes with a code of [`ENGINE_LIMITS`], which also
+/// names a [`TURN_ENDED`] stop that followed such a turn, `start_failed` or `ended_by_itself`.
 pub(super) fn cause(
     stop: Option<&'static str>,
     ready: bool,
     problem: Option<&str>,
 ) -> &'static str {
-    match stop {
-        Some("") => "engine_stop:unnamed",
-        Some(why) => why,
-        None if problem.is_some_and(|problem| problem.contains("could not be taken over")) => {
+    let limit = problem.and_then(engine_limit);
+    match (stop, limit) {
+        (Some(TURN_ENDED), Some(limit)) => limit,
+        (Some(""), _) => "engine_stop:unnamed",
+        (Some(why), _) => why,
+        (None, _) if problem.is_some_and(|problem| problem.contains("could not be taken over")) => {
             "takeover_failed"
         }
-        None => match problem.and_then(engine_limit) {
-            Some(limit) => limit,
-            None if !ready && problem.is_some() => "start_failed",
-            None => "ended_by_itself",
-        },
+        (None, Some(limit)) => limit,
+        (None, None) if !ready && problem.is_some() => "start_failed",
+        (None, None) => "ended_by_itself",
     }
+}
+
+/// Says whether a launch code is one of the engine's own bounds in [`ENGINE_LIMITS`], so a
+/// turn that ended at it leaves the code on its agent. Input: the code. Output: the answer.
+pub(super) fn engine_bound(code: &str) -> bool {
+    ENGINE_LIMITS.iter().any(|(named, _)| *named == code)
 }
 
 /// Finds the engine bound a problem names in its closing `(code)`, as `with_code` writes
@@ -123,7 +132,7 @@ pub(super) fn restart_line(problem: Option<&str>, turn_open: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ENDS_PER_PROJECT_MAX, End, cause, record};
+    use super::{ENDS_PER_PROJECT_MAX, End, TURN_ENDED, cause, engine_bound, record};
     use crate::protocol::ProjectId;
     use crate::team::AgentRole;
     use rusqlite::Connection;
@@ -179,11 +188,37 @@ mod tests {
         );
         assert_eq!(
             cause(
+                Some("engine_stop:idle"),
+                true,
+                Some(&closed("launch_deadline"))
+            ),
+            "engine_stop:idle"
+        );
+        assert_eq!(
+            cause(
                 None,
                 true,
                 Some("The agent's running terminal could not be taken over (launch_deadline)")
             ),
             "takeover_failed"
+        );
+    }
+
+    /// L1C r1 F1: a sub-agent turn the engine ended at one of its bounds is followed by the
+    /// turn-ended stop, and its end is still named `engine_limit:<code>`; the same stop after
+    /// the owner's task limit or a cancel, with no bound code, stays `engine_stop:turn_ended`.
+    #[test]
+    fn a_turn_ended_stop_after_an_engine_bound_is_named_engine_limit() {
+        let closed = |code: &str| format!("The agent process closed. ({code})");
+        for (code, named) in super::ENGINE_LIMITS {
+            assert!(engine_bound(code));
+            assert_eq!(cause(Some(TURN_ENDED), true, Some(&closed(code))), named);
+        }
+        assert!(!engine_bound("launch_closed"));
+        assert_eq!(cause(Some(TURN_ENDED), true, None), TURN_ENDED);
+        assert_eq!(
+            cause(Some(TURN_ENDED), true, Some(&closed("launch_closed"))),
+            TURN_ENDED
         );
     }
 

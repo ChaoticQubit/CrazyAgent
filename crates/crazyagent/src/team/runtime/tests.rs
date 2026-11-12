@@ -2108,6 +2108,30 @@ fn a_reply_text_past_its_bound_is_trimmed_with_one_mark_never_ended() {
     assert_eq!(turn.len(), TURN_TEXT_BYTES_MAX);
 }
 
+/// L1C r1 F1: a sub-agent turn the engine ended at its run time or on an unreadable record
+/// leaves the closed process with that code on its agent, and the turn-ended stop that
+/// follows still names the end `engine_limit:<code>`; the owner's task limit leaves no
+/// problem, and a turn that closed its agent keeps its code as before.
+#[test]
+fn a_turn_ended_at_an_engine_bound_leaves_its_code_on_the_agent() {
+    for code in ["launch_deadline", "launch_transcript_unavailable"] {
+        let (end, cause) = launch_end(LaunchError(code.into(), None));
+        let problem = turn_problem(end, cause.as_deref());
+        assert_eq!(problem, Some(format!("The agent process closed. ({code})")));
+        assert_eq!(
+            continuity::cause(Some(continuity::TURN_ENDED), true, problem.as_deref()),
+            format!("engine_limit:{code}")
+        );
+    }
+    assert_eq!(turn_problem(TurnEnd::TimedOut, Some(TURN_LIMIT)), None);
+    assert_eq!(
+        turn_problem(TurnEnd::Closed, Some("launch_protocol_failed")).as_deref(),
+        Some("The agent process closed. (launch_protocol_failed)")
+    );
+    assert_eq!(turn_problem(TurnEnd::Success, None), None);
+    assert_eq!(turn_problem(TurnEnd::Interrupted, None), None);
+}
+
 #[test]
 fn a_launch_error_that_closes_an_agent_names_its_plain_code_on_the_agent_and_its_task() {
     assert_eq!(
