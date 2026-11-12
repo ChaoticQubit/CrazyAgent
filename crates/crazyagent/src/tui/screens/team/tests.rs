@@ -5398,3 +5398,115 @@ fn a_master_terminal_not_open_after_a_minute_says_so_and_s_tries_again() {
     );
     assert!(!rows[23].contains("s Try again"), "{}", rows[23]);
 }
+
+/// A master the engine stops before its attached terminal sent a first frame says the
+/// engine's line, never an empty terminal box, keeps typed keys from that terminal and s
+/// tries again once (owner 11-12).
+#[test]
+fn a_master_stopped_before_its_terminal_opened_says_why_and_s_tries_again() {
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), None));
+    requests(&mut shell);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(
+            |sent| matches!(sent, Request::TerminalAttach { agent } if agent.as_str() == "team-1")
+        ),
+        "{sent:?}"
+    );
+    shell.arrive(switch(
+        Some(false),
+        Some(crate::team::master::TERMINAL_MISSING),
+    ));
+    requests(&mut shell);
+    let rows = render(&mut shell);
+    let body = rows[4..22].join("\n");
+    assert!(
+        body.contains("tmux is missing, so the live master's"),
+        "{body}"
+    );
+    assert!(body.contains("s tries again."), "{body}");
+    assert!(rows[23].contains("s Try again"), "{}", rows[23]);
+    shell.key(Key::Char('x'));
+    assert!(
+        requests(&mut shell)
+            .iter()
+            .all(|sent| input(sent).is_none()),
+        "no key reaches a terminal the engine stopped before it opened"
+    );
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
+}
+
+/// A master terminal that closes while the switch stays on starts a new wait for the next
+/// one, as the desktop restarts its clock when the master loses its terminal; with none a
+/// minute on, the view says so instead of the closed words and s tries again (owner 11-12).
+#[test]
+fn a_closed_master_terminal_with_no_new_one_waits_afresh_and_is_overdue_after_a_minute() {
+    use crate::tui::screens::Screen;
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    ctx.width = 80;
+    ctx.height = 24;
+    ctx.link = Link::Ready;
+    let mut screen = super::Team::master(project(), "Tidepool".into());
+    screen.shown(&mut ctx);
+    screen.arrive(&switch(Some(true), None), &mut ctx);
+    screen.arrive(
+        &Arrival::TeamGraph {
+            project: project(),
+            result: Ok(graph()),
+        },
+        &mut ctx,
+    );
+    screen.arrive(
+        &Arrival::Terminal {
+            agent: terminal("team-1"),
+            frame: TerminalFrame::Attached {
+                agent_id: terminal("team-1"),
+                cols: 74,
+                rows: 17,
+            },
+        },
+        &mut ctx,
+    );
+    assert_eq!(screen.waiting_since, None, "an open terminal ends the wait");
+    screen.arrive(
+        &Arrival::Terminal {
+            agent: terminal("team-1"),
+            frame: TerminalFrame::Closed {
+                reason: "terminal_ended".into(),
+            },
+        },
+        &mut ctx,
+    );
+    let since = screen.waiting_since;
+    assert!(
+        since.is_some_and(|since| crate::tui::clock::now_ms() - since < 60_000),
+        "a closed terminal with the switch on waits afresh: {since:?}"
+    );
+    screen.waiting_since = Some(crate::tui::clock::now_ms() - 61_000);
+    let mut shell = Shell::with(ctx, Box::new(screen));
+    requests(&mut shell);
+    let rows = render(&mut shell);
+    let body = rows[4..22].join("\n");
+    assert!(
+        body.contains("The master's terminal hasn't opened after a minute."),
+        "{body}"
+    );
+    assert!(body.contains("s tries again."), "{body}");
+    assert!(!body.contains("This run finished."), "{body}");
+    assert!(rows[23].contains("s Try again"), "{}", rows[23]);
+    shell.key(Key::Char('s'));
+    assert_eq!(starts_asked(&mut shell), 1);
+}
