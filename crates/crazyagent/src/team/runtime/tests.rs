@@ -16790,6 +16790,63 @@ fn a_kept_session_s_message_wake_carries_no_task_start_reminder_and_a_real_task_
     team.workers.clear();
 }
 
+/// F30, S2R1-M1: a kept-session sub-agent whose session started fresh, as after the owner's
+/// Wake or Restart when its conversation could not continue, hears the Task-start reminder
+/// once on the first turn of that session, even when a message wake starts it.
+#[test]
+fn a_message_wake_that_starts_a_fresh_session_carries_the_task_start_reminder_once() {
+    const REMINDER: &str = "Task start reminder: query the project graph first.";
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let restarted = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+    worker.starts.text = Some(REMINDER.to_owned());
+    worker.fresh = Some(1);
+    assert!(worker.kept_session);
+    team.workers.insert(restarted, worker);
+    crate::coord::send(
+        &fixture.connection,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Agent(lead),
+            to: crate::coord::Party::Agent(restarted),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Merge your branch".into(),
+            idempotency_key: None,
+        },
+        2,
+    )
+    .unwrap();
+    let asleep = team.asleep(&project);
+    team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+        .unwrap();
+    let (orders, turns) = channel();
+    team.workers.get_mut(&restarted).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the restarted agent's fresh session got no turn");
+    };
+    assert!(
+        typed.contains(super::super::master::WAKE_TASK)
+            || typed.contains(super::super::master::WAKE_DELIVERED),
+        "{typed}"
+    );
+    assert_eq!(
+        typed.matches(REMINDER).count(),
+        1,
+        "the first turn of a fresh session carries the reminder once: {typed}"
+    );
+    assert_eq!(team.workers[&restarted].fresh, None);
+    team.workers.clear();
+}
+
 /// An agent whose last turn ended well is stopped, not failed, when a command it started
 /// outlives it, and the reason stays for the owner (HB-S5-D). A failed or unfinished turn,
 /// a closed process and a listing that failed still fail it.

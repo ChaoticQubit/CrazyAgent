@@ -5726,7 +5726,8 @@ impl TeamRuntime {
                 task_text,
                 super::master::WAKE_TASK | super::master::WAKE_DELIVERED
             ) && !woken_fresh
-                && self.workers[&agent].kept_session;
+                && self.workers[&agent].kept_session
+                && self.workers[&agent].fresh.is_none();
             if !wake_only
                 && let Some(text) = &self.workers[&agent].starts.text
                 && crate::coord::settings::read(&self.connection, project)?.task_start
