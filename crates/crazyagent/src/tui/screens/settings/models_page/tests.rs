@@ -845,3 +845,41 @@ fn only_a_pending_id_offers_a_test_launch() {
         assert!(!screen(&mut shell).contains("Which pool runs"));
     }
 }
+
+/// A harness the engine says has no test launch keeps the Add row and the owner's ids, and
+/// both say "Not supported by this harness" in the desktop's words, so no id waits forever
+/// (MUG2-L1). The TUI follows the engine's `testable`, not a harness list of its own.
+#[test]
+fn a_harness_without_a_test_launch_says_not_supported_on_add_and_on_a_pending_id() {
+    let mut shell = app_page(Models {
+        testable: false,
+        ..with_own(Origin::Pending)
+    });
+    shell.ctx.store.pools = crate::tui::ctx::Load::Ready(vec![pool("main")]);
+    let text = screen(&mut shell);
+    assert!(text.contains("Add a model id"), "{text}");
+    assert!(!text.contains("Enter to type one"), "{text}");
+    assert!(!text.contains("Waiting for its test launch"), "{text}");
+    press(&mut shell, &[Key::End]);
+    let text = screen(&mut shell);
+    assert!(text.contains(&format!("{NOT_SUPPORTED}.")), "{text}");
+    assert!(text.contains(NO_TEST_LAUNCH), "{text}");
+    assert!(!text.contains("t Test"), "{text}");
+    press(&mut shell, &[Key::Char('t'), Key::Enter]);
+    assert_eq!(requests(&mut shell), vec![]);
+    assert!(!screen(&mut shell).contains("Which pool runs"));
+
+    press(&mut shell, &[Key::Up]);
+    let text = screen(&mut shell);
+    assert!(text.contains(NO_TEST_LAUNCH), "{text}");
+    assert!(!text.contains("Type an id"), "{text}");
+    press(&mut shell, &[Key::Enter]);
+    assert!(!screen(&mut shell).contains("Model id"), "no field opens");
+    assert_eq!(requests(&mut shell), vec![], "no id is sent");
+    assert_eq!(lead(&shell), "Not supported by this harness.");
+    assert_eq!(rest(&shell), NO_TEST_LAUNCH);
+    assert_eq!(
+        NO_TEST_LAUNCH,
+        "An id you add needs a test launch, and this harness has none."
+    );
+}
