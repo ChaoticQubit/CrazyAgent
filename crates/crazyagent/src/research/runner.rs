@@ -933,7 +933,6 @@ impl ResearchRunner {
             .trust(&project)
             .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
         let enforcement = crate::trust::Enforcement::for_level(trust);
-        let open = job.tools && !enforcement.model_endpoints_only;
         let policy = jobs
             .agent_policy(&project)
             .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
@@ -943,8 +942,8 @@ impl ResearchRunner {
         if let Some((line, _)) = enforcement.refusal(policy.access) {
             return Err(RunError::Invalid(line.into()));
         }
-        let kept = job_kept_ports(self.settings.as_ref(), open)?;
-        let (network, proxy) = job_reach(&policy, open, account, job.id, &kept)?;
+        let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
+        let (network, proxy) = job_reach(&policy, job.tools, &enforcement, account, job.id, &kept)?;
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
@@ -1904,26 +1903,30 @@ pub(crate) fn job_network(
 }
 
 /// The sandbox network a research job runs under and the model proxy it reaches its model
-/// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
-/// for its account's hosts and reaches only the proxy's port; any other job gets
-/// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
-/// account, its id, which the proxy's refusal lines name, and the owner's model ports the
-/// proxy leaves alone. Output: the network and the proxy, which must live as long as the
-/// job runs, or the refusal of an endpoint no proxy can reach by name or a proxy that could
-/// not start.
+/// through (S4B-M1). A tools-on job under None, or of an untrusted project at any network,
+/// whose model is not on loopback gets a proxy for its account's hosts and reaches only the
+/// proxy's port; any other job gets [`job_network`], tools counted only for a project whose
+/// trust allows more than the model endpoint. Inputs: the project's agent policy, whether
+/// the job has tools, the trust enforcement, its account, its id, which the proxy's refusal
+/// lines name, and the owner's model ports the proxy leaves alone. Output: the network and
+/// the proxy, which must live as long as the job runs, or the refusal of an endpoint no
+/// proxy can reach by name or a proxy that could not start.
 pub(crate) fn job_reach(
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
+    enforcement: &crate::trust::Enforcement,
     account: &ResearchAccount,
     job: i64,
     kept: &[u16],
 ) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
     let model = model_remote(account)?;
     let proxied = tools
-        && policy.network == crate::sandbox::policy::AgentNetwork::None
+        && (policy.network == crate::sandbox::policy::AgentNetwork::None
+            || enforcement.model_endpoints_only)
         && matches!(model, SandboxRemote::AnyHost(_));
     if !proxied {
-        return Ok((job_network(policy, tools, model), None));
+        let open = tools && !enforcement.model_endpoints_only;
+        return Ok((job_network(policy, open, model), None));
     }
     let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
         hosts
@@ -2426,6 +2429,27 @@ fn repository_setup(root: &Path) -> RepositorySetup {
     RepositorySetup(key)
 }
 
+/// Runs one git command the engine makes in a project folder it created: the safe git
+/// options, a cleared environment with a private HOME and TMPDIR, no system config, no input
+/// or output, bounded by SETUP_TIMEOUT. Inputs: the folder, the private home and the
+/// arguments. Output: whether git succeeded, or the spawn or wait failure.
+pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<bool, RunError> {
+    let mut command = Command::new(GIT);
+    command
+        .args(GIT_SAFE)
+        .args(arguments)
+        .current_dir(root)
+        .env_clear()
+        .env("HOME", tmp)
+        .env("TMPDIR", tmp)
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
+}
+
 /// Makes a project folder the engine created a git repository with one empty start commit,
 /// one setup per repository at a time. A folder with any `.git` entry is the owner's repository and
 /// stays as it is; an owner's folder holding `.crazyagent/`, or that folder itself, never
@@ -2443,25 +2467,7 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
             "the project folder is not a git repository, so agents cannot get their own copy of it; run git init there and make a first commit".into(),
         ));
     }
-    let git = |arguments: &[&str]| -> Result<bool, RunError> {
-        let mut command = Command::new(GIT);
-        command
-            .args(GIT_SAFE)
-            .args(arguments)
-            .current_dir(root)
-            .env_clear()
-            .env("HOME", tmp)
-            .env("TMPDIR", tmp)
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        Ok(
-            wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)?
-                == Ended::Succeeded,
-        )
-    };
+    let git = |arguments: &[&str]| engine_git(root, tmp, arguments);
     let created = git(&["init", "-q", "--template="])?
         && git(&[
             "-c",
@@ -3783,11 +3789,12 @@ mod tests {
             network: AgentNetwork::None,
             ..AgentPolicy::default()
         };
+        let reviewed = crate::trust::Enforcement::for_level(crate::trust::Trust::Reviewed);
         let account = ResearchAccount::ManagedCodex {
             connection: codex_connection(),
             model: None,
         };
-        let (network, proxy) = job_reach(&none, true, &account, 41, &[]).unwrap();
+        let (network, proxy) = job_reach(&none, true, &reviewed, &account, 41, &[]).unwrap();
         assert!(
             proxy.is_some(),
             "a tools-on job under None gets a model proxy, not {network:?}"
@@ -3817,7 +3824,7 @@ mod tests {
                 .unwrap();
             assert_eq!(line.trim_end(), status, "{target}");
         }
-        let (off, unproxied) = job_reach(&none, false, &account, 41, &[]).unwrap();
+        let (off, unproxied) = job_reach(&none, false, &reviewed, &account, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
         let local = ResearchAccount::Endpoint {
@@ -3825,7 +3832,7 @@ mod tests {
             model: "qwen2.5:0.5b".into(),
             key: None,
         };
-        let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
+        let (direct, unproxied) = job_reach(&none, true, &reviewed, &local, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(
             direct,
@@ -3837,9 +3844,56 @@ mod tests {
             key: None,
         };
         assert!(matches!(
-            job_reach(&none, true, &unnamed, 41, &[]),
+            job_reach(&none, true, &reviewed, &unnamed, 41, &[]),
             Err(RunError::Invalid(_))
         ));
+    }
+
+    /// CU-2: a tools-on research job of an untrusted project reaches its model only through a
+    /// model proxy at every network choice, Open and Https included, and with tools off or on
+    /// a loopback endpoint only its model, never the project's network choice (threat model
+    /// N2).
+    #[test]
+    fn an_untrusted_research_job_with_tools_reaches_its_model_only_through_a_model_proxy() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let untrusted = crate::trust::Enforcement::for_level(crate::trust::Trust::Untrusted);
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let local = ResearchAccount::Endpoint {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        };
+        for network in [AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None] {
+            let policy = AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            };
+            let (reach, proxy) = job_reach(&policy, true, &untrusted, &account, 41, &[]).unwrap();
+            let port = proxy.as_ref().map(ModelProxy::port);
+            assert_eq!(
+                (reach, port.is_some()),
+                (
+                    SandboxNetwork::Only(vec![SandboxRemote::Loopback(port.unwrap_or(0))]),
+                    true
+                ),
+                "{network:?}"
+            );
+            let (off, unproxied) =
+                job_reach(&policy, false, &untrusted, &account, 41, &[]).unwrap();
+            assert!(unproxied.is_none());
+            assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
+            let (direct, unproxied) =
+                job_reach(&policy, true, &untrusted, &local, 41, &[]).unwrap();
+            assert!(unproxied.is_none());
+            assert_eq!(
+                direct,
+                SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)]),
+                "{network:?}"
+            );
+        }
     }
 
     #[test]

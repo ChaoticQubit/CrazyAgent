@@ -347,6 +347,10 @@ test("every checks setting lists every engine option with what it does, the defa
     }
     assert.ok(html.includes(scope === "app" ? "Default (Warn)" : "App default (Warn)"));
     assert.equal(html.includes("Use app default"), scope === "project", "only a project page that sets a key offers the app default");
+    assert.ok(html.includes('class="pj set-groups"') && html.includes('class="set-group"') && html.includes("Check rules"), "both scopes use the Settings section parts");
+    assert.equal((html.match(/class="set-row wide"/g) ?? []).length, api.CHECKS_KEYS.length);
+    assert.equal((html.match(/class="set-changed"/g) ?? []).length, scope === "app" ? 0 : 1, "only a value away from the one below is marked");
+    assert.ok(html.includes("Save changes"));
   }
   const page = api.checksPage(settingsView(null), null);
   for (const row of page.keys) {

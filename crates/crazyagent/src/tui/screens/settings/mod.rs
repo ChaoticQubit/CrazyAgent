@@ -4,6 +4,7 @@ pub(in crate::tui) mod harness_page;
 pub mod pool_editor;
 pub mod pools;
 pub mod profile;
+pub mod spend;
 pub mod tickets;
 
 use super::{Flow, Screen, SettingsSection};
