@@ -253,16 +253,17 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
 }
 
 /// Checks an unpacked tree before it is kept: only plain folders, files and links, no file
-/// with a set-id or sticky bit or that others can write, every link relative and resolving
-/// inside the tree, and no more entries, file bytes or depth than the bounds allow. Nothing
-/// is followed. Inputs: the tree's top folder and the bounds. Output: Ok, or
-/// `setup_archive_unsafe`.
+/// with a set-id or sticky bit or that others can write, every link relative, inside the
+/// tree by its words and by its resolved real path, and no more entries, file bytes or depth
+/// than the bounds allow. The walk never descends a link. Inputs: the tree's top folder and
+/// the bounds. Output: Ok, or `setup_archive_unsafe`.
 pub(crate) fn check_tree(top: &Path, limits: Limits) -> Result<(), InstallError> {
     let unsafe_tree = InstallError("setup_archive_unsafe");
     let top_ok = std::fs::symlink_metadata(top).is_ok_and(|metadata| metadata.is_dir());
     if !top_ok {
         return Err(unsafe_tree);
     }
+    let real_top = std::fs::canonicalize(top).map_err(|_| unsafe_tree)?;
     let mut pending: Vec<(PathBuf, usize)> = vec![(top.to_path_buf(), 0)];
     let mut entries: usize = 0;
     let mut bytes: u64 = 0;
@@ -292,7 +293,8 @@ pub(crate) fn check_tree(top: &Path, limits: Limits) -> Result<(), InstallError>
                 }
             } else if kind.is_symlink() {
                 let target = std::fs::read_link(&path).map_err(|_| unsafe_tree)?;
-                if !stays_inside(top, &dir, &target) {
+                let resolved = std::fs::canonicalize(&path).map_err(|_| unsafe_tree)?;
+                if !stays_inside(top, &dir, &target) || !resolved.starts_with(&real_top) {
                     return Err(unsafe_tree);
                 }
             } else {
