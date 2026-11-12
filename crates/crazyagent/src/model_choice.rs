@@ -44,6 +44,7 @@ const SHIPPED: &[(&str, &str)] = &[
     ("codex", include_str!("../assets/model-catalogs/codex.json")),
 ];
 const CATALOG_JSON_MAX: usize = 64 * 1024;
+const LONG_CONTEXT_SUFFIX: &str = "[1m]";
 const ITEM_PREFIX: &str = "model-choice";
 const PROJECT_BYTES_MAX: usize = 128;
 /// The longest stored value as JSON: a full allowed list of the longest ids.
@@ -146,22 +147,24 @@ pub enum Written {
 }
 
 /// Checks one model id before it can reach a command line or a `-c model="..."` line, the
-/// one rule the store saves by and every agent launch starts by: 1 to `MODEL_BYTES_MAX`
-/// bytes, an ASCII letter or digit first, then letters, digits and `-_.:/@+`; Claude Code
-/// ids, passed as their own argument, may also hold `[` and `]`, as in `opus[1m]`.
-/// Inputs: the catalog harness id and the model id. Output: true when it may be used.
+/// one rule the store saves by and every agent launch starts by: at most `MODEL_BYTES_MAX`
+/// bytes, an ASCII letter or digit first, then letters, digits and `-_.:/@+`. A Claude
+/// Code id, passed as its own argument, may end in the `[1m]` long-context suffix its
+/// catalog lists, as in `opus[1m]`; no other brackets pass. Inputs: the catalog harness
+/// id and the model id. Output: true when it may be used.
 pub fn model_valid(harness: &str, model: &str) -> bool {
-    let brackets = harness == "claude-code";
+    let base = match harness {
+        "claude-code" => model.strip_suffix(LONG_CONTEXT_SUFFIX).unwrap_or(model),
+        _ => model,
+    };
     model.len() <= MODEL_BYTES_MAX
-        && model
+        && base
             .as_bytes()
             .first()
             .is_some_and(u8::is_ascii_alphanumeric)
-        && model.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || b"-_.:/@+".contains(&byte)
-                || (brackets && b"[]".contains(&byte))
-        })
+        && base
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte))
 }
 
 /// One harness's shipped model catalog: the harness, the exact versions it was checked
