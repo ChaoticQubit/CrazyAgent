@@ -8387,7 +8387,7 @@ impl TeamRuntime {
             }
         }
         if role != AgentRole::Master {
-            off.push(tool::RECORD_TOOL.to_owned());
+            off.extend(tool::MASTER_QUESTION_TOOLS.map(str::to_owned));
             off.push(tool::DISCARD_TOOL.to_owned());
         }
         assert!(tool::known_tools(&off));
@@ -9571,12 +9571,13 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat, and the same tool with answer in place of owner_turn records one the owner typed here in your terminal; {}(question, version) takes a question you no longer need off the owner's list. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
             tool::SPAWN_TOOL,
             tool::UPDATE_WORK_TOOL,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::INSPECT_WORK_TOOL
         )
     } else {

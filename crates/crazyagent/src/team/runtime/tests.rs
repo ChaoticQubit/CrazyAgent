@@ -20868,7 +20868,12 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
         assert_eq!(args[1], runtime.mailbox(id).to_str().unwrap());
         let mut off: Vec<&str> = args[2..].iter().map(String::as_str).collect();
         off.sort_unstable();
-        let mut wanted = vec![tool::REMEMBER_TOOL, tool::RECORD_TOOL, tool::DISCARD_TOOL];
+        let mut wanted = vec![
+            tool::REMEMBER_TOOL,
+            tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
+            tool::DISCARD_TOOL,
+        ];
         if !leads {
             wanted.extend(tool::LEAD_TOOLS);
         }

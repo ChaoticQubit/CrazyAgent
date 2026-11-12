@@ -3,14 +3,16 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{OwnerClient, QUESTIONS_CODES};
 use crazyagent::protocol::ProjectId;
 use crazyagent::questions::{
-    ANSWER_BYTES_MAX, Answer, OPTIONS_MAX, Question, QuestionKind, QuestionStatus, Settlement,
+    ANSWER_BYTES_MAX, Answer, BulkDismissal, ClosedBy, LISTED_MAX, OPTIONS_MAX, Question,
+    QuestionKind, QuestionStatus, Settlement,
 };
 use serde::Serialize;
 use std::sync::Arc;
 
 /// One question an agent or an engine step asked the owner, as the window shows it: how it
-/// is answered (`single`, `multi` or `text`), plain status words and the version an answer
-/// or dismissal sends back.
+/// is answered (`single`, `multi` or `text`), plain status words, who closed it when the
+/// owner did not (`master`, `replaced` or `relay`) and the version an answer or dismissal
+/// sends back.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QuestionRow {
     pub id: u64,
@@ -24,6 +26,7 @@ pub struct QuestionRow {
     pub status: &'static str,
     pub version: u64,
     pub answer: Option<String>,
+    pub closed_by: Option<ClosedBy>,
     pub created_ms: u64,
     pub settled_ms: Option<u64>,
 }
@@ -47,6 +50,7 @@ impl From<Question> for QuestionRow {
             },
             version: question.version,
             answer: question.answer,
+            closed_by: question.closed_by,
             created_ms: question.created_ms,
             settled_ms: question.settled_ms,
         }
@@ -58,6 +62,39 @@ impl From<Question> for QuestionRow {
 pub struct QuestionPage {
     pub items: Vec<QuestionRow>,
     pub next: Option<u64>,
+}
+
+/// What one "Dismiss all" did (F12): the questions dismissed, the ones settled or changed
+/// since the owner read them, and each one refused with its questions code.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct QuestionsDismissed {
+    pub settled: Vec<u64>,
+    pub stale: Vec<u64>,
+    pub refused: Vec<RefusedQuestion>,
+}
+
+/// One question a "Dismiss all" could not dismiss and the code that says why.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct RefusedQuestion {
+    pub id: u64,
+    pub code: &'static str,
+}
+
+impl From<BulkDismissal> for QuestionsDismissed {
+    fn from(outcome: BulkDismissal) -> Self {
+        Self {
+            settled: outcome.settled,
+            stale: outcome.stale,
+            refused: outcome
+                .refused
+                .into_iter()
+                .map(|(id, code)| RefusedQuestion {
+                    id,
+                    code: questions_error(EngineError(code)).code,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// How many questions of one project wait for the owner.
@@ -185,6 +222,31 @@ impl NativeBridge {
                     .await
                     .map_err(questions_error)?,
             )
+        }))
+    }
+
+    /// Dismisses up to `LISTED_MAX` pending questions at once, each naming the version the
+    /// owner read, run without the bridge lock (F12). Input: each question's id and version.
+    /// Output: what happened to each, or `questions_bulk_invalid` for an empty list, one
+    /// longer than `LISTED_MAX` or one naming a question twice.
+    pub fn dismiss_questions(
+        &self,
+        items: Vec<(u64, u64)>,
+    ) -> Result<Unlocked<QuestionsDismissed>, BridgeError> {
+        let distinct = items
+            .iter()
+            .enumerate()
+            .all(|(index, (id, _))| !items[..index].iter().any(|(seen, _)| seen == id));
+        if items.is_empty() || items.len() > LISTED_MAX || !distinct {
+            return Err(failure("questions_bulk_invalid"));
+        }
+        let client = self.questions_client()?;
+        Ok(Box::pin(async move {
+            let outcome = client
+                .questions_dismiss_many(items)
+                .await
+                .map_err(questions_error)?;
+            Ok(QuestionsDismissed::from(outcome))
         }))
     }
 

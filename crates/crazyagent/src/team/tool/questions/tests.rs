@@ -93,6 +93,7 @@ fn shipped() -> Call {
         options: vec!["Friday".into(), "Monday".into()],
         recommended: Some("Friday".into()),
         context: Some("Every check passes today.".into()),
+        replaces: None,
     }
 }
 
@@ -131,11 +132,23 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, [super::super::TOOL_NAME, ASK_TOOL, RECORD_TOOL]);
+    assert_eq!(
+        names,
+        [
+            super::super::TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL
+        ]
+    );
     assert_eq!(answered[0]["result"]["tools"][1], super::super::ask_tool());
     assert_eq!(
         answered[0]["result"]["tools"][2],
         super::super::record_tool()
+    );
+    assert_eq!(
+        answered[0]["result"]["tools"][3],
+        super::super::withdraw_tool()
     );
     assert_eq!(text(&answered[1]), (ASK_LOGGED, false));
     let (refused, error) = text(&answered[2]);
@@ -200,6 +213,7 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
         options: vec!["Friday".into()],
         recommended: Some("Sunday".into()),
         context: None,
+        replaces: None,
     };
     planted.extend(serde_json::to_vec(&unchecked).unwrap());
     planted.push(b'\n');
@@ -225,12 +239,13 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
 }
 
 #[test]
-fn a_sub_agent_server_lists_ask_but_not_record_answer_and_logs_its_question_as_the_agent() {
-    let sub_agent = [RECORD_TOOL.to_owned()];
+fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
+    let sub_agent = super::super::MASTER_QUESTION_TOOLS.map(str::to_owned);
     let listed = super::super::team_tools(&sub_agent);
     let tools = listed["tools"].as_array().unwrap();
     assert_eq!(tools.last(), Some(&super::super::ask_tool()));
     assert!(tools.iter().all(|tool| tool["name"] != RECORD_TOOL));
+    assert!(tools.iter().all(|tool| tool["name"] != WITHDRAW_TOOL));
     assert!(super::super::known_tools(&sub_agent));
 
     let case = Case::new();
@@ -417,6 +432,7 @@ fn a_question_outside_the_kind_rules_hears_those_rules_and_is_not_logged() {
         options: vec!["Postgres".into()],
         recommended: Some("Postgres".into()),
         context: None,
+        replaces: None,
     };
     assert_eq!(
         logged_ask(&case.db, &case.project, &Asker::Master(41), call).as_deref(),
@@ -549,4 +565,163 @@ fn the_open_line_names_only_the_askers_open_questions_and_the_message_to_record_
     let line = open_line(&pending, &crowded, Some(u64::MAX));
     assert!(line.len() <= OPEN_LINE_BYTES_MAX, "{}", line.len());
     assert_eq!(line.matches("; ").count(), 7);
+}
+
+/// Calls one question tool on the drop-file server and returns what the master reads.
+fn said(drop: &Path, name: &str, arguments: Value) -> (String, bool) {
+    let params = json!({"name": name, "arguments": arguments});
+    drop_call(Some(&params), drop).unwrap()
+}
+
+fn choice(question: &str, replaces: u64) -> Value {
+    json!({
+        "question": question,
+        "kind": "single",
+        "options": ["Yes", "No"],
+        "recommended": "Yes",
+        "replaces": replaces
+    })
+}
+
+#[test]
+fn a_drop_file_master_withdraws_and_asks_again_but_never_records_an_answer_in_its_own_words() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let master = Asker::Master(41);
+    let own = asked(&case, &master, "Rename the app?");
+    let sub = asked(&case, &Asker::Agent(AGENT), "Which port?");
+    let boxed = asked(&case, &Asker::Terminal(AGENT), "Allow the edit?");
+
+    assert_eq!(
+        said(
+            &drop,
+            RECORD_TOOL,
+            json!({"question": own, "version": 0, "answer": "Yes"})
+        ),
+        (RELAY_LIVE_ONLY.to_owned(), true)
+    );
+    assert_eq!(
+        said(&drop, WITHDRAW_TOOL, json!({"question": sub, "version": 0})),
+        (WITHDRAW_TAKEN.to_owned(), false)
+    );
+    assert!(
+        said(&drop, WITHDRAW_TOOL, json!({"question": sub})).1,
+        "a withdrawal names the version it read"
+    );
+    called(&drop, ASK_TOOL, choice("Rename the app to Crazy?", own));
+    called(
+        &drop,
+        WITHDRAW_TOOL,
+        json!({"question": boxed, "version": 0}),
+    );
+    assert_eq!(
+        apply_master_calls(&case.db, &case.project, 41, &drop),
+        [format!(
+            "Your withdrawal of question {boxed} was not taken: it is not an open question of this project asked by you or by a sub-agent."
+        )]
+    );
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    let asked_again: Vec<_> = open
+        .iter()
+        .filter(|question| question.id != boxed)
+        .collect();
+    assert_eq!(asked_again.len(), 1, "{open:#?}");
+    assert_eq!(asked_again[0].question, "Rename the app to Crazy?");
+    assert_eq!(asked_again[0].asker, master.name());
+    assert_eq!(asked_again[0].kind, crate::questions::QuestionKind::Single);
+    assert!(open.iter().any(|question| question.id == boxed));
+    assert!(
+        !open
+            .iter()
+            .any(|question| question.id == own || question.id == sub)
+    );
+
+    called(&drop, ASK_TOOL, choice("Rename it twice?", own));
+    assert_eq!(
+        apply_master_calls(&case.db, &case.project, 41, &drop),
+        [
+            "Your question \"Rename it twice?\" was not logged for the owner: the question it replaces is not an open free-text question of this project asked by you or by an engine step, or the new one is not of kind single or multi."
+        ]
+    );
+}
+
+#[test]
+fn a_conversation_master_withdraws_its_own_question_on_any_turn() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let session = SessionId::new("session-1").unwrap();
+    let own = asked(&case, &Asker::Session(session.clone()), "Rename the app?");
+    let other = asked(&case, &Asker::Master(41), "Ship on Friday?");
+    called(&drop, WITHDRAW_TOOL, json!({"question": own, "version": 0}));
+    called(
+        &drop,
+        WITHDRAW_TOOL,
+        json!({"question": other, "version": 0}),
+    );
+    assert_eq!(
+        apply_session_calls(&case.db, &case.project, &session, None, &drop),
+        [format!(
+            "Your withdrawal of question {other} was not taken: it is not an open question of this project asked by you or by a sub-agent."
+        )]
+    );
+    assert_eq!(open_ids(&case), [other]);
+}
+
+#[test]
+fn a_sub_agent_asks_its_own_question_again_but_never_withdraws_or_records_one() {
+    let case = Case::new();
+    let agent = Asker::Agent(AGENT);
+    let own = asked(&case, &agent, "Which port?");
+    let master = asked(&case, &Asker::Master(41), "Rename the app?");
+    let call = |name: &str, arguments: Value| {
+        super::super::live_call(name, Some(&arguments))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        agent_ask(
+            &case.db,
+            &case.project,
+            AGENT,
+            call(WITHDRAW_TOOL, json!({"question": own, "version": 0}))
+        ),
+        (AGENT_WITHDRAW_REFUSED.to_owned(), true)
+    );
+    assert_eq!(
+        agent_ask(
+            &case.db,
+            &case.project,
+            AGENT,
+            call(
+                RECORD_TOOL,
+                json!({"question": own, "version": 0, "answer": "8080"})
+            )
+        ),
+        (AGENT_ASKS_ONLY.to_owned(), true)
+    );
+    let (refused, error) = agent_ask(
+        &case.db,
+        &case.project,
+        AGENT,
+        call(ASK_TOOL, choice("Rename it to Crazy?", master)),
+    );
+    assert!(error, "{refused}");
+    assert!(
+        refused.contains("not an open free-text question you asked"),
+        "{refused}"
+    );
+    let (logged, error) = agent_ask(
+        &case.db,
+        &case.project,
+        AGENT,
+        call(ASK_TOOL, choice("Use port 8080?", own)),
+    );
+    assert!(!error, "{logged}");
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    assert!(!open.iter().any(|question| question.id == own));
+    assert!(open.iter().any(|question| question.id == master));
+    assert!(
+        open.iter()
+            .any(|question| question.question == "Use port 8080?" && question.asker == agent.name())
+    );
 }

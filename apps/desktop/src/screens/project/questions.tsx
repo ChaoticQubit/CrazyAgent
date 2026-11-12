@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { ANSWER_BYTES_MAX, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, answerQuestion, askedInTerminal, askerLabel, dismissNote, dismissQuestion, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
+import { ANSWER_BYTES_MAX, BULK_DISMISS_MAX, COMMENT_BYTES_MAX, COMMENT_LABEL, OPTIONS_MAX, answerQuestion, askedInTerminal, askerLabel, bulkDismissNote, bulkDismissedLine, dismissNote, dismissQuestion, dismissQuestions, isRecommended, loadQuestions, notReady, orderQuestions, questionsRefusal, settledNote, statusBadge, typedAnswer } from "../../api-questions";
 import type { OwnerQuestion, QuestionChoice, QuestionKind, QuestionPage } from "../../api-questions";
 import { Button, ConfirmDialog, TextArea } from "../../ui";
 import { displayText } from "../conversation";
@@ -80,7 +80,8 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
   const choice = choiceOf(question.kind, picks, writing ? text : null);
   const bytesMax = commentBytesMax(picks.length);
   const tooLong = writing && text.trim().length > 0 && typedAnswer(text, bytesMax) === null;
-  const badge = statusBadge(question.status);
+  const badge = statusBadge(question.status, question.closed_by ?? null);
+  const answerLabel = question.closed_by === "relay" ? "The master reports: " : "Answer: ";
   const suggested = typing ? question.recommended : null;
   const input = question.kind === "multi" ? "checkbox" : "radio";
   useEffect(() => {
@@ -128,7 +129,7 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
         <Button variant="quiet" disabled={busy} onClick={() => onDismiss(question)}>Dismiss</Button>
       </div>
     </>}
-    {!pending && question.answer !== null && <p className="qs-answer"><span className="pj-secondary">Answer: </span>{displayText(question.answer)}</p>}
+    {!pending && question.answer !== null && <p className="qs-answer"><span className="pj-secondary">{answerLabel}</span>{displayText(question.answer)}</p>}
   </section>;
 }
 
@@ -196,17 +197,27 @@ export function useQuestionActions(data: ProjectData, after: () => void) {
   return { busy, setBusy, note, setNote, answer: (question: OwnerQuestion, choice: QuestionChoice) => void answer(question, choice), askDismiss: setDismissing, dialog };
 }
 
+/** The waiting questions one "Dismiss all" sends: the pending ones shown, oldest first, at
+ * most `BULK_DISMISS_MAX`. Input: the shown questions. Output: the questions. */
+export function dismissAllOf(questions: readonly OwnerQuestion[]): OwnerQuestion[] {
+  const waiting = questions.filter((question) => question.status === "pending").slice(0, BULK_DISMISS_MAX);
+  assert(waiting.length <= BULK_DISMISS_MAX, "one Dismiss all sends at most one page");
+  return waiting;
+}
+
 /** Questions tab: every question the project's agents and engine steps asked the owner,
- * pending first, with Answer and Dismiss. Input: the project data. Output: the tab; the list
- * rereads every few seconds while it is open. */
+ * pending first, with Answer and Dismiss, and Dismiss all while two or more wait. Input: the
+ * project data. Output: the tab; the list rereads every few seconds while it is open. */
 export function QuestionsTab({ data }: { data: ProjectData }) {
   const [first, setFirst] = useState<Result<QuestionPage>>();
   const [older, setOlder] = useState<OlderPages>({ items: [], next: null });
   const [round, setRound] = useState(0);
-  const { busy, setBusy, note, setNote, answer, askDismiss, dialog } = useQuestionActions(data, () => {
+  const [dismissingAll, setDismissingAll] = useState<OwnerQuestion[] | null>(null);
+  const reread = () => {
     setOlder((shown) => olderAfter(shown, { kind: "settled" }));
     setRound((value) => value + 1);
-  });
+  };
+  const { busy, setBusy, note, setNote, answer, askDismiss, dialog } = useQuestionActions(data, reread);
   useEffect(() => {
     let current = true;
     void loadQuestions(data.id, null).then((result) => {
@@ -217,6 +228,18 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
     const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
     return () => { current = false; clearInterval(timer); };
   }, [data.id, round]);
+
+  async function dismissAll(waiting: OwnerQuestion[]) {
+    setBusy(true);
+    const result = await dismissQuestions(waiting);
+    setBusy(false);
+    setDismissingAll(null);
+    if (result.kind === "ok") {
+      setNote("");
+      data.notify(bulkDismissedLine(result.value));
+    } else setNote(notReady(result) ? "Questions aren't ready in this engine yet." : refusalOf(result));
+    reread();
+  }
 
   async function showOlder() {
     if (older.next === null) return;
@@ -230,17 +253,26 @@ export function QuestionsTab({ data }: { data: ProjectData }) {
   if (first === undefined) return <p className="pj-muted pj-small" role="status">Loading questions...</p>;
   if (notReady(first)) return <NotReady what="questions from agents aren't in this engine yet." />;
   const questions = first.kind === "ok" ? mergedQuestions(first.value, older.items) : [];
+  const waiting = dismissAllOf(questions);
   return <div className="pj-stack">
     {first.kind === "error" && <p className="pj-error" role="alert">Couldn't load questions. {refusalOf(first)}</p>}
     {note && <p className="pj-note warn" role="alert">{note}</p>}
     {first.kind === "ok" && questions.length === 0 && <ProjectEmpty title="No questions yet">
       When the master, a sub-agent or a CrazyAgent step needs a decision from you, its question waits here.
     </ProjectEmpty>}
+    {waiting.length >= 2 && <div className="pj-row between">
+      <span className="pj-small pj-secondary">{`${waiting.length} questions wait for you.`}</span>
+      <Button variant="quiet" disabled={busy} onClick={() => setDismissingAll(waiting)}>Dismiss all</Button>
+    </div>}
     {questions.length > 0 && <div className="pj-stack-s qs-list">
       {questions.map((question) => <QuestionCard key={`${question.id}:${question.version}`} question={question} now={data.now} busy={busy}
         onAnswer={answer} onDismiss={askDismiss} />)}
     </div>}
     {older.next !== null && <span><Button disabled={busy} onClick={() => void showOlder()}>Show older questions</Button></span>}
     {dialog}
+    <ConfirmDialog open={dismissingAll !== null} pending={busy} title={`Dismiss ${dismissingAll?.length ?? 0} questions?`} confirmLabel="Dismiss all" cancelLabel="Keep them"
+      onCancel={() => setDismissingAll(null)} onConfirm={() => { if (dismissingAll) void dismissAll(dismissingAll); }}>
+      {dismissingAll ? bulkDismissNote(dismissingAll.length) : ""}
+    </ConfirmDialog>
   </div>;
 }

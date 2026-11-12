@@ -251,6 +251,7 @@
     "allow-desktop-questions",
     "allow-desktop-answer-question",
     "allow-desktop-dismiss-question",
+    "allow-desktop-dismiss-questions",
     "allow-desktop-question-counts",
     "allow-desktop-notify-question",
     "allow-desktop-notification-target",
