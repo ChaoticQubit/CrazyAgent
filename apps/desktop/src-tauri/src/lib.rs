@@ -162,10 +162,11 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
 
 /// Installs the service when it is missing, when `reinstall` asks or when it is
 /// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
-/// engine with the shared bound. The service runs the sidecar, or its private copy when
-/// the sidecar sits in the AppImage mount folder; a sidecar other users can change is
-/// refused. Inputs: the layout, the service and whether to replace the definition with
-/// this app's sidecar. Output: Ok once it answers.
+/// engine while the service still runs it ([`crazyagent::service::wait_started`]). The
+/// service runs the sidecar, or its private copy when the sidecar sits in the AppImage
+/// mount folder; a sidecar other users can change is refused. Inputs: the layout, the
+/// service and whether to replace the definition with this app's sidecar. Output: Ok once
+/// it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -200,7 +201,7 @@ async fn start_engine(
             .start()
             .map_err(|_| engine_failure("engine_service_failed"))?;
     }
-    crazyagent::service::wait_ready(layout, crazyagent::service::READY_TIMEOUT, None, since)
+    crazyagent::service::wait_started(layout, &service, crazyagent::service::READY_TIMEOUT, since)
         .await
         .map_err(|_| engine_failure(start_failure(layout)))
 }

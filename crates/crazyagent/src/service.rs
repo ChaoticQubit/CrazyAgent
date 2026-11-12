@@ -13,6 +13,9 @@ pub const SYSTEMD_UNIT: &str = "crazyagent-engine.service";
 pub const WINDOWS_TASK: &str = "CrazyAgent Engine";
 /// How long a client waits for a starting engine to answer.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a client waits for an engine while its service manager still runs the process
+/// it started: a busy machine took close to a minute to bring the owner's engine up.
+pub const START_TIMEOUT: Duration = Duration::from_secs(180);
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
@@ -29,6 +32,7 @@ const SERVICE_PATH_EXTRAS: [&str; 6] = [
 const POLL: Duration = Duration::from_millis(100);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(35);
+const LIVENESS_EVERY: Duration = Duration::from_secs(1);
 const LOG_SCAN_BYTES: u64 = 4 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1006,8 +1010,8 @@ pub enum Started {
 /// Starts the engine for a client when none answers: through the installed service, or
 /// else as a detached `<executable> engine --home <root>` with output in the engine log.
 /// Inputs: the layout, the service, the executable, the PATH a detached engine gets and
-/// the wait bound. Output: how the engine runs once it answers, or a clear error naming
-/// the log after the bound or when the started engine stops.
+/// the wait bound, which a service start outlasts while it runs ([`wait_started`]).
+/// Output: how the engine runs once it answers, or an error naming the log.
 pub async fn ensure_running(
     layout: &Layout,
     service: &Service,
@@ -1020,18 +1024,15 @@ pub async fn ensure_running(
     }
     layout.prepare()?;
     let since = log_length(layout);
-    let mut child = None;
-    let started = if service.status()?.installed {
+    if service.status()?.installed {
         service.start()?;
-        Started::Service
-    } else {
-        let spawned = spawn_detached(layout, executable, path)?;
-        let pid = spawned.id();
-        child = Some(spawned);
-        Started::Detached { pid }
-    };
-    wait_ready(layout, bound, child.as_mut(), since).await?;
-    Ok(started)
+        wait_started(layout, service, bound, since).await?;
+        return Ok(Started::Service);
+    }
+    let mut child = spawn_detached(layout, executable, path)?;
+    let pid = child.id();
+    wait_ready(layout, bound, Some(&mut child), since).await?;
+    Ok(Started::Detached { pid })
 }
 
 fn spawn_detached(
@@ -1185,14 +1186,7 @@ pub async fn wait_ready(
 ) -> Result<(), ServiceError> {
     let deadline = Instant::now() + bound;
     loop {
-        let probe = PROBE_TIMEOUT.min(bound.max(POLL));
-        if logged_ready(layout, since)
-            && answering(&layout.socket())
-            && !matches!(
-                check_engine(layout.root(), OwnerClientKind::Tui, probe).await,
-                EngineCheck::Unavailable { .. }
-            )
-        {
+        if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
             return Ok(());
         }
         if let Some(child) = child.as_deref_mut()
@@ -1205,15 +1199,76 @@ pub async fn wait_ready(
             )));
         }
         if Instant::now() >= deadline {
-            return Err(failure(format!(
-                "the engine did not answer within {} s{}; see {}",
-                bound.as_secs(),
-                backup_reason(layout),
-                layout.engine_log().display()
-            )));
+            return Err(unanswered(layout, bound));
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// Waits like [`wait_ready`] for an engine a service manager starts. Past `bound` it keeps
+/// waiting, up to [`START_TIMEOUT`], while the manager still runs the process it was first
+/// seen running, and it fails at once when that process stops or another one takes its
+/// place. Inputs: the layout, the service, the bound and the log length before the start.
+/// Output: Ok once the engine answers, or an error naming the engine log.
+pub async fn wait_started(
+    layout: &Layout,
+    service: &Service,
+    bound: Duration,
+    since: u64,
+) -> Result<(), ServiceError> {
+    assert!(bound <= START_TIMEOUT);
+    let started = Instant::now();
+    let mut seen: Option<u32> = None;
+    let mut looked: Option<Instant> = None;
+    loop {
+        if answered(layout, since, PROBE_TIMEOUT.min(bound.max(POLL))).await {
+            return Ok(());
+        }
+        if looked.is_none_or(|at| at.elapsed() >= LIVENESS_EVERY) {
+            looked = Some(Instant::now());
+            let status = service.status()?;
+            let running = status.pid.filter(|_| status.running);
+            match (seen, running) {
+                (None, pid) => seen = pid,
+                (Some(first), Some(pid)) if pid == first => {}
+                (Some(_), _) => {
+                    return Err(failure(format!(
+                        "the engine stopped while starting{}; see {}",
+                        backup_reason(layout),
+                        layout.engine_log().display()
+                    )));
+                }
+            }
+        }
+        let limit = if seen.is_some() { START_TIMEOUT } else { bound };
+        if started.elapsed() >= limit {
+            return Err(unanswered(layout, limit));
+        }
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// Whether the engine at a layout has written `ready` to its log after a start and answers
+/// an authenticated read. Inputs: the layout, the log length before the start and the read's
+/// bound. Output: the answer.
+async fn answered(layout: &Layout, since: u64, probe: Duration) -> bool {
+    logged_ready(layout, since)
+        && answering(&layout.socket())
+        && !matches!(
+            check_engine(layout.root(), OwnerClientKind::Tui, probe).await,
+            EngineCheck::Unavailable { .. }
+        )
+}
+
+/// The error of an engine that did not answer within a bound. Inputs: the layout and the
+/// bound. Output: the error naming the bound, a failed upgrade backup and the engine log.
+fn unanswered(layout: &Layout, bound: Duration) -> ServiceError {
+    failure(format!(
+        "the engine did not answer within {} s{}; see {}",
+        bound.as_secs(),
+        backup_reason(layout),
+        layout.engine_log().display()
+    ))
 }
 
 /// Links the running `crazyagent` into a folder on the user's PATH so a shell finds it:
