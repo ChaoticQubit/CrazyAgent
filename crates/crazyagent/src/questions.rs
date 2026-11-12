@@ -1416,20 +1416,22 @@ fn settle(
     };
     let linked = coord_link(tx, question.id)?;
     let by_owner = matches!(how, How::Answer(..) | How::Dismiss);
-    let message = match linked {
-        Some(coord) if by_owner => {
-            tell_coord(tx, coord, answer)?;
-            None
-        }
+    let told = match linked {
+        Some(coord) if by_owner => tell_coord(tx, coord, answer)?,
         Some(coord) => {
             end_coord(tx, coord)?;
-            None
+            false
         }
-        None if by == Some(AnsweredBy::Chat) => None,
-        None if by_owner || matches!(how, How::Terminal) => deliver(tx, &question, answer)?,
-        None => None,
+        None => false,
     };
-    let noted = (linked.is_some() && by_owner)
+    let message = if told || by == Some(AnsweredBy::Chat) {
+        None
+    } else if by_owner || matches!(how, How::Terminal) {
+        deliver(tx, &question, answer)?
+    } else {
+        None
+    };
+    let noted = told
         || matches!(
             how,
             How::Replace | How::Withdraw { own: true } | How::Relay { own: true, .. }
@@ -1502,11 +1504,15 @@ fn coord_open(tx: &Transaction<'_>, message: i64) -> Result<bool, EngineError> {
 
 /// Tells the asker of a linked team question the owner's answer or dismissal as one team
 /// reply from the owner, while the team message still waits. Inputs: the transaction, the
-/// message id and the owner's answer, none when dismissed. Output: nothing, or
+/// message id and the owner's answer, none when dismissed. Output: whether it was told, or
 /// `questions_unavailable` when the team reply cannot be written.
-fn tell_coord(tx: &Transaction<'_>, message: i64, answer: Option<&str>) -> Result<(), EngineError> {
+fn tell_coord(
+    tx: &Transaction<'_>,
+    message: i64,
+    answer: Option<&str>,
+) -> Result<bool, EngineError> {
     if !coord_open(tx, message)? {
-        return Ok(());
+        return Ok(false);
     }
     let body = match answer {
         Some(text) => bound_text(text, crate::coord::BODY_BYTES_MAX),
@@ -1515,7 +1521,7 @@ fn tell_coord(tx: &Transaction<'_>, message: i64, answer: Option<&str>) -> Resul
     assert!(!body.is_empty() && body.len() <= crate::coord::BODY_BYTES_MAX);
     crate::coord::reply(tx, crate::coord::Party::Owner, message, body, now_ms())
         .map_err(unavailable)?;
-    Ok(())
+    Ok(true)
 }
 
 /// Ends a linked team question nobody answers any more, from any open receipt, so its team

@@ -697,3 +697,29 @@ fn dismissed_and_withdrawn_team_questions_close_both_sides() {
         Some(crate::questions::ClosedBy::Master)
     );
 }
+
+/// F12: an owner answer to a linked team question whose team message ended before the tick
+/// noticed is not lost: it reaches the asker once the way an unlinked answer does.
+#[test]
+fn an_answer_after_the_team_message_ended_still_reaches_the_asker_once() {
+    let mut engine = Engine::new();
+    engine.register();
+    let asker = engine.agent("working");
+    let asked = engine.ask(asker, Severity::Normal, "Rename the repo?");
+    engine.tick(NOW);
+    let linked = engine.linked();
+    assert_eq!(linked.len(), 1);
+    assert!(crate::coord::withdraw(&engine.connection, asked, NOW + 1).unwrap());
+    assert_eq!(
+        crate::questions::dismiss(&engine.connection, linked[0].id, 0).unwrap(),
+        crate::questions::Settlement::Settled
+    );
+    assert!(engine.replies(asked).is_empty());
+    let notes = crate::questions::agent_notes(&engine.connection, &engine.project, asker).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert!(
+        notes[0].text.starts_with("The owner dismissed"),
+        "{}",
+        notes[0].text
+    );
+}
