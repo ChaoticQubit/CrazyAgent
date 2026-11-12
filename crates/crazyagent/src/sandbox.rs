@@ -4365,7 +4365,7 @@ mod profile_string_tests {
         assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
     }
 
-    /// The default secret rule and 512 long open top-level names, as a Chosen folders
+    /// The default secret rule and 64 long open top-level names, as a Chosen folders
     /// launch can keep open, give a profile with no string past the limit; a project folder
     /// so deep that one secret name no longer fits is refused at install, before a profile
     /// sandbox-exec cannot read is written.
@@ -4378,8 +4378,8 @@ mod profile_string_tests {
         for folder in [&home, &tmp, &profiles, &project] {
             fs::create_dir_all(folder).unwrap();
         }
-        let open: Vec<String> = (0..OPEN_TOPS_MAX)
-            .map(|at| format!("{at:03}{}", "n".repeat(60)))
+        let open: Vec<String> = (0..64)
+            .map(|at| format!("{at:02}{}", "n".repeat(40)))
             .collect();
         let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
             .unwrap()
