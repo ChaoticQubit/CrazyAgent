@@ -474,6 +474,22 @@ fn quoted(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
+/// Fits the rows above the editor into `room` on a short body, such as 80x24 under a
+/// wrapped hint bar, so the editor and the line under it stay in view. Only when they do
+/// not fit: blank separator rows give way first, bottom up, then the intro drops to its
+/// short rows, without the Ctrl-G and Ctrl-D sentence the hint bar names too. Inputs: the
+/// rows, the room, the intro's row count after the title and its short rows. Output: unit.
+fn give_way(lines: &mut Vec<Line<'static>>, room: usize, intro: usize, short: Vec<Line<'static>>) {
+    while lines.len() > room
+        && let Some(at) = lines.iter().rposition(|line| line.width() == 0)
+    {
+        lines.remove(at);
+    }
+    if lines.len() > room && short.len() < intro {
+        lines.splice(1..=intro, short);
+    }
+}
+
 /// One agent's grounding and skill counts as one line of words: graphify, `ctx_*`, then
 /// every skill its project enabled by name with zero included, then the other skills it
 /// called. Inputs: the view's skill names and the agent's row. Output: the words.
@@ -1441,12 +1457,17 @@ impl ProcessPage {
             Scope::Project { name, .. } => format!("Instructions every agent in {name} gets, after the app-wide ones. Kept in the project's .crazyagent/instructions.md, which git ignores."),
         };
         let seeds = "Ctrl-G imports an instructions file you name, such as a CLAUDE.md, and Ctrl-D the CrazyAgent default process, each as a preview first.";
-        let intro = match self.scope {
+        let full = match self.scope {
             Scope::App => format!("{intro} {seeds}"),
-            Scope::Project { .. } => intro,
+            Scope::Project { .. } => intro.clone(),
         };
+        let intro_rows = wrap(&full, width).len();
+        let short: Vec<Line<'static>> = wrap(&intro, width)
+            .into_iter()
+            .map(|text| styled(text, Role::Muted, theme))
+            .collect();
         lines.extend(
-            wrap(&intro, width)
+            wrap(&full, width)
                 .into_iter()
                 .map(|text| styled(text, Role::Muted, theme)),
         );
@@ -1506,6 +1527,14 @@ impl ProcessPage {
         } else {
             EDITOR_ROWS_MIN
         };
+        if self.scope == Scope::App {
+            give_way(
+                &mut lines,
+                height.saturating_sub(EDITOR_CHROME_ROWS + floor),
+                intro_rows,
+                short,
+            );
+        }
         let rows = height
             .saturating_sub(lines.len() + EDITOR_CHROME_ROWS)
             .max(floor);

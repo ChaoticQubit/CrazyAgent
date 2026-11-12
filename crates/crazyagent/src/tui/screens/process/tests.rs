@@ -1124,8 +1124,8 @@ fn every_app_process_hint_stays_on_the_bar_at_80_by_24() {
     let rows = render(&mut shell, 80, 24);
     every_hint_once(&rows, &hints, "80x24");
     assert!(
-        rows.iter().any(|row| row.contains("Use tdd.")),
-        "the saved text stays in view:\n{}",
+        rows.iter().any(|row| row.contains("se tdd.")),
+        "the saved text stays in view, the cursor on its first cell:\n{}",
         rows.join("\n")
     );
 }
@@ -1315,7 +1315,9 @@ fn import_from_file_reads_a_named_file_as_a_preview() {
     std::fs::write(&file, "Plan first.\n").unwrap();
     let mut shell = opened(Scope::App, "Saved rule.");
     assert!(
-        render(&mut shell, 80, 24)[23].contains("Ctrl-G Import from file"),
+        crate::tui::screens::settings_accounts::tests::bar_rows(&render(&mut shell, 80, 24))
+            .join("\n")
+            .contains("Ctrl-G Import from file"),
         "{}",
         screen(&mut shell)
     );
@@ -1326,7 +1328,9 @@ fn import_from_file_reads_a_named_file_as_a_preview() {
     assert!(field.contains("Import from file"), "{field}");
     assert!(field.contains("~/never"), "{field}");
     assert!(
-        render(&mut shell, 80, 24)[23].contains("Enter Read file"),
+        crate::tui::screens::settings_accounts::tests::bar_rows(&render(&mut shell, 80, 24))
+            .join("\n")
+            .contains("Enter Read file"),
         "{field}"
     );
     shell.key(Key::Esc);
