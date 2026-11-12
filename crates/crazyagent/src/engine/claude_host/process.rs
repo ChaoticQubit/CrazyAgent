@@ -4,6 +4,7 @@ use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use crate::protocol::ProjectId;
 use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -53,6 +54,7 @@ struct Process {
     group: Pid,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
+    project: ProjectId,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -76,10 +78,14 @@ struct Process {
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
 }
 
+/// Runs one Claude Code master under custody until it retires. Inputs: the command, its
+/// sandbox, the account lease with the project whose leftover setting and owner view what
+/// it leaves running follow, the turn's home, the protocol, the limits and the channels.
+/// Output: none; the status channel reports how it ended.
 pub(super) fn run(
     mut command: Command,
     sandbox: InstalledSandbox,
-    profile: NativeProfileUse,
+    (profile, project): (NativeProfileUse, ProjectId),
     home: PathBuf,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
@@ -171,6 +177,7 @@ pub(super) fn run(
         warden,
         follower,
         profile: Some(profile),
+        project,
         stdin: None,
         stdout: None,
         stderr: None,
@@ -659,14 +666,15 @@ impl Process {
         {
             self.fail(Fault::Host(unstopped.code()));
             if let (Unstopped::Left(left), Some(profile)) = (unstopped, self.profile.take()) {
+                let project = self.project.as_str();
                 left.hold(
                     Some(profile.account().clone()),
                     profile,
                     crate::harnesses::leftovers::HoldBy {
-                        project: None,
+                        project: Some(project.to_owned()),
                         who: "a Claude host turn".to_owned(),
                     },
-                    crate::harnesses::leftovers::mode_of(None),
+                    crate::harnesses::leftovers::mode_of(Some(project)),
                 );
             }
         }
