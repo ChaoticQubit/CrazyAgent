@@ -11,6 +11,7 @@ import { Button, Dialog, Icon, LoadError, NotReady, ProviderMark, Segmented, Set
 import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
 import { HarnessPage } from "./harness-page";
+import { ModelsSection } from "./models-section";
 import "../project/projects.css";
 
 const KIND_LABEL: Record<HarnessAccountKind, string> = {
@@ -416,6 +417,7 @@ export function HarnessScreenView({ catalog, id }: { catalog: Loaded<HarnessEntr
     {back}
     <div className="hs-head"><ProviderMark provider={entry.id} name={entry.name} large /><h2>{entry.name}</h2><StatusBadge word={statusWord(entry)} /></div>
     <HarnessDetails entry={entry} />
+    <ModelsSection harness={entry.id} name={entry.name} projectId={null} />
     <HarnessPage harness={entry.id} projectId={null} />
   </div>;
 }
