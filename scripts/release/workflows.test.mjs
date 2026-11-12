@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const WORKFLOWS = new URL("../../.github/workflows/", import.meta.url);
 
@@ -640,4 +645,213 @@ test("CI runs the price snapshot script's check on Linux, so a bad refresh fails
     linux.some((step) => /^ {8}run: make test-price-script$/m.test(step)),
     "the linux job runs make test-price-script",
   );
+});
+
+const SCRIPT_MS = 10_000;
+const HDIUTIL_RETRY = fileURLToPath(new URL("./hdiutil-retry/", import.meta.url));
+const FAKE_SLEEP = String.raw`printf '%s\n' "$1" >> "$FAKE_STATE/sleeps"
+`;
+const FAKE_GH = String.raw`state="$FAKE_STATE"
+printf '%s\n' "$*" >> "$state/calls"
+stale="$(cat "$state/stale")"
+if [ "$1 $2" = "release view" ] || [ "$1 $2" = "release delete" ]; then exit 0; fi
+if [ "$1 $2" = "release create" ]; then
+  if [ "$stale" -gt 0 ]; then echo "HTTP 422: Validation Failed: tag_name already exists" >&2; exit 1; fi
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = -X ] && [ "$3" = DELETE ]; then echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; fi
+if [ "$1" = api ] && [ -e "$state/read-fails" ]; then echo "gh: Server Error (HTTP 502)" >&2; exit 1; fi
+gone='[{"ref":"refs/tags/dev-old"}]'
+refs="$gone"
+if [ "$1" = api ] && [ "$stale" -gt 0 ]; then
+  echo "$((stale - 1))" > "$state/stale"
+  refs='[{"ref":"refs/tags/dev"},{"ref":"refs/tags/dev-old"}]'
+fi
+case "$1 $2 $3" in
+  "api repos/example/fake-repo/git/ref/tags/dev ")
+    if [ "$refs" = "$gone" ]; then echo "gh: Not Found (HTTP 404)" >&2; exit 1; fi
+    echo '{"ref":"refs/tags/dev"}'
+    exit 0 ;;
+  "api repos/example/fake-repo/git/matching-refs/tags/dev --jq")
+    printf '%s' "$refs" | jq "$4"
+    exit $? ;;
+esac
+echo "fake gh: unexpected call: $*" >&2
+exit 2
+`;
+const FAKE_HDIUTIL = String.raw`for image; do :; done
+if [ -e "$image" ]; then seen=present; else seen=absent; fi
+printf '%s %s\n' "$1" "$seen" >> "$FAKE_STATE/calls"
+[ -e "$image" ] || : > "$image"
+fails="$(cat "$FAKE_STATE/fails")"
+if [ "$fails" -gt 0 ]; then
+  echo "$((fails - 1))" > "$FAKE_STATE/fails"
+  echo "hdiutil: $1 failed - Resource busy" >&2
+  exit "$(cat "$FAKE_STATE/status")"
+fi
+exit 0
+`;
+
+/**
+ * Returns the shell a workflow step runs, as GitHub hands it to bash.
+ * Input: one step from `steps`, whose last key is `run: |`. Output: the run body with the step's
+ * indentation removed.
+ */
+function runBody(step) {
+  const lines = step.split("\n");
+  const start = lines.indexOf("        run: |");
+  assert(start >= 0, "the step has a run block");
+  const body = lines.slice(start + 1);
+  assert(body.every((line) => line === "" || line.startsWith("          ")), "run is the step's last key");
+  return `${body.map((line) => line.slice(10)).join("\n")}\n`;
+}
+
+/**
+ * Writes executable bash stand-ins into a folder. Inputs: the folder and a map from file name to
+ * script body.
+ */
+function standIns(folder, scripts) {
+  mkdirSync(folder, { recursive: true });
+  for (const [name, body] of Object.entries(scripts)) {
+    writeFileSync(join(folder, name), `#!/bin/bash\n${body}`);
+    chmodSync(join(folder, name), 0o755);
+  }
+}
+
+/** The lines a stand-in appended to one state file. Inputs: the state folder and the file name. Output: the lines, or none. */
+function logged(state, name) {
+  const file = join(state, name);
+  return existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean) : [];
+}
+
+/**
+ * Runs the dev publish step's shell against a stand-in `gh` that holds no token and can reach no
+ * repository: `stale` tag reads still show the dev tag after the release delete, the ref DELETE
+ * always answers 422 "Reference does not exist", and `readFails` makes every tag read error.
+ * Inputs: the step's shell and the stand-in state. Output: the exit status, output, `gh` calls and sleeps.
+ */
+function publishDev(body, { stale, readFails = false }) {
+  const root = mkdtempSync(join(tmpdir(), "ca-relwf-"));
+  try {
+    const state = join(root, "state");
+    const work = join(root, "work");
+    mkdirSync(state);
+    mkdirSync(join(work, "dist"), { recursive: true });
+    mkdirSync(join(root, "home"));
+    writeFileSync(join(state, "stale"), `${stale}\n`);
+    if (readFails) writeFileSync(join(state, "read-fails"), "");
+    writeFileSync(join(work, "notes.txt"), "Dev build\n");
+    writeFileSync(join(work, "dist", "CrazyAgent.dmg"), "");
+    writeFileSync(join(root, "step.sh"), body);
+    standIns(join(root, "bin"), { gh: FAKE_GH, sleep: FAKE_SLEEP });
+    const run = spawnSync("/bin/bash", ["--noprofile", "--norc", "-eo", "pipefail", join(root, "step.sh")], {
+      cwd: work,
+      encoding: "utf8",
+      timeout: SCRIPT_MS,
+      env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: join(root, "home"), FAKE_STATE: state, GITHUB_REPOSITORY: "example/fake-repo", GITHUB_SHA: "0123456789abcdef0123456789abcdef01234567", VERSION: "0.0.0-dev.1" },
+    });
+    assert.equal(run.error, undefined, `the step ends within ${SCRIPT_MS} ms`);
+    return { status: run.status, stdout: run.stdout, stderr: run.stderr, calls: logged(state, "calls"), sleeps: logged(state, "sleeps").map(Number) };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Runs scripts/release/hdiutil-retry/hdiutil in front of a stand-in hdiutil whose first `fails`
+ * calls leave a half-made image and fail with "Resource busy" and `status`. Inputs: the arguments,
+ * with IMAGE for the image path, and the stand-in state; `existing` makes the image before the run.
+ * Output: the exit status, stderr, the stand-in's calls, the sleeps and the image's text.
+ */
+function hdiutil(args, { fails, status = 1, existing = false }) {
+  const root = mkdtempSync(join(tmpdir(), "ca-relwf-"));
+  try {
+    const state = join(root, "state");
+    const image = join(root, "rw.1.CrazyAgent.dmg");
+    mkdirSync(state);
+    writeFileSync(join(state, "fails"), `${fails}\n`);
+    writeFileSync(join(state, "status"), `${status}\n`);
+    if (existing) writeFileSync(image, "kept");
+    standIns(join(root, "bin"), { sleep: FAKE_SLEEP });
+    standIns(join(root, "real"), { hdiutil: FAKE_HDIUTIL });
+    const run = spawnSync(join(HDIUTIL_RETRY, "hdiutil"), args.map((arg) => (arg === "IMAGE" ? image : arg)), {
+      encoding: "utf8",
+      timeout: SCRIPT_MS,
+      env: { PATH: `${join(root, "bin")}:/usr/bin:/bin`, HOME: root, FAKE_STATE: state, CRAZYAGENT_REAL_HDIUTIL: join(root, "real", "hdiutil") },
+    });
+    assert.equal(run.error, undefined, `the hdiutil retry ends within ${SCRIPT_MS} ms`);
+    return { status: run.status, stderr: run.stderr, calls: logged(state, "calls"), sleeps: logged(state, "sleeps").map(Number), kept: existsSync(image) ? readFileSync(image, "utf8") : null };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("the dev publish tolerates a tag delete that finds the tag already gone and waits, bounded, until the tag reads gone before it creates the dev release", async () => {
+  const jq = spawnSync("/bin/bash", ["-c", "command -v jq"], { encoding: "utf8", env: { PATH: "/usr/bin:/bin" } });
+  assert.equal(jq.status, 0, "the stand-in gh runs the step's --jq filter with jq, which must be on /usr/bin:/bin");
+  const body = runBody(steps(await workflow("release.yml"), "publish").find((step) => step.includes("- name: Publish dev prerelease")));
+  const reads = (run) => run.calls.filter((call) => call.startsWith("api repos/example/fake-repo/git/matching-refs/tags/dev ")).length;
+  const created = (run) => run.calls.filter((call) => call.startsWith("release create dev ")).length;
+
+  const stale = publishDev(body, { stale: 2 });
+  assert.equal(stale.status, 0, `${stale.stdout}${stale.stderr}`);
+  assert.equal(reads(stale), 3, "two reads still show the tag, the third reads it gone");
+  assert.equal(created(stale), 1);
+  assert.match(stale.calls.at(-1), /^release create dev /, "the release is created only after the tag reads gone");
+  assert.deepEqual(stale.sleeps, [2, 4]);
+
+  const never = publishDev(body, { stale: 99 });
+  assert.notEqual(never.status, 0, "a tag that never reads gone fails the publish");
+  assert.match(never.stdout, /::error::the dev tag still reads present after 5 checks/);
+  assert.equal(reads(never), 5);
+  assert.equal(created(never), 0, "nothing is published while the tag reads present");
+  assert(never.sleeps.reduce((sum, seconds) => sum + seconds, 0) <= 30, "the wait is bounded");
+
+  const broken = publishDev(body, { stale: 0, readFails: true });
+  assert.notEqual(broken.status, 0, "a tag read that errors fails the publish and never counts as gone");
+  assert.equal(created(broken), 0);
+});
+
+test("on macOS the release build puts the hdiutil retry first on PATH before Tauri builds, so a busy hdiutil create is retried inside the dmg step without signing or notarizing the app again", async () => {
+  const build = steps(await workflow("release.yml"), "build").find((step) => step.includes("id: desktop"));
+  const macos = [
+    '          if [ "$PLATFORM" = macos ]; then',
+    '            export TMPDIR="$RUNNER_TEMP/macos-tmp"',
+    '            mkdir -p "$TMPDIR"',
+    '            export PATH="$GITHUB_WORKSPACE/scripts/release/hdiutil-retry:$PATH"',
+    "          fi",
+  ].join("\n");
+  assert(build.includes(macos), "the macOS block exports the hdiutil retry folder ahead of PATH");
+  assert(build.indexOf(macos) < build.indexOf("tauri.js build"), "PATH is set before Tauri runs bundle_dmg.sh");
+  assert.equal((await workflow("release.yml")).split("\n").filter((line) => line.includes("hdiutil-retry")).length, 1, "only the macOS desktop build uses it");
+  assert.deepEqual(readdirSync(HDIUTIL_RETRY), ["hdiutil"], "the folder that sits ahead of /usr/bin while codesign and notarytool run holds nothing but hdiutil");
+  assert.notEqual(statSync(join(HDIUTIL_RETRY, "hdiutil")).mode & 0o111, 0, "the hdiutil retry is executable");
+});
+
+test("the hdiutil retry tries a busy hdiutil create three times, removing the half-made image between tries, and passes the last failure through", () => {
+  const create = ["create", "-srcfolder", "src", "-volname", "CrazyAgent", "-format", "UDRW", "IMAGE"];
+  const busy = hdiutil(create, { fails: 2 });
+  assert.equal(busy.status, 0, busy.stderr);
+  assert.deepEqual(busy.calls, ["create absent", "create absent", "create absent"], "each try starts with no half-made image");
+  assert.deepEqual(busy.sleeps, [5, 10]);
+  assert.match(busy.stderr, /hdiutil-retry: hdiutil create, try 3 of 3/);
+
+  const broken = hdiutil(create, { fails: 9, status: 35 });
+  assert.equal(broken.status, 35, "the last try's status");
+  assert.equal(broken.calls.length, 3);
+  assert.equal(broken.stderr.match(/hdiutil: create failed - Resource busy/g)?.length, 3, "every try's error is shown, the last one included");
+  assert.deepEqual(broken.sleeps, [5, 10]);
+});
+
+test("the hdiutil retry runs every other hdiutil command, and a create over an existing image, exactly once", () => {
+  const attach = hdiutil(["attach", "-readwrite", "-noverify", "IMAGE"], { fails: 1 });
+  assert.equal(attach.status, 1);
+  assert.deepEqual(attach.calls, ["attach absent"]);
+  assert.deepEqual(attach.sleeps, []);
+
+  const over = hdiutil(["create", "-srcfolder", "src", "IMAGE"], { fails: 1, existing: true });
+  assert.equal(over.status, 1);
+  assert.deepEqual(over.calls, ["create present"]);
+  assert.equal(over.kept, "kept", "an image that was there before is never deleted");
+  assert.deepEqual(over.sleeps, []);
 });

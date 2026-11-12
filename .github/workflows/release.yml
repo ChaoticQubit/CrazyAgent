@@ -411,6 +411,7 @@ jobs:
           if [ "$PLATFORM" = macos ]; then
             export TMPDIR="$RUNNER_TEMP/macos-tmp"
             mkdir -p "$TMPDIR"
+            export PATH="$GITHUB_WORKSPACE/scripts/release/hdiutil-retry:$PATH"
           fi
           if [ "$PLATFORM" = macos ] && [ "$status" = signed ]; then
             security_line() { printf '%s\n' "$1" | security -i; }
@@ -592,9 +593,16 @@ jobs:
           if gh release view dev --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             gh release delete dev --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/dev" > /dev/null 2>&1; then
-            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev"
-          fi
+          dev_tags() { gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/dev" --jq '[.[] | select(.ref == "refs/tags/dev")] | length'; }
+          tries=5
+          for try in $(seq 1 "$tries"); do
+            count="$(dev_tags)"
+            case "$count" in 0|1) ;; *) echo "::error::reading the dev tag gave '$count', not 0 or 1"; exit 1 ;; esac
+            if [ "$count" = 0 ]; then break; fi
+            if [ "$try" = "$tries" ]; then echo "::error::the dev tag still reads present after $tries checks; nothing published"; exit 1; fi
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/dev" > /dev/null || echo "deleting the dev tag failed, it may be gone already; checking again"
+            sleep $((try * 2))
+          done
           gh release create dev --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --target "$GITHUB_SHA" --title "Dev build $VERSION" --notes-file notes.txt dist/*
       - name: Publish stable release
         if: needs.prepare.outputs.channel == 'stable'
