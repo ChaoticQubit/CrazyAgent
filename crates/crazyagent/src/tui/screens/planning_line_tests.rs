@@ -354,6 +354,28 @@ fn the_status_line_is_read_again_slowly_when_idle_and_quickly_while_a_check_runs
 }
 
 #[test]
+fn a_check_waiting_for_an_account_says_why_without_the_failure_mark_until_the_check_ends() {
+    let reason = crate::roadmap_status::NO_ACCOUNT;
+    for (stale, running) in [(true, false), (true, true)] {
+        let mut line = StatusLine::new(alpha());
+        let mut waiting = checked(&[ItemStatus::Pending]);
+        waiting.problem = Some(reason.into());
+        waiting.stale = stale;
+        waiting.running = running;
+        exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(waiting))));
+        let text = shown(&line);
+        assert!(text.contains(reason), "{text}");
+        assert!(!text.contains('!'), "{text}");
+    }
+    let mut line = StatusLine::new(alpha());
+    let mut ended = checked(&[ItemStatus::Pending]);
+    ended.problem = Some(reason.into());
+    exchange(&mut line, NOW, Ok(RoadmapReply::Status(Box::new(ended))));
+    let text = shown(&line);
+    assert!(text.contains(&format!("! {reason}")), "{text}");
+}
+
+#[test]
 fn r_asks_for_a_check_then_reads_the_status_again_and_off_refuses_it() {
     let mut line = StatusLine::new(alpha());
     let idle = checked(&[ItemStatus::Pending]);
