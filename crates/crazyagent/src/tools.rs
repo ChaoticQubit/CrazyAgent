@@ -390,7 +390,8 @@ impl Missing {
 
 /// Finds a tool by its program name wherever the places look, passing over version-manager
 /// shims, files in a `.crazyagent` folder and files others can change, then reads how it
-/// runs. Harness launches keep their pinned entry and call [`resolve_entry`] instead.
+/// runs; a miss asks the background probes to look again ([`probe::missed`]). Harness
+/// launches keep their pinned entry and call [`resolve_entry`] instead.
 /// Inputs: the program name and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
@@ -415,12 +416,15 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     if !valid_name(name) {
         return Err(not_found());
     }
-    let found = places
+    let Some(found) = places
         .folders
         .iter()
         .map(|folder| folder.join(name))
         .find(|candidate| usable_candidate(places, candidate))
-        .ok_or_else(not_found)?;
+    else {
+        probe::missed();
+        return Err(not_found());
+    };
     entry_at(&found, places, depth).map_err(|missing| Missing {
         tool: name.to_owned(),
         ..missing
