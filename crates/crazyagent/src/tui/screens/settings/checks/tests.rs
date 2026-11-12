@@ -8,7 +8,13 @@ use crate::tui::shell::{Shell, targets};
 use serde_json::json;
 
 fn jobs(shell: &mut Shell) -> Vec<ChecksJob> {
-    std::iter::from_fn(|| shell.ctx.next_request())
+    ctx_jobs(&mut shell.ctx)
+}
+
+/// The check jobs a page sent through its context, in order. Takes the context. Returns
+/// the jobs.
+fn ctx_jobs(ctx: &mut Ctx) -> Vec<ChecksJob> {
+    std::iter::from_fn(|| ctx.next_request())
         .filter_map(|request| match request {
             Request::Settings(job) => match *job {
                 SettingsJob::Checks(job) => Some(*job),
@@ -762,4 +768,72 @@ fn a_chosen_check_profile_stays_in_view_at_80x24() {
         "the chosen profile row:\n{rows}"
     );
     assert!(rows.contains("p Approve"), "{rows}");
+}
+
+/// A check settings page outside any shell, read from the engine as a shell would serve it,
+/// so a test can ask the page itself which lines it keeps in view. Inputs: the engine and the
+/// scope. Output: the page and its context.
+fn served_page(engine: &mut Engine, scope: Scope) -> (CheckSettingsPage, Ctx) {
+    let mut ctx = ctx(80, 24);
+    let mut page = CheckSettingsPage::new(scope);
+    page.shown(&mut ctx);
+    for _ in 0..8 {
+        let sent = ctx_jobs(&mut ctx);
+        if sent.is_empty() {
+            return (page, ctx);
+        }
+        for job in sent {
+            let event = answer(job, engine);
+            page.arrive(
+                &Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(event)))),
+                &mut ctx,
+            );
+        }
+    }
+    panic!("the page kept asking");
+}
+
+fn line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[test]
+fn the_focused_part_runs_from_the_chosen_setting_through_its_last_option() {
+    let mut engine = Engine::new();
+    wide_profile(&engine);
+    let (mut page, mut ctx) = served_page(&mut engine, project());
+    let all = choices();
+    let last = all.len() - 1;
+    for _ in 0..last {
+        page.key(&Key::Down, &mut ctx);
+    }
+    page.key(&Key::Enter, &mut ctx);
+    let (lines, (first, end)) = page.body(76, &ctx);
+    assert!(
+        line_text(&lines[first]).contains("Removed tests"),
+        "{}",
+        line_text(&lines[first])
+    );
+    assert_eq!(
+        end,
+        first + 1 + all[last].options.len(),
+        "the row, a blank, every option"
+    );
+    assert!(
+        line_text(&lines[end]).contains("A test a run no longer reports"),
+        "{}",
+        line_text(&lines[end])
+    );
+    page.key(&Key::Esc, &mut ctx);
+    page.key(&Key::Down, &mut ctx);
+    let (lines, (first, end)) = page.body(76, &ctx);
+    assert_eq!(first, end, "a chosen profile is its row alone");
+    assert!(
+        line_text(&lines[first]).contains("3 checks and 1 holdout"),
+        "{}",
+        line_text(&lines[first])
+    );
 }
