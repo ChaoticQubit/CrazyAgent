@@ -191,7 +191,11 @@ test("a release builds the bundled tmux from its pinned script before staging si
   const rosetta = index("Install Rosetta for the x86_64 tmux start check");
   assert(rosetta >= 0 && rosetta < tmux, "Rosetta is in place before the x86_64 tmux is built and started");
   assert.match(build[rosetta], /^ {8}if: matrix\.target == 'x86_64-apple-darwin'$/m);
-  assert.match(build[rosetta], /^ {10}if \[ "\$\(uname -m\)" = arm64 \]; then sudo softwareupdate --install-rosetta --agree-to-license; fi$/m);
+  const install = build[rosetta].indexOf("sudo softwareupdate --install-rosetta --agree-to-license");
+  const ownRunner = build[rosetta].indexOf('if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then');
+  assert(install > 0 && ownRunner > 0 && ownRunner < install, "Rosetta is installed only on a GitHub-hosted runner");
+  assert.match(build[rosetta].slice(ownRunner, install), /::error::[^\n]*install Rosetta[^\n]*\n\s+exit 1\n/, "on the owner's runner CI installs nothing: it fails and says to install Rosetta");
+  assert.match(build[rosetta], /^ {10}if \[ "\$\(uname -m\)" = arm64 \] && ! \/usr\/bin\/arch -x86_64 \/usr\/bin\/true 2> \/dev\/null; then$/m, "only an Apple silicon runner without Rosetta needs it");
   assert.match(build[rosetta], /^ {10}\/usr\/bin\/arch -x86_64 \/usr\/bin\/true$/m, "the step fails when x86_64 still cannot run");
   assert(!/continue-on-error/.test(build[rosetta]), "a failed Rosetta install fails the release, never skips the start check");
   assert.match(build[stage], /--tmux "\$TMUX_SIDECAR"/);
