@@ -726,3 +726,40 @@ fn check_settings_use_the_desktop_words() {
         "The check settings every project starts from"
     ));
 }
+
+#[test]
+fn the_last_check_setting_s_options_stay_in_view_at_80x24() {
+    let mut engine = Engine::new();
+    let mut shell = Shell::with(ctx(80, 24), Box::new(CheckSettingsPage::new(project())));
+    serve(&mut shell, &mut engine);
+    for _ in 0..7 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 24).join("\n");
+    for words in [
+        "Removed tests",
+        "A test a run no longer reports is not looked",
+        "A test a run no longer reports is recorded",
+        "A test a run no longer reports blocks Accept",
+    ] {
+        assert!(rows.contains(words), "{words}:\n{rows}");
+    }
+}
+
+#[test]
+fn a_chosen_check_profile_stays_in_view_at_80x24() {
+    let mut engine = Engine::new();
+    wide_profile(&engine);
+    let mut shell = Shell::with(ctx(80, 24), Box::new(CheckSettingsPage::new(project())));
+    serve(&mut shell, &mut engine);
+    for _ in 0..8 {
+        shell.key(Key::Down);
+    }
+    let rows = render(&mut shell, 80, 24).join("\n");
+    assert!(
+        rows.contains("3 checks and 1 holdout"),
+        "the chosen profile row:\n{rows}"
+    );
+    assert!(rows.contains("p Approve"), "{rows}");
+}
