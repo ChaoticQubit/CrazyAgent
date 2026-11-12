@@ -64,6 +64,55 @@ test("on macOS tmux links jemalloc as Homebrew's tmux does, force-loaded so its 
   assert.match(text, /check_jemalloc/, "the built tmux is checked to hold jemalloc's zone");
 });
 
+test("on macOS no libc function newer than the app's minimum is linked weak: pipe2 (macOS 27) is turned off and any other weak import fails the build, since a weak symbol is NULL on older macOS and tmux crashed at start in libevent", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  assert.match(text, /^\s*configure_args=\("--host=\$\{target\}" [^\n]*\bac_cv_func_pipe2=no\b[^\n]*\)$/m, "every macOS configure is told pipe2 is missing");
+  for (const name of ["build_jemalloc", "build_libevent", "build_tmux"]) {
+    const body = text.slice(text.indexOf(`${name}() {`), text.indexOf("\n}\n", text.indexOf(`${name}() {`)));
+    assert(body.includes('${configure_args[@]+"${configure_args[@]}"}'), `${name} passes the configure arguments`);
+  }
+  assert.equal(text.match(/^MACOS_WEAK_ALLOWED="([^"]*)"$/m)?.[1], "_malloc_default_purgeable_zone ___darwin_check_fd_set_overflow", "only the two weak imports whose callers check for NULL");
+  assert.match(text, /^check_weak_imports\(\) \{\n[^]*?nm -m "\$binary"[^]*?\(undefined\\\) weak external[^]*?build_tmux_weak_import[^]*?\n\}$/m);
+  assert.match(text, /^check_macos\(\) \{\n[^]*?check_weak_imports "\$binary" "\$minimum"[^]*?\n\}$/m);
+});
+
+test("every check reads its tool's whole output before it matches, so pipefail never fails a good build or passes a bad one when grep -q stops reading early", () => {
+  const lines = readFileSync(SCRIPT, "utf8").split("\n");
+  assert.deepEqual(lines.filter((line) => /\|\s*grep\b/.test(line)), [], "no tool output is piped into grep");
+  assert.deepEqual(lines.filter((line) => /\|\| true/.test(line) && !/kill-server/.test(line)), [], "a failed tool is never read as a passed check");
+  for (const tool of ['nm -U "$binary"', 'nm -m "$binary"', 'otool -L "$binary"', 'otool -l "$binary"', 'readelf -l "$binary"', 'readelf -d "$binary"', '"$@" -V']) {
+    const line = lines.find((each) => each.includes(tool));
+    assert(line, `${tool} is checked`);
+    assert.match(line, /^\s*[a-z]+="\$\(.*\)" \|\| fail "build_tmux_[a-z_]+: /, `${tool} is captured whole and its failure names a code`);
+  }
+});
+
+test("the built tmux must start a server on a private socket, keep its session and stop, not only print its version, and a failed start still stops the server", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  const body = text.match(/^check_start\(\) \{\n([^]*?)\n\}$/m)?.[1];
+  assert(body, "check_start is defined");
+  assert.match(body, /local socket="\$work\/s"/);
+  assert.match(body, /env -u TMUX "\$@" -S "\$socket" -f \/dev\/null new-session -d -s check/);
+  assert.match(body, /env -u TMUX "\$@" -S "\$socket" has-session -t check/);
+  assert(body.split("kill-server").length - 1 >= 3, "each failure after the start and the end all stop the server");
+  assert.match(body, /build_tmux_start_failed/);
+  assert.match(text, /^check_macos\(\) \{\n[^]*?check_start \/usr\/bin\/arch "-\$arch" "\$binary"[^]*?\n\}$/m, "under the built architecture, as -V runs");
+  assert.match(text, /^check_linux\(\) \{\n[^]*?check_start "\$binary"[^]*?\n\}$/m);
+  assert.equal(pin(text, "SOCKET_PATH_MAX"), "103", "macOS sun_path holds 104 bytes with the NUL");
+});
+
+test("the tmux build refuses a work folder whose private socket path would not fit in a unix socket address, before it downloads anything", () => {
+  const root = mkdtempSync(join(tmpdir(), "build-tmux-"));
+  try {
+    const work = join(root, "w".repeat(Math.max(1, 103 - root.length)));
+    const run = refused(["--target", "aarch64-apple-darwin", "--work", work, "--out", join(root, "crazyagent-tmux")]);
+    assert.equal(run.status, 2);
+    assert.match(run.stderr, /build_tmux_work_too_long/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the tmux build refuses an unknown target, a used work folder or an existing output before it downloads anything", () => {
   const root = mkdtempSync(join(tmpdir(), "build-tmux-"));
   try {
