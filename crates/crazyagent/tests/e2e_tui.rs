@@ -1607,6 +1607,7 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("Add an account")
             && screen.contains("[> Add account ]   [ Skip for now ]")
@@ -1614,6 +1615,61 @@ fn reach_accounts_step(engine: &Engine, home: &Path) -> ScriptPty {
             && screen.contains("[x] Show the guide on Home")
     });
     pty
+}
+
+/// Waits for first run's Harnesses step with only RCLI picked and Continue focused, then
+/// continues without installing anything. Input: the TUI after Setup. Output: none; the TUI
+/// is on its way to the Accounts step.
+fn pass_harness_step(pty: &mut ScriptPty) {
+    pty.until("the Harnesses step opens with only RCLI picked", |screen| {
+        screen.contains("Choose your harnesses")
+            && screen.contains("[x] RCLI")
+            && screen.contains("[> Continue ]")
+    });
+    pty.type_bytes(b"\r");
+}
+
+/// DEC-157: after Setup, first run asks for harnesses with only RCLI picked and locked,
+/// Codex and Claude Code unpicked, and Continue with no picks goes on to Accounts without
+/// starting an install.
+#[test]
+fn first_run_shows_the_harness_step_with_only_rcli_picked() {
+    let mut engine = Engine::start("ca-e2e-harness-step-");
+    let home = scratch("ca-e2e-harness-step-home-");
+    std::fs::create_dir(home.path().join("Projects")).unwrap();
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"Mira Okafor\t\t\t\t\t\t\r");
+    pty.until("the projects folder step opens", |screen| {
+        screen.contains("Your projects folder")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Setup offers to continue without installing", |screen| {
+        screen.contains("c Continue without")
+    });
+    pty.type_bytes(b"c");
+    pty.until("the Harnesses step lists RCLI picked and the others unpicked", |screen| {
+        screen.contains("Choose your harnesses")
+            && screen.contains("[x] RCLI")
+            && screen.contains("Comes with CrazyAgent.")
+            && screen.contains("[ ] Codex")
+            && screen.contains("[ ] Claude Code")
+            && screen.contains("Enter Continue")
+            && !screen.contains("Install picked harnesses")
+    });
+    pty.type_bytes(b"\r");
+    pty.until("Continue goes on to the Accounts step", |screen| {
+        screen.contains("Add an account") && !screen.contains("Choose your harnesses")
+    });
+    drop(pty);
+    engine.stop();
 }
 
 /// DEC-153: keeping the Learn CrazyAgent guide ticked and picking Skip for now ends first run
@@ -1750,6 +1806,7 @@ fn run_first_run_setup_again_on_profile_clears_the_skip_and_ends_on_home_with_th
         screen.contains("c Continue without")
     });
     pty.type_bytes(b"c");
+    pass_harness_step(&mut pty);
     pty.until("the Accounts step opens with the ticked guide", |screen| {
         screen.contains("[x] Show the guide on Home")
     });
