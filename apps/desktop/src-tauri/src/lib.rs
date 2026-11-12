@@ -361,6 +361,44 @@ async fn desktop_harness_install(
 }
 
 #[tauri::command]
+async fn desktop_harness_find(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::harnesses::finding::Found, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_find(&id).await
+}
+
+#[tauri::command]
+async fn desktop_harness_choose_path(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    path: Option<String>,
+) -> Result<crazyagent::harnesses::finding::Found, BridgeError> {
+    main_window(&webview)?;
+    read(&state)
+        .await?
+        .harness_choose_path(&id, path.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn desktop_pick_harness_file(webview: Webview) -> Result<Option<String>, BridgeError> {
+    main_window(&webview)?;
+    Ok(
+        match bridge::picker::choose(bridge::picker::HARNESS_FILE_SCRIPT).await? {
+            Pick::Canceled => None,
+            Pick::Paths(mut paths) => {
+                assert!(!paths.is_empty());
+                Some(paths.swap_remove(0))
+            }
+        },
+    )
+}
+
+#[tauri::command]
 async fn desktop_harness_update_settings(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -1192,6 +1230,37 @@ async fn desktop_team_background(
     lock(&state)
         .await?
         .team_background(&id, choice, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_leftovers(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: crazyagent::team::LeftoverMode,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_leftovers(&id, mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_leftover_hold(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    key: u64,
+    end: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .team_leftover_hold(&id, key, end, generation)
         .await
 }
 
@@ -4648,6 +4717,9 @@ native_commands! {
     desktop_harness_versions,
     desktop_harness_update,
     desktop_harness_install,
+    desktop_harness_find,
+    desktop_harness_choose_path,
+    desktop_pick_harness_file,
     desktop_harness_update_settings,
     desktop_harness_set_update_settings,
     desktop_baselines,
@@ -4693,6 +4765,8 @@ native_commands! {
     desktop_team_master_branch,
     desktop_team_land_on,
     desktop_team_background,
+    desktop_team_leftovers,
+    desktop_team_leftover_hold,
     desktop_team_ask_before_merge,
     desktop_team_master_lands,
     desktop_team_reask_empty_reply,

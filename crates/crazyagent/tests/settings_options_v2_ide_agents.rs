@@ -9,10 +9,11 @@ use e2e_support::{Engine, Owner, git, repository, scratch};
 use rusqlite::{Connection, params};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PROJECT: &str = "v2-ide-agents";
 const AGENTS: usize = AGENTS_SHOWN_MAX + 2;
+const ENGINE_WRITE_TIME: Duration = Duration::from_secs(10);
 
 /// The running engine with one project set up through the owner protocol and a real
 /// repository in the folder the engine recorded for it.
@@ -111,6 +112,45 @@ impl Team {
             .unwrap();
         worktree
     }
+
+    /// Records each stopped agent of the project started again, as the team runtime records
+    /// a start. A restarted engine stops every agent it does not find running, and these
+    /// agents have no process. Input: how many agents start again. Output: none.
+    fn start_again(&self, count: usize) {
+        let db = Connection::open(self.engine.path().join("engine.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        let started = db
+            .execute(
+                "UPDATE team_agents SET status='working', error=NULL, stopped_ms=NULL
+                 WHERE project=?1 AND status='stopped'",
+                params![PROJECT],
+            )
+            .unwrap();
+        assert_eq!(started, count);
+    }
+
+    /// Waits until the running engine's own rewrite of the workspace file opens `folders`:
+    /// its team runtime rewrites a followed project's file once its agents change. The case
+    /// writes the file itself only after that, never beside the engine, since one engine
+    /// writer waits for another but not for a writer in this test process. Inputs: the
+    /// folders and the change awaited. Output: none; panics after `ENGINE_WRITE_TIME`.
+    async fn engine_opens(&self, folders: &[PathBuf], change: &str) {
+        let file = self
+            .engine
+            .path()
+            .join(crazyagent::ide::FOLDER)
+            .join(PROJECT)
+            .join(workspace::FILE);
+        let deadline = Instant::now() + ENGINE_WRITE_TIME;
+        while opened(&file) != folders {
+            assert!(
+                Instant::now() < deadline,
+                "the engine never rewrote the workspace for {change}: {:?}",
+                opened(&file)
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 /// The folders the IDE opens, in order, from the workspace file the engine wrote.
@@ -133,6 +173,10 @@ fn expected(folder: &Path, agents: &[PathBuf]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The default workspace opens the project and the newest twelve agents, and the cap stays
+/// after a restart: the restarted engine stops the agents it did not find running, and once
+/// they start again its own rewrite opens the newest twelve. Each write of the case waits
+/// for the engine's rewrite of the change before it.
 #[tokio::test(flavor = "multi_thread")]
 async fn ide_agents_newest_12_opens_the_project_and_the_newest_twelve_agents() {
     let mut team = Team::start("ca-v2opt-agents-12-").await;
@@ -147,13 +191,23 @@ async fn ide_agents_newest_12_opens_the_project_and_the_newest_twelve_agents() {
     );
 
     let newest = team.agent();
-    let written = workspace::write(team.engine.path(), &team.project).unwrap();
-    assert_eq!(written.hidden, 3);
     let mut shown = agents[3..].to_vec();
     shown.push(newest);
+    team.engine_opens(&expected(&team.folder, &shown), "the newest agent")
+        .await;
+    let written = workspace::write(team.engine.path(), &team.project).unwrap();
+    assert_eq!(written.hidden, 3);
     assert_eq!(opened(&written.path), expected(&team.folder, &shown));
 
     team.engine.restart();
+    team.engine_opens(
+        &expected(&team.folder, &[]),
+        "the agents the restart stopped",
+    )
+    .await;
+    team.start_again(AGENTS + 1);
+    team.engine_opens(&expected(&team.folder, &shown), "the agents started again")
+        .await;
     let written = workspace::write(team.engine.path(), &team.project).unwrap();
     assert_eq!(
         (written.hidden, written.show_all),
@@ -161,12 +215,15 @@ async fn ide_agents_newest_12_opens_the_project_and_the_newest_twelve_agents() {
         "the cap stays after a restart"
     );
     assert_eq!(
-        opened(&written.path).len(),
-        1 + AGENTS_SHOWN_MAX,
-        "the project and twelve agents"
+        opened(&written.path),
+        expected(&team.folder, &shown),
+        "the project and the newest twelve agents"
     );
 }
 
+/// Show all opens every working agent and is kept after a restart: the restarted engine
+/// stops the agents it did not find running, and once they start again its own rewrite opens
+/// all of them. Each write of the case waits for the engine's rewrite of the change before it.
 #[tokio::test(flavor = "multi_thread")]
 async fn ide_agents_show_all_opens_every_agent_and_survives_a_restart() {
     let mut team = Team::start("ca-v2opt-agents-all-").await;
@@ -181,6 +238,14 @@ async fn ide_agents_show_all_opens_every_agent_and_survives_a_restart() {
     );
 
     team.engine.restart();
+    team.engine_opens(
+        &expected(&team.folder, &[]),
+        "the agents the restart stopped",
+    )
+    .await;
+    team.start_again(AGENTS);
+    team.engine_opens(&expected(&team.folder, &agents), "the agents started again")
+        .await;
     let written = workspace::write(team.engine.path(), &team.project).unwrap();
     assert_eq!(
         (written.hidden, written.show_all),

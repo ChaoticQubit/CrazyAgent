@@ -212,7 +212,7 @@ fn claude_a_record_with_no_typed_line_reads_to_its_last_finished_line() {
     assert_eq!(read, (Vec::new(), finished));
 }
 
-/// OB6R2-M1: a line longer than `LINE_BYTES_MAX`, which the turn reader refuses too, is
+/// OB6R2-M1: a line longer than `LINE_BYTES_MAX`, which the turn reader passes over too, is
 /// passed over without being held in memory, and the typed line after it is read.
 #[test]
 fn claude_a_line_longer_than_the_reader_takes_is_passed_over_not_read() {
@@ -863,25 +863,52 @@ fn claude_transcript_behind_a_symlink_is_not_followed() {
     assert_eq!(reader.read().unwrap(), Vec::new());
 }
 
+/// Owner 11-11, no output cap: a line longer than `LINE_BYTES_MAX` is passed over with one
+/// note, never an error, the line after it is read as usual, every byte counts as read and
+/// the reader never holds more than `LINE_BYTES_MAX + READ_BYTES_MAX` bytes.
 #[test]
-fn line_above_the_limit_is_refused() {
+fn a_line_above_the_limit_is_skipped_and_the_next_line_is_read() {
     let case = Case::new();
     let (file, mut reader) = case.claude();
-    append(&file, &"x".repeat(LINE_BYTES_MAX + 1));
-    let mut outcome = Ok(Vec::new());
-    for _ in 0..(LINE_BYTES_MAX / READ_BYTES_MAX + 2) {
-        outcome = reader.read();
-        if outcome.is_err() {
-            break;
-        }
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    let long = LINE_BYTES_MAX + 2 * READ_BYTES_MAX + 1;
+    append(&file, &"x".repeat(long));
+    append(&file, &format!("\n{prompt}\n"));
+    let total = (long + 1 + prompt.len() + 1) as u64;
+    let mut events = Vec::new();
+    for _ in 0..(total as usize / READ_BYTES_MAX + 3) {
+        events.extend(reader.read().unwrap());
+        assert!(reader.pending.len() <= LINE_BYTES_MAX + READ_BYTES_MAX);
     }
-    assert_eq!(
-        outcome,
-        Err(LaunchError(
-            "launch_transcript_line_too_long".to_owned(),
-            None
-        ))
-    );
+    assert_eq!(events, vec![TranscriptEvent::TurnStarted]);
+    assert_eq!(reader.bytes(), total);
+    assert!(!reader.skipping);
+}
+
+/// Owner 11-11: a reader that starts inside a line, as a resume at a recorded offset can
+/// after a restart, passes over the rest of that line, short or past `LINE_BYTES_MAX`,
+/// and reads the next line, never failing on the fragment.
+#[test]
+fn a_reader_resumed_inside_a_line_passes_over_the_rest_of_it() {
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    for rest in [16, LINE_BYTES_MAX + 1] {
+        let case = Case::new();
+        let (file, mut reader) = case.claude();
+        append(&file, &format!("{prompt}\n"));
+        assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+        append(&file, r#"{"type":"assistant","message":"#);
+        let inside = std::fs::metadata(&file).unwrap().len();
+        append(&file, &"x".repeat(rest));
+        append(&file, &format!("\n{prompt}\n"));
+        let claude = Transcript::ClaudeSession { file: file.clone() };
+        let mut resumed =
+            TranscriptReader::resumed(claude, &case.work(), &file, Some(inside)).unwrap();
+        let mut events = Vec::new();
+        for _ in 0..(rest / READ_BYTES_MAX + 3) {
+            events.extend(resumed.read().unwrap());
+        }
+        assert_eq!(events, vec![TranscriptEvent::TurnStarted], "rest {rest}");
+    }
 }
 
 fn rollout(sessions: &Path, day: &str, name: &str, cwd: &Path, lines: &[&str]) -> PathBuf {

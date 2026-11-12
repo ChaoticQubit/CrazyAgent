@@ -20,6 +20,8 @@ use tokio::sync::oneshot;
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(target_os = "macos")]
+pub(crate) mod keychain;
 #[cfg(all(test, unix))]
 mod master_host_fixture;
 #[cfg(unix)]
@@ -36,7 +38,7 @@ pub use native_auth_host::{
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
-pub(crate) use native_auth_host::RegisteredNativeAuthHost;
+pub(crate) use native_auth_host::{RegisteredNativeAuthHost, pinnable};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

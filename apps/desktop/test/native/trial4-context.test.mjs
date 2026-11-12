@@ -45,19 +45,31 @@ test("the remember request names the token once and refuses a token that could b
 
 test("the project memory check passes on a master's fact saved at once or approved after Ask me first", () => {
   const shown = "Project memory\nFacts agents keep for this project.\nYour notes\nT4-0a1b2c3d is the trial 4 project memory fact.\nSaved";
-  assert.equal(memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only, saved by Master", approved: false, shown }),
+  const waiting = "Project memory\nMemory settings\n1 memory waits for your approval.\nYour notes\nT4-0a1b2c3d is the trial 4 project memory fact.\nNeeds approval\nApprove";
+  assert.equal(memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only, saved by Master", approved: false, waiting: shown, shown }),
     "Agent memory writes: Save directly; the master saved T4-0a1b2c3d with remember (ca-trial-4 only, saved by Master); it was saved at once; Context, Project memory shows it");
-  assert.match(memoryVerdict({ token: "T4-0a1b2c3d", writes: "ask", source: "Waiting for your approval. ca-trial-4 only, asked by Master", approved: true, shown }),
-    /; it waited for approval under Ask me first and was approved in Settings, Memory; Context, Project memory shows it$/u);
+  assert.match(memoryVerdict({ token: "T4-0a1b2c3d", writes: "ask", source: "Waiting for your approval. ca-trial-4 only, asked by Master", approved: true, waiting, shown }),
+    /; it waited for approval under Ask me first and was approved in Context, Project memory; Context, Project memory shows it$/u);
+});
+
+test("the project memory check fails when a waiting fact has no count in the project or the project points at Settings, Memory", () => {
+  const source = "Waiting for your approval. ca-trial-4 only, asked by Master";
+  const shown = "Your notes\nT4-0a1b2c3d is the trial 4 project memory fact.\nSaved";
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "ask", source, approved: true, waiting: "Your notes\nT4-0a1b2c3d", shown }),
+    /does not say how many memories wait for approval/u);
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "ask", source, approved: true,
+    waiting: "2 memories wait for your approval.\nApprove it in Settings, Memory.", shown }), /still sends the owner to Settings, Memory/u);
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only, saved by Master", approved: false,
+    waiting: shown, shown: `${shown}\nShowing your newest 1 notes. Settings, Memory lists them all.` }), /still sends the owner to Settings, Memory/u);
 });
 
 test("the project memory check fails when the fact is missing, not the master's or left waiting", () => {
   const empty = "Project memory\nNo memories yet";
-  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only, saved by Master", approved: false, shown: empty }),
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only, saved by Master", approved: false, waiting: empty, shown: empty }),
     /^Error: OP-22: Context, Project memory does not show the master's fact T4-0a1b2c3d$/u);
-  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only", approved: false, shown: "T4-0a1b2c3d" }),
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "save", source: "ca-trial-4 only", approved: false, waiting: "", shown: "T4-0a1b2c3d" }),
     /is not the master's: ca-trial-4 only$/u);
-  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "ask", source: "Waiting for your approval. ca-trial-4 only, asked by Master", approved: false, shown: "T4-0a1b2c3d" }),
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "ask", source: "Waiting for your approval. ca-trial-4 only, asked by Master", approved: false, waiting: "", shown: "T4-0a1b2c3d" }),
     /still waits for approval/u);
-  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "never", source: "x, saved by Master", approved: false, shown: "T4-0a1b2c3d" }), /save or ask/u);
+  assert.throws(() => memoryVerdict({ token: "T4-0a1b2c3d", writes: "never", source: "x, saved by Master", approved: false, waiting: "", shown: "T4-0a1b2c3d" }), /save or ask/u);
 });

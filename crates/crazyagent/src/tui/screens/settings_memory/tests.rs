@@ -328,7 +328,13 @@ fn research_suggestions_come_first_and_save_for_every_project() {
         SettingsJob::Suggestions { projects } => assert_eq!(projects.len(), 3),
         other => panic!("suggestions expected, got {other:?}"),
     }
-    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(memories()),
+        )),
+        &mut ctx,
+    );
     let found = vec![
         suggestion("tidepool", "Labs want hourly exports."),
         suggestion("ledgerline", "Studios pay by card."),
@@ -400,7 +406,13 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
     let mut screen = Memory::new();
     screen.shown(&mut ctx);
     while ctx.next_request().is_some() {}
-    screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(Vec::new()),
+        )),
+        &mut ctx,
+    );
     let found = vec![suggestion("fieldnotes", "Crews sync at dawn.")];
     screen.arrive(
         &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
@@ -438,7 +450,13 @@ fn a_suggestion_can_be_dismissed_and_a_refusal_is_plain() {
         SettingsJob::AgentScope { set: None }
     ));
     assert!(matches!(job(&mut ctx), SettingsJob::Suggestions { .. }));
-    screen.arrive(&settings(SettingsEvent::Memories(Ok(Vec::new()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(Vec::new()),
+        )),
+        &mut ctx,
+    );
     screen.arrive(
         &settings(SettingsEvent::Suggestions(Ok(found.clone()))),
         &mut ctx,
@@ -471,7 +489,13 @@ fn suggestions_without_engine_support_stay_quiet() {
     let mut screen = Memory::new();
     screen.shown(&mut ctx);
     while ctx.next_request().is_some() {}
-    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(memories()),
+        )),
+        &mut ctx,
+    );
     screen.arrive(
         &settings(SettingsEvent::Suggestions(Err(NOT_READY.into()))),
         &mut ctx,
@@ -655,7 +679,7 @@ fn every_project_scope_is_read_and_a_new_project_reloads() {
     }
     assert!(ctx.next_request().is_none());
     let reply = Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
-        SettingsEvent::Memories(Ok(memories())),
+        SettingsEvent::Memories(screen.scoped.clone(), Ok(memories())),
     ))));
     screen.arrive(&reply, &mut ctx);
     assert_eq!(ctx.store.memory, Load::Ready(7));
@@ -685,12 +709,15 @@ fn hidden_characters_in_memory_text_show_as_escapes() {
     screen.shown(&mut ctx);
     while ctx.next_request().is_some() {}
     screen.arrive(
-        &settings(SettingsEvent::Memories(Ok(vec![saved(
-            1,
-            hidden,
-            MemoryScope::Global,
-            MemoryOrigin::Written,
-        )]))),
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(vec![saved(
+                1,
+                hidden,
+                MemoryScope::Global,
+                MemoryOrigin::Written,
+            )]),
+        )),
         &mut ctx,
     );
     screen.arrive(
@@ -727,7 +754,13 @@ fn a_memory_kept_in_a_project_can_be_used_in_all_projects() {
     let mut screen = Memory::new();
     screen.shown(&mut ctx);
     while ctx.next_request().is_some() {}
-    screen.arrive(&settings(SettingsEvent::Memories(Ok(memories()))), &mut ctx);
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(memories()),
+        )),
+        &mut ctx,
+    );
     let found = vec![
         kept(
             "tidepool",
@@ -1021,5 +1054,283 @@ fn p_switches_where_agents_save_memories_between_both_options() {
     assert_eq!(
         ctx.message().unwrap().lead,
         "Agents now save memories in their own project only."
+    );
+}
+
+fn fieldnotes_memory(memories: Vec<SavedMemory>) -> Memory {
+    let mut screen = Memory::with(memories);
+    screen.project = Some((
+        ProjectId::new("fieldnotes").unwrap(),
+        "Fieldnotes Mobile".into(),
+    ));
+    screen
+}
+
+fn asked(ordinal: u64, text: &str) -> SavedMemory {
+    saved(
+        ordinal,
+        text,
+        only("fieldnotes"),
+        MemoryOrigin::Requested {
+            agent: "Ada (@lead-a)".into(),
+        },
+    )
+}
+
+#[test]
+fn a_project_memory_reads_only_its_project_and_y_approves_a_requested_memory_in_place() {
+    let mut ctx = memory_ctx(120, 36);
+    let before = ctx.store.memory.clone();
+    let fieldnotes = ProjectId::new("fieldnotes").unwrap();
+    let mut screen = Memory::for_project(fieldnotes.clone(), "Fieldnotes Mobile".into());
+    screen.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+    match job(&mut ctx) {
+        SettingsJob::Memories { scopes } => assert_eq!(scopes, [only("fieldnotes")]),
+        other => panic!("memories expected, got {other:?}"),
+    }
+    assert!(
+        ctx.next_request().is_none(),
+        "the app-wide Agent memory writes setting and research suggestions stay in Settings"
+    );
+
+    let list = vec![
+        asked(9, "Ship on Fridays."),
+        saved(
+            8,
+            "Field crews sync at dusk.",
+            only("fieldnotes"),
+            MemoryOrigin::Written,
+        ),
+    ];
+    screen.arrive(
+        &settings(SettingsEvent::Memories(screen.scoped.clone(), Ok(list))),
+        &mut ctx,
+    );
+    assert_eq!(
+        ctx.store.memory, before,
+        "one project's count never stands for every memory"
+    );
+    let shown = texts(&screen.body(110, &ctx).0).join("\n");
+    assert!(shown.starts_with("Project memory"), "{shown}");
+    assert!(
+        shown.contains("1 memory waits for your approval. y approves the focused one."),
+        "{shown}"
+    );
+    assert!(shown.contains(PROJECT_SUBTITLE), "{shown}");
+    assert!(!shown.contains("Agent memory writes"), "{shown}");
+    assert!(!shown.contains("Settings, Memory"), "{shown}");
+    assert_eq!(
+        screen.crumbs(),
+        ["Fieldnotes Mobile".to_owned(), "Project memory".to_owned()]
+    );
+    assert_eq!(
+        screen.place(),
+        Some(Place::ProjectMemory {
+            id: fieldnotes.clone(),
+            name: "Fieldnotes Mobile".into(),
+        })
+    );
+    assert_eq!(screen.project(), Some(fieldnotes));
+    assert!(screen.hints(&ctx).contains(&hint("y", "Approve")));
+
+    screen.key(&Key::Char('y'), &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::ApproveMemory { memory, generation } => {
+            assert_eq!(memory.as_str(), "memory-9");
+            assert!(generation > 0);
+        }
+        other => panic!("approve expected, got {other:?}"),
+    }
+    screen.arrive(&settings(SettingsEvent::MemoryApproved(Ok(()))), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Memory approved. Agents get it from their next launch."
+    );
+    match job(&mut ctx) {
+        SettingsJob::Memories { scopes } => {
+            assert_eq!(
+                scopes,
+                [only("fieldnotes")],
+                "the reload stays in the project"
+            )
+        }
+        other => panic!("reload expected, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_project_memory_leaves_app_wide_keys_to_settings_and_s_opens_memory_settings() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = fieldnotes_memory(vec![asked(9, "Ship on Fridays.")]);
+    for key in ['w', 'a', 'i', 'p', 'm'] {
+        assert!(
+            matches!(screen.key(&Key::Char(key), &mut ctx), Flow::Ignored),
+            "{key}"
+        );
+        assert_eq!(ctx.queued(), 0, "{key}");
+        assert!(matches!(screen.mode, Mode::List), "{key}");
+    }
+    assert!(matches!(screen.step(true, &mut ctx), Flow::Ignored));
+    assert!(matches!(
+        screen.key(&Key::Char('s'), &mut ctx),
+        Flow::Open(Place::Settings(SettingsSection::Memory))
+    ));
+    let hints = screen.hints(&ctx);
+    assert!(hints.contains(&hint("s", "Memory settings")), "{hints:?}");
+    assert!(hints.contains(&hint("Esc", "Back")), "{hints:?}");
+    for app_wide in ["a", "w", "i", "p", "m"] {
+        assert!(
+            !hints.iter().any(|shown| shown.key == app_wide),
+            "{app_wide}: {hints:?}"
+        );
+    }
+
+    let mut app = Memory::with(vec![asked(9, "Ship on Fridays.")]);
+    assert!(matches!(app.key(&Key::Char('s'), &mut ctx), Flow::Ignored));
+    assert!(app.hints(&ctx).contains(&hint("w", "Agent memory writes")));
+}
+
+#[test]
+fn a_project_memory_counts_one_or_many_waiting_and_says_when_none_wait() {
+    let ctx = memory_ctx(120, 36);
+    let line = |memories: Vec<SavedMemory>| {
+        texts(&fieldnotes_memory(memories).body(110, &ctx).0)[2].clone()
+    };
+    assert_eq!(
+        line(vec![saved(
+            1,
+            "Kept.",
+            only("fieldnotes"),
+            MemoryOrigin::Written
+        )]),
+        "Nothing waits for your approval."
+    );
+    assert_eq!(
+        line(vec![
+            asked(2, "One."),
+            saved(1, "Kept.", only("fieldnotes"), MemoryOrigin::Written)
+        ]),
+        "1 memory waits for your approval. y approves the focused one."
+    );
+    assert_eq!(
+        line(vec![asked(3, "One."), asked(2, "Two.")]),
+        "2 memories wait for your approval. y approves the focused one."
+    );
+    let empty = texts(&fieldnotes_memory(Vec::new()).body(110, &ctx).0).join(" ");
+    assert!(empty.starts_with("Project memory"), "{empty}");
+    assert!(empty.contains("No memories yet."), "{empty}");
+    assert!(empty.contains("it waits here for your approval"), "{empty}");
+}
+
+#[test]
+fn a_project_memory_keeps_only_its_own_reply_and_its_own_project_and_rereads_on_return() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::for_project(
+        ProjectId::new("fieldnotes").unwrap(),
+        "Fieldnotes Mobile".into(),
+    );
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    let mut mixed = memories();
+    mixed.insert(0, asked(9, "Ship on Fridays."));
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(mixed.clone()),
+        )),
+        &mut ctx,
+    );
+    assert!(
+        screen
+            .memories
+            .iter()
+            .all(|memory| memory.scope == only("fieldnotes"))
+    );
+    assert!(
+        screen
+            .memories
+            .iter()
+            .any(|memory| memory.id.as_str() == "memory-9")
+    );
+    assert!(screen.memories.len() < mixed.len());
+    let ids = |screen: &Memory| -> Vec<String> {
+        screen
+            .memories
+            .iter()
+            .map(|memory| memory.id.as_str().to_owned())
+            .collect()
+    };
+    let kept = ids(&screen);
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(Vec::new()),
+        )),
+        &mut ctx,
+    );
+    assert_eq!(
+        ids(&screen),
+        kept,
+        "a reply this screen never asked for belongs to another Memory screen"
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Err("engine_unreachable".into()),
+        )),
+        &mut ctx,
+    );
+    assert!(matches!(screen.load, Load::Ready(())));
+    assert!(ctx.message().is_none());
+
+    screen.shown(&mut ctx);
+    assert!(matches!(ctx.next_request(), Some(Request::Projects)));
+    match job(&mut ctx) {
+        SettingsJob::Memories { scopes } => assert_eq!(scopes, [only("fieldnotes")]),
+        other => panic!("a fresh read expected on return, got {other:?}"),
+    }
+}
+
+#[test]
+fn stacked_memory_screens_each_take_only_the_reply_for_the_scopes_they_asked_for() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut project = Memory::for_project(
+        ProjectId::new("fieldnotes").unwrap(),
+        "Fieldnotes Mobile".into(),
+    );
+    project.shown(&mut ctx);
+    let mut app = Memory::new();
+    app.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    assert!(project.waiting && app.waiting);
+    assert_ne!(project.scoped, app.scoped);
+
+    let mine = settings(SettingsEvent::Memories(
+        project.scoped.clone(),
+        Ok(vec![asked(9, "Ship on Fridays.")]),
+    ));
+    app.arrive(&mine, &mut ctx);
+    project.arrive(&mine, &mut ctx);
+    assert!(
+        app.waiting && app.memories.is_empty(),
+        "Settings, Memory waits on for its own reply (PROJMEM-L2)"
+    );
+    assert!(!matches!(app.load, Load::Ready(())));
+    assert_eq!(project.memories.len(), 1);
+
+    let all = settings(SettingsEvent::Memories(app.scoped.clone(), Ok(memories())));
+    app.arrive(&all, &mut ctx);
+    project.arrive(&all, &mut ctx);
+    assert_eq!(app.memories.len(), memories().len());
+    assert_eq!(ctx.store.memory, Load::Ready(memories().len()));
+    assert_eq!(
+        project
+            .memories
+            .iter()
+            .map(|memory| memory.id.as_str())
+            .collect::<Vec<_>>(),
+        ["memory-9"],
+        "Project memory keeps its own list"
     );
 }

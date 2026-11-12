@@ -96,6 +96,33 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.harness_install(&id).await }.await;
             routed(result)
         }
+        "desktop_harness_find" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.harness_find(&id).await }.await;
+            routed(result)
+        }
+        "desktop_harness_choose_path" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                path: Option<String>,
+            }
+            let Args { id, path } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state) .await? .harness_choose_path(&id, path.as_deref()) .await }.await;
+            routed(result)
+        }
         "desktop_harness_update_settings" => {
             let result: Result<_, BridgeError> = async { read(state).await?.harness_update_settings().await }.await;
             routed(result)
@@ -921,6 +948,37 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_background(&id, choice, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_leftovers" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                mode: crazyagent::team::LeftoverMode,
+                generation: u64,
+            }
+            let Args { id, mode, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_leftovers(&id, mode, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_team_leftover_hold" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                key: u64,
+                end: bool,
+                generation: u64,
+            }
+            let Args { id, key, end, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_leftover_hold(&id, key, end, generation) .await }.await;
             routed(result)
         }
         "desktop_team_ask_before_merge" => {

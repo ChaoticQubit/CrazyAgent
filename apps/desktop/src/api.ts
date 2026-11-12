@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, LeftoverMode, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryScope, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryScope, AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1448,6 +1448,20 @@ export function setLandOn(id: string, branch: string | null): Promise<Result<Int
  * receipt, not ready, or a plain error; the engine refuses a grace time outside 10 to 3600 s. */
 export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
+}
+
+/** Sets what the engine does with processes the project's agents leave running after their
+ * stop. Inputs: the project id and the setting. Output: the engine receipt, not ready, or a
+ * plain error. */
+export function setLeftovers(id: string, mode: LeftoverMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_leftovers", { id, mode, generation: nextGeneration() });
+}
+
+/** Ends or keeps the processes one leftover hold lists. Inputs: the project id, the hold's key
+ * and whether to end them. Output: the engine receipt, not ready, or a plain error; a hold
+ * that is gone is refused. */
+export function settleLeftoverHold(id: string, key: number, end: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_leftover_hold", { id, key, end, generation: nextGeneration() });
 }
 
 /** Turns the project's "Master accepts change sets" setting on or off;

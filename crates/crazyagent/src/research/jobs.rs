@@ -578,6 +578,13 @@ impl ResearchJobs {
         crate::sandbox::policy::load(&self.connection, project.as_str())
     }
 
+    /// Reads the owner's Leftover processes setting for a project (DEC-147.4), see
+    /// [`crate::team::leftover_mode`]; the default, End them, when it cannot be read.
+    /// Takes the project. Returns the mode.
+    pub fn leftover_mode(&self, project: &str) -> crate::harnesses::leftovers::LeftoverMode {
+        crate::team::leftover_mode(&self.connection, project).unwrap_or_default()
+    }
+
     /// Proves a managed connection is signed in for the running engine, with
     /// the check every master and team turn uses, on the engine database this
     /// queue lives in. Returns the engine host and the sign-in, or a plain code

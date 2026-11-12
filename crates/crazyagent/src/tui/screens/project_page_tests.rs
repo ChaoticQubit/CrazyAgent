@@ -5499,3 +5499,101 @@ mod overview_tabs {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_requested_memory_is_approved_from_the_project_context_tab_on_a_real_engine() {
+    use crate::memory::library::{MemoryOrigin, MemoryScope, agent_remember};
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 2).await;
+    {
+        let mut db = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute(
+            "INSERT INTO memory_settings(singleton,agent_writes) VALUES(1,'ask')
+             ON CONFLICT(singleton) DO UPDATE SET agent_writes=excluded.agent_writes",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            agent_remember(&mut db, &notes, "Ada (@lead-a)", false, "Ship on Fridays.").unwrap(),
+            Ok(true),
+            "under Ask me first the agent's memory waits for the owner"
+        );
+    }
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 40);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Context,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("p opens Project memory."), "{shown}");
+
+    shell.key(Key::Char('p'));
+    assert_eq!(
+        shell.place(),
+        Some(Place::ProjectMemory {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        })
+    );
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"settings"), "{sent:?}");
+    let shown = render(&mut shell, 120, 40);
+    assert!(shown.contains("Notes CLI  /  Project memory"), "{shown}");
+    assert!(
+        shown.contains("1 memory waits for your approval."),
+        "{shown}"
+    );
+    assert!(shown.contains("Ship on Fridays."), "{shown}");
+    assert!(shown.contains("Needs approval"), "{shown}");
+    assert!(!shown.contains("Agent memory writes"), "{shown}");
+
+    shell.key(Key::Char('y'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"settings"), "{sent:?}");
+    let shown = render(&mut shell, 120, 40);
+    assert!(
+        shown.contains("Memory approved. Agents get it from their next launch."),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Nothing waits for your approval."),
+        "{shown}"
+    );
+
+    let page = engine
+        .controller
+        .memories(
+            MemoryScope::Project {
+                project_id: notes.clone(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(
+        page.items[0].origin,
+        MemoryOrigin::Agent {
+            agent: "Ada (@lead-a)".into()
+        }
+    );
+
+    shell.key(Key::Esc);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Context,
+        })
+    );
+}

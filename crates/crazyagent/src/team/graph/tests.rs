@@ -98,6 +98,8 @@ fn status() -> TeamStatus {
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,

@@ -17,14 +17,14 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -40,6 +40,10 @@ const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
 pub const DURABLE_OUTPUT: &str = "output.log";
+/// The most bytes a durable harness output log holds before the engine empties it: the
+/// session's reader once it has read all of it, the watcher of a reattached agent, whose log
+/// nothing reads, at once. The agent runs on either way (owner 11-11).
+pub const DURABLE_OUTPUT_KEPT_MAX: u64 = 64 * 1024 * 1024;
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
@@ -216,16 +220,15 @@ impl AccountBinding {
 pub const RUN_TIME_MAX: Duration = Duration::from_secs(86_400);
 
 /// Bounds for one launched harness process.
-/// `run_time` caps the whole session, `stop_grace` the wait between TERM and KILL,
-/// `output_bytes` the total stdout read and `events` the events delivered. `stale_turn` is
-/// how long an open turn of a session that follows every turn may get no new byte in the
-/// session record, on a pane whose app waits, before it counts as no turn.
+/// `run_time` caps the whole session and `stop_grace` the wait between TERM and KILL.
+/// `stale_turn` is how long an open turn of a session that follows every turn may get no
+/// new byte in the session record, on a pane whose app waits, before it counts as no turn.
+/// No count of output bytes or events ends a session (owner 11-11): memory is bounded per
+/// line and per read, and a line past the bound is passed over.
 #[derive(Clone, Copy, Debug)]
 pub struct LaunchLimits {
     pub run_time: Duration,
     pub stop_grace: Duration,
-    pub output_bytes: usize,
-    pub events: usize,
     pub stale_turn: Duration,
 }
 
@@ -234,8 +237,6 @@ impl Default for LaunchLimits {
         Self {
             run_time: Duration::from_secs(600),
             stop_grace: Duration::from_secs(2),
-            output_bytes: 8 * 1024 * 1024,
-            events: 10_000,
             stale_turn: Duration::from_secs(600),
         }
     }
@@ -1025,8 +1026,6 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     if limits.run_time.is_zero()
         || limits.run_time > RUN_TIME_MAX
         || limits.stop_grace > Duration::from_secs(30)
-        || !(1..=64 * 1024 * 1024).contains(&limits.output_bytes)
-        || !(1..=1_000_000).contains(&limits.events)
     {
         return Err(failure("launch_limits_invalid"));
     }
@@ -1068,11 +1067,17 @@ pub(crate) fn validate_home(_home: &Path) -> Result<(), LaunchError> {
     Err(failure("launch_account_home_unavailable"))
 }
 
+/// What a harness output reader hands the session: one line, the note that a line longer
+/// than `LINE_BYTES_MAX` was passed over, or the end of the output.
 enum Line {
     Bytes(Vec<u8>),
     Closed,
-    Overflow,
+    Skipped,
 }
+
+/// The most output lines a reader holds for the session before it waits for the session to
+/// take one, so a session that reads slowly holds a bounded amount of output.
+const LINES_AHEAD_MAX: usize = 16;
 
 enum Driver {
     Codex {
@@ -1426,7 +1431,6 @@ pub struct Session {
     queue: VecDeque<LaunchEvent>,
     limits: LaunchLimits,
     deadline: Instant,
-    events: usize,
     exited: bool,
     stopped: bool,
     _context: Option<Installed>,
@@ -1499,8 +1503,7 @@ impl Session {
         let (driver, startup) = Driver::new(&request, native_threads)?;
         let token = LineageToken::new().ok_or_else(|| failure("launch_spawn_failed"))?;
         command.env(LINEAGE_VARIABLE, token.as_str());
-        let output_bytes = request.limits.output_bytes;
-        let (sender, lines) = channel();
+        let (sender, lines) = sync_channel(LINES_AHEAD_MAX);
         let mut child;
         let mut warden = None;
         let stdin;
@@ -1517,7 +1520,7 @@ impl Session {
                 let (output, probe) = (io.output, io.probe);
                 std::thread::Builder::new()
                     .name("harness-output".into())
-                    .spawn(move || tail(output, probe, sender, output_bytes))
+                    .spawn(move || tail(output, probe, sender))
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
             None => {
@@ -1534,7 +1537,7 @@ impl Session {
                     .ok_or_else(|| failure("launch_stdio_unavailable"))?;
                 std::thread::Builder::new()
                     .name("harness-stdout".into())
-                    .spawn(move || forward(stdout, sender, output_bytes))
+                    .spawn(move || forward(stdout, sender))
                     .map_err(|_| failure("launch_reader_unavailable"))?;
                 std::thread::Builder::new()
                     .name("harness-stderr".into())
@@ -1560,7 +1563,6 @@ impl Session {
             queue: VecDeque::new(),
             limits: request.limits,
             deadline: Instant::now() + request.limits.run_time,
-            events: 0,
             exited: false,
             stopped: false,
             _context: context,
@@ -1599,17 +1601,13 @@ impl Session {
         Ok(())
     }
 
-    /// Waits up to `wait` for the next event. Output: Some(event), None on timeout,
-    /// or an error once the session deadline passes or the output is malformed or too large.
+    /// Waits up to `wait` for the next event. A line too long to hold is passed over with
+    /// one note in the engine log. Output: Some(event), None on timeout, or an error once
+    /// the session deadline passes or the output is malformed.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<LaunchEvent>, LaunchError> {
         let until = Instant::now() + wait;
         loop {
             if let Some(event) = self.queue.pop_front() {
-                self.events += 1;
-                if self.events > self.limits.events {
-                    self.stop_group();
-                    return Err(failure("launch_event_limit"));
-                }
                 return Ok(Some(event));
             }
             if self.exited {
@@ -1637,9 +1635,8 @@ impl Session {
                     }
                     self.queue.extend(events);
                 }
-                Ok(Line::Overflow) => {
-                    self.stop_group();
-                    return Err(failure("launch_output_limit"));
+                Ok(Line::Skipped) => {
+                    eprintln!("launch_output_line_skipped over={LINE_BYTES_MAX}");
                 }
                 Ok(Line::Closed) | Err(RecvTimeoutError::Disconnected) => {
                     self.exited = true;
@@ -1808,7 +1805,7 @@ impl DurableIo {
         )?;
         rustix::fs::flock(&child_output, FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| failure("launch_state_in_use"))?;
-        let reader = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
+        let reader = open(output.as_path(), OFlags::RDWR, Mode::empty())?;
         let probe = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
         assert!(holder_alive(&probe));
         Ok(Self {
@@ -1849,6 +1846,56 @@ pub fn holder_alive(probe: &File) -> bool {
     }
 }
 
+/// Empties a durable output log its reader has read to the end once it holds more than
+/// `DURABLE_OUTPUT_KEPT_MAX` bytes, and moves the reader back to its start, where the
+/// harness's appends now land. Only bytes already read are dropped, unless the harness
+/// writes between the length check and the cut, which are microseconds apart. Takes the
+/// reader at the log's end. Returns whether it emptied the log.
+fn trim_read_output(reader: &mut BufReader<File>) -> bool {
+    let Ok(at) = reader.stream_position() else {
+        return false;
+    };
+    if at <= DURABLE_OUTPUT_KEPT_MAX
+        || !reader
+            .get_ref()
+            .metadata()
+            .is_ok_and(|log| log.is_file() && log.len() == at)
+        || reader.get_ref().set_len(0).is_err()
+    {
+        return false;
+    }
+    let rewound = reader.seek(SeekFrom::Start(0));
+    assert!(rewound.is_err() || reader.buffer().is_empty());
+    rewound.is_ok_and(|start| start == 0)
+}
+
+/// Empties a durable output log that nothing reads, such as a reattached agent's, once it
+/// holds more than `DURABLE_OUTPUT_KEPT_MAX` bytes, so the log on disk stays bounded while
+/// the agent runs on. The path is opened without following a link or waiting on a FIFO and
+/// must still name the probed file. Takes the log path and the probe's open of it. Returns
+/// whether it emptied the log.
+#[cfg(unix)]
+pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
+    let Ok(probed) = probe.metadata() else {
+        return false;
+    };
+    if probed.len() <= DURABLE_OUTPUT_KEPT_MAX {
+        return false;
+    }
+    let Ok(log) = rustix::fs::open(
+        output,
+        OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from) else {
+        return false;
+    };
+    let same = log.metadata().is_ok_and(|opened| {
+        opened.is_file() && (opened.dev(), opened.ino()) == (probed.dev(), probed.ino())
+    });
+    same && log.set_len(0).is_ok()
+}
+
 /// Turns a child's stdin pipe into the file the session writes prompts to.
 /// Takes the pipe. Returns a file owning the same descriptor.
 #[cfg(unix)]
@@ -1863,9 +1910,12 @@ fn stdin_file(pipe: std::process::ChildStdin) -> File {
     File::from(std::os::windows::io::OwnedHandle::from(pipe))
 }
 
-fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
+/// Hands each line of a harness's stdout to the session until the output ends. A line
+/// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
+/// skipped, so no amount of output ends the session. Takes the stdout and the sender.
+fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
     let mut reader = BufReader::new(stdout);
-    let mut total = 0_usize;
+    let mut skipping = false;
     loop {
         let mut line = Vec::new();
         let limit = u64::try_from(LINE_BYTES_MAX + 1).unwrap_or(u64::MAX);
@@ -1874,14 +1924,20 @@ fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
                 let _ = sender.send(Line::Closed);
                 return;
             }
-            Ok(count) => {
-                total = total.saturating_add(count);
-                if total > output_bytes
-                    || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n'))
-                {
-                    let _ = sender.send(Line::Overflow);
-                    return;
+            Ok(_) => {
+                let ended = line.last() == Some(&b'\n');
+                if skipping {
+                    skipping = !ended;
+                    continue;
                 }
+                if line.len() > LINE_BYTES_MAX && !ended {
+                    skipping = true;
+                    if sender.send(Line::Skipped).is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                assert!(line.len() <= LINE_BYTES_MAX + 1);
                 if sender.send(Line::Bytes(line)).is_err() {
                     return;
                 }
@@ -1890,10 +1946,16 @@ fn forward(stdout: ChildStdout, sender: Sender<Line>, output_bytes: usize) {
     }
 }
 
-fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
+/// Hands each line a durable harness writes to its output file to the session until the
+/// holder of the file is gone and the file is read to its end. A line longer than
+/// `LINE_BYTES_MAX` is passed over to its newline and reported once as skipped. A log read
+/// to its end past `DURABLE_OUTPUT_KEPT_MAX` is emptied at a line boundary, so the log on
+/// disk stays bounded and the agent runs on. Takes the output file, open for reading and
+/// writing, the holder probe and the sender.
+fn tail(output: File, probe: File, sender: SyncSender<Line>) {
     let mut reader = BufReader::new(output);
     let mut line = Vec::new();
-    let mut total = 0_usize;
+    let mut skipping = false;
     let mut draining = false;
     loop {
         assert!(line.len() <= LINE_BYTES_MAX);
@@ -1905,13 +1967,21 @@ fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
                 return;
             }
         };
-        total = total.saturating_add(count);
-        if total > output_bytes || (line.len() > LINE_BYTES_MAX && line.last() != Some(&b'\n')) {
-            let _ = sender.send(Line::Overflow);
-            return;
+        let ended = line.last() == Some(&b'\n');
+        if line.len() > LINE_BYTES_MAX && !ended {
+            line.clear();
+            if !skipping && sender.send(Line::Skipped).is_err() {
+                return;
+            }
+            skipping = true;
+            continue;
         }
-        if line.last() == Some(&b'\n') {
-            if sender.send(Line::Bytes(std::mem::take(&mut line))).is_err() {
+        if ended {
+            let whole = std::mem::take(&mut line);
+            if std::mem::take(&mut skipping) {
+                continue;
+            }
+            if sender.send(Line::Bytes(whole)).is_err() {
                 return;
             }
             continue;
@@ -1920,13 +1990,19 @@ fn tail(output: File, probe: File, sender: Sender<Line>, output_bytes: usize) {
             continue;
         }
         if draining {
-            if !line.is_empty() && sender.send(Line::Bytes(std::mem::take(&mut line))).is_err() {
+            if !skipping
+                && !line.is_empty()
+                && sender.send(Line::Bytes(std::mem::take(&mut line))).is_err()
+            {
                 return;
             }
             let _ = sender.send(Line::Closed);
             return;
         }
         if holder_alive(&probe) {
+            if (line.is_empty() || skipping) && trim_read_output(&mut reader) {
+                eprintln!("launch_output_trimmed over={DURABLE_OUTPUT_KEPT_MAX}");
+            }
             std::thread::sleep(TAIL_POLL);
         } else {
             draining = true;

@@ -1135,6 +1135,8 @@ fn finished_team() -> crate::team::TeamStatus {
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
@@ -1859,6 +1861,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
@@ -2302,6 +2306,8 @@ fn master_status(
         master_branch: None,
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
+        leftovers: crate::team::LeftoverMode::End,
+        leftover_holds: Vec::new(),
         ask_before_merge: false,
         master_lands: None,
         access_unreadable: false,
@@ -4340,7 +4346,7 @@ fn a_master_stopped_for_another_reason_offers_no_start_again() {
     requests(&mut shell);
     shell.arrive(switch(
         Some(false),
-        Some("The live master was turned off: its terminal ended. Start it again from the master view."),
+        Some("The live master was turned off: it had to start 3 times within 10 minutes. Start it again from the master view."),
     ));
     requests(&mut shell);
     let seen = render(&mut shell).join("\n");

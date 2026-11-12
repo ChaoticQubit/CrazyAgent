@@ -859,7 +859,15 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
     );
 
     let (held, released) = std::sync::mpsc::channel::<()>();
-    left.hold(Some(CredentialRef::new("leaving-headless").unwrap()), held);
+    left.hold(
+        Some(CredentialRef::new("leaving-headless").unwrap()),
+        held,
+        crazyagent::harnesses::leftovers::HoldBy {
+            project: None,
+            who: "a headless test agent".to_owned(),
+        },
+        crazyagent::harnesses::leftovers::LeftoverMode::Ask,
+    );
     assert_eq!(
         released.recv_timeout(Duration::from_secs(3)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),

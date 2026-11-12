@@ -163,8 +163,8 @@ test("sign-in stages come from real reducer states, never from a reply the reduc
   assert.deepEqual(signInStage(mismatched, "chatgpt"), { kind: "failed", text: "We couldn't confirm the sign-in. Check again.", hint: "check" });
   const missing = auth.reduceNativeAuth(begun(), { kind: "failure", navigation: 7, request: 1, code: "native_auth_host_unavailable" });
   assert.equal(signInStage(missing, "chatgpt").hint, "missing");
-  assert.match(signInStage(missing, "chatgpt").text, /^Codex isn't installed on this Mac, so ChatGPT sign-in isn't available\./);
-  assert.match(signInStage(missing, "claude").text, /^Claude Code isn't installed on this Mac/);
+  assert.match(signInStage(missing, "chatgpt").text, /^CrazyAgent didn't find a Codex it can run on this Mac, so ChatGPT sign-in isn't available\./);
+  assert.match(signInStage(missing, "claude").text, /^CrazyAgent didn't find a Claude Code it can run on this Mac/);
   const expired = answered({ phase: "unauthenticated_observed", challenge: null, code: "native_auth_sign_in_expired" });
   assert.deepEqual(signInStage(expired, "chatgpt"), { kind: "failed", text: "This code expired.", hint: "expired" });
   assert.deepEqual(signInStage(answered({ phase: "unavailable", challenge: null, code: null }), "claude").hint, "missing");
@@ -284,8 +284,13 @@ test("failure panels name the fix: a new code, a key instead of a missing harnes
   assert.match(expired, /This code expired\./);
   assert.match(expired, />Get a new code<\/button>/);
   const missingState = auth.reduceNativeAuth(begun(), { kind: "failure", navigation: 7, request: 1, code: "native_auth_host_unavailable" });
-  assert.match(panel(missingState, { onUseKey: forbidden }), />Use an API key instead<\/button>/);
-  assert.doesNotMatch(panel(missingState), /<button/);
+  const missing = panel(missingState, { onUseKey: forbidden });
+  assert.match(missing, /CrazyAgent didn&#x27;t find a Codex it can run on this Mac, so ChatGPT sign-in isn&#x27;t available\./);
+  assert.match(missing, />Use an API key instead<\/button>/);
+  assert.match(missing, /aria-label="Check again for Codex"/);
+  assert.match(missing, />Choose the codex file<\/button>/);
+  assert.doesNotMatch(missing, />Try again<\/button>/);
+  assert.doesNotMatch(panel(missingState), /Use an API key instead/);
   assert.match(panel(answered({ connection: "another-account" })), />Check again<\/button>/);
   assert.match(panel(answered({ phase: "authenticated_observed", challenge: null, account: null })), /Signed in\./);
 });
