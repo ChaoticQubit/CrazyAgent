@@ -224,3 +224,108 @@ fn the_app_plugin_request_scratch_folder_is_an_engine_secret_agents_cannot_reach
     assert!(secrets.contains(&case.runtime.join("plugin-scratch")));
     walled(guarded(&case).allow_read(&case.runtime.join("plugin-scratch").join("inner")));
 }
+
+#[test]
+fn the_mcp_plugin_store_is_an_engine_secret_no_grant_reaches() {
+    let case = case();
+    let store = case.runtime.join("plugins");
+    fs::create_dir_all(store.join("secrets")).unwrap();
+    fs::write(store.join("secrets").join("mcp-ref"), "synthetic").unwrap();
+    let secrets = guarded(&case).secret_paths();
+    assert!(secrets.contains(&store));
+    walled(guarded(&case).allow_read(&store));
+    walled(guarded(&case).allow_read(&store.join("secrets")));
+    let server_parent = store.clone();
+    walled(
+        sandbox(&case)
+            .keep_ports(&[])
+            .and_then(|sandbox| sandbox.guard_engine(&case.runtime))
+            .and_then(|sandbox| sandbox.allow_read(&server_parent)),
+    );
+    walled(
+        sandbox(&case)
+            .allow_read(&server_parent)
+            .and_then(|sandbox| sandbox.guard_engine(&case.runtime)),
+    );
+    let profile = guarded(&case).profile();
+    let deny = profile
+        .split("(deny file-read* file-write*")
+        .nth(1)
+        .expect("a secret deny block");
+    assert!(
+        deny.contains(&format!("(subpath \"{}\")", store.display())),
+        "{profile}"
+    );
+}
+
+const NEAR_PLUGIN: &str = "schema: 1
+kind: embedding
+name: near
+title: Near
+version: 1
+http:
+  url: http://127.0.0.1:9000/embed
+  hosts: [127.0.0.1]
+  body:
+    input: \"{{inputs}}\"
+  vectors: data.*.embedding
+  dimensions: 64
+";
+
+const STUDIO_PLUGIN: &str = "schema: 1
+kind: embedding
+name: studio
+title: Studio
+version: 1
+http:
+  url: http://localhost:1234/v1/embeddings
+  hosts: [localhost]
+  body:
+    input: \"{{inputs}}\"
+  vectors: data.*.embedding
+  dimensions: 64
+";
+
+fn plugins_folder(case: &Case, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = case.runtime.join("app-plugins");
+    fs::create_dir_all(&folder).unwrap();
+    for (name, text) in [("near.yaml", NEAR_PLUGIN), ("studio.yaml", STUDIO_PLUGIN)] {
+        fs::write(folder.join(name), text).unwrap();
+        fs::set_permissions(folder.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    fs::set_permissions(&folder, fs::Permissions::from_mode(mode)).unwrap();
+    folder
+}
+
+fn open_sandbox(case: &Case) -> ProjectSandbox {
+    ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open).unwrap()
+}
+
+#[test]
+fn a_tools_on_sandbox_keeps_every_loopback_app_plugin_port_and_fails_closed_on_an_unsafe_folder() {
+    let case = case();
+    plugins_folder(&case, 0o700);
+    let open = open_sandbox(&case).guard_engine(&case.runtime).unwrap();
+    let profile = open.profile();
+    for rule in ["network-bind", "network-inbound"] {
+        let line = profile
+            .lines()
+            .find(|line| line.starts_with(&format!("(deny {rule}")))
+            .unwrap_or_else(|| panic!("no {rule} deny in {profile}"));
+        for port in [1234, 9000, 11434] {
+            assert!(
+                line.contains(&format!("(local ip \"*:{port}\")")),
+                "{rule} {port}: {line}"
+            );
+        }
+    }
+    plugins_folder(&case, 0o755);
+    match open_sandbox(&case).guard_engine(&case.runtime) {
+        Err(SandboxError::Invalid(reason)) => {
+            assert_eq!(reason, crazyagent::sandbox::APP_PLUGIN_PORTS_UNREADABLE)
+        }
+        other => panic!("expected the plugin ports refusal, got {other:?}"),
+    }
+    guarded(&case);
+}

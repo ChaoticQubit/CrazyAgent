@@ -309,3 +309,40 @@ fn a_plugin_whose_bound_key_is_gone_makes_no_call() {
         "app_plugin_needs_key"
     );
 }
+
+#[test]
+fn quotes_and_backslashes_in_the_url_headers_and_keys_are_escaped_in_the_curl_config() {
+    let text = acme().replace("X-Team: research", "X-Team: 'a\"b\\c'");
+    let plugin = loaded(&text);
+    let key = "k\"e\\y-0001";
+    let secrets = [crate::credentials::SecretString::new(key.as_bytes().to_vec()).unwrap()];
+    let built = String::from_utf8(
+        config(
+            spec(&plugin),
+            &secrets,
+            std::path::Path::new("/tmp/x/re\"q\\uest"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        built.contains("header = \"X-Team: a\\\"b\\\\c\"\n"),
+        "{built}"
+    );
+    assert!(
+        built.contains("header = \"Authorization: Bearer k\\\"e\\\\y-0001\"\n"),
+        "{built}"
+    );
+    assert!(
+        built.contains("data-binary = \"@/tmp/x/re\\\"q\\\\uest\"\n"),
+        "{built}"
+    );
+    let mut line = String::with_capacity(CONFIG_BYTES);
+    push_line(&mut line, "url", "https://api.acme.example/a\"b\\c").unwrap();
+    assert_eq!(line, "url = \"https://api.acme.example/a\\\"b\\\\c\"\n");
+    let mut short = String::with_capacity(16);
+    assert_eq!(
+        push_line(&mut short, "url", &"x".repeat(64)).unwrap_err().0,
+        "app_plugin_call_failed"
+    );
+}
