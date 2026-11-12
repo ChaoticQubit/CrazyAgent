@@ -79,8 +79,10 @@ impl Rows {
         self.file
             .read_exact_at(&mut bytes, offset)
             .map_err(|_| "search_model_store_unavailable")?;
-        for (into, raw) in sum.iter_mut().zip(bytes.chunks_exact(FLOAT_BYTES)) {
-            let value = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+        let (floats, rest) = bytes.as_chunks::<FLOAT_BYTES>();
+        assert!(rest.is_empty());
+        for (into, raw) in sum.iter_mut().zip(floats) {
+            let value = f32::from_le_bytes(*raw);
             if !value.is_finite() {
                 return Err("search_model_mismatch");
             }

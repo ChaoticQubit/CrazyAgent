@@ -74,9 +74,7 @@ fn a_file_that_is_not_one_f32_tensor_of_the_pinned_shape_filling_the_file_is_ref
         (
             "two tensors",
             safetensors_bytes(
-                &format!(
-                    "{{\"a\":{{\"dtype\":\"F32\",\"shape\":[16,4],\"data_offsets\":[0,256]}},\"b\":{{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[256,260]}}}}"
-                ),
+                "{\"a\":{\"dtype\":\"F32\",\"shape\":[16,4],\"data_offsets\":[0,256]},\"b\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[256,260]}}",
                 &[data.clone(), vec![0.0]].concat(),
             ),
         ),

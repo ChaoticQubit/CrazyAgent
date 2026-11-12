@@ -57,7 +57,7 @@ pub(crate) fn fixture_tokenizer_json() -> String {
 /// the header JSON and the data. Output: the file bytes.
 pub(crate) fn safetensors_bytes(header: &str, data: &[f32]) -> Vec<u8> {
     let mut header = header.to_owned();
-    while header.len() % 8 != 0 {
+    while !header.len().is_multiple_of(8) {
         header.push(' ');
     }
     let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
@@ -126,7 +126,7 @@ fn embed_is_the_l2_normalized_mean_of_the_first_dims_of_the_token_rows() {
         ("Caf\u{e9} unaffable", [0.995495, 0.094809]),
         ("hello [MASK] \u{4e2d}!", [0.993884, 0.110432]),
         ("hellos", [0.986394, 0.164399]),
-        ("xyz", [0.707107, 0.707107]),
+        ("xyz", [std::f32::consts::FRAC_1_SQRT_2; 2]),
     ];
     let texts: Vec<&str> = cases.iter().map(|(text, _)| *text).collect();
     let rows = model.embed(&texts).unwrap();

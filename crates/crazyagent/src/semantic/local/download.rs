@@ -384,6 +384,7 @@ pub(crate) fn curl_command(curl: &Path, pin: &Pinned) -> (Command, Vec<u8>) {
 /// pinned sha256; on any failure the part file is deleted. Inputs: the body, the pin, the
 /// part path and the progress counter. Output: unit, `search_model_mismatch`,
 /// `search_model_store_unavailable` or `search_model_download_failed`.
+#[cfg(test)]
 pub(crate) fn receive(
     source: impl Read,
     pin: &Pinned,
