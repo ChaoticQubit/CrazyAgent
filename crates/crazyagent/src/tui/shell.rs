@@ -80,6 +80,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Place",
         place: Place::Usage,
     });
+    out.push(Target {
+        label: "Notifications".into(),
+        kind: "Place",
+        place: Place::Notifications,
+    });
     for section in SettingsSection::ALL {
         out.push(Target {
             label: format!("Settings / {}", section.label()),
@@ -303,8 +308,8 @@ impl Shell {
     }
 
     /// Runs the periodic refresh the run loop makes every few seconds: asks the engine how
-    /// many change sets wait for the owner, in all and in the top screen's project, and the
-    /// header's notification counts, then refreshes the top screen.
+    /// many change sets wait for the owner, in all and in the top screen's project, then
+    /// refreshes the top screen, which reads the badge and header counts again.
     /// Input: none. Output: none; requests are queued on the context.
     pub fn tick(&mut self) {
         let project = self.top().project();
@@ -312,8 +317,6 @@ impl Shell {
             .request(Request::Changes(Box::new(ChangesQuery::Waiting {
                 project,
             })));
-        self.ctx
-            .request(Request::Notices(Box::new(NoticesQuery::counts())));
         self.refresh();
     }
 
