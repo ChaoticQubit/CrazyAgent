@@ -564,7 +564,8 @@ fn numbers_and_text_are_checked_before_they_are_sent() {
     );
 
     let mut shell = app_page(QUALIFIED);
-    press(&mut shell, &[Key::Down, Key::Down, Key::Down, Key::Enter]);
+    to_row(&mut shell, "Status label");
+    shell.key(Key::Enter);
     typed(&mut shell, &"é".repeat(17));
     shell.key(Key::Enter);
     assert_eq!(requests(&mut shell), vec![]);

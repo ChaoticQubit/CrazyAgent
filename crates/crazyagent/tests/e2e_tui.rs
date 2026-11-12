@@ -1857,15 +1857,21 @@ fn a_harness_settings_page_opens_from_settings_harnesses_with_the_desktop_words(
     let screen = pty.until("Codex's settings page reads its version", |screen| {
         screen.contains("Changes apply the next time a master or agent starts with this harness.")
     });
+    let qualified = screen.contains("is qualified. You can change the settings below.");
+    let first_group = if qualified {
+        "Settings ("
+    } else {
+        "Read-only ("
+    };
     for words in [
         "What every master and agent using this harness starts with, in every project.",
         "Running ones keep their settings.",
-        "Settings (",
+        first_group,
         "Esc All harnesses",
     ] {
         assert!(screen.contains(words), "{words}:\n{screen}");
     }
-    let mut locked = screen.contains("Set by CrazyAgent (");
+    let mut locked = !qualified || screen.contains("Set by CrazyAgent (");
     for _ in 0..HARNESS_PAGES_MAX {
         if locked {
             break;
@@ -1877,7 +1883,7 @@ fn a_harness_settings_page_opens_from_settings_harnesses_with_the_desktop_words(
     }
     assert!(
         locked,
-        "PgDn reaches the Set by CrazyAgent group:\n{}",
+        "PgDn reaches the Set by CrazyAgent group of a qualified Codex:\n{}",
         pty.screen()
     );
     assert!(
