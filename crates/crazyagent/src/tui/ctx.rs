@@ -1,9 +1,11 @@
+use super::client::learning::LearningQuery;
 use super::client::questions::QuestionsQuery;
 use super::frame::Message;
 use super::glyphs::Glyphs;
 use super::seam::{AccountRow, Arrival, PoolScope, ProjectCard, Request};
 use super::theme::{Appearance, Colors, Depth, Theme};
 use crate::engine::bootstrap::OwnerConnectionIdentity;
+use crate::learning::{LearningProgress, MarkStep};
 use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::protocol::ProjectId;
@@ -13,6 +15,7 @@ use ratatui::text::{Line, Span};
 use std::collections::VecDeque;
 
 const QUEUE_MAX: usize = 32;
+const MARKS_MAX: usize = 4;
 
 /// Engine data a screen shows, with its loading state.
 /// Input: set by the shell as requests start and replies arrive. Output:
@@ -61,6 +64,7 @@ pub struct Store {
     pub harnesses: Load<(usize, usize)>,
     pub memory: Load<usize>,
     pub setup: Load<SetupStatus>,
+    pub learning: Load<LearningProgress>,
     pub projects_seen: Option<String>,
     pub questions: Load<Vec<(ProjectId, u32)>>,
     pub waiting: Option<(
@@ -90,6 +94,7 @@ impl Default for Store {
             harnesses: Load::NotReady,
             memory: Load::NotReady,
             setup: Load::Idle,
+            learning: Load::Idle,
             projects_seen: None,
             questions: Load::Idle,
             waiting: None,
@@ -132,6 +137,7 @@ pub struct Ctx {
     reconnect: bool,
     message: Option<Message>,
     generation: u64,
+    learned: Vec<MarkStep>,
 }
 
 impl Ctx {
@@ -174,6 +180,7 @@ impl Ctx {
             reconnect: false,
             message: None,
             generation: 0,
+            learned: Vec::new(),
         }
     }
 
@@ -287,13 +294,19 @@ impl Ctx {
         self.requests.pop_front()
     }
 
-    /// Takes the oldest queued request other than the shell's pending-questions count,
-    /// which every refresh queues for the footer badge, so a test reads what a screen sent.
-    /// Input: none. Output: that request, if one waits; the count stays queued.
+    /// Takes the oldest queued request other than the shell's own: the pending-questions
+    /// count every refresh queues for the footer badge and the learning marks a page or a
+    /// terminal sets, so a test reads what a screen sent. Input: none. Output: that
+    /// request, if one waits; the shell's requests stay queued.
     #[cfg(test)]
     pub fn next_screen_request(&mut self) -> Option<Request> {
-        let index = self.requests.iter().position(|queued| {
-            !matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts)
+        let index = self.requests.iter().position(|queued| match queued {
+            Request::Questions(query) => **query != QuestionsQuery::Counts,
+            Request::Learning(query) => !matches!(
+                **query,
+                LearningQuery::Mark { step, .. } if step != MarkStep::Skipped
+            ),
+            _ => true,
         })?;
         self.requests.remove(index)
     }
@@ -339,6 +352,36 @@ impl Ctx {
         self.message
             .as_ref()
             .filter(|message| message.visible(std::time::Instant::now()))
+    }
+
+    /// Sets one learning mark in the background, once per TUI session, for a page or a
+    /// terminal the owner opened. Skips an engine without the learning read and a mark the
+    /// last read already shows. Input: the mark, never Skipped. Output: none; a mark the
+    /// engine refused is tried again the next time (`unlearn`).
+    pub fn learn(&mut self, step: MarkStep) {
+        assert!(step != MarkStep::Skipped, "only the owner skips the guide");
+        let known = match &self.store.learning {
+            Load::NotReady => true,
+            Load::Ready(progress) => progress.marked(step),
+            Load::Idle | Load::Loading | Load::Failed(_) => false,
+        };
+        if known || self.learned.contains(&step) {
+            return;
+        }
+        self.learned.push(step);
+        assert!(self.learned.len() <= MARKS_MAX);
+        let generation = self.next_generation();
+        self.request(Request::Learning(Box::new(LearningQuery::Mark {
+            step,
+            on: true,
+            generation,
+        })));
+    }
+
+    /// Forgets a learning mark the engine did not set, so the next visit sends it again.
+    /// Input: the mark. Output: none.
+    pub fn unlearn(&mut self, step: MarkStep) {
+        self.learned.retain(|sent| *sent != step);
     }
 
     /// A fresh nonzero client generation for one owner mutation.

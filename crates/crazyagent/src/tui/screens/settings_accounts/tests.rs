@@ -27,6 +27,7 @@ pub(crate) fn ctx(width: u16, height: u16) -> Ctx {
     ctx.height = height;
     ctx.tick = 4;
     ctx.link = Link::Ready;
+    ctx.store.learning = Load::NotReady;
     ctx
 }
 
