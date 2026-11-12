@@ -2449,6 +2449,7 @@ fn owner_apply_with(
                 },
             ) = (&outcome, &request.operation)
             {
+                crate::demo::assert_confined(&tx, project_id)?;
                 crate::demo::record(&tx, project_id, crate::team::now_ms())?;
             }
             outcome

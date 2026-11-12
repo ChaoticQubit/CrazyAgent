@@ -829,6 +829,21 @@ async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question()
             .join("demo-git-home")
             .exists()
     );
+    let demo = ProjectId::new(PROJECT_ID).unwrap();
+    let policy = owner.project_agent_policy(demo.clone()).await.unwrap();
+    assert_eq!(
+        policy.access,
+        crazyagent::sandbox::policy::AgentAccess::Sandboxed
+    );
+    assert!(
+        owner
+            .project_read_paths(demo.clone())
+            .await
+            .unwrap()
+            .paths
+            .is_empty()
+    );
+    assert!(owner.project_hidden_paths(demo).await.unwrap().is_empty());
 
     let after = owner.project_demo().await.unwrap();
     assert_eq!(

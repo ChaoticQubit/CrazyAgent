@@ -339,6 +339,39 @@ fn the_demo_reads_each_step_from_its_own_rows_and_a_new_demo_never_inherits_a_de
 }
 
 #[test]
+fn a_demo_that_would_start_wider_than_sandboxed_stops_at_the_assertion() {
+    use crate::sandbox::policy::{AccessGrant, AgentAccess, AgentPolicy};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let temp = tempfile::tempdir().unwrap();
+    let db = database(temp.path());
+    let id = demo_id().unwrap();
+    let trips = || catch_unwind(AssertUnwindSafe(|| assert_confined(&db, &id))).is_err();
+    assert_confined(&db, &id).unwrap();
+    for access in [AgentAccess::OwnBranch, AgentAccess::Full] {
+        let policy = AgentPolicy {
+            access,
+            ..AgentPolicy::default()
+        };
+        crate::sandbox::policy::save(&db, PROJECT_ID, &policy).unwrap();
+        assert!(trips(), "{access:?}");
+    }
+    let granted = AgentPolicy {
+        grants: vec![AccessGrant::TempFolder],
+        ..AgentPolicy::default()
+    };
+    crate::sandbox::policy::save(&db, PROJECT_ID, &granted).unwrap();
+    assert!(trips(), "a grant");
+    crate::sandbox::policy::save(&db, PROJECT_ID, &AgentPolicy::default()).unwrap();
+    assert_confined(&db, &id).unwrap();
+    let folder = [std::path::PathBuf::from("/Users/owner/notes")];
+    crate::sandbox::extra_paths::save(&db, PROJECT_ID, &folder).unwrap();
+    assert!(trips(), "a read folder");
+    crate::sandbox::extra_paths::save(&db, PROJECT_ID, &[]).unwrap();
+    crate::sandbox::hidden_paths::save(&db, PROJECT_ID, &folder).unwrap();
+    assert!(trips(), "a hidden folder");
+}
+
+#[test]
 fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() {
     let temp = tempfile::tempdir().unwrap();
     let mut db = database(temp.path());

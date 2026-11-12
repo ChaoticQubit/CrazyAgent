@@ -239,6 +239,25 @@ pub(crate) fn record(
     Ok(())
 }
 
+/// Asserts the demo's agents start confined right after New Project recorded it (DEC-153,
+/// DM-L1): Sandboxed access, no access grants, no read folders and no hidden folders. A
+/// wider start is a broken invariant, never an owner choice. Inputs: the connection or
+/// transaction that recorded the demo and its id. Output: done, or the database error.
+pub(crate) fn assert_confined(db: &Connection, project_id: &ProjectId) -> Result<(), EngineError> {
+    assert_eq!(project_id.as_str(), PROJECT_ID);
+    let policy = crate::sandbox::policy::load(db, PROJECT_ID).map_err(error)?;
+    let read = crate::sandbox::extra_paths::load(db, PROJECT_ID).map_err(error)?;
+    let hidden = crate::sandbox::hidden_paths::load(db, PROJECT_ID).map_err(error)?;
+    assert_eq!(
+        policy.access,
+        crate::sandbox::policy::AgentAccess::Sandboxed
+    );
+    assert!(policy.grants.is_empty(), "demo_policy_grants");
+    assert!(read.is_empty(), "demo_read_paths");
+    assert!(hidden.is_empty(), "demo_hidden_paths");
+    Ok(())
+}
+
 /// Plants the demo's question once the demo is recorded, so the guide's question step has
 /// one whatever the model does; the owner's answer reaches the master as an engine message.
 /// Asking again while it waits returns the same question. Input: the engine connection.
