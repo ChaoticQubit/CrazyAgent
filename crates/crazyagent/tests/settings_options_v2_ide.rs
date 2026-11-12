@@ -144,6 +144,7 @@ impl Hooked {
                     tool_cache: Default::default(),
                     ide_agent_files: Default::default(),
                     network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                    ..Default::default()
                 },
                 generation,
             )

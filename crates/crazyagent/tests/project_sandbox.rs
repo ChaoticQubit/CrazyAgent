@@ -3987,3 +3987,62 @@ fn a_confined_shell_lists_its_own_running_child() {
     let listed = text.lines().last().unwrap();
     assert!(listed.split(' ').any(|pid| pid == child), "{text}");
 }
+
+/// F08: under a real Seatbelt profile a socket grant connects to that one socket and to no
+/// other, neither socket can be removed, the temp folder grant hands the folder over as
+/// TMPDIR and takes a new file there, and a port grant joins the limited network.
+#[test]
+fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets() {
+    use crazyagent::sandbox::policy::AccessGrant;
+    use std::os::unix::net::UnixListener;
+    let case = case();
+    let owner_tmp = case.root.join("otmp");
+    fs::create_dir_all(&owner_tmp).unwrap();
+    let granted = owner_tmp.join("g.sock");
+    let other = owner_tmp.join("o.sock");
+    let _granted = UnixListener::bind(&granted).unwrap();
+    let _other = UnixListener::bind(&other).unwrap();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .grant_access(
+            &[
+                AccessGrant::Socket {
+                    path: granted.clone(),
+                },
+                AccessGrant::TempFolder,
+                AccessGrant::Port { port: 47_821 },
+            ],
+            Some(&owner_tmp),
+        )
+        .unwrap();
+    assert_eq!(
+        sandbox.network(),
+        &SandboxNetwork::Only(vec![SandboxRemote::Loopback(47_821)])
+    );
+    let profile = case.profiles.join("grants.sb");
+    let env = command_env(&sandbox, &profile);
+    assert_eq!(env["TMPDIR"], owner_tmp.display().to_string());
+    let script = format!(
+        "/usr/bin/nc -U {g} </dev/null && echo reached-granted; /usr/bin/nc -U {o} </dev/null || echo refused-other; rm -f {g} {o}; test -S {g} && echo kept-granted; test -S {o} && echo kept-other; echo hi > \"$TMPDIR/note.txt\" && echo wrote-tmp",
+        g = quoted(&granted),
+        o = quoted(&other)
+    );
+    let out = run(&sandbox, &profile, &script);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in [
+        "reached-granted",
+        "refused-other",
+        "kept-granted",
+        "kept-other",
+        "wrote-tmp",
+    ] {
+        assert!(
+            stdout.lines().any(|l| l == line),
+            "{line} missing: {stdout} / {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(owner_tmp.join("note.txt")).unwrap(),
+        "hi\n"
+    );
+}

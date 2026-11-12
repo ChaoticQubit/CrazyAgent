@@ -15,6 +15,7 @@ use std::process::Command;
 
 pub mod elf;
 pub mod extra_paths;
+pub mod grants;
 pub mod hidden_paths;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
@@ -831,6 +832,8 @@ pub struct ProjectSandbox {
     lead_branch: Option<String>,
     adds_worktrees: bool,
     agent_files: Option<policy::AgentFilesRule>,
+    granted: Vec<PathBuf>,
+    owner_tmp: Option<PathBuf>,
 }
 
 /// What the engine's git may write, with a linked lead's rights, while it adds the lead's
@@ -910,7 +913,92 @@ impl ProjectSandbox {
             lead_branch: None,
             adds_worktrees: false,
             agent_files: None,
+            granted: Vec::new(),
+            owner_tmp: None,
         })
+    }
+
+    /// Adds the narrow extras the owner allowed the project's agents (F08): each socket
+    /// grant as a connect-and-read grant of its exact path in a list of its own, never bind,
+    /// write or unlink; each port grant as an outbound loopback port when the network is
+    /// limited (an open network reaches it already); and the temp folder grant as the
+    /// owner's private temp folder, written as a root and handed over as `TMPDIR`, with every
+    /// socket node in it kept unwritable. Inputs: the saved grants and the owner's temp
+    /// folder as [`grants::owner_temp_folder`] gives it, none when it cannot be given.
+    /// Output: the widened sandbox, or `Invalid`; sockets and the temp folder need Seatbelt.
+    pub fn grant_access(
+        mut self,
+        grants: &[policy::AccessGrant],
+        owner_tmp: Option<&Path>,
+    ) -> Result<Self, SandboxError> {
+        if grants.len() > policy::GRANTS_MAX {
+            return Err(invalid("too many access grants"));
+        }
+        for grant in grants {
+            if !grant.plain() {
+                return Err(invalid("an access grant is not plain"));
+            }
+            match grant {
+                policy::AccessGrant::Socket { path } => {
+                    if !cfg!(target_os = "macos") {
+                        return Err(invalid("unix socket grants need Seatbelt"));
+                    }
+                    let folder = path.parent().filter(|folder| {
+                        fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir())
+                    });
+                    let known = self
+                        .sockets
+                        .iter()
+                        .chain(&self.served)
+                        .chain(&self.reached)
+                        .chain(&self.shut)
+                        .chain(&self.granted)
+                        .any(|socket| socket == path);
+                    if folder.is_none() || known || self.granted.len() >= policy::GRANT_SOCKETS_MAX
+                    {
+                        return Err(invalid("a socket grant cannot be held"));
+                    }
+                    self.granted.push(path.clone());
+                }
+                policy::AccessGrant::Port { port } => {
+                    if let SandboxNetwork::Only(remotes) = &mut self.network {
+                        let remote = SandboxRemote::Loopback(*port);
+                        if !remotes.contains(&remote) {
+                            remotes.push(remote);
+                        }
+                        if remotes.len() > REMOTES_MAX {
+                            return Err(invalid("network remotes must be 1..8 nonzero ports"));
+                        }
+                    }
+                }
+                policy::AccessGrant::TempFolder => {
+                    if !cfg!(target_os = "macos") {
+                        return Err(invalid("the temp folder grant needs Seatbelt"));
+                    }
+                    let tmp = owner_tmp
+                        .ok_or_else(|| invalid("the owner's temp folder cannot be given"))?;
+                    let owner = owner_home()?;
+                    let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
+                    granted_root(tmp, &owner, &secrets)?;
+                    clear_of_secrets(tmp, &self.engine_secrets)?;
+                    self.owner_tmp = Some(tmp.to_path_buf());
+                }
+            }
+        }
+        assert!(self.granted.len() <= policy::GRANT_SOCKETS_MAX);
+        Ok(self)
+    }
+
+    /// The owner's temp folder this sandbox hands over as `TMPDIR` under a temp folder
+    /// grant, or none. Takes the sandbox. Returns the folder.
+    pub fn owner_tmp(&self) -> Option<&Path> {
+        self.owner_tmp.as_deref()
+    }
+
+    /// The exact sockets the owner's grants let this agent connect to. Takes the sandbox.
+    /// Returns the paths.
+    pub fn granted_sockets(&self) -> &[PathBuf] {
+        &self.granted
     }
 
     /// Lets the agent bind and connect one Unix socket at an exact path, read and write that
@@ -1886,6 +1974,7 @@ impl ProjectSandbox {
             .chain(self.worktrees.iter())
             .chain(self.shared.iter())
             .chain(self.tool_cache.iter().map(|(root, _)| root))
+            .chain(self.owner_tmp.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
@@ -2032,6 +2121,12 @@ impl ProjectSandbox {
                 scratch.display()
             ));
         }
+        if let Some(tmp) = &self.owner_tmp {
+            let tmp = tmp.display();
+            text.push_str(&format!(
+                "(deny {FIXED_WRITES}\n  (literal \"{tmp}\"))\n(deny file-write*\n  (require-all\n    (subpath \"{tmp}\")\n    (vnode-type SOCKET)))\n"
+            ));
+        }
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
         text.push_str(&self.nested_git_denies());
@@ -2063,7 +2158,7 @@ impl ProjectSandbox {
                 "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(deny file-write-unlink (literal \"{path}\"))\n"
             ));
         }
-        for socket in &self.reached {
+        for socket in self.reached.iter().chain(&self.granted) {
             let path = socket.display();
             let folder = socket.parent().unwrap_or(socket).display();
             text.push_str(&format!(
@@ -2148,6 +2243,7 @@ impl ProjectSandbox {
                 && self
                     .reached
                     .iter()
+                    .chain(&self.granted)
                     .all(|socket| denied_last("file-write*", socket)),
             "a served socket's unlink deny and a reached socket's write deny must follow every write allow, since the last match wins"
         );
@@ -2507,7 +2603,11 @@ impl ProjectSandbox {
     /// does. Takes whether the command is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = toolchains::ToolHomes::at(&self.owner_home);
-        let tmp = self.scratch.as_ref().unwrap_or(&self.agent_tmp);
+        let tmp = self
+            .owner_tmp
+            .as_ref()
+            .or(self.scratch.as_ref())
+            .unwrap_or(&self.agent_tmp);
         let path = toolchains::agent_path(&homes, AGENT_PATH);
         let path = if harness {
             toolchains::with_agent_git(&self.agent_home, path)
@@ -3675,5 +3775,126 @@ mod order_tests {
             &text.replace(&pins[1], ""),
             &pins
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod access_grant_tests {
+    use super::*;
+    use policy::AccessGrant;
+
+    fn case() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp", "owner-tmp"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        (temp, root)
+    }
+
+    /// F08: a socket grant is a connect-only rule ahead of the network section with its
+    /// write deny after every write allow, a port grant joins a limited network on
+    /// loopback, and the temp folder grant becomes a writable root handed over as TMPDIR
+    /// with every socket node in it kept unwritable.
+    #[test]
+    fn grants_add_a_connect_only_socket_a_loopback_port_and_the_owner_s_temp_folder() {
+        let (_temp, root) = case();
+        let socket = root.join("owner-tmp").join("discord-ipc-0");
+        let owner_tmp = root.join("owner-tmp");
+        let sandbox = ProjectSandbox::new(
+            &root.join("project"),
+            &root.join("home"),
+            &root.join("tmp"),
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]),
+        )
+        .unwrap()
+        .grant_access(
+            &[
+                AccessGrant::Socket {
+                    path: socket.clone(),
+                },
+                AccessGrant::Port { port: 47_821 },
+                AccessGrant::TempFolder,
+            ],
+            Some(&owner_tmp),
+        )
+        .unwrap();
+        assert_eq!(
+            sandbox.network(),
+            &SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::Loopback(47_821)
+            ])
+        );
+        assert_eq!(sandbox.granted_sockets(), [socket.clone()]);
+        assert_eq!(sandbox.owner_tmp(), Some(owner_tmp.as_path()));
+        assert!(sandbox.writes(&owner_tmp.join("note.txt")));
+        let text = sandbox.profile();
+        let path = socket.display();
+        assert!(text.contains(&format!(
+            "(allow network-outbound (remote unix-socket (path-literal \"{path}\")))"
+        )));
+        assert!(!text.contains(&format!(
+            "(allow network-bind (local unix-socket (path-literal \"{path}\")))"
+        )));
+        assert!(text.contains(&format!("(deny file-write* (literal \"{path}\"))")));
+        assert!(text.contains("(allow network-outbound (remote ip \"localhost:47821\"))"));
+        assert!(text.contains(&format!(
+            "(deny file-write*\n  (require-all\n    (subpath \"{}\")\n    (vnode-type SOCKET)))",
+            owner_tmp.display()
+        )));
+        let env = sandbox.base_env(true);
+        let tmpdir = env
+            .iter()
+            .find(|(name, _)| *name == "TMPDIR")
+            .map(|(_, value)| value.clone());
+        assert_eq!(tmpdir, Some(owner_tmp.clone().into_os_string()));
+    }
+
+    /// F08: a grant beyond its kind's bound, a socket in a missing folder, a temp folder
+    /// grant without the owner's folder and a port that overfills a limited network are
+    /// refused; an open network takes a port grant as it is.
+    #[test]
+    fn grants_that_cannot_be_held_are_refused() {
+        let (_temp, root) = case();
+        let fresh = |network| {
+            ProjectSandbox::new(
+                &root.join("project"),
+                &root.join("home"),
+                &root.join("tmp"),
+                network,
+            )
+            .unwrap()
+        };
+        let socket = |name: &str| AccessGrant::Socket {
+            path: root.join("owner-tmp").join(name),
+        };
+        let only = || SandboxNetwork::Only(Vec::new());
+        assert!(
+            fresh(only())
+                .grant_access(&[socket("a"), socket("b"), socket("c")], None)
+                .is_err()
+        );
+        let missing = AccessGrant::Socket {
+            path: root.join("gone").join("x"),
+        };
+        assert!(fresh(only()).grant_access(&[missing], None).is_err());
+        assert!(
+            fresh(only())
+                .grant_access(&[AccessGrant::TempFolder], None)
+                .is_err()
+        );
+        let full: Vec<SandboxRemote> = (1..=REMOTES_MAX as u16)
+            .map(SandboxRemote::AnyHost)
+            .collect();
+        assert!(
+            fresh(SandboxNetwork::Only(full))
+                .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
+                .is_err()
+        );
+        let open = fresh(SandboxNetwork::Open)
+            .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
+            .unwrap();
+        assert_eq!(open.network(), &SandboxNetwork::Open);
     }
 }

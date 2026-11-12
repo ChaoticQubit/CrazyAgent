@@ -265,6 +265,98 @@ impl AgentFilesRule {
     }
 }
 
+/// When a running agent picks up a saved policy that gives it more than it started with
+/// (F08): When the agent is idle, the default, stops it at its next idle point so its next
+/// start uses the new policy, the live master as a planned restart that resumes its own
+/// conversation; At its next start leaves it running until it next starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessApply {
+    #[default]
+    WhenIdle,
+    NextStart,
+}
+
+impl AccessApply {
+    /// Every choice, the default first.
+    pub const ALL: [Self; 2] = [Self::WhenIdle, Self::NextStart];
+
+    /// The choice's stable id, as stored and sent to clients.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::WhenIdle => "when_idle",
+            Self::NextStart => "next_start",
+        }
+    }
+
+    /// The name shown to the owner, the same in the desktop app.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::WhenIdle => "When the agent is idle",
+            Self::NextStart => "At its next start",
+        }
+    }
+}
+
+/// The most socket grants one project's policy holds.
+pub const GRANT_SOCKETS_MAX: usize = 2;
+/// The most port grants one project's policy holds.
+pub const GRANT_PORTS_MAX: usize = 4;
+/// The most grants of every kind one project's policy holds: its sockets, its ports and
+/// the temp folder.
+pub const GRANTS_MAX: usize = GRANT_SOCKETS_MAX + GRANT_PORTS_MAX + 1;
+/// The longest socket path a grant names, macOS `sun_path` less its closing NUL.
+pub const GRANT_SOCKET_BYTES_MAX: usize = 103;
+
+/// One narrow extra the owner allowed a project's agents beside their access level (F08):
+/// connecting to one exact Unix socket, connecting to one TCP port on this computer, or
+/// using the owner's own temp folder as their TMPDIR. A grant is added in Agent access or by
+/// the owner's Allow on an agent's request, and removed there.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccessGrant {
+    Socket { path: std::path::PathBuf },
+    Port { port: u16 },
+    TempFolder,
+}
+
+impl AccessGrant {
+    /// Tells whether the grant has a plain shape: a socket path absolute, at most
+    /// [`GRANT_SOCKET_BYTES_MAX`] bytes of letters, digits, `/`, `.`, `-` and `_` with no
+    /// empty, `.` or `..` part, and a port other than 0. Input: the grant. Output: the answer.
+    pub fn plain(&self) -> bool {
+        match self {
+            Self::Socket { path } => {
+                let Some(text) = path.to_str() else {
+                    return false;
+                };
+                path.is_absolute()
+                    && text.len() <= GRANT_SOCKET_BYTES_MAX
+                    && !text.ends_with('/')
+                    && !text.contains("//")
+                    && text
+                        .split('/')
+                        .skip(1)
+                        .all(|part| part != "." && part != "..")
+                    && text.bytes().all(|b| {
+                        b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'-' | b'_')
+                    })
+            }
+            Self::Port { port } => *port != 0,
+            Self::TempFolder => true,
+        }
+    }
+
+    /// The grant as the owner reads it. Input: the grant. Output: the words.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Socket { path } => format!("Socket {}", path.display()),
+            Self::Port { port } => format!("Port {port} on this computer"),
+            Self::TempFolder => "Your temp folder".to_owned(),
+        }
+    }
+}
+
 /// The owner's choice for one toolchain family; a family with no choice follows the
 /// project (on when the project uses it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,7 +371,9 @@ pub struct ToolchainChoice {
 /// and whether git in the IDE runs the project's own hooks in the Project section (Off
 /// unless the owner turned it on; a policy saved before the setting existed reads Off), what
 /// the IDE may do to agent files (Allow all changes when none was saved) and who shares the
-/// agents' tool cache (T8; a policy saved before that setting reads Shared).
+/// agents' tool cache (T8; a policy saved before that setting reads Shared), when running
+/// agents pick up a wider policy and the narrow grants the owner allowed (F08; a policy saved
+/// before those settings reads When the agent is idle and no grants).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -293,11 +387,16 @@ pub struct AgentPolicy {
     pub tool_cache: ToolCacheScope,
     #[serde(default)]
     pub ide_agent_files: IdeAgentFiles,
+    #[serde(default)]
+    pub apply_changes: AccessApply,
+    #[serde(default)]
+    pub grants: Vec<AccessGrant>,
 }
 
 impl AgentPolicy {
-    /// Checks a policy a client sent: each toolchain at most once. Takes the policy.
-    /// Returns a plain refusal code.
+    /// Checks a policy a client sent: each toolchain at most once, and at most
+    /// [`GRANT_SOCKETS_MAX`] sockets, [`GRANT_PORTS_MAX`] ports and one temp folder, each
+    /// plain and named once. Takes the policy. Returns a plain refusal code.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.toolchains.len() > Toolchain::ALL.len() {
             return Err("agent_policy_invalid");
@@ -310,6 +409,22 @@ impl AgentPolicy {
                 return Err("agent_policy_invalid");
             }
         }
+        if self.grants.len() > GRANTS_MAX {
+            return Err("agent_grants_invalid");
+        }
+        let count = |kind: fn(&AccessGrant) -> bool| self.grants.iter().filter(|g| kind(g)).count();
+        let sockets = count(|grant| matches!(grant, AccessGrant::Socket { .. }));
+        let ports = count(|grant| matches!(grant, AccessGrant::Port { .. }));
+        let temp = count(|grant| matches!(grant, AccessGrant::TempFolder));
+        if sockets > GRANT_SOCKETS_MAX || ports > GRANT_PORTS_MAX || temp > 1 {
+            return Err("agent_grants_invalid");
+        }
+        for (index, grant) in self.grants.iter().enumerate() {
+            if !grant.plain() || self.grants[..index].contains(grant) {
+                return Err("agent_grants_invalid");
+            }
+        }
+        assert_eq!(sockets + ports + temp, self.grants.len());
         Ok(())
     }
 
@@ -344,6 +459,8 @@ impl AgentPolicy {
             network: self.network,
             tool_cache: self.tool_cache,
             ide_agent_files: self.ide_agent_files,
+            apply_changes: self.apply_changes,
+            grants: self.grants.clone(),
         };
         assert!(pinned.validate().is_ok());
         pinned
@@ -391,7 +508,70 @@ impl AgentPolicy {
                 })
                 .collect(),
             ide_agent_files: self.ide_agent_files,
+            apply_changes: self.apply_changes,
+            apply_choices: AccessApply::ALL
+                .into_iter()
+                .map(|apply| ApplyView {
+                    apply,
+                    label: apply.label().to_owned(),
+                })
+                .collect(),
+            grants: self
+                .grants
+                .iter()
+                .map(|grant| GrantView {
+                    grant: grant.clone(),
+                    label: grant.label(),
+                })
+                .collect(),
+            temp_folder: match super::grants::owner_temp_folder() {
+                Ok(folder) => TempFolderView {
+                    path: Some(folder.display().to_string()),
+                    unavailable: None,
+                },
+                Err(code) => TempFolderView {
+                    path: None,
+                    unavailable: Some(super::grants::refusal_text(code).to_owned()),
+                },
+            },
+            grant_log: Vec::new(),
         }
+    }
+
+    /// Tells whether this saved policy gives a running agent more than it started with: a
+    /// wider level, a wider network for an agent with tools, a toolchain its profile lacks
+    /// or a grant it does not hold. A level or network of none is not compared, and a
+    /// toolchain list of none counts as every family, so a record from before the engine
+    /// kept them never asks for a restart. Inputs: the project folder, none when it cannot
+    /// be read, the level and network the agent runs with, the toolchains and the grants its
+    /// profile holds. Output: true when a restart would give it more.
+    pub fn widens(
+        &self,
+        project: Option<&Path>,
+        access: Option<AgentAccess>,
+        network: Option<AgentNetwork>,
+        granted: Option<&[Toolchain]>,
+        grants: &[AccessGrant],
+    ) -> bool {
+        assert!(grants.len() <= GRANTS_MAX);
+        let tools = match (project, granted) {
+            (Some(project), Some(granted)) => self
+                .allowed(project)
+                .iter()
+                .any(|toolchain| !granted.contains(toolchain)),
+            _ => false,
+        };
+        access.is_some_and(|access| self.access.wider_than(access))
+            || network.is_some_and(|network| self.network.wider_than(network))
+            || tools
+            || self.grants.iter().any(|grant| !grants.contains(grant))
+    }
+
+    /// Tells whether a running agent holds a grant this saved policy no longer has, which
+    /// stops it at once as a lowered level does. Input: the grants its profile holds.
+    /// Output: the answer.
+    pub fn revokes(&self, grants: &[AccessGrant]) -> bool {
+        grants.iter().any(|grant| !self.grants.contains(grant))
     }
 
     fn choice(&self, toolchain: Toolchain) -> Option<bool> {
@@ -498,6 +678,41 @@ pub struct PolicyView {
     #[serde(default)]
     pub tool_caches: Vec<ToolCacheView>,
     pub ide_agent_files: IdeAgentFiles,
+    #[serde(default)]
+    pub apply_changes: AccessApply,
+    #[serde(default)]
+    pub apply_choices: Vec<ApplyView>,
+    #[serde(default)]
+    pub grants: Vec<GrantView>,
+    #[serde(default)]
+    pub temp_folder: TempFolderView,
+    #[serde(default)]
+    pub grant_log: Vec<super::grants::LogView>,
+}
+
+/// One Apply access changes choice with the name shown to the owner (F08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyView {
+    pub apply: AccessApply,
+    pub label: String,
+}
+
+/// One saved grant with the words the owner reads (F08).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantView {
+    pub grant: AccessGrant,
+    pub label: String,
+}
+
+/// The owner's temp folder a temp folder grant would hand to agents, or why this computer
+/// cannot grant it (F08).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TempFolderView {
+    pub path: Option<String>,
+    pub unavailable: Option<String>,
 }
 
 /// One tool cache choice with the name shown to the owner (T8).
@@ -680,6 +895,137 @@ mod tests {
         );
     }
 
+    /// F08: a policy saved before the access change settings reads When the agent is idle
+    /// and no grants, a pinned policy keeps both, the view lists every Apply choice, the
+    /// default first, and the saved grants with their words.
+    #[test]
+    fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grants() {
+        let old: AgentPolicy =
+            serde_json::from_str(r#"{"access":"own_branch","toolchains":[]}"#).unwrap();
+        assert_eq!(old.apply_changes, AccessApply::WhenIdle);
+        assert!(old.grants.is_empty());
+        let own = AgentPolicy {
+            apply_changes: AccessApply::NextStart,
+            grants: vec![AccessGrant::Port { port: 47_821 }, AccessGrant::TempFolder],
+            ..AgentPolicy::default()
+        };
+        let folder = tempfile::tempdir().unwrap();
+        let pinned = own.pinned(folder.path());
+        assert_eq!(
+            (pinned.apply_changes, pinned.grants.clone()),
+            (own.apply_changes, own.grants.clone())
+        );
+        let saved = serde_json::to_string(&own).unwrap();
+        assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
+        assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
+        assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
+        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let listed: Vec<(&str, &str)> = view
+            .apply_choices
+            .iter()
+            .map(|row| (row.apply.id(), row.label.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("when_idle", "When the agent is idle"),
+                ("next_start", "At its next start")
+            ]
+        );
+        let words: Vec<&str> = view.grants.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(words, ["Port 47821 on this computer", "Your temp folder"]);
+        assert!(view.temp_folder.path.is_some() != view.temp_folder.unavailable.is_some());
+    }
+
+    /// F08: at most two sockets, four ports and one temp folder, each plain and named once.
+    #[test]
+    fn grants_are_bounded_per_kind_plain_and_named_once() {
+        let with = |grants: Vec<AccessGrant>| AgentPolicy {
+            grants,
+            ..AgentPolicy::default()
+        };
+        let socket = |name: &str| AccessGrant::Socket {
+            path: std::path::PathBuf::from(format!("/private/tmp/{name}")),
+        };
+        let port = |port| AccessGrant::Port { port };
+        assert!(
+            with(vec![
+                socket("a"),
+                socket("b"),
+                port(1),
+                port(2),
+                port(3),
+                port(4),
+                AccessGrant::TempFolder
+            ])
+            .validate()
+            .is_ok()
+        );
+        for refused in [
+            vec![socket("a"), socket("b"), socket("c")],
+            vec![port(1), port(2), port(3), port(4), port(5)],
+            vec![AccessGrant::TempFolder, AccessGrant::TempFolder],
+            vec![port(9), port(9)],
+            vec![port(0)],
+            vec![socket("a b")],
+            vec![socket("../etc")],
+            vec![AccessGrant::Socket {
+                path: "relative".into(),
+            }],
+            vec![socket(&"x".repeat(GRANT_SOCKET_BYTES_MAX))],
+        ] {
+            assert_eq!(
+                with(refused.clone()).validate(),
+                Err("agent_grants_invalid"),
+                "{refused:?}"
+            );
+        }
+    }
+
+    /// F08: a running agent is widened by a wider level or network, a toolchain its profile
+    /// lacks or a grant it does not hold, and revoked by a grant the saved policy dropped; a
+    /// record that kept no level, network or toolchains never asks for a restart.
+    #[test]
+    fn a_saved_policy_widens_or_revokes_a_running_agent_only_by_what_it_holds() {
+        let folder = tempfile::tempdir().unwrap();
+        let root = Some(folder.path());
+        let port = AccessGrant::Port { port: 47_821 };
+        let saved = AgentPolicy {
+            access: AgentAccess::Full,
+            network: AgentNetwork::Open,
+            grants: vec![port.clone()],
+            ..AgentPolicy::default()
+        };
+        let sandboxed = Some(AgentAccess::Sandboxed);
+        let none = Some(AgentNetwork::None);
+        assert!(saved.widens(
+            root,
+            sandboxed,
+            None,
+            Some(&[]),
+            std::slice::from_ref(&port)
+        ));
+        assert!(saved.widens(
+            root,
+            Some(AgentAccess::Full),
+            none,
+            Some(&[]),
+            std::slice::from_ref(&port)
+        ));
+        assert!(saved.widens(root, Some(AgentAccess::Full), None, Some(&[]), &[]));
+        assert!(!saved.widens(
+            root,
+            Some(AgentAccess::Full),
+            Some(AgentNetwork::Open),
+            Some(&[]),
+            std::slice::from_ref(&port)
+        ));
+        assert!(!saved.widens(None, None, None, None, std::slice::from_ref(&port)));
+        assert!(!saved.revokes(std::slice::from_ref(&port)));
+        assert!(saved.revokes(&[port.clone(), AccessGrant::TempFolder]));
+        assert!(!AgentPolicy::default().revokes(&[]));
+    }
+
     #[test]
     fn a_network_choice_is_wider_only_than_the_narrower_ones() {
         let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
@@ -752,6 +1098,7 @@ mod tests {
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
             network: AgentNetwork::default(),
+            ..Default::default()
         };
         let sandboxed = chose(AgentAccess::Sandboxed, &[]);
         let full = Some(AgentAccess::Full);
@@ -862,6 +1209,7 @@ mod tests {
             ide_git_hooks: true,
             tool_cache: Default::default(),
             ide_agent_files: Default::default(),
+            ..Default::default()
         };
         save(&connection, "p", &policy).unwrap();
         assert_eq!(load(&connection, "p").unwrap(), policy);

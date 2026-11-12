@@ -2484,6 +2484,7 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
                     ide_agent_files: Default::default(),
+                    ..Default::default()
                 },
                 request,
             )
@@ -2531,6 +2532,7 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
         ide_git_hooks,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        ..Default::default()
     };
     let choice = |toolchain: Toolchain, allowed: bool| ToolchainChoice { toolchain, allowed };
     let chosen = |view: &crate::sandbox::policy::PolicyView, toolchain: Toolchain| {
@@ -2650,6 +2652,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ide_git_hooks: true,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        ..Default::default()
     };
     let saved = owner
         .set_project_agent_policy(project.clone(), fresh.version, policy.clone(), 2)
@@ -2671,6 +2674,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
+                ..Default::default()
             },
             7,
         )
@@ -2714,6 +2718,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        ..Default::default()
     };
     assert_eq!(twice.validate(), Err("agent_policy_invalid"));
     let action = SetupAction::SetAgentPolicy {
@@ -2738,6 +2743,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
         ide_git_hooks: false,
         tool_cache: Default::default(),
         ide_agent_files: Default::default(),
+        ..Default::default()
     };
     let saved = owner
         .set_project_agent_policy(project.clone(), view.version, full, 3)
@@ -2817,6 +2823,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
+                ..Default::default()
             },
             6,
         )
@@ -2843,6 +2850,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 tool_cache: Default::default(),
                 ide_agent_files: Default::default(),
                 network: crate::sandbox::policy::AgentNetwork::default(),
+                ..Default::default()
             },
             7,
         )

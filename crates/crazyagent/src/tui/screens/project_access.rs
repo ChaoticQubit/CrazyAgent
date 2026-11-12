@@ -130,8 +130,8 @@ impl AccessEdit {
 
     /// The policy the box would save: the chosen level, a choice for each toolchain whose
     /// switch differs from the project's own use, so the others keep following the project,
-    /// the IDE hooks switch, the agent folders choice and the tool cache choice as the project
-    /// saved it (T8).
+    /// the IDE hooks switch, the agent folders choice, and the tool cache choice, the Apply
+    /// access changes choice and the grants as the project saved them (T8, F08).
     pub fn policy(&self) -> AgentPolicy {
         let toolchains: Vec<ToolchainChoice> = self
             .view
@@ -151,6 +151,13 @@ impl AccessEdit {
             ide_git_hooks: self.ide_git_hooks,
             tool_cache: self.view.tool_cache,
             ide_agent_files: self.ide_agent_files,
+            apply_changes: self.view.apply_changes,
+            grants: self
+                .view
+                .grants
+                .iter()
+                .map(|row| row.grant.clone())
+                .collect(),
         };
         assert!(policy.validate().is_ok());
         policy
