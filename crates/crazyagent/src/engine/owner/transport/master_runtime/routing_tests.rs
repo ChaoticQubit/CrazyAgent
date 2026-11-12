@@ -2636,6 +2636,7 @@ async fn console_claude_master(
         account_ref.clone(),
         clock,
         ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -2910,6 +2911,41 @@ fn store_step_limit(case: &Fixture, limit: StepLimit) {
         crate::master_step_limit::load(&writer).unwrap().limit,
         limit
     );
+}
+
+/// Saves the owner's master frame size limit in a fixture's engine store, as the owner's
+/// Save in Settings does. Inputs: the fixture and the size. Output: none.
+fn store_frame_limit(case: &Fixture, limit: crate::master_frame_limit::FrameSize) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let settings = crate::master_frame_limit::MasterFrameSettings { limit };
+    let saved = crate::master_frame_limit::save(&writer, &settings).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(crate::master_frame_limit::load(&writer).unwrap(), settings);
+}
+
+/// A master turn carries the owner's saved master frame size limit to its host (F39): 64
+/// KiB before any save, and each option once the owner saved it.
+#[tokio::test]
+async fn a_prepared_master_turn_carries_the_saved_frame_size_limit() {
+    use crate::master_frame_limit::FrameSize;
+
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.frames, FrameSize::Kib64);
+    for limit in FrameSize::ALL {
+        let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+        store_frame_limit(&case, limit);
+        case.sign_in("codex-c", true).await;
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(
+            prepared.frames, limit,
+            "the turn carries the saved frame size"
+        );
+    }
 }
 
 /// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.

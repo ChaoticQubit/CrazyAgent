@@ -299,10 +299,90 @@ impl TaskStart {
     }
 }
 
+/// How many heavy commands of one project run at once (F28): one to four, or no limit. A
+/// heavy command an agent runs through the project's lane waits its turn behind the ones
+/// before it; One, the default, runs them one at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeavyLane {
+    #[default]
+    One,
+    Two,
+    Three,
+    Four,
+    NoLimit,
+}
+
+named!(HeavyLane { One => "one", Two => "two", Three => "three", Four => "four", NoLimit => "no_limit" });
+
+impl HeavyLane {
+    /// Every option, in the order settings list them.
+    pub const ALL: [Self; 5] = [Self::One, Self::Two, Self::Three, Self::Four, Self::NoLimit];
+
+    /// How many heavy commands may run at once. Takes the option. Returns 1 to 4, or None
+    /// for no limit.
+    pub fn slots(self) -> Option<usize> {
+        let slots = match self {
+            Self::One => Some(1),
+            Self::Two => Some(2),
+            Self::Three => Some(3),
+            Self::Four => Some(4),
+            Self::NoLimit => None,
+        };
+        assert!(slots.is_none_or(|slots| (1..=4).contains(&slots)));
+        slots
+    }
+
+    /// The words settings show for this option. Takes the option. Returns its fixed text.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::One => "1 at a time",
+            Self::Two => "2 at a time",
+            Self::Three => "3 at a time",
+            Self::Four => "4 at a time",
+            Self::NoLimit => "No limit",
+        }
+    }
+}
+
+/// The most shared resources one project names.
+pub const SHARED_RESOURCES_MAX: usize = 16;
+/// The longest shared resource name, in bytes.
+pub const RESOURCE_NAME_BYTES_MAX: usize = 32;
+/// The most commands one shared resource serves at once.
+pub const RESOURCE_SLOTS_MAX: u8 = 8;
+
+const _: () = assert!(SHARED_RESOURCES_MAX <= 64 && RESOURCE_SLOTS_MAX >= 1);
+
+/// One resource a project's agents share (F28), such as a local model or a database, with
+/// how many heavy commands it serves at once. A heavy command that names it waits until
+/// one of its slots is free, besides its turn in the lane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedResource {
+    pub name: String,
+    pub slots: u8,
+}
+
+/// Checks a shared resource name: 1 to `RESOURCE_NAME_BYTES_MAX` bytes of lower case
+/// letters, digits, `.`, `_` and `-`, starting with a letter or digit, so it reads the same
+/// on a command line, in settings and in a file name. Takes the name. Returns the answer.
+pub fn resource_name_valid(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let plain = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    !bytes.is_empty()
+        && bytes.len() <= RESOURCE_NAME_BYTES_MAX
+        && plain(&bytes[0])
+        && bytes
+            .iter()
+            .all(|b| plain(b) || matches!(b, b'.' | b'_' | b'-'))
+}
+
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic terminal display and
-/// the Task-start reminder On. A row stored before DEC-141 names the display
-/// `claude_display`; it reads as `terminal_display`, so the owner's choice is kept.
+/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic terminal display, the
+/// Task-start reminder On, a heavy lane of One and no shared resources. A row stored before
+/// DEC-141 names the display `claude_display`; it reads as `terminal_display`, so the
+/// owner's choice is kept. A row stored before F28 reads with the lane defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
@@ -316,6 +396,10 @@ pub struct CoordSettings {
     pub terminal_display: TerminalDisplay,
     #[serde(default)]
     pub task_start: TaskStart,
+    #[serde(default)]
+    pub heavy_lane: HeavyLane,
+    #[serde(default)]
+    pub shared_resources: Vec<SharedResource>,
 }
 
 impl Default for CoordSettings {
@@ -328,6 +412,8 @@ impl Default for CoordSettings {
             role_skills: RoleSkills::default(),
             terminal_display: TerminalDisplay::Classic,
             task_start: TaskStart::On,
+            heavy_lane: HeavyLane::One,
+            shared_resources: Vec::new(),
         }
     }
 }
@@ -335,9 +421,26 @@ impl Default for CoordSettings {
 impl CoordSettings {
     /// Checks settings that came from a client: at most `COUNTED_TOOLS_MAX` counted
     /// tools, each 1 to `COUNTED_TOOL_BYTES_MAX` bytes of letters, digits, `_`, `-` and
-    /// `*`, none twice, and at most `ROLE_SKILLS_MAX` valid skill names per role, none
-    /// twice. Takes the settings. Returns Ok or `coord_settings_invalid`.
+    /// `*`, none twice, at most `ROLE_SKILLS_MAX` valid skill names per role, none twice,
+    /// and at most `SHARED_RESOURCES_MAX` shared resources with valid names, none twice,
+    /// each serving 1 to `RESOURCE_SLOTS_MAX` commands. Takes the settings. Returns Ok or
+    /// `coord_settings_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
+        let resources = self.shared_resources.len() <= SHARED_RESOURCES_MAX
+            && self
+                .shared_resources
+                .iter()
+                .enumerate()
+                .all(|(at, resource)| {
+                    resource_name_valid(&resource.name)
+                        && (1..=RESOURCE_SLOTS_MAX).contains(&resource.slots)
+                        && !self.shared_resources[..at]
+                            .iter()
+                            .any(|seen| seen.name == resource.name)
+                });
+        if !resources {
+            return Err(failure("coord_settings_invalid"));
+        }
         let name = |tool: &String| {
             !tool.is_empty()
                 && tool.len() <= COUNTED_TOOL_BYTES_MAX

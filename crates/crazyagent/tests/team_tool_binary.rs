@@ -3,7 +3,7 @@ use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
     AGENT_SERVER_COMMAND, ASK_TOOL, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND,
     MAILBOX_FOLDER, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL, REQUEST_ACCESS_TOOL,
-    SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, answer_call, take, take_calls,
+    SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL, answer_call, take, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
@@ -17,8 +17,15 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
     let arguments = [SERVER_COMMAND.to_owned(), record.display().to_string()];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),
-        [TOOL_NAME, ASK_TOOL, RECORD_TOOL, REQUEST_ACCESS_TOOL],
-        "the engine's own MCP check sees exactly the delegate tool and the master's question tools"
+        [
+            TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
+            WAKE_TOOL
+        ],
+        "the engine's own MCP check sees exactly the delegate tool, the master's question tools and wake"
     );
     let mailbox = record.with_file_name(MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
@@ -33,11 +40,31 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
             TOOL_NAME,
             ASK_TOOL,
             RECORD_TOOL,
+            WITHDRAW_TOOL,
             REQUEST_ACCESS_TOOL,
+            WAKE_TOOL,
             REMEMBER_TOOL,
             RECALL_TOOL
         ],
         "a master without its live terminal also gets its memory tools"
+    );
+    let conversing: Vec<String> = remembering
+        .iter()
+        .cloned()
+        .chain([WAKE_TOOL.to_owned()])
+        .collect();
+    assert_eq!(
+        check_stdio(engine, &conversing, &[], CHECK_TIME).unwrap(),
+        [
+            TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
+            REMEMBER_TOOL,
+            RECALL_TOOL
+        ],
+        "a conversation master's server leaves wake out"
     );
     let unknown = crazyagent::spawn_gate::output(
         Command::new(engine)
@@ -515,6 +542,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         AGENT_SERVER_COMMAND.to_owned(),
         mailbox.display().to_string(),
         RECORD_TOOL.to_owned(),
+        WITHDRAW_TOOL.to_owned(),
     ];
     assert_eq!(
         check_stdio(engine, &arguments, &[], CHECK_TIME).unwrap(),

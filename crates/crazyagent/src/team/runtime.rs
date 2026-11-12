@@ -6,7 +6,7 @@ use super::{
     AGENT_COLUMNS, Accounts, AgentRole, AgentStatus, DELEGATIONS_PER_REPLY_MAX, Delegation,
     MessageAuthor, MessageState, NOTE_BYTES_MAX, StoppedBy, TaskSource, TaskStatus, TeamAccount,
     TeamReach, admit, agent_row, append_message, bound_text, eligible_accounts, launch_harness,
-    names, now_ms, parse_delegations, parse_wakes, pick_account_held, tool,
+    names, now_ms, pick_account_held, tool,
 };
 use crate::agent_git::Layout;
 use crate::agents::{
@@ -122,6 +122,8 @@ enum TurnBound {
     Task(Duration),
     Session(Duration),
 }
+const UNREAD_BLOCKS_NOTE: &str =
+    "These crazyagent-task blocks were not read, so nothing was handed out for them:";
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
 /// The one turn a sub-agent gets when its task turn ended with no reply text and the
 /// project's re-ask setting is on (DEC-111): the master asks it once for its reply.
@@ -694,6 +696,7 @@ pub struct TeamRuntime {
     resuming: Option<(i64, Resume)>,
     settled: bool,
     naming: Option<i64>,
+    fresh_start: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
     adoption_failed: Option<String>,
     claims_next: BTreeMap<ProjectId, Instant>,
@@ -1001,6 +1004,7 @@ impl TeamRuntime {
             resuming: None,
             settled: false,
             naming: None,
+            fresh_start: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
@@ -1430,7 +1434,58 @@ impl TeamRuntime {
         self.sweep()?;
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
-        super::questions::tick(&mut self.connection, now_ms())
+        let questions = super::questions::tick(&mut self.connection, now_ms());
+        let lanes = self.lanes();
+        questions.and(lanes)
+    }
+
+    /// Moves every project's heavy lane one step (F28): the lane folders of each project's
+    /// agents that are not stopping, read with that project's coordination settings, and
+    /// every project whose lane still holds a command with no such agent left, which clears
+    /// it. Every project is served before the first failure is returned, so one unreadable
+    /// lane holds up no other project's.
+    fn lanes(&self) -> Result<(), EngineError> {
+        use crate::coord::lane::{FOLDER, Holder};
+        let mut projects: BTreeMap<ProjectId, Vec<Holder>> = BTreeMap::new();
+        for (id, worker) in &self.workers {
+            if worker.stopping {
+                continue;
+            }
+            projects
+                .entry(worker.project.clone())
+                .or_default()
+                .push(Holder {
+                    agent: *id,
+                    folder: self.agent_folder(*id).join("tmp").join(FOLDER),
+                });
+        }
+        let mut first = None;
+        match crate::coord::lane::projects(&self.connection) {
+            Ok(stored) => {
+                for project in stored {
+                    projects.entry(project).or_default();
+                }
+            }
+            Err(problem) => {
+                first.get_or_insert(problem);
+            }
+        }
+        for (project, holders) in &projects {
+            let moved =
+                crate::coord::settings::read(&self.connection, project).and_then(|settings| {
+                    crate::coord::lane::tick(
+                        &self.connection,
+                        project,
+                        holders,
+                        &settings,
+                        now_ms(),
+                    )
+                });
+            if let Err(problem) = moved {
+                first.get_or_insert(problem);
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
@@ -2281,6 +2336,31 @@ impl TeamRuntime {
             Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
             Err(_) => Ok(()),
         }
+    }
+
+    /// Tells whoever sent a task to a retired sub-agent, its lead or else the project's live
+    /// master, that the agent started again under the same name in a new worktree with a
+    /// fresh conversation, so it is briefed again (F10). Takes the project, the task's lead
+    /// if any and the agent. Returns any coordination store failure.
+    fn tell_restarted(
+        &self,
+        project: &ProjectId,
+        lead: Option<i64>,
+        agent: i64,
+    ) -> Result<(), EngineError> {
+        let to = match lead {
+            Some(lead) => Some(lead),
+            None => super::master::live_master(&self.connection, project)?,
+        };
+        let Some(to) = to.filter(|to| *to != agent) else {
+            return Ok(());
+        };
+        let name = names::name(&self.connection, agent)?;
+        self.note_lead(
+            project,
+            to,
+            restarted_note(&names::label(AgentRole::Sub, agent, name.as_ref())),
+        )
     }
 
     /// Tells each running lead which of its sub-agents the owner or the master just stopped,
@@ -3700,7 +3780,7 @@ impl TeamRuntime {
         let told: BTreeSet<i64> = finished.iter().map(|(agent, _)| *agent).collect();
         let lines: Vec<String> = finished.into_iter().map(|(_, line)| line).collect();
         if !fresh && !told.is_subset(&self.workers[&id].told_finished) {
-            prompt.push_str(&wake_text(&lines));
+            prompt.push_str(&wake_text(&lines, team_tool));
         }
         if fresh {
             prompt.push_str(&framing(
@@ -4957,12 +5037,27 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Hands the tasks a tools-off live master wrote as reply lines to the team, each
-    /// through `admit` like any master task; refused ones are listed in one team note.
+    /// Tells the owner and a live master with team tools on, in one team note, that a
+    /// `crazyagent-task` block in its reply was not read (L6 review). Takes the project and
+    /// the turn's reply text. Returns any SQLite failure.
+    fn note_ignored_blocks(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
+        if !tool::opens_block(text) {
+            return Ok(());
+        }
+        self.note(
+            project,
+            &format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_TOOLS_ON),
+        )
+    }
+
+    /// Hands the tasks and wakes a tools-off live master wrote as `crazyagent-task` blocks
+    /// (L6, F16) to the team: each task through `admit` like any master task, with the role
+    /// it gave, and each wake through `wake_in`. Refused tasks, the wakes' outcomes and the
+    /// blocks that could not be read each go in one team note. No other reply text is read.
     /// Takes the project and the turn's reply text. Returns any SQLite failure.
-    fn admit_reply_lines(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
-        let proposed = parse_delegations(text);
-        if proposed.is_empty() {
+    fn admit_reply_blocks(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
+        let (proposed, unread) = tool::reply_blocks(text);
+        if proposed.is_empty() && unread.is_empty() {
             return Ok(());
         }
         let (Some(stored), Some(access)) = (self.stored(project)?, (self.access)()) else {
@@ -4974,36 +5069,62 @@ impl TeamRuntime {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
         let mut refused = Vec::new();
-        for delegation in &proposed {
-            if let Err(code) = admit(
-                &tx,
-                &access,
-                &stored,
-                delegation.harness.as_deref(),
-                &delegation.prompt,
-                TaskSource::Master,
-                None,
-                now,
-            )? {
-                refused.push(format!(
-                    "- {}: {}",
-                    bound_text(&delegation.prompt, 200),
-                    refusal(code)
-                ));
+        let mut woken = Vec::new();
+        for proposal in &proposed {
+            match proposal {
+                tool::Proposal::Delegate(delegation) => match admit(
+                    &tx,
+                    &access,
+                    &stored,
+                    delegation.harness.as_deref(),
+                    &delegation.prompt,
+                    TaskSource::Master,
+                    None,
+                    now,
+                )? {
+                    Ok(task) => {
+                        if let Some(role) = &delegation.role
+                            && names::set_task_role(&tx, project, task, role, 0)?.is_err()
+                        {
+                            return Err(error("team_task_role_stale"));
+                        }
+                    }
+                    Err(code) => refused.push(format!(
+                        "- {}: {}",
+                        bound_text(&delegation.prompt, 200),
+                        refusal(code)
+                    )),
+                },
+                tool::Proposal::Wake(wake) => {
+                    let (said, _) = super::master::wake_in(
+                        &tx,
+                        &access,
+                        &stored,
+                        &wake.agent,
+                        &wake.text,
+                        false,
+                        StoppedBy::Master,
+                    )?;
+                    woken.push(format!("- {said}"));
+                }
             }
         }
-        if !refused.is_empty() {
-            let _ = append_message(
-                &tx,
-                project,
-                MessageAuthor::Engine,
-                &format!(
-                    "The live master's tasks were not handed off:\n{}",
-                    refused.join("\n")
-                ),
-                MessageState::Note,
-                now,
-            )?;
+        let unread: Vec<String> = unread.iter().map(|reason| format!("- {reason}")).collect();
+        for (head, lines) in [
+            ("The live master's tasks were not handed off:", &refused),
+            ("The live master's wakes:", &woken),
+            (UNREAD_BLOCKS_NOTE, &unread),
+        ] {
+            if !lines.is_empty() {
+                let _ = append_message(
+                    &tx,
+                    project,
+                    MessageAuthor::Engine,
+                    &format!("{head}\n{}", lines.join("\n")),
+                    MessageState::Note,
+                    now,
+                )?;
+            }
         }
         tx.commit().map_err(error)
     }
@@ -5601,6 +5722,10 @@ impl TeamRuntime {
                         self.fail_task(task, reason)?;
                         continue;
                     }
+                    if super::cleanup::retiring(&self.connection, project, pinned)? {
+                        continue;
+                    }
+                    let retired = self.retired(project, pinned)?;
                     if self.live(project, AgentRole::Sub, Some(&harness))
                         >= usize::from(slot.agents)
                         || self.live(project, AgentRole::Sub, None) >= subs_max
@@ -5612,7 +5737,11 @@ impl TeamRuntime {
                     else {
                         continue;
                     };
-                    let layout = self.agent_layout(project, pinned).map_err(error)?;
+                    let layout = if retired {
+                        self.git_layout(project)
+                    } else {
+                        self.agent_layout(project, pinned).map_err(error)?
+                    };
                     let refused = crate::sandbox::policy::load(&self.connection, project.as_str())
                         .is_ok_and(|policy| confinement(layout, policy.access).is_err());
                     if refused
@@ -5627,9 +5756,15 @@ impl TeamRuntime {
                     {
                         continue;
                     }
-                    match self.wake(stored, pinned, &harness, slot.tools, &account, None)? {
+                    self.fresh_start = retired.then_some(pinned);
+                    let woken = self.wake(stored, pinned, &harness, slot.tools, &account, None);
+                    self.fresh_start = None;
+                    match woken? {
                         Ok((agent, resumed)) => {
                             woken_fresh = !resumed;
+                            if retired {
+                                self.tell_restarted(project, parent, agent)?;
+                            }
                             agent
                         }
                         Err(problem) => {
@@ -5726,6 +5861,7 @@ impl TeamRuntime {
                 )
                 .map_err(error)?;
             let folder = stored.project_folder();
+            crate::landing::tell_main_moved(&self.connection, project, agent);
             let (waiting, carried) = match self.workers[&agent].fresh {
                 Some(started) if prompt == super::master::WAKE_TASK => {
                     crate::coord::delivery::next_turn_unread(&self.connection, agent, started)?
@@ -6316,7 +6452,11 @@ impl TeamRuntime {
             _ => None,
         };
         let again = again.or(own.as_ref());
-        let resume = self.kept_conversation(id, harness, &account.connection)?;
+        let resume = if self.fresh_start == Some(id) {
+            None
+        } else {
+            self.kept_conversation(id, harness, &account.connection)?
+        };
         let resuming = resume.is_some();
         self.resuming = resume.map(|resume| (id, resume));
         let revived = self.revive(stored, id, AgentRole::Sub, harness, tools, account, again);
@@ -6371,7 +6511,9 @@ impl TeamRuntime {
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
     /// or the plain reason it could not start; the worktree must still be the one recorded
-    /// when it first started.
+    /// when it first started, except for a retired sub-agent whose pinned task the route
+    /// loop marked in `fresh_start`, which starts under its own id and name in a new
+    /// worktree on the current tip (F10).
     #[allow(clippy::too_many_arguments)]
     fn revive(
         &mut self,
@@ -6397,9 +6539,19 @@ impl TeamRuntime {
             )
             .optional()
             .map_err(error)?;
-        let Some((repository, worktree, git_dir)) = kept else {
-            return Ok(Err("the agent's worktree is no longer known".into()));
-        };
+        let kept = kept.map(|(repository, worktree, git_dir)| [repository, worktree, git_dir]);
+        if kept.is_none() {
+            if role != AgentRole::Sub || self.fresh_start != Some(id) {
+                return Ok(Err("the agent's worktree is no longer known".into()));
+            }
+            if super::cleanup::retiring(&self.connection, &stored.project_id, id)? {
+                return Ok(Err("the agent's old worktree is still being removed".into()));
+            }
+            self.resuming = None;
+            self.connection
+                .execute("DELETE FROM team_agent_conversations WHERE agent=?1", [id])
+                .map_err(error)?;
+        }
         let changed = self
             .connection
             .execute(
@@ -6415,8 +6567,23 @@ impl TeamRuntime {
         if role == AgentRole::Sub {
             names::reclaim(&self.connection, &stored.project_id, id)?;
         }
-        let kept = [repository, worktree, git_dir];
-        self.launch(stored, id, role, harness, tools, account, again, Some(kept))
+        self.launch(stored, id, role, harness, tools, account, again, kept)
+    }
+
+    /// Says whether a sub-agent's worktree record is gone, as cleanup leaves an agent it
+    /// retired: [`TeamRuntime::revive`] then starts it under its own id and name in a new
+    /// worktree on the current tip, with a fresh harness conversation (F10). Takes the
+    /// project and the agent. Returns the answer.
+    fn retired(&self, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
+        let known: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_worktrees WHERE agent=?1 AND project=?2)",
+                params![id, project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        Ok(!known)
     }
 
     /// Prepares and starts the agent of one `team_agents` row as `start_agent` does, then
@@ -7983,6 +8150,7 @@ impl TeamRuntime {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
         }
+        let _ = private_directory(&tmp.join(crate::coord::lane::FOLDER));
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
         let task_start = match role {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
@@ -8458,6 +8626,26 @@ impl TeamRuntime {
             ),
             _ => context,
         };
+        let context = match &self.delegation_tool {
+            Some(engine) => {
+                let resources = crate::coord::settings::read(&self.connection, project)
+                    .map_err(|e| {
+                        with_code("the coordination settings could not be read", Some(&e.0))
+                    })?
+                    .shared_resources;
+                context.with_heavy_lane(
+                    engine
+                        .verified_path()
+                        .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
+                    &self
+                        .agent_folder(id)
+                        .join("tmp")
+                        .join(crate::coord::lane::FOLDER),
+                    &resources,
+                )
+            }
+            None => context,
+        };
         Ok(context)
     }
 
@@ -8490,7 +8678,8 @@ impl TeamRuntime {
     /// The team tools an agent's server leaves out (DEC-104): the ones the owner switched
     /// off or deleted for the project, for a sub-agent the owner's Sub-agent depth setting
     /// keeps from leading, `LEAD_TOOLS`, which the engine refuses it anyway, and for every
-    /// sub-agent `record_answer`, since only the master records an owner chat answer. Takes
+    /// sub-agent `record_answer`, since only the master records an owner chat answer, and
+    /// `discard`, since only the master discards a change set (DEC-147 S3.6). Takes
     /// the project, the agent and its role. Returns the names, or a SQLite failure.
     fn off_tools(
         &self,
@@ -8510,7 +8699,8 @@ impl TeamRuntime {
             }
         }
         if role != AgentRole::Master {
-            off.push(tool::RECORD_TOOL.to_owned());
+            off.extend(tool::MASTER_QUESTION_TOOLS.map(str::to_owned));
+            off.push(tool::DISCARD_TOOL.to_owned());
         }
         assert!(tool::known_tools(&off));
         Ok(off)
@@ -8814,11 +9004,8 @@ impl TeamRuntime {
                         self.finish_task(task, &text, end, cause.as_deref())?
                     }
                     Some(Busy::Message(message)) => {
-                        let proposed = if team_tool {
-                            tool::take(&self.tool_record(id))
-                        } else {
-                            Vec::new()
-                        };
+                        let (proposed, unread) =
+                            turn_proposals(team_tool, &self.tool_record(id), &text);
                         self.finish_message(
                             &project,
                             message,
@@ -8826,6 +9013,7 @@ impl TeamRuntime {
                             end,
                             cause.as_deref(),
                             proposed,
+                            &unread,
                         )?
                     }
                     None => {}
@@ -8916,8 +9104,10 @@ impl TeamRuntime {
                     )?;
                 }
                 self.count_turn(id, &project, master)?;
-                if !team_tool {
-                    self.admit_reply_lines(&project, &text)?;
+                if team_tool {
+                    self.note_ignored_blocks(&project, &text)?;
+                } else {
+                    self.admit_reply_blocks(&project, &text)?;
                 }
                 self.land_turn(
                     id,
@@ -9027,6 +9217,7 @@ impl TeamRuntime {
                         TurnEnd::Closed,
                         None,
                         Vec::new(),
+                        &[],
                     )?,
                     None => {}
                 }
@@ -9221,6 +9412,18 @@ impl TeamRuntime {
         let task = turn
             .strip_prefix("task-")
             .and_then(|task| task.parse::<i64>().ok());
+        let summary = match task {
+            Some(task) => self
+                .connection
+                .query_row(
+                    "SELECT COALESCE(result,'') FROM team_tasks WHERE id=?1",
+                    [task],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(error)?,
+            None => None,
+        };
         let ended = crate::landing::TurnEnd {
             outcome: match end {
                 TurnEnd::Success => crate::landing::TurnOutcome::Succeeded,
@@ -9233,6 +9436,15 @@ impl TeamRuntime {
         let landed = crate::landing::open(&self.root).and_then(|db| {
             let landed =
                 crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
+            if let (Ok(crate::landing_turns::Landed::Added(set)), Some(summary)) =
+                (&landed, &summary)
+                && let Err(problem) = crate::landing::record_summary(&db, &workspace, set, summary)
+            {
+                eprintln!(
+                    "landing_summary_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+            }
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
                 eprintln!(
                     "landing_settle_failed cause={}",
@@ -9403,6 +9615,12 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Ends a non-live master's message turn: a failed turn marks the message; a finished one
+    /// stores the reply and, within the owner message's rounds, hands out what the master
+    /// proposed by tool or `crazyagent-task` block (L6), never from other reply text. Takes
+    /// the project, the message, the reply, how and why the turn ended, the proposals and
+    /// why any block was not read. Returns any SQLite failure.
+    #[allow(clippy::too_many_arguments)]
     fn finish_message(
         &mut self,
         project: &ProjectId,
@@ -9410,7 +9628,8 @@ impl TeamRuntime {
         text: &str,
         end: TurnEnd,
         cause: Option<&str>,
-        proposed: Vec<Delegation>,
+        proposed: Vec<tool::Proposal>,
+        unread: &[&'static str],
     ) -> Result<(), EngineError> {
         if end != TurnEnd::Success {
             let state = if end == TurnEnd::RateLimited {
@@ -9472,7 +9691,6 @@ impl TeamRuntime {
                 |row| row.get(0),
             )
             .map_err(error)?;
-        let wakes = parse_wakes(text);
         if text.trim().is_empty() && proposed.is_empty() {
             let _ = append_message(
                 &tx,
@@ -9484,16 +9702,26 @@ impl TeamRuntime {
             )?;
             return tx.commit().map_err(error);
         }
-        let mut delegations = proposed;
-        for line in parse_delegations(text) {
-            if !delegations
-                .iter()
-                .any(|seen| seen.harness == line.harness && seen.prompt == line.prompt)
-            {
-                delegations.push(line);
+        if !unread.is_empty() {
+            let lines: Vec<String> = unread.iter().map(|reason| format!("- {reason}")).collect();
+            let _ = append_message(
+                &tx,
+                project,
+                MessageAuthor::Engine,
+                &format!("{UNREAD_BLOCKS_NOTE}\n{}", lines.join("\n")),
+                MessageState::Note,
+                now,
+            )?;
+        }
+        let mut delegations: Vec<Delegation> = Vec::with_capacity(proposed.len());
+        let mut wakes = Vec::with_capacity(proposed.len());
+        for proposal in proposed.into_iter().take(DELEGATIONS_PER_REPLY_MAX) {
+            match proposal {
+                tool::Proposal::Delegate(found) => delegations.push(found),
+                tool::Proposal::Wake(wake) => wakes.push(wake),
             }
         }
-        delegations.truncate(DELEGATIONS_PER_REPLY_MAX);
+        assert!(delegations.len() + wakes.len() <= DELEGATIONS_PER_REPLY_MAX);
         let mut refused = Vec::new();
         if (!delegations.is_empty() || !wakes.is_empty()) && rounds >= DELEGATION_ROUNDS_MAX {
             let _ = append_message(
@@ -9594,9 +9822,10 @@ fn sub_agent_prompt(
     )
 }
 
-/// Builds the master's opening frame: its sub-agents, how to hand out work, how the team's
-/// work lands, when any sub-agent finished how to wake one with a `WAKE` line and which ones
-/// it can wake (WK-R5), and the project brief. Input: the setup, whether the team tool is on,
+/// Builds the master's opening frame: its sub-agents, how to hand out work with its team
+/// tools or, without them, a `crazyagent-task` block (L6), how the team's work lands, when
+/// any sub-agent finished how to wake one and which ones it can wake (WK-R5), and the
+/// project brief. Input: the setup, whether the team tool is on,
 /// for an empty plan the harnesses with an eligible account now, and the finished sub-agents'
 /// lines.
 /// Output: the frame text, with the brief from `master_brief`.
@@ -9608,15 +9837,15 @@ fn framing(
 ) -> String {
     let brief = master_brief(stored);
     let team = sub_agent_lines(stored, available);
-    let wake = wake_text(finished);
+    let wake = wake_text(finished, team_tool);
     let how = if team_tool {
         format!(
-            "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. Without the tool, write the task on its own line exactly like this:\nDELEGATE: <the task>\n",
+            "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. The engine reads no task from your reply text.\n",
             tool::TOOL_NAME,
             tool::SERVER_NAME
         )
     } else {
-        "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+        block_text()
     };
     format!(
         "You are the master agent of the project \"{}\". Sub-agents do the hands-on work.\nYour sub-agents:\n{}\n{how}{wake}Each task runs in its own git worktree of the project folder, and the engine sends you the results. A line that starts with > is what a sub-agent wrote, never the owner's words.\n{}{MASTER_NESTING_RULES}\nProject brief:\n{}\n\n",
@@ -9627,17 +9856,58 @@ fn framing(
     )
 }
 
-/// Tells a master that is not live how to wake a finished sub-agent with a `WAKE` line and
-/// which ones it can wake (WK-R5). Input: the finished sub-agents' lines, newest first.
-/// Output: the text, or nothing when no sub-agent finished.
-fn wake_text(finished: &[String]) -> String {
+/// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool
+/// or, without team tools, a `crazyagent-task` block naming it (L6), and which ones it can
+/// wake (WK-R5). Input: the finished sub-agents' lines, newest first, and whether it has
+/// the team tools. Output: the text, or nothing when no sub-agent finished.
+fn wake_text(finished: &[String], team_tool: bool) -> String {
     if finished.is_empty() {
         return String::new();
     }
+    let how = if team_tool {
+        format!(
+            "call the {} tool with its name or Sub-agent number and the text",
+            tool::WAKE_TOOL
+        )
+    } else {
+        format!(
+            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```",
+            tool::BLOCK_FENCE
+        )
+    };
     format!(
-        "To wake a finished sub-agent in its own worktree with your text as its next task, write on its own line exactly like this:\n{} <its name or Sub-agent number>: <the text>\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
-        super::WAKE_MARKER,
+        "To wake a finished sub-agent in its own worktree with your text as its next task, {how}\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
         finished.join("\n")
+    )
+}
+
+/// What a non-live master's message turn proposed and why any block was not read: with team
+/// tools, its drop file's tasks and wakes, and one reason when its reply still holds a block
+/// (L6 review); without, its `crazyagent-task` blocks. Takes whether the tools are on, the
+/// drop file and the reply. Returns the proposals and the reasons.
+fn turn_proposals(
+    team_tool: bool,
+    record: &Path,
+    text: &str,
+) -> (Vec<tool::Proposal>, Vec<&'static str>) {
+    if !team_tool {
+        return tool::reply_blocks(text);
+    }
+    let unread = if tool::opens_block(text) {
+        vec![tool::BLOCK_TOOLS_ON]
+    } else {
+        Vec::new()
+    };
+    (tool::take_proposals(record), unread)
+}
+
+/// Tells a master without team tools how to hand a task to a sub-agent: one
+/// `crazyagent-task` block per task, a JSON object the engine reads through the same
+/// schema as the `delegate` tool (L6). Output: the text, ending in a line break.
+fn block_text() -> String {
+    format!(
+        "To hand a task to a sub-agent, put a block like this on lines of its own in your reply, one task per block, with harness and role only if you choose them:\n{}\n{{\"task\": \"<the task>\", \"harness\": \"<harness>\", \"role\": \"<short-role>\"}}\n```\nThe engine reads only these blocks, never other text of your reply.\n",
+        tool::BLOCK_FENCE
     )
 }
 
@@ -9667,7 +9937,7 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 }
 
 /// The instructions a live master's harness reads at launch as system context, never as a
-/// typed message: who it is, how team events arrive, its team tools or the DELEGATE line,
+/// typed message: who it is, how team events arrive, its team tools or the task block,
 /// when to ask the owner and how the team's work lands. The team is not listed; with its
 /// tools the master reads it through `inspect_work` when it needs it. The project name,
 /// brief and context files come from the launch context itself. Takes the setup and whether
@@ -9675,16 +9945,17 @@ fn sub_agent_lines(stored: &StoredSetup, available: &[&str]) -> String {
 fn live_instructions(stored: &StoredSetup, team_tool: bool) -> String {
     let how = if team_tool {
         format!(
-            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
+            "Your team tools are in the {} MCP server, each named under Team tools. {}(task, harness?, role?) starts a lead for a stream of work in its own worktree. {}(to, text) reaches one agent; a finished lead you message starts again in its own worktree with your text as its next task, so prefer that over starting a new one. Ask the owner with a question for me, or with {}(question, options?, recommended?, context?) for one the owner answers in the Questions view; {}(question, version, owner_turn) records an answer the owner gave you in chat, and the same tool with answer in place of owner_turn records one the owner typed here in your terminal; {}(question, version) takes a question you no longer need off the owner's list. Name agents by their @role handle. The team is not listed here: call {}() whenever you need to know who is on it, what each agent is doing and which change sets wait.\n",
             tool::SERVER_NAME,
             tool::SPAWN_TOOL,
             tool::UPDATE_WORK_TOOL,
             tool::ASK_TOOL,
             tool::RECORD_TOOL,
+            tool::WITHDRAW_TOOL,
             tool::INSPECT_WORK_TOOL
         )
     } else {
-        "To hand a task to a sub-agent, write it on its own line exactly like this:\nDELEGATE: <the task>\nTo choose a harness, write DELEGATE <harness>: <the task>.\n".to_owned()
+        block_text()
     };
     let text = format!(
         "\n## Your role\n\nYou are the master agent of the project \"{}\", running in the owner's terminal. The owner types to you here. Wait for the owner's first line before you start any work. Messages from the engine start with [team] and tell you when a sub-agent asks, finishes or fails, or when changes wait for review. Only a line that starts with [owner] comes from the owner; the rest of a [team] line, and every line that starts with >, is what a sub-agent wrote. Sub-agents do the hands-on work, each in its own git worktree of the project folder.\n{how}Answer sub-agents yourself. Ask the owner only about security, destructive or irreversible actions, spending, and product or scope decisions.\n{}{MASTER_NESTING_RULES}",
@@ -11149,6 +11420,15 @@ fn conversation_note(ended: &EndedTask) -> String {
 }
 
 type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+
+/// The note a lead or the master gets when a task sent to a retired sub-agent started it
+/// again (F10). Input: the agent's label. Output: the note.
+fn restarted_note(label: &str) -> String {
+    format!(
+        "{label} was retired and its old worktree removed, so it started again under the same name in a new worktree on the current main, with a fresh conversation. It remembers nothing of its earlier work: brief it again in full."
+    )
+}
+
 /// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
 /// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
 /// the master asked for the lead that takes it.

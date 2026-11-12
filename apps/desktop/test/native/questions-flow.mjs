@@ -48,6 +48,7 @@ const SLICES = {
   "RM-1": "feat/v2-roadmap-job: planning job, context/roadmap.md, context/release-process.md, open points",
   "RM-2": "feat/v2-roadmap-ui: roadmap toggle, Plan roadmap now, planning_busy (then regenerate routes)",
   "OB-9": "fix/v221-ob9-questions-inline: the Questions show setting and the questions pop-up on project tabs",
+  "S4": "fix/v232-questions: withdraw_question, record_answer from the master's terminal, ask replaces, Dismiss all",
 };
 const ASKS = {
   view: { question: "Which database should the plant shop use?", options: ["Postgres", "SQLite", "MySQL"], recommended: "Postgres", context: "The shop keeps orders and stock." },
@@ -57,6 +58,9 @@ const ASKS = {
   popup: { question: "Should the shop offer gift wrapping?", options: ["Yes", "No"], recommended: "Yes" },
   every: { question: "Should the shop show how many plants are in stock?", options: ["Yes", "No"], recommended: "No" },
   tabOnly: { question: "Should the shop ship plants abroad?", options: ["Yes", "No"], recommended: "No" },
+  withdraw: { question: "Should the shop sell seeds too?", options: ["Yes", "No"], recommended: "No" },
+  bulkFirst: { question: "Should the shop offer plant care tips?", options: ["Yes", "No"], recommended: "Yes" },
+  bulkSecond: { question: "Should the shop take returns?", options: ["Yes", "No"], recommended: "Yes" },
 };
 const POPUP = "section.qp-popup";
 const POPUP_QUIET_MS = 12000;
@@ -456,7 +460,7 @@ async function main() {
     return receipt.project_id;
   };
   const question = (id) => {
-    const [row] = rows(database, "SELECT id, project, asker, status, answer, answered_by FROM questions_log WHERE id = ?", id);
+    const [row] = rows(database, "SELECT id, project, asker, status, answer, answered_by, closed_by FROM questions_log WHERE id = ?", id);
     return row ?? null;
   };
   const delivered = (id, verb) => `The owner ${verb} your question ${id} (`;
@@ -647,6 +651,46 @@ async function main() {
         if (back !== 0) throw new Refused("chat_answer_delivered_back", `${back} deliveries`);
         if (question(id).answer !== row.answer) throw new Refused("second_record_changed_the_answer");
         return `recorded from owner message ${message.id}; second record ${again.error ? "refused" : "answered"}: ${again.text.slice(0, 80)}`;
+      });
+
+      await step("6a", "the master withdraws its question: it leaves the list as withdrawn by the master, a second withdrawal is refused and nothing is sent back", ["S4"], async () => {
+        const control = needs(state.control, "0");
+        const id = await ask("withdraw");
+        const view = onPage();
+        await view.waitFor("the question to withdraw", (text) => text.includes(ASKS.withdraw.question), VIEW_MS);
+        const withdrawn = await toolCall(control, "withdraw_question", { question: id, version: 0 });
+        if (withdrawn.error) throw new Refused("withdraw_refused", withdrawn.text);
+        const row = question(id);
+        if (row?.status !== "dismissed" || row.closed_by !== "master") throw new Refused("not_withdrawn", JSON.stringify(row));
+        const again = await toolCall(control, "withdraw_question", { question: id, version: 0 });
+        if (!again.error) throw new Refused("second_withdrawal_taken", again.text);
+        await view.waitFor("the withdrawn card", (text) => text.includes(ASKS.withdraw.question) && text.includes("Withdrawn by the master"), VIEW_MS);
+        await view.capture("questions-withdrawn");
+        await pause(QUIET_MS);
+        const back = typedCount(control, delivered(id, "dismissed")) + deliveredRows(id, "dismissed").length;
+        if (back !== 0) throw new Refused("withdrawal_delivered_back", `${back} deliveries`);
+        return `withdrawn; second withdrawal refused: ${again.text.slice(0, 80)}`;
+      });
+
+      await step("6a2", "Dismiss all: two waiting questions leave the list after one confirm, each asker is told once and a second Dismiss all of the same versions is stale", ["S4"], async () => {
+        const ids = [await ask("bulkFirst"), await ask("bulkSecond")];
+        const view = onPage();
+        await view.waitFor("two waiting questions and Dismiss all", (text) => text.includes(ASKS.bulkFirst.question) && text.includes(ASKS.bulkSecond.question) && text.includes("Dismiss all"), VIEW_MS);
+        await view.click("Dismiss all");
+        await view.waitFor("the Dismiss all confirmation", (text) => text.includes("Dismiss 2 questions?") && text.includes("Keep them"));
+        await view.capture("questions-dismiss-all-confirm");
+        await view.click("Dismiss all", "dialog button");
+        await view.waitFor("the Dismiss all note", (text) => text.includes("Dismissed 2 questions."), VIEW_MS);
+        await view.capture("questions-dismissed-all");
+        for (const id of ids) {
+          if (question(id)?.status !== "dismissed") throw new Refused("not_dismissed_by_all", JSON.stringify(question(id)));
+          await deliveredOnce(id, "dismissed", "No answer comes.");
+        }
+        const again = await value("desktop_dismiss_questions", { items: ids.map((id) => [id, 0]) });
+        if (again.settled.length !== 0 || again.stale.length !== 2) throw new Refused("second_dismiss_all_not_stale", JSON.stringify(again));
+        const empty = await call("desktop_dismiss_questions", { items: [] });
+        if (empty.failure?.code !== "questions_bulk_invalid") throw new Refused("empty_dismiss_all_taken", JSON.stringify(empty));
+        return `dismissed ${ids.join(", ")} with one confirm; each told once; a repeat is stale`;
       });
 
       const popupText = () => page.evaluate(`document.querySelector(${JSON.stringify(POPUP)})?.innerText ?? ""`);

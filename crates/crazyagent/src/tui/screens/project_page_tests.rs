@@ -5061,6 +5061,7 @@ fn with_the_move_banner_showing_accept_waits_for_the_moved_diffs_last_line_paint
         outside: false,
         regenerated: Vec::new(),
         number: None,
+        landing_result: crate::landing::LandingResult::None,
     };
     let page = |text: &str, next: Option<u16>| {
         Ok(ChangesView::Diff(ChangeDiff {

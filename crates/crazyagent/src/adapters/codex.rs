@@ -527,6 +527,7 @@ pub struct CodexProtocol {
     refused: Option<String>,
     children: Children,
     steps: Steps,
+    frame_max: usize,
 }
 
 impl Default for CodexProtocol {
@@ -551,10 +552,27 @@ impl CodexProtocol {
             refused: None,
             children: Children::default(),
             steps: Steps::default(),
+            frame_max: FRAME_BYTES_MAX,
         };
         protocol.assert_consistent();
         assert_eq!(protocol.phase, State::New);
         protocol
+    }
+
+    /// Bounds each frame this protocol writes by the owner's master frame size limit (F39)
+    /// in place of the engine wire frame. Input: the bound in bytes, from `FRAME_BYTES_MAX`
+    /// to `master_frame_limit::BYTES_MAX`; another bound is a caller fault. Output: the
+    /// protocol with that bound.
+    pub fn with_frame_limit(mut self, bytes: usize) -> Self {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        self.frame_max = bytes;
+        self.assert_consistent();
+        self
+    }
+
+    /// The bound on each frame this protocol writes. Input: none. Output: the bytes.
+    pub fn frame_limit(&self) -> usize {
+        self.frame_max
     }
 
     /// The steps the current turn has taken, as the master step limit counts them: model
@@ -586,7 +604,7 @@ impl CodexProtocol {
 
     pub fn initialized(&mut self) -> Result<Vec<u8>, ProtocolError> {
         self.require(State::Initialized)?;
-        let bytes = encode(json!({"method":"initialized"}))?;
+        let bytes = encode(json!({"method":"initialized"}), self.frame_max)?;
         self.phase = State::Ready;
         self.assert_consistent();
         assert!(self.pending.is_none());
@@ -742,7 +760,7 @@ impl CodexProtocol {
         if text.trim().is_empty() || text.contains('\0') {
             return Err(ProtocolError::InvalidInput);
         }
-        if text.len() > FRAME_BYTES_MAX {
+        if text.len() > self.frame_max {
             return Err(ProtocolError::FrameTooLarge);
         }
         if self.seen_turns.len() == TURNS_MAX {
@@ -802,9 +820,12 @@ impl CodexProtocol {
         }
         let id = self.next_id;
         let next = id.checked_add(1).ok_or(ProtocolError::Capacity)?;
-        let bytes = encode(json!({
-            "id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}
-        }))?;
+        let bytes = encode(
+            json!({
+                "id":id,"method":"turn/interrupt","params":{"threadId":thread_id,"turnId":turn_id}
+            }),
+            self.frame_max,
+        )?;
         self.children.interrupt(id, thread_id)?;
         self.next_id = next;
         assert!(self.children.interrupts.contains_key(&id));
@@ -830,7 +851,7 @@ impl CodexProtocol {
                 "code":-32601,"message":"unsupported native request"
             }}),
         };
-        let bytes = encode(value)?;
+        let bytes = encode(value, self.frame_max)?;
         let removed = self.server_requests.remove(id);
         assert!(removed.is_some());
         self.assert_consistent();
@@ -867,6 +888,7 @@ impl CodexProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.next_id > 0);
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&self.frame_max));
         assert!(self.turn.is_some() || self.steps == Steps::default());
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
         assert!(self.seen_turns.len() <= TURNS_MAX);
@@ -980,7 +1002,10 @@ impl CodexProtocol {
         assert!(self.pending.is_none());
         assert!(self.next_id > 0);
         let next = self.next_id.checked_add(1).ok_or(ProtocolError::Capacity)?;
-        let bytes = encode(json!({"id":self.next_id,"method":operation.method(),"params":params}))?;
+        let bytes = encode(
+            json!({"id":self.next_id,"method":operation.method(),"params":params}),
+            self.frame_max,
+        )?;
         self.pending = Some((self.next_id, operation));
         self.next_id = next;
         self.assert_consistent();
@@ -1633,13 +1658,16 @@ impl CodexProtocol {
     }
 }
 
-fn encode(value: Value) -> Result<Vec<u8>, ProtocolError> {
+/// Encodes one outbound frame as a JSON line. Input: the value and the bound on the frame,
+/// its newline included. Output: the line, or `FrameTooLarge` when it would pass the bound.
+fn encode(value: Value, frame_max: usize) -> Result<Vec<u8>, ProtocolError> {
+    assert!(frame_max >= FRAME_BYTES_MAX);
     let mut bytes = serde_json::to_vec(&value).map_err(|_| ProtocolError::InvalidInput)?;
-    if bytes.len() >= FRAME_BYTES_MAX {
+    if bytes.len() >= frame_max {
         return Err(ProtocolError::FrameTooLarge);
     }
     bytes.push(b'\n');
-    assert!(bytes.len() <= FRAME_BYTES_MAX);
+    assert!(bytes.len() <= frame_max);
     assert_eq!(bytes.last(), Some(&b'\n'));
     Ok(bytes)
 }

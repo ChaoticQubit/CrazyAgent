@@ -137,10 +137,23 @@ CREATE TABLE IF NOT EXISTS tool_switches (
     tool TEXT NOT NULL,
     switch TEXT NOT NULL,
     PRIMARY KEY(scope_project, server, tool)
-);";
+);
+CREATE TABLE IF NOT EXISTS coord_lane (
+    project TEXT NOT NULL,
+    agent INTEGER NOT NULL,
+    ticket TEXT NOT NULL,
+    uses TEXT NOT NULL,
+    label TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    created_ms INTEGER NOT NULL,
+    seen_ms INTEGER NOT NULL,
+    granted_ms INTEGER,
+    PRIMARY KEY(agent, ticket)
+);
+CREATE INDEX IF NOT EXISTS coord_lane_project ON coord_lane(project, seq);";
 
 /// The coordination tables a project's removal clears by their `project` column.
-const REMOVED_WITH_PROJECT: [&str; 10] = [
+const REMOVED_WITH_PROJECT: [&str; 11] = [
     "coord_work",
     "coord_messages",
     "coord_claims",
@@ -151,6 +164,7 @@ const REMOVED_WITH_PROJECT: [&str; 10] = [
     "coord_audit",
     "coord_settings",
     "coord_harness_settings",
+    "coord_lane",
 ];
 
 /// Creates the coordination tables (DEC-104) when they are missing, like the team

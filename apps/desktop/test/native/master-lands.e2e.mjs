@@ -236,7 +236,7 @@ test("at Full access Merge into main itself lands the master's conflict fix on m
   });
 });
 
-test("at Full access Ask me before merging on leaves the master's fix in Changes under Merge into main itself", { timeout: 600000 }, async (t) => {
+test("at Full access Master accepts change sets at Only when I click or say accept all leaves the master's fix in Changes under Merge into main itself", { timeout: 600000 }, async (t) => {
   await withProject(t, "full", async (run) => {
     const { open, masterFix, changes, status, activity, repo, askBeforeMerging } = run;
     await open("agents?section=access", SETTING);

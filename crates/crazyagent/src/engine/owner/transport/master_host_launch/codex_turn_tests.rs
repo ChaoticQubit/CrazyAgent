@@ -314,6 +314,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             crate::team::tool::TOOL_NAME,
             crate::team::tool::ASK_TOOL,
             crate::team::tool::RECORD_TOOL,
+            crate::team::tool::WITHDRAW_TOOL,
             crate::team::tool::REMEMBER_TOOL
         ],
         "a console master with tools asks the owner and remembers through the engine, less the tools switched off"
@@ -438,7 +439,10 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     };
     assert_eq!(
         require_master_tool_policy(
-            &served(&engine, &[&record, &mailbox, Path::new("recall")]),
+            &served(
+                &engine,
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")]
+            ),
             Some(tools)
         ),
         Ok(())
@@ -448,24 +452,42 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             "another executable",
             served(
                 Path::new("/usr/bin/true"),
-                &[&record, &mailbox, Path::new("recall")],
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")],
             ),
         ),
         (
             "a link to the engine",
-            served(&link, &[&record, &mailbox, Path::new("recall")]),
+            served(
+                &link,
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")],
+            ),
         ),
         (
             "a hard link to the engine",
-            served(&hard, &[&record, &mailbox, Path::new("recall")]),
+            served(
+                &hard,
+                &[&record, &mailbox, Path::new("recall"), Path::new("wake")],
+            ),
         ),
         (
             "another turn's drop file",
-            served(&engine, &[&other_drop, &mailbox, Path::new("recall")]),
+            served(
+                &engine,
+                &[
+                    &other_drop,
+                    &mailbox,
+                    Path::new("recall"),
+                    Path::new("wake"),
+                ],
+            ),
         ),
         (
             "a switched-off tool listed again",
-            served(&engine, &[&record, &mailbox]),
+            served(&engine, &[&record, &mailbox, Path::new("wake")]),
+        ),
+        (
+            "wake listed for a conversation master",
+            served(&engine, &[&record, &mailbox, Path::new("recall")]),
         ),
         (
             "an extra argument",
@@ -475,6 +497,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
                     &record,
                     &mailbox,
                     Path::new("recall"),
+                    Path::new("wake"),
                     Path::new("--verbose"),
                 ],
             ),

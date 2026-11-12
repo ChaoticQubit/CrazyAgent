@@ -27,6 +27,7 @@ crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
 crazyagent coord-watch MAILBOX_DIR\n\
+crazyagent lane --folder LANE_DIR [--uses NAME]... [--label TEXT] -- PROGRAM [ARGUMENT ...]\n\
 crazyagent qualification admit --report PATH --source-revision REV --profile-id PROFILE \
 --evidence-dir DIR --require CAPABILITY [--require CAPABILITY]\n\
 Capabilities: confinement, live_recovery, native_auth, child_control\n\
@@ -219,6 +220,17 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == crazyagent::coord::lane::COMMAND)
+    {
+        let lane: Vec<OsString> = std::env::args_os()
+            .skip(2)
+            .take(crazyagent::coord::lane::ARGUMENTS_MAX + 1)
+            .collect();
+        let code = crazyagent::coord::lane::run(&lane, &mut io::stderr().lock());
+        return ExitCode::from(u8::try_from(code.clamp(0, 255)).unwrap_or(1));
     }
     if args
         .first()

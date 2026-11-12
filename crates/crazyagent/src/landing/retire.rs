@@ -636,9 +636,10 @@ fn drop_graph_copy(agent: &Agent, worktree: &Path) -> Result<Option<&'static str
 /// then forgets its base and its owner edits. An agent's own clone is fetched before the
 /// hold and removed as a folder with no git, never following a link out of it, since git
 /// keeps no record of it in the owner repository. Inputs: the store, the three paths and
-/// the time now. Output: Ok once removed, `cleanup_worktree_leftover` with the base and
-/// owner edits forgotten when git deleted its record of the worktree, or a clone's folder
-/// was deleted, only part way, or the plain code that kept it.
+/// the time now. Output: Ok once removed, `cleanup_worktree_leftover` with the base, owner
+/// edits and agent branch record forgotten, and the branch dropped as a full removal drops
+/// it, when git deleted its record of the worktree, or a clone's folder was deleted, only
+/// part way, or the plain code that kept it.
 pub(super) fn remove(
     db: &Connection,
     repository: &Path,
@@ -694,6 +695,12 @@ pub(super) fn remove(
         db.execute("DELETE FROM landing_bases WHERE worktree=?1", [path])
             .map_err(unavailable)?;
         super::owner_edit::logged("forget", super::owner_edit::forget_worktree(db, worktree));
+        store::forget_agent_branch(db, path)?;
+        if let Some((branch, head)) = named
+            && !drop_branch(repository, &branch, &head)?
+        {
+            eprintln!("landing_branch_kept branch={branch}");
+        }
         return Ok(Err("cleanup_worktree_leftover"));
     }
     if std::fs::symlink_metadata(worktree).is_ok() || std::fs::symlink_metadata(git_dir).is_ok() {

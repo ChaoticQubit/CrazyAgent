@@ -86,12 +86,22 @@ export function checkedNote(set: ChangeSet): string | null {
   return set.checked ? null : "Not checked by CrazyAgent. Any test results in it are reported by the agent.";
 }
 
-/** Says how the agent's last turn ended when it did not succeed. Input: the change set.
- * Output: the note, or null after a turn that succeeded. */
+/** Says how the agent's last turn ended when it did not succeed, apart from what landing
+ * did (F23): a landed set says both facts, so "failed" never reads as a failed landing.
+ * Input: the change set. Output: the note, or null after a turn that succeeded. */
 export function outcomeNote(set: ChangeSet): string | null {
-  if (set.last_outcome === "failed") return "The agent's last turn failed. These are the changes it made before it stopped.";
-  if (set.last_outcome === "cancelled") return "The agent's last turn was stopped. These are the changes it made before it stopped.";
+  const landed = set.state === "accepted";
+  if (set.last_outcome === "failed") return landed ? "Last turn: failed. Landing: landed. How the turn ended does not change what landed." : "The agent's last turn failed. These are the changes it made before it stopped.";
+  if (set.last_outcome === "cancelled") return landed ? "Last turn: stopped. Landing: landed. How the turn ended does not change what landed." : "The agent's last turn was stopped. These are the changes it made before it stopped.";
   return null;
+}
+
+/** Says what the last landing try of an open change set did when nothing else on screen
+ * does (F23): an Accept refused before anything landed. Input: the change set. Output: the
+ * note, or null. */
+export function landingNote(set: ChangeSet): string | null {
+  const open = set.state === "pending" || set.state === "conflict" || set.state === "updating";
+  return open && set.landing_result === "refused" ? "Landing: the last Accept was refused, so nothing landed yet." : null;
 }
 
 /** What the owner is reviewing of one change set: its id, the head its diff pages are read
@@ -238,6 +248,12 @@ export function branchLabel(branches: TargetBranches, name: string): string {
  * note instead. Input: the engine's outcome. Output: the line, or null for a conflict. */
 export function acceptNote(outcome: AcceptOutcome): string | null {
   return outcome.kind === "landed" ? `Accepted as ${outcome.commit.slice(0, 7)} on ${displayText(outcome.branch)}.` : null;
+}
+
+/** The note after the owner's own files were committed first and the Accept runs again
+ * (F21). Inputs: the commit and its branch. Output: the sentence. */
+export function committedFirstNote(commit: string, branch: string): string {
+  return `Committed your files as ${commit.slice(0, 7)} on ${displayText(branch)}. Accepting the changes now.`;
 }
 
 /** One line for a changed file: how it changed and its path. Input: the file. */
