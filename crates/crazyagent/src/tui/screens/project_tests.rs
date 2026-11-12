@@ -303,7 +303,8 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     );
     assert_eq!(
         settle(&mut screen, &mut controller, start + 3_000).await,
-        ["jobs", "memories"]
+        ["jobs", "overview", "memories"],
+        "the first Overview read asked for the first writing run, so the tabs are read again until it writes them"
     );
 
     let look = Look::plain();
