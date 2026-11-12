@@ -4,8 +4,8 @@ use crate::engine::owner::ModelAdded;
 use crate::harness_settings::{Access, Source};
 use crate::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
 use crate::model_choice::{
-    ALLOWED_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, Origin, Row, Slot, Written,
-    model_valid, shipped,
+    ALLOWED_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, Origin, Row, Slot,
+    UNQUALIFIED_REASON_BYTES_MAX, Written, model_valid, shipped,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::model_choice::{ModelChoiceEvent, ModelChoiceQuery, ModelChoiceReply};
@@ -30,7 +30,7 @@ use serde_json::Value;
 #[cfg(all(test, unix))]
 mod tests;
 
-const DETAIL_ROWS: usize = 5;
+const DETAIL_ROWS: usize = 4;
 const PAGE_STEP: isize = 10;
 const ACCOUNT_MODEL: &str = "Account's own model";
 const APP_VALUE: &str = "Use the app value";
@@ -466,6 +466,10 @@ impl ModelsPage {
             && models.rows.iter().map(|row| row.slot).eq(Slot::ALL)
             && models.candidates.len()
                 <= crate::model_choice::CATALOG_MODELS_MAX + crate::model_choice::CUSTOM_MAX
+            && models
+                .reason
+                .as_ref()
+                .is_none_or(|reason| reason.len() <= UNQUALIFIED_REASON_BYTES_MAX)
     }
 
     fn items(&self) -> Vec<Item> {
@@ -1233,6 +1237,16 @@ impl ModelsPage {
             }
             State::Ready { models, rules } => (models.clone(), rules.clone()),
         };
+        if let (false, Some(reason)) = (models.qualified, &models.reason) {
+            lines.extend(
+                wrap(
+                    &format!("Version not checked: {}.", printable(reason)),
+                    limit,
+                )
+                .into_iter()
+                .map(|part| styled(part, Role::Warning, theme)),
+            );
+        }
         if matches!(self.edit, Some(Edit::Ticks { .. })) {
             return (self.tick_lines(lines, &models, limit, height, ctx), None);
         }

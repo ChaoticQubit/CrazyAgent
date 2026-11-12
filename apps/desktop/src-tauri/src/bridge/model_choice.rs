@@ -3,7 +3,8 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{MODEL_CHOICE_PROTOCOL_CODES, ModelAdded, OwnerClient};
 use crazyagent::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
 use crazyagent::model_choice::{
-    ALLOWED_MAX, CATALOG_MODELS_MAX, CUSTOM_MAX, MODEL_BYTES_MAX, Models, Slot, Written, shipped,
+    ALLOWED_MAX, CATALOG_MODELS_MAX, CUSTOM_MAX, MODEL_BYTES_MAX, Models, Slot,
+    UNQUALIFIED_REASON_BYTES_MAX, Written, shipped,
 };
 use crazyagent::protocol::ProjectId;
 use serde::Serialize;
@@ -140,6 +141,10 @@ pub fn page_of(
     if slots != Slot::ALL
         || models.candidates.len() > CATALOG_MODELS_MAX + CUSTOM_MAX
         || models.harness != harness
+        || models
+            .reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > UNQUALIFIED_REASON_BYTES_MAX)
     {
         return Err(failure("owner_read_failed"));
     }

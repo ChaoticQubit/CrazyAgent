@@ -31,12 +31,15 @@ export interface ModelCandidate {
   origin: ModelOrigin;
 }
 
-/** A harness's Models section from the engine: its three slots in page order and every
- * candidate, the harness's list first, then the owner's ids. */
+/** A harness's Models section from the engine: its three slots in page order, every
+ * candidate, the harness's list first, then the owner's ids, and whether the list was
+ * checked on the installed harness version, with the reason when it was not. */
 export interface Models {
   harness: string;
   rows: ModelRow[];
   candidates: ModelCandidate[];
+  qualified: boolean;
+  reason: string | null;
 }
 
 /** The Models page: the section, the project it was read for (null on the app page) and the
@@ -201,6 +204,13 @@ export function catalogLine(page: Pick<ModelsPage, "qualified_versions">, name: 
   const shown = displayText(name);
   if (page.qualified_versions.length === 0) return `CrazyAgent has no model list for ${shown}.`;
   return `Model list checked against ${shown} ${page.qualified_versions.map(displayText).join(", ")}.`;
+}
+
+/** Says that the harness's model list was not checked on the installed version, in the
+ * engine's words; the ids still save. Input: the section. Output: the sentence, or "". */
+export function uncheckedLine(models: Pick<Models, "qualified" | "reason">): string {
+  if (models.qualified || models.reason === null) return "";
+  return `Version not checked: ${displayText(models.reason)}.`;
 }
 
 /** A slot value in words. Input: the value. Output: the words. */

@@ -5,7 +5,8 @@ import {
   ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, PICK_HELP, PICK_OPTIONS, SLOT_HELP, SLOT_LABELS,
   addModel, addedLine, allowedChange, allowedDraft, canResetModel, catalogLine, choiceChange, choiceDraft, choiceOptions,
   loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, originWord, passedOverLine,
-  removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, tickable, toggleAllowed, valueText,
+  removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, tickable, toggleAllowed, uncheckedLine,
+  valueText,
 } from "../../api-model-choice";
 import type { FallbackRule, ModelCandidate, ModelRow, ModelRules, ModelSlot, ModelsPage, PickRule } from "../../api-model-choice";
 import { useLoad, type Loaded } from "../../state";
@@ -126,7 +127,8 @@ export function ModelsView(props: ModelsViewProps) {
   const value = page.value;
   assert((scope === "project") === (value.project_id !== null), "a project page names its project");
   const about = scope === "project" ? "A model set here wins over the app value for this project only." : "Changes apply the next time the master or an agent starts with this harness.";
-  return <SettingSection title="Models" about={<>{catalogLine(value, name)} {about}</>}>
+  const unchecked = uncheckedLine(value.models);
+  return <SettingSection title="Models" about={<>{catalogLine(value, name)} {unchecked ? `${unchecked} ` : ""}{about}</>}>
     {value.models.rows.map((row) => <SlotLine key={row.slot} row={row} candidates={value.models.candidates} scope={scope}
       draft={drafts[row.slot]} busy={busy === row.slot} note={notes[row.slot] ?? ""}
       onDraft={(draft) => props.onDraft(row.slot, draft)} onSave={() => props.onSave(row)} onReset={() => props.onReset(row)} />)}
