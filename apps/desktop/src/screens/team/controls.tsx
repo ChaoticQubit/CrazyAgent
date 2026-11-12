@@ -389,7 +389,7 @@ export function DoneQuietSetting({ projectId, status, reload }: { projectId: str
   return <SettingRow label="End a turn after done">
     <Select id={`tg-done-quiet-${projectId}`} label="End a turn after done" value={shown} options={DONE_QUIET_OPTIONS}
       onValue={(value) => { if (!busy && DONE_QUIET_OPTIONS.some((option) => option.value === value)) void choose(value); }}
-      helper="A sub-agent's work goes to Changes as soon as it says its task is done or commits. If it then stays quiet this long, CrazyAgent ends its turn." />
+      helper="A sub-agent's commits go to Changes as soon as it makes them or says its task is done; the rest goes when its turn ends. If it stays quiet this long after saying done, CrazyAgent ends its turn." />
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </SettingRow>;
 }
