@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { chooseHome, createRunDirectories } from "./run-layout.mjs";
+import { dirname, join } from "node:path";
+import { chooseHome, clearWebStore, createRunDirectories, runProjects } from "./run-layout.mjs";
 import { createNavigationReader } from "./refresh-barrier.mjs";
 
 const source = (name) => readFileSync(new URL(name, import.meta.url), "utf8");
@@ -60,6 +60,38 @@ test("master-switch.wdio.conf gives the engine, the app and the spec's WebKit st
   assert.match(spec, /import \{ TURN_S, home \} from "\.\/master-switch\.wdio\.conf\.mjs";/);
   assert.match(spec, /join\(home, "Library", "WebKit"/);
   assert.doesNotMatch(spec, /join\(root, "home"/);
+});
+
+test("runs that share one prepared CRAZYAGENT_E2E_HOME each get a new projects folder and start with no web store an earlier run left, keeping the keychain", () => {
+  withHomes((paths) => {
+    const keychain = join(paths.prepared, "Library", "Keychains", "login.keychain-db");
+    mkdirSync(dirname(keychain), { recursive: true, mode: 0o700 });
+    writeFileSync(keychain, "kept");
+    clearWebStore(paths.prepared);
+    const first = runProjects(paths.prepared);
+    const stored = join(paths.prepared, "Library", "WebKit", "crazyagent-desktop", "WebsiteData", "localstorage.sqlite3");
+    mkdirSync(dirname(stored), { recursive: true, mode: 0o700 });
+    writeFileSync(stored, "an earlier run's saved key");
+    writeFileSync(join(first, "earlier-project"), "an earlier run's project");
+    clearWebStore(paths.prepared);
+    const second = runProjects(paths.prepared);
+    assert.notEqual(second, first, "the second run on the same home does not reuse the first run's projects");
+    assert.equal(dirname(second), paths.prepared);
+    assert.deepEqual(readdirSync(second), []);
+    assert.equal(lstatSync(second).mode & 0o777, 0o700);
+    assert.equal(existsSync(join(paths.prepared, "Library", "WebKit")), false, "no web store an earlier run left");
+    assert.equal(readFileSync(keychain, "utf8"), "kept", "the prepared keychain stays");
+    clearWebStore(paths.fresh);
+    assert.equal(dirname(runProjects(paths.fresh)), paths.fresh);
+  });
+  const runner = source("./run.mjs");
+  assert.match(runner, /clearWebStore\(home\);/);
+  assert.match(runner, /projects: runProjects\(home\)/);
+  assert.doesNotMatch(runner, /join\(env\.HOME, "Projects"\)/);
+  const conf = source("./master-switch.wdio.conf.mjs");
+  assert.match(conf, /clearWebStore\(home\);/);
+  assert.match(conf, /CODEX_HOME: join\(root, "codex"\)/, "the Codex home is the run's own too");
+  assert.doesNotMatch(conf, /join\(home, "\.codex"\)/);
 });
 
 test("shared runner creates private owned home tmp and webdriver under umask 0022", () => {
