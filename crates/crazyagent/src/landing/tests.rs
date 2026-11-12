@@ -15213,3 +15213,595 @@ fn a_change_set_still_lands_when_the_roadmap_status_cannot_be_marked() {
 }
 
 mod polish;
+
+const TEAMMATE: i64 = 8;
+
+/// Adds a second linked worktree at the owner's HEAD for team sub-agent `TEAMMATE` with
+/// the given status, records it in the team tables and records its start, so an Accept
+/// of the case's own set finds it resting or busy (DEC-147.6). Inputs: the case and the
+/// status. Output: the teammate's workspace.
+fn seat_teammate(case: &Case, status: &str) -> Workspace {
+    crate::team::initialize(&case.db).unwrap();
+    crate::coord::ensure(&case.db).unwrap();
+    let worktree = case.repo.parent().unwrap().join("agent-2");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "--detach",
+        worktree.to_str().unwrap(),
+        "HEAD",
+    ]);
+    let teammate = Workspace {
+        project: case.workspace.project.clone(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: TEAMMATE.to_string(),
+            label: "Teammate".into(),
+        },
+        repository: case.repo.clone(),
+        worktree,
+        git_dir: case.repo.join(".git/worktrees/agent-2"),
+    };
+    case.db
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent)
+             VALUES (?1,?2,'sub','claude',0,?3,1,1,NULL)",
+            rusqlite::params![TEAMMATE, teammate.project.as_str(), status],
+        )
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                TEAMMATE,
+                teammate.project.as_str(),
+                teammate.repository.to_str().unwrap(),
+                teammate.worktree.to_str().unwrap(),
+                teammate.git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    record_worktree_start(
+        &case.db,
+        &teammate.repository,
+        &teammate.worktree,
+        &teammate.git_dir,
+    )
+    .unwrap();
+    teammate
+}
+
+/// The commit a worktree's HEAD holds. Inputs: the case and the worktree. Output: the id.
+fn head_of(case: &Case, worktree: &Path) -> String {
+    git_in(&case.home, worktree, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// The parents of a commit in the owner repository, in order. Inputs: the case and the
+/// commit. Output: the parent ids.
+fn parents_of(case: &Case, commit: &str) -> Vec<String> {
+    case.owner(&["rev-list", "--parents", "-n", "1", commit])
+        .split_whitespace()
+        .skip(1)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Commits every change in the agent's worktree under the owner's git identity, the one
+/// the engine gives agents' own commits, so a Merge commit landing may carry it (L3-L1).
+/// Inputs: the case and the message. Output: the new HEAD.
+fn owner_named_commit(case: &Case, message: &str) -> String {
+    case.agent(&["add", "-A"]);
+    case.agent(&["commit", "-q", "-m", message]);
+    case.agent_head()
+}
+
+/// Lands one new line of the case's own agent and returns the landed commit. Input: the
+/// case. Output: the landed commit.
+fn land_fourth_line(case: &Case) -> String {
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    match case.accept(&id).unwrap() {
+        AcceptOutcome::Landed { commit, .. } => commit,
+        other => panic!("the set did not land: {other:?}"),
+    }
+}
+
+/// Under the default Landing setting Squash an Accept lands one commit whose only parent
+/// is the branch tip it landed on (DEC-147.6).
+#[test]
+fn squash_landing_makes_one_commit_whose_only_parent_is_the_tip() {
+    let case = Case::new();
+    let before = case.tip();
+    let landed = land_fourth_line(&case);
+    assert_eq!(parents_of(&case, &landed), vec![before]);
+}
+
+/// Under Merge commit an Accept lands the same files as a merge commit whose second parent
+/// is the set's head, so the agent's commits stay in the branch history and the head is
+/// an ancestor of the branch (DEC-147.6, F18).
+#[test]
+fn merge_commit_landing_keeps_the_agent_head_as_its_second_parent() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let head = owner_named_commit(&case, "Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![before, head.clone()]);
+    assert_eq!(case.tip(), commit);
+    case.owner(&["merge-base", "--is-ancestor", &head, "main"]);
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+}
+
+/// Under Merge commit the same agent's next change set lands too, with no conflict: its
+/// worktree sits on the merge commit after the first accept, so the second accept is again
+/// a merge commit over the first, keeping the agent's new commit (DEC-147.6).
+#[test]
+fn merge_commit_landing_lands_the_same_agent_s_next_set_with_no_conflict() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&first).unwrap() else {
+        panic!("the first set did not land");
+    };
+    case.edit("README", "one\ntwo\nthree\nfour\nfive\n");
+    let head = owner_named_commit(&case, "Add the fifth line");
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(second, first);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&second).unwrap() else {
+        panic!("the next set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![landed, head]);
+    assert_eq!(
+        std::fs::read_to_string(case.repo.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\nfive\n"
+    );
+}
+
+/// Under Merge commit an agent commit whose message holds a control character is refused
+/// before anything lands, so nothing an agent wrote can garble the owner's git log, and
+/// the branch stays where it was (DEC-147.6 security bound).
+#[test]
+fn merge_commit_landing_refuses_an_agent_message_with_a_control_character() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line \u{1b}[31mred");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+    assert_eq!(case.view(&id).state, ChangeState::Pending);
+}
+
+/// Under Merge commit the check covers every commit the merge makes reachable, not only
+/// those above the set's measured base: an agent commit with a control character that an
+/// earlier Squash accept left out of the owner's history, below the next set's base, is
+/// still refused once the owner switches to Merge commit (DEC-147.6 security bound).
+#[test]
+fn merge_commit_landing_refuses_an_unplain_commit_below_a_squash_landed_base() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line \u{1b}[31mred");
+    let first = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.edit("NOTES", "five\n");
+    owner_named_commit(&case, "Add the notes");
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&first).unwrap() else {
+        panic!("the squash set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit).len(), 1, "a squash commit");
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let second = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_ne!(second, first);
+    assert_eq!(case.accept(&second).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), commit, "nothing more landed");
+    assert_eq!(case.view(&second).state, ChangeState::Pending);
+}
+
+/// Under Merge commit every carried commit's tree passes the landing's own tree checks,
+/// not only the set's final tree: a commit that adds a bare-repository layout, a link out
+/// of the project or a gitlink, which the agent's next commit removes again, is refused,
+/// so none of them ever enters the owner's history (L3-M1).
+#[test]
+fn merge_commit_landing_refuses_a_carried_commit_whose_tree_fails_the_landing_checks() {
+    let variants: [(&str, fn(&Case)); 3] = [
+        ("bare layout", |case| {
+            for (path, text) in [
+                ("vault/HEAD", "ref: refs/heads/main\n"),
+                ("vault/config", "[core]\n\tbare = true\n"),
+                ("vault/objects/info/packs", "\n"),
+                ("vault/refs/heads/main", "0\n"),
+            ] {
+                write(&case.workspace.worktree.join(path), text);
+            }
+            case.agent(&["add", "-A"]);
+        }),
+        ("outside link", |case| {
+            std::os::unix::fs::symlink("../../../../outside", case.workspace.worktree.join("out"))
+                .unwrap();
+            case.agent(&["add", "-A"]);
+        }),
+        ("gitlink", |case| {
+            let tip = case.tip();
+            case.agent(&[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{tip},lib"),
+            ]);
+        }),
+    ];
+    for (what, add) in variants {
+        let case = Case::new();
+        crate::team::initialize(&case.db).unwrap();
+        crate::team::set_landing_mode(
+            &case.db,
+            &case.workspace.project,
+            crate::team::LandingMode::Merge,
+        )
+        .unwrap();
+        let before = case.tip();
+        case.start();
+        add(&case);
+        case.agent(&["commit", "-q", "-m", "Add a helper"]);
+        case.agent(&[
+            "rm",
+            "-r",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "vault",
+            "out",
+            "lib",
+        ]);
+        let _ = std::fs::remove_dir_all(case.workspace.worktree.join("vault"));
+        let _ = std::fs::remove_file(case.workspace.worktree.join("out"));
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        owner_named_commit(&case, "Remove the helper");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        assert_eq!(
+            case.accept(&id).unwrap_err().0,
+            "changes_merge_unsafe",
+            "{what}"
+        );
+        assert_eq!(case.tip(), before, "{what}: nothing landed");
+        assert_eq!(case.view(&id).state, ChangeState::Pending, "{what}");
+    }
+}
+
+/// Under Merge commit an agent's merge of main is checked only for what its own side and
+/// the merge bring, against the main parent the owner's history holds: a gitlink the owner
+/// added on main before the agent merged it never refuses the set, which lands as a merge
+/// commit with the agent's head as its second parent, as it lands under Squash (L3R2-M1).
+#[test]
+fn merge_commit_landing_lands_a_set_whose_agent_merged_main_with_the_owner_s_gitlink() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line");
+    let linked = case.tip();
+    case.owner(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{linked},lib"),
+    ]);
+    case.owner(&["commit", "-q", "-m", "Add the lib submodule"]);
+    let tip = case.tip();
+    case.agent(&["merge", "-q", "--no-edit", "main"]);
+    let merged = case.agent_head();
+    assert_eq!(
+        case.agent(&["rev-list", "--parents", "-n", "1", &merged])
+            .split_whitespace()
+            .count(),
+        3,
+        "the agent made a merge commit"
+    );
+    case.edit("NOTES", "five\n");
+    let head = owner_named_commit(&case, "Add the notes");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![tip, head]);
+    assert_eq!(
+        case.owner(&["ls-tree", &commit, "lib"])
+            .split_whitespace()
+            .next(),
+        Some("160000"),
+        "the owner's gitlink stays"
+    );
+}
+
+/// Under Merge commit a carried commit must name the owner's identity, which the engine
+/// gives agents' own commits, or the engine's own: an agent commit written under another
+/// author or committer is refused, so no commit lands in the owner's history under a name
+/// the engine never gave (L3-L1). The same set lands under Squash as the owner's commit.
+#[test]
+fn merge_commit_landing_refuses_a_carried_commit_under_another_identity() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Squash,
+    )
+    .unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the set did not land under Squash");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![before]);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%an <%ae>", &commit])
+            .trim(),
+        "Repo Owner <owner@example.invalid>"
+    );
+}
+
+/// Under Merge commit an agent message holding a record mark followed by four field marks
+/// is refused: each commit object is read whole, so no message byte can split it into a
+/// second record and slip its control characters past the check (L3 r1 F1).
+#[test]
+fn merge_commit_landing_refuses_record_and_field_marks_in_an_agent_message() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "x\u{1e}a\u{1f}b\u{1f}c\u{1f}d\u{1f}e");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+}
+
+/// Under Merge commit a set carrying more than `MERGED_COMMITS_MAX` agent commits is
+/// refused before anything lands (DEC-147.6 bound).
+#[test]
+fn merge_commit_landing_refuses_more_than_256_carried_commits() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    for step in 0..ancestry::MERGED_COMMITS_MAX {
+        case.agent(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("Step {step}"),
+        ]);
+    }
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line");
+    assert_eq!(
+        case.agent(&["rev-list", "--count", &format!("{before}..HEAD")])
+            .trim(),
+        (ancestry::MERGED_COMMITS_MAX + 1).to_string()
+    );
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+}
+
+/// Agent-written text with hidden or control characters is never plain; a message with
+/// newlines and tabs is.
+#[test]
+fn only_plain_agent_text_may_enter_the_owner_history() {
+    assert!(ancestry::plain_text("Add the fourth line\n\nBody\tline\n"));
+    assert!(!ancestry::plain_text("Add\u{1b}[31m red"));
+    assert!(!ancestry::plain_text("Add\r overwritten"));
+    assert!(!ancestry::plain_text("Add \u{202e}enil"));
+    assert!(!ancestry::plain_text("x\u{1e}a"), "a record mark");
+    assert!(!ancestry::plain_text("a\u{1f}b"), "a field mark");
+    assert!(!ancestry::plain_text("a\u{9b}31m"), "a C1 control");
+}
+
+/// After another agent's Accept, an idle teammate on the old base with nothing of its own
+/// moves onto the landed tip at once, and its next change set opens above that tip
+/// (DEC-147.6, F18).
+#[test]
+fn after_an_accept_an_idle_teammate_on_the_old_base_moves_to_the_landed_tip() {
+    let case = Case::new();
+    let teammate = seat_teammate(&case, "idle");
+    let landed = land_fourth_line(&case);
+    assert_eq!(head_of(&case, &teammate.worktree), landed);
+    assert_eq!(
+        std::fs::read_to_string(teammate.worktree.join("README")).unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+    assert_eq!(
+        store::base_of(&case.db, teammate.worktree.to_str().unwrap()).unwrap(),
+        Some(landed)
+    );
+}
+
+/// A resting teammate with an uncommitted edit is never moved over it: its HEAD and its
+/// edit stay (DEC-147.6, DEC-117 reset guard).
+#[test]
+fn a_resting_teammate_with_an_uncommitted_edit_stays_where_it_is() {
+    let case = Case::new();
+    let teammate = seat_teammate(&case, "idle");
+    let start = head_of(&case, &teammate.worktree);
+    write(&teammate.worktree.join("README"), "one\ntwo\nmine\n");
+    land_fourth_line(&case);
+    assert_eq!(head_of(&case, &teammate.worktree), start);
+    assert_eq!(
+        std::fs::read_to_string(teammate.worktree.join("README")).unwrap(),
+        "one\ntwo\nmine\n"
+    );
+}
+
+/// A resting teammate with commits of its own that main does not hold is not moved, so
+/// its work stays on its branch for its own change set (DEC-147.6).
+#[test]
+fn a_resting_teammate_with_its_own_commits_is_not_moved() {
+    let case = Case::new();
+    let teammate = seat_teammate(&case, "stopped");
+    write(&teammate.worktree.join("NOTES"), "mine\n");
+    git_in(&case.home, &teammate.worktree, &["add", "NOTES"]);
+    git_in(
+        &case.home,
+        &teammate.worktree,
+        &[
+            "-c",
+            "user.name=Agent",
+            "-c",
+            "user.email=agent@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "Add notes",
+        ],
+    );
+    let own = head_of(&case, &teammate.worktree);
+    land_fourth_line(&case);
+    assert_eq!(head_of(&case, &teammate.worktree), own);
+}
+
+/// A working teammate is left alone by the Accept and moves onto the landed tip at its own
+/// turn end, once that turn left nothing pending (DEC-147.6).
+#[test]
+fn a_working_teammate_moves_to_the_landed_tip_at_its_turn_end() {
+    let case = Case::new();
+    let teammate = seat_teammate(&case, "working");
+    let start = head_of(&case, &teammate.worktree);
+    let landed = land_fourth_line(&case);
+    assert_eq!(
+        head_of(&case, &teammate.worktree),
+        start,
+        "a busy agent waits for its turn end"
+    );
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-2".into(),
+        prompt_line: "Look around".into(),
+    };
+    assert_eq!(
+        crate::landing_turns::record(&case.db, &teammate, &turn, None).unwrap(),
+        crate::landing_turns::Landed::Nothing
+    );
+    assert_eq!(head_of(&case, &teammate.worktree), landed);
+}
+
+/// An agent in its own clone hears once, as its next task is handed over, that main moved
+/// on, with the commit its next work opens above, and is given the tip as
+/// `crazyagent/main`; the same tip is never told twice (DEC-147.6, leader 22:40).
+#[test]
+fn an_own_clone_agent_is_told_once_per_tip_that_main_moved_on() {
+    let mut case = Case::own_branch();
+    seat_team_agent(&mut case);
+    let base = store::base_of(&case.db, case.workspace.worktree.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let tip = case.owner_commit("OTHER", "theirs\n", "Land other work");
+    assert!(tell_main_moved(
+        &case.db,
+        &case.workspace.project,
+        CLONE_AGENT
+    ));
+    tell_main_moved(&case.db, &case.workspace.project, CLONE_AGENT);
+    assert_eq!(
+        engine_notes(&case),
+        vec![ancestry::main_moved_text(&tip, &base)]
+    );
+    assert_eq!(
+        ancestry::main_moved_text(&tip, &base),
+        format!(
+            "Main moved on to {}. If git log {}..HEAD shows no commits, start your next work from main: git reset --keep crazyagent/main.",
+            &tip[..12],
+            &base[..12]
+        )
+    );
+    let given = git_in(
+        &case.home,
+        &case.workspace.worktree,
+        &["rev-parse", "crazyagent/main"],
+    );
+    assert_eq!(given.trim(), tip);
+}
+
+/// An agent in its own clone already on the tip hears nothing (DEC-147.6).
+#[test]
+fn an_own_clone_agent_on_the_tip_is_told_nothing() {
+    let mut case = Case::own_branch();
+    seat_team_agent(&mut case);
+    assert!(!tell_main_moved(
+        &case.db,
+        &case.workspace.project,
+        CLONE_AGENT
+    ));
+    assert!(engine_notes(&case).is_empty());
+}

@@ -2197,7 +2197,10 @@ fn withdraw_question(
 
 /// Reads the team agent id of a project's live master. Takes the database and project.
 /// Returns the id, none when no live master is on record, or a SQLite failure.
-fn live_master(connection: &Connection, project: &ProjectId) -> Result<Option<i64>, EngineError> {
+pub(super) fn live_master(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<i64>, EngineError> {
     connection
         .query_row(
             "SELECT agent FROM team_live_masters WHERE project=?1",

@@ -58,6 +58,7 @@ fn main() {
         "desktop_team_master_idle_stop",
         "desktop_team_master_live_terminal",
         "desktop_team_reuse_idle",
+        "desktop_team_landing_mode",
         "desktop_team_new_folder_limit",
         "desktop_team_coordination",
         "desktop_team_harness_mode",

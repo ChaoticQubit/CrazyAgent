@@ -6509,6 +6509,92 @@ fn the_catch_up_with_main_action_is_saved_and_shown_in_the_team_status() {
     }
 }
 
+/// "Landing" is Squash for a project with no choice saved and for a store with no team
+/// tables, reads the owner's Merge commit and Squash again, the choice is per project, and
+/// a stored name it does not know is refused (DEC-147.6).
+#[test]
+fn landing_mode_defaults_to_squash_and_reads_the_saved_choice() {
+    let (_directory, connection) = database();
+    let project = ProjectId::new("team-landing-mode").unwrap();
+    assert_eq!(
+        landing_mode(&connection, &project).unwrap(),
+        LandingMode::Squash,
+        "Squash is the default"
+    );
+    for value in [LandingMode::Merge, LandingMode::Squash, LandingMode::Merge] {
+        set_landing_mode(&connection, &project, value).unwrap();
+        assert_eq!(landing_mode(&connection, &project).unwrap(), value);
+    }
+    assert_eq!(
+        landing_mode(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        LandingMode::Squash,
+        "the choice is per project"
+    );
+    let bare = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        landing_mode(&bare, &project).unwrap(),
+        LandingMode::Squash,
+        "a store with no team tables reads Squash"
+    );
+    assert_eq!(LandingMode::named("rebase"), None);
+    assert!(
+        connection
+            .execute(
+                "INSERT INTO team_landing_mode(project,mode) VALUES ('team-odd','rebase')",
+                [],
+            )
+            .is_err(),
+        "the table refuses a mode it does not know"
+    );
+}
+
+/// The owner's Landing action saves Merge commit and Squash again for the project and the
+/// team status shows each choice (DEC-147.6).
+#[test]
+fn the_landing_mode_action_is_saved_and_shown_in_the_team_status() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-landing-action",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-landing-action", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().landing_mode,
+        LandingMode::Squash,
+        "Squash is the default"
+    );
+    for mode in [LandingMode::Merge, LandingMode::Squash] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::LandingMode {
+                    project_id: setup.project_id.clone(),
+                    mode,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().landing_mode, mode);
+    }
+}
+
 /// Owner 2026-11-05: under Native only the team status and graph say "Can't receive
 /// messages" on a tools-off Codex sub-agent of a keyless endpoint account, which runs a kept
 /// session with no bridge, and on no other agent: not one on a signed-in profile, woken per

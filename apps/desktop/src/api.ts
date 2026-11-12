@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, CatchUpMain, ChildLanding, CoordHarness, MasterIdleStop, MasterLands, CoordSettings, Delivery, LandingMode, PendingIntent, ReuseIdle, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1500,6 +1500,13 @@ export function setMasterLiveTerminal(id: string, on: boolean): Promise<Result<I
  * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
 export function setReuseIdle(id: string, mode: ReuseIdle): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_reuse_idle", { id, mode, generation: nextGeneration() });
+}
+
+/** Sets the project's "Landing" setting: squash lands each accepted change set as one commit;
+ * merge lands it as a merge commit that keeps every agent commit in the owner's history.
+ * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
+export function setLandingMode(id: string, mode: LandingMode): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_landing_mode", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,
