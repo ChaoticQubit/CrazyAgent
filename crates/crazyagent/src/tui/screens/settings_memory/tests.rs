@@ -198,7 +198,11 @@ fn memory_frames_match_the_design() {
     with_writes(
         &mut expected,
         120,
-        " Enter View   d Delete   a Add   w Agent memory writes   i Import   / Filter   Shift-←→ Sections   Esc Home      ? Help ",
+        &format!("{:<113}? Help ", " p Where agents save"),
+    );
+    expected[34] = format!(
+        "{:<120}",
+        " Enter View   d Delete   a Add   w Agent memory writes   i Import   / Filter   Shift-←→ Sections   Esc Home"
     );
     assert_eq!(render(&mut shell, 120, 36), expected);
 }
