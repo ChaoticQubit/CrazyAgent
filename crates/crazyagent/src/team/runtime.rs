@@ -1155,7 +1155,9 @@ impl TeamRuntime {
     }
 
     /// Takes over one live team pane when its agent may still run: the project's setup and
-    /// team plan still hold its role and harness, the team is not paused, the project has
+    /// team plan still hold its role and harness, a master on a harness the plan no longer
+    /// names included, as a saved harness change reaches it when idle or at its next start
+    /// (F06), the team is not paused, the project has
     /// room, and its account is still in the project's pool, as an endpoint, or as a
     /// signed-in account for a live master or a native-mode lead, whose worker hands the
     /// credential to its home again before it serves. The pane keeps the access level its
@@ -1208,12 +1210,16 @@ impl TeamRuntime {
         if super::paused(&self.connection, &project)? {
             return Ok(Err("the team is paused".into()));
         }
-        let in_plan = match role {
-            AgentRole::Master => {
-                crate::harnesses::same(&stored.team.master, &harness)
-                    && stored.team.master_tools == tools
-                    && self.master(&project).is_none()
+        if role == AgentRole::Master {
+            if self.master(&project).is_some() {
+                return Ok(Err("another master of the project runs already".into()));
             }
+            if stored.team.master_tools != tools {
+                return Ok(Err("the master's Tools setting changed".into()));
+            }
+        }
+        let in_plan = match role {
+            AgentRole::Master => true,
             AgentRole::Sub => super::slot(&stored.team, &harness).is_some_and(|slot| {
                 slot.tools == tools
                     && self.live(&project, AgentRole::Sub, Some(&harness))
@@ -3852,7 +3858,10 @@ impl TeamRuntime {
     /// owner instruction edit (DEC-111 QR1 Restart) never counts toward the starts that turn
     /// the live master off. The owner's Live terminal Off ends the master at its next stop,
     /// once no turn is open and the owner is not typing, and clears those starts, so switching
-    /// it off and on never counts as a crash. Takes the setup, live access and paused accounts.
+    /// it off and on never counts as a crash. With no master running and a saved master
+    /// harness that has no live terminal, such as RCLI, it turns the live master off with one
+    /// note, so the one-turn master answers (F06). Takes the setup, live access and paused
+    /// accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -3896,6 +3905,14 @@ impl TeamRuntime {
         let planned = self.master_restarts.remove(project);
         let left = self.master_moves.remove(project);
         assert!(left.is_none() || planned, "a move is a planned restart");
+        if on
+            && crate::harnesses::interactive::support(&harness)
+                != crate::harnesses::interactive::Support::Terminal
+        {
+            super::master::set_live(&self.connection, project, false)?;
+            self.live_starts.remove(project);
+            return self.note(project, &live_gone(&harness));
+        }
         if !on || !live_capable || self.panes(project) >= PANES_PER_PROJECT_MAX {
             return Ok(());
         }
@@ -3966,9 +3983,11 @@ impl TeamRuntime {
     /// Applies a saved master harness change to the project's running live master under the
     /// owner's When the master is idle choice: once it is quiet with no turn of its own it
     /// stops for a planned restart that `keep_live` starts on the new harness, which writes
-    /// the switch and its divider. Under At the next start, or while no pool account can run
-    /// the new harness, the master keeps running. Takes the setup, the access, the paused
-    /// accounts and the master's id. Returns any SQLite failure.
+    /// the switch and its divider. A new harness with no live terminal, such as RCLI, stops it
+    /// with no restart, and `keep_live` then turns the live master off (F06). Under At the
+    /// next start, or while no pool account can run a new live harness, the master keeps
+    /// running. Takes the setup, the access, the paused accounts and the master's id.
+    /// Returns any SQLite failure.
     fn switch_when_idle(
         &mut self,
         stored: &StoredSetup,
@@ -3979,17 +3998,17 @@ impl TeamRuntime {
         let project = &stored.project_id;
         let worker = &self.workers[&id];
         assert!(worker.role == AgentRole::Master && &worker.project == project);
-        let Some(saved) = launch_harness(&stored.team.master) else {
-            return Ok(());
-        };
+        let saved = launch_harness(&stored.team.master);
         if !worker.live
-            || launch_harness(&worker.harness) == Some(saved)
-            || !self.live_master(project, AgentRole::Master, saved)
+            || crate::harnesses::same(&worker.harness, &stored.team.master)
+            || (saved.is_some() && launch_harness(&worker.harness) == saved)
+            || super::master_backend(&stored.team.master).is_none()
             || super::apply_harness_switch(&self.connection, project)?
                 != super::SwitchApply::WhenIdle
         {
             return Ok(());
         }
+        let saved = saved.filter(|saved| self.live_master(project, AgentRole::Master, saved));
         let quiet = super::master::quiet(
             &self.connection,
             self.agents.as_deref().map(Agents::typing),
@@ -4000,17 +4019,21 @@ impl TeamRuntime {
             worker.busy.is_none() && worker.own_turn.is_none() && worker.turn_started.is_none();
         if !idle
             || !quiet
-            || !matches!(
-                self.account_for(access, project, saved, paused),
-                Ok(Some(_))
-            )
+            || saved.is_some_and(|saved| {
+                !matches!(
+                    self.account_for(access, project, saved, paused),
+                    Ok(Some(_))
+                )
+            })
         {
             return Ok(());
         }
         let worker = self.workers.get_mut(&id).expect("master worker exists");
         worker.stopping = true;
         let _ = worker.orders.send(Order::Stop);
-        self.master_restarts.insert(project.clone());
+        if saved.is_some() {
+            self.master_restarts.insert(project.clone());
+        }
         Ok(())
     }
 
@@ -11426,6 +11449,16 @@ fn with_code(sentence: &str, cause: Option<&str>) -> String {
         }
         None => sentence.to_owned(),
     }
+}
+
+/// The team note when a saved master harness with no live terminal, such as RCLI, takes
+/// over and the live master turns off (F06). Takes the harness. Returns the note.
+pub(super) fn live_gone(harness: &str) -> String {
+    let to = crate::master_sessions::harness_label(harness);
+    assert!(!to.is_empty());
+    format!(
+        "The live master is off: the master now runs on {to}, which has no live terminal, one turn at a time."
+    )
 }
 
 /// Ends an owner line with one full stop, leaving a line that already ends with a sentence

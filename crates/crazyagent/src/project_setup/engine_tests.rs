@@ -1068,6 +1068,12 @@ async fn team_plans_take_a_master_only_harness_as_the_master_but_never_as_a_team
         OwnerResult::Applied,
         "Settings switches the master to RCLI"
     );
+    let rewritten = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(
+        (rewritten.revision, rewritten.team.master.as_str()),
+        (saved.revision + 2, "rcli"),
+        "F06: the switch rewrites the plan's master in the same save"
+    );
     let other = ProjectId::new("setup-rcli-row").unwrap();
     let row_refused = owner
         .setup_project(

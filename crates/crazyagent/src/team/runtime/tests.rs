@@ -12398,6 +12398,120 @@ fn a_saved_master_harness_switch_no_pool_account_can_run_leaves_the_master_runni
     assert_eq!(fixture.status().live_switch, None);
 }
 
+/// F06: a saved switch to a master harness with no live terminal, RCLI, reaches the idle
+/// live master under When the master is idle: it stops, nothing live starts again, and the
+/// live master turns off with one note, so the owner's next line goes to the one-turn master.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_switch_to_rcli_stops_the_idle_live_master_and_turns_live_off() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+
+    set_master(&fixture, "rcli");
+    let note = super::live_gone("rcli");
+    fixture.until(
+        &mut team,
+        "the idle Codex master stops and the live master turns off",
+        |f| live_agent(&f.connection).is_none() && noted(f, &note) == 1,
+    );
+    assert!(!super::super::master::live(&fixture.connection, &project).unwrap());
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "nothing live starts on RCLI"
+    );
+    assert_eq!(noted(&fixture, &note), 1, "one note");
+}
+
+/// F06: under At the next start a saved switch to RCLI leaves the running live master on
+/// its own harness with the live master on, until it starts again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_switch_to_rcli_waits_for_the_next_start_when_the_owner_chose_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::ApplyHarnessSwitch {
+                project_id: project.clone(),
+                mode: crate::team::SwitchApply::NextStart,
+                version: crate::team::settings_version(&tx, &project).unwrap(),
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+
+    set_master(&fixture, "rcli");
+    idle_ticks(&mut team);
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert_eq!(noted(&fixture, &super::live_gone("rcli")), 0);
+}
+
+/// F06: an engine restart takes over a master on a harness the saved plan no longer names,
+/// since a saved harness change reaches the running master when idle or at its next start;
+/// a second master and a changed master Tools setting each end a pane with their own cause,
+/// never "no room".
+#[cfg(target_os = "macos")]
+#[test]
+fn a_restarted_engine_keeps_a_master_whose_saved_harness_changed_and_names_each_refusal() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let other = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    for id in [master, other] {
+        let record = fixture.pane(&host, id);
+        fixture.keep(id, &record);
+    }
+    set_master(&fixture, "claude-code");
+
+    let _team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    let alive = host.alive().unwrap();
+    assert_eq!(alive.len(), 1, "one master keeps running: {alive:?}");
+    let ended = if alive == names(&[master]) {
+        other
+    } else {
+        master
+    };
+    assert!(fixture.note(&format!(
+        "The terminal of team agent {ended} was closed: another master of the project runs already."
+    )));
+
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let record = fixture.pane(&host, master);
+    fixture.keep(master, &record);
+    let mut setup = fixture.setup.clone();
+    setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+
+    let _team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    assert!(host.alive().unwrap().is_empty());
+    assert!(fixture.note(&format!(
+        "The terminal of team agent {master} was closed: the master's Tools setting changed."
+    )));
+}
+
 /// `RESUMING_CODEX` whose turn on a line with "long" in it stays open until `go` exists in
 /// the agent's Codex home. Returns the script.
 #[cfg(target_os = "macos")]
