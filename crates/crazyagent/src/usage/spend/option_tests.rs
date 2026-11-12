@@ -21,6 +21,16 @@ struct Case {
 
 impl Case {
     fn new(confirm: SpendConfirm, all_limited: AllLimited) -> Self {
+        Self::answering(confirm, all_limited, |_| {
+            Answer::json(200, serde_json::json!({"outcome": "reset"}))
+        })
+    }
+
+    fn answering(
+        confirm: SpendConfirm,
+        all_limited: AllLimited,
+        consume: impl Fn(usize) -> Answer + Send + Sync + 'static,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let db = crate::usage::open(root.path()).unwrap();
         write(
@@ -31,9 +41,10 @@ impl Case {
             },
         )
         .unwrap();
-        let server = Server::start(|seen, _| {
+        let consumed = std::sync::atomic::AtomicUsize::new(0);
+        let server = Server::start(move |seen, _| {
             if seen.path.ends_with("/rate-limit-reset-credits/consume") {
-                Answer::json(200, serde_json::json!({"outcome": "reset"}))
+                consume(consumed.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
             } else {
                 Answer::json(404, serde_json::json!({}))
             }
@@ -260,11 +271,11 @@ fn option_all_limited_auto_spend_spends_one_reset_once_over_the_loopback_usage_s
     assert_eq!(shown.attempts[0].account, r("codex-b"));
     assert_eq!(shown.attempts[0].origin, Origin::Auto);
     assert_eq!(shown.attempts[0].outcome.as_deref(), Some("reset"));
-    track_pools(&case.db, &access, NOW + 3).unwrap();
+    track_pools(&case.db, &access, NOW + HOUR + 3).unwrap();
     assert_eq!(
-        case.send_queued(NOW + 4),
+        case.send_queued(NOW + HOUR + 4),
         0,
-        "a stale reading spends nothing more"
+        "past the pool's hour a stale reading spends nothing more"
     );
     assert_eq!(case.consumes().len(), 1);
 }
@@ -276,6 +287,74 @@ fn option_auto_spend_with_spend_confirmation_off_sends_nothing() {
     track_pools(&case.db, &access, NOW + 1).unwrap();
     assert_eq!(case.send_queued(NOW + 2), 0);
     assert!(case.consumes().is_empty());
+}
+
+fn a_second_spend_after_an_unclear_reply_sends_the_same_key(first: Answer) {
+    let first = std::sync::Mutex::new(Some(first));
+    let case = Case::answering(SpendConfirm::OneClick, AllLimited::Notice, move |n| match (
+        n,
+        first.lock().unwrap().take(),
+    ) {
+        (0, Some(answer)) => answer,
+        _ => Answer::json(200, serde_json::json!({"outcome": "reset"})),
+    });
+    request(&case.db, &r("codex-a"), NOW).unwrap();
+    assert_eq!(case.send_queued(NOW + 1), 1);
+    assert!(refresh_asked(&case.db), "a poll is asked after any reply");
+    let shown = view(&case.db).unwrap();
+    assert_eq!(shown.attempts[0].state, AttemptState::Sent);
+    assert_eq!(shown.attempts[0].outcome, None);
+    assert_eq!(case.send_queued(NOW + 2), 0, "never re-sent on its own");
+    request(&case.db, &r("codex-a"), NOW + 3).unwrap();
+    assert_eq!(case.send_queued(NOW + 4), 1);
+    let consumes = case.consumes();
+    assert_eq!(consumes.len(), 2);
+    let key = consumes[0].header("idempotency-key").unwrap();
+    assert_eq!(consumes[1].header("idempotency-key"), Some(key));
+    assert_eq!(
+        view(&case.db).unwrap().attempts[0].outcome.as_deref(),
+        Some("reset")
+    );
+}
+
+#[test]
+fn a_502_reply_then_a_second_spend_sends_the_same_idempotency_key() {
+    a_second_spend_after_an_unclear_reply_sends_the_same_key(Answer::json(
+        502,
+        serde_json::json!({}),
+    ));
+}
+
+#[test]
+fn an_unknown_2xx_reply_then_a_second_spend_before_the_next_poll_sends_the_same_key() {
+    a_second_spend_after_an_unclear_reply_sends_the_same_key(Answer::json(
+        200,
+        serde_json::json!({}),
+    ));
+}
+
+#[test]
+fn an_unreadable_reply_then_a_second_spend_sends_the_same_key() {
+    a_second_spend_after_an_unclear_reply_sends_the_same_key(Answer::bytes(
+        200,
+        b"not json".to_vec(),
+    ));
+}
+
+#[test]
+fn a_refusal_on_the_first_send_settles_and_asks_for_a_poll() {
+    let case = Case::answering(SpendConfirm::OneClick, AllLimited::Notice, |_| {
+        Answer::json(404, serde_json::json!({}))
+    });
+    request(&case.db, &r("codex-a"), NOW).unwrap();
+    assert_eq!(case.send_queued(NOW + 1), 1);
+    assert!(refresh_asked(&case.db));
+    let shown = view(&case.db).unwrap();
+    assert_eq!(shown.attempts[0].state, AttemptState::Settled);
+    assert_eq!(
+        shown.attempts[0].outcome.as_deref(),
+        Some("usage_spend_refused")
+    );
 }
 
 #[test]

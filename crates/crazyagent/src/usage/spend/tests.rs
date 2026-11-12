@@ -183,14 +183,14 @@ fn a_spend_not_yet_sent_is_tried_again_with_the_same_key_up_to_a_bound() {
     let (_root, db) = store();
     request(&db, &r("codex-a"), NOW).unwrap();
     let first = queued(&db).unwrap().remove(0);
+    let mut latest = first.clone();
     for n in 1..TRIES_MAX {
-        not_sent(&db, &first, None, NOW + n).unwrap();
-        let again = queued(&db).unwrap().remove(0);
-        assert_eq!(again.key, first.key);
-        assert_eq!(again.tries, n);
+        not_sent(&db, &latest, None, NOW + n).unwrap();
+        latest = queued(&db).unwrap().remove(0);
+        assert_eq!(latest.key, first.key);
+        assert_eq!(latest.tries, n);
     }
-    let last = queued(&db).unwrap().remove(0);
-    not_sent(&db, &last, None, NOW + 9).unwrap();
+    not_sent(&db, &latest, None, NOW + 9).unwrap();
     assert!(queued(&db).unwrap().is_empty());
     let shown = view(&db).unwrap();
     assert_eq!(
@@ -217,7 +217,7 @@ fn a_sent_attempt_is_never_sent_again_by_the_engine_even_after_a_restart() {
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(
         &db,
-        attempt.id,
+        &attempt,
         &Err(EngineError("usage_unreachable".into())),
         NOW + 31_000,
     )
@@ -249,21 +249,28 @@ fn an_owner_retry_of_a_sent_attempt_carries_the_same_key() {
 }
 
 #[test]
-fn a_reply_settles_the_attempt_with_a_fixed_code_and_a_failure_with_its_code() {
+fn a_definite_reply_settles_the_attempt_with_its_fixed_code() {
     let (_root, db) = store();
     for (n, (result, code)) in [
         (Ok(Outcome::Reset), "reset"),
         (Ok(Outcome::NothingToReset), "nothing_to_reset"),
         (Ok(Outcome::NoCredit), "no_credit"),
         (Ok(Outcome::AlreadyRedeemed), "already_redeemed"),
-        (Ok(Outcome::Unknown), "outcome_unknown"),
+        (
+            Err(EngineError("usage_request_invalid".into())),
+            "usage_request_invalid",
+        ),
+        (
+            Err(EngineError("usage_spend_refused".into())),
+            "usage_spend_refused",
+        ),
+        (
+            Err(EngineError("usage_sign_in_lapsed".into())),
+            "usage_sign_in_lapsed",
+        ),
         (
             Err(EngineError("usage_rate_limited".into())),
             "usage_rate_limited",
-        ),
-        (
-            Err(EngineError("some raw text: /Users/x".into())),
-            "usage_spend_failed",
         ),
     ]
     .into_iter()
@@ -272,17 +279,167 @@ fn a_reply_settles_the_attempt_with_a_fixed_code_and_a_failure_with_its_code() {
         let account = format!("codex-{n}");
         request(&db, &r(&account), NOW).unwrap();
         let attempt = queued(&db).unwrap().remove(0);
+        assert!(!attempt.resend);
         mark_sent(&db, attempt.id, NOW + 1).unwrap();
-        sent(&db, attempt.id, &result, NOW + 2).unwrap();
+        sent(&db, &attempt, &result, NOW + 2).unwrap();
         let shown = view(&db).unwrap();
         let line = shown
             .attempts
             .iter()
             .find(|line| line.account.as_str() == account)
             .unwrap();
-        assert_eq!(line.state, AttemptState::Settled);
+        assert_eq!(line.state, AttemptState::Settled, "{code}");
         assert_eq!(line.outcome.as_deref(), Some(code));
     }
+}
+
+#[test]
+fn a_reply_that_may_have_used_a_reset_keeps_the_attempt_sent_with_its_key() {
+    let (_root, db) = store();
+    for (n, result) in [
+        Ok(Outcome::Unknown),
+        Err(EngineError("usage_spend_failed".into())),
+        Err(EngineError("usage_reply_invalid".into())),
+        Err(EngineError("usage_unreachable".into())),
+        Err(EngineError("some raw text: /Users/x".into())),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let account = format!("codex-{n}");
+        request(&db, &r(&account), NOW).unwrap();
+        let attempt = queued(&db).unwrap().remove(0);
+        mark_sent(&db, attempt.id, NOW + 1).unwrap();
+        sent(&db, &attempt, &result, NOW + 2).unwrap();
+        let shown = view(&db).unwrap();
+        let line = shown
+            .attempts
+            .iter()
+            .find(|line| line.account.as_str() == account)
+            .unwrap();
+        assert_eq!(line.state, AttemptState::Sent, "{result:?}");
+        assert_eq!(line.outcome, None);
+        assert!(queued(&db).unwrap().is_empty(), "never re-sent on its own");
+        request(&db, &r(&account), NOW + 60_000).unwrap();
+        let again = queued(&db).unwrap().remove(0);
+        assert_eq!(again.id, attempt.id);
+        assert_eq!(
+            again.key, attempt.key,
+            "the owner's next Spend reuses the key"
+        );
+        assert!(again.resend);
+        mark_sent(&db, again.id, NOW + 60_001).unwrap();
+        sent(&db, &again, &Ok(Outcome::Reset), NOW + 60_002).unwrap();
+    }
+}
+
+#[test]
+fn a_refusal_of_a_resend_keeps_the_attempt_sent_with_its_key() {
+    let (_root, db) = store();
+    for (n, code) in [
+        "usage_request_invalid",
+        "usage_spend_refused",
+        "usage_sign_in_lapsed",
+        "usage_rate_limited",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let account = format!("codex-{n}");
+        request(&db, &r(&account), NOW).unwrap();
+        let attempt = queued(&db).unwrap().remove(0);
+        mark_sent(&db, attempt.id, NOW + 1).unwrap();
+        sent(
+            &db,
+            &attempt,
+            &Err(EngineError("usage_spend_failed".into())),
+            NOW + 2,
+        )
+        .unwrap();
+        request(&db, &r(&account), NOW + 60_000).unwrap();
+        let again = queued(&db).unwrap().remove(0);
+        assert!(again.resend);
+        mark_sent(&db, again.id, NOW + 60_001).unwrap();
+        sent(&db, &again, &Err(EngineError(code.into())), NOW + 60_002).unwrap();
+        let open = open_attempts(&db);
+        assert_eq!(
+            open.len(),
+            1,
+            "{code}: the first send may have used a reset"
+        );
+        assert_eq!(open[0].2, attempt.key);
+        sent(&db, &again, &Ok(Outcome::Reset), NOW + 60_003).unwrap();
+    }
+}
+
+#[test]
+fn a_resend_that_cannot_go_out_goes_back_to_sent_with_its_key() {
+    let (_root, db) = store();
+    request(&db, &r("codex-a"), NOW).unwrap();
+    let attempt = queued(&db).unwrap().remove(0);
+    mark_sent(&db, attempt.id, NOW + 1).unwrap();
+    sent(
+        &db,
+        &attempt,
+        &Err(EngineError("usage_unreachable".into())),
+        NOW + 2,
+    )
+    .unwrap();
+    for (n, problem) in [
+        None,
+        Some(EngineError("usage_spend_off".into())),
+        Some(EngineError("usage_spend_no_account".into())),
+        Some(EngineError("usage_sign_in_rejected".into())),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        request(&db, &r("codex-a"), NOW + 60_000).unwrap();
+        let again = queued(&db).unwrap().remove(0);
+        assert!(again.resend);
+        not_sent(&db, &again, problem.as_ref(), NOW + 60_001 + n as i64).unwrap();
+        assert!(queued(&db).unwrap().is_empty());
+        let open = open_attempts(&db);
+        assert_eq!(open.len(), 1, "{problem:?}");
+        assert_eq!(open[0].2, attempt.key);
+        assert_eq!(view(&db).unwrap().attempts[0].state, AttemptState::Sent);
+    }
+}
+
+#[test]
+fn a_failed_poll_never_settles_a_sent_attempt() {
+    let (_root, db) = store();
+    request(&db, &r("codex-a"), NOW).unwrap();
+    let attempt = queued(&db).unwrap().remove(0);
+    mark_sent(&db, attempt.id, NOW + 1).unwrap();
+    sent(
+        &db,
+        &attempt,
+        &Err(EngineError("usage_spend_failed".into())),
+        NOW + 2,
+    )
+    .unwrap();
+    crate::usage::record_failure(&db, &r("codex-a"), "usage_unreachable", NOW + 10).unwrap();
+    settle_sent(&db, NOW + 11).unwrap();
+    assert_eq!(
+        open_attempts(&db).len(),
+        1,
+        "a failed poll read no limits after the send"
+    );
+    polled(
+        &db,
+        "codex-a",
+        100.0,
+        LimitSource::Poll,
+        NOW + 20,
+        NOW + 2 * HOUR,
+    );
+    settle_sent(&db, NOW + 21).unwrap();
+    assert!(open_attempts(&db).is_empty());
+    assert_eq!(
+        view(&db).unwrap().attempts[0].outcome.as_deref(),
+        Some("outcome_unknown")
+    );
 }
 
 #[test]
@@ -293,7 +450,7 @@ fn a_poll_newer_than_the_send_settles_a_sent_attempt_whose_reply_never_came() {
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
     sent(
         &db,
-        attempt.id,
+        &attempt,
         &Err(EngineError("usage_unreachable".into())),
         NOW + 2,
     )
@@ -334,7 +491,7 @@ fn the_view_shows_outcomes_but_never_a_key() {
     request(&db, &r("codex-a"), NOW).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 1).unwrap();
-    sent(&db, attempt.id, &Ok(Outcome::NoCredit), NOW + 2).unwrap();
+    sent(&db, &attempt, &Ok(Outcome::NoCredit), NOW + 2).unwrap();
     let shown = view(&db).unwrap();
     assert_eq!(shown.attempts.len(), 1);
     assert_eq!(shown.attempts[0].settled_ms, Some(NOW + 2));
@@ -350,7 +507,7 @@ fn settled_attempts_are_kept_to_a_bound() {
         request(&db, &r(&format!("codex-{n}")), NOW + n).unwrap();
         let attempt = queued(&db).unwrap().remove(0);
         mark_sent(&db, attempt.id, NOW + n).unwrap();
-        sent(&db, attempt.id, &Ok(Outcome::Reset), NOW + n).unwrap();
+        sent(&db, &attempt, &Ok(Outcome::Reset), NOW + n).unwrap();
     }
     let kept: i64 = db
         .query_row("SELECT COUNT(*) FROM usage_spend_attempts", [], |row| {
@@ -523,8 +680,9 @@ fn a_stale_count_after_a_spend_gives_no_second_auto_spend_in_the_same_limit_wind
     track_pools(&db, &pool, NOW + 1).unwrap();
     let attempt = queued(&db).unwrap().remove(0);
     mark_sent(&db, attempt.id, NOW + 2).unwrap();
-    sent(&db, attempt.id, &Ok(Outcome::Reset), NOW + 3).unwrap();
-    track_pools(&db, &pool, NOW + 4).unwrap();
+    sent(&db, &attempt, &Ok(Outcome::Reset), NOW + 3).unwrap();
+    let past_the_hour = NOW + HOUR + 1;
+    track_pools(&db, &pool, past_the_hour + 4).unwrap();
     assert!(
         open_attempts(&db).is_empty(),
         "the poll and count are older than the spend"
@@ -534,11 +692,16 @@ fn a_stale_count_after_a_spend_gives_no_second_auto_spend_in_the_same_limit_wind
         "codex-a",
         100.0,
         LimitSource::Poll,
-        NOW + 5,
+        past_the_hour + 5,
         window_end,
     );
-    resets(&db, "codex-a", 2, NOW + 5);
-    track_pools(&db, &pool, NOW + 6).unwrap();
+    track_pools(&db, &pool, past_the_hour + 6).unwrap();
+    assert!(
+        open_attempts(&db).is_empty(),
+        "a fresh poll but the count is older than the spend"
+    );
+    resets(&db, "codex-a", 2, past_the_hour + 7);
+    track_pools(&db, &pool, past_the_hour + 8).unwrap();
     assert!(open_attempts(&db).is_empty(), "the same limit window");
     let later = NOW + 3 * HOUR;
     polled(
@@ -556,6 +719,72 @@ fn a_stale_count_after_a_spend_gives_no_second_auto_spend_in_the_same_limit_wind
         1,
         "a new limit window, a fresh poll and count"
     );
+}
+
+#[test]
+fn a_failed_poll_is_never_fresh_enough_for_an_auto_spend() {
+    let (_root, db) = store();
+    let pool = access(&[("codex-a", "codex")]);
+    polled(
+        &db,
+        "codex-a",
+        100.0,
+        LimitSource::Poll,
+        NOW,
+        NOW + 3 * HOUR,
+    );
+    resets(&db, "codex-a", 2, NOW);
+    request(&db, &r("codex-a"), NOW + 1).unwrap();
+    let attempt = queued(&db).unwrap().remove(0);
+    mark_sent(&db, attempt.id, NOW + 2).unwrap();
+    sent(&db, &attempt, &Ok(Outcome::Reset), NOW + 3).unwrap();
+    write(&db, settings(SpendConfirm::OneClick, AllLimited::AutoSpend)).unwrap();
+    let later = NOW + HOUR;
+    crate::usage::record_failure(&db, &r("codex-a"), "usage_unreachable", later).unwrap();
+    resets(&db, "codex-a", 1, later);
+    track_pools(&db, &pool, later + 1).unwrap();
+    assert!(
+        open_attempts(&db).is_empty(),
+        "the limits are still the ones read before the owner's spend"
+    );
+    polled(
+        &db,
+        "codex-a",
+        100.0,
+        LimitSource::Poll,
+        later + 2,
+        NOW + 3 * HOUR,
+    );
+    track_pools(&db, &pool, later + 3).unwrap();
+    assert_eq!(open_attempts(&db).len(), 1, "a poll that read the limits");
+}
+
+#[test]
+fn auto_spend_passes_over_a_claude_member_until_its_spend_call_lands() {
+    let (_root, db) = store();
+    let pool = access(&[("claude-x", "claude"), ("codex-y", "codex")]);
+    for account in ["claude-x", "codex-y"] {
+        polled(&db, account, 100.0, LimitSource::Poll, NOW, NOW + 2 * HOUR);
+        resets(&db, account, 1, NOW);
+    }
+    write(&db, settings(SpendConfirm::OneClick, AllLimited::AutoSpend)).unwrap();
+    track_pools(&db, &pool, NOW + 1).unwrap();
+    let open = open_attempts(&db);
+    assert_eq!(open.len(), 1);
+    assert_eq!(
+        (open[0].0.as_str(), open[0].1.as_str()),
+        ("codex-y", "auto")
+    );
+}
+
+#[test]
+fn a_claude_spend_is_settled_unavailable_before_its_token_is_read() {
+    assert_eq!(
+        not_spendable(Some(&managed("claude-x", "claude"))),
+        Some("usage_spend_unavailable")
+    );
+    assert_eq!(not_spendable(Some(&managed("codex-y", "codex"))), None);
+    assert_eq!(not_spendable(None), Some("usage_spend_no_account"));
 }
 
 #[test]
@@ -584,7 +813,7 @@ fn a_pool_auto_spends_at_most_once_an_hour() {
     track_pools(&db, &pool, NOW + 1).unwrap();
     let first = queued(&db).unwrap().remove(0);
     mark_sent(&db, first.id, NOW + 2).unwrap();
-    sent(&db, first.id, &Ok(Outcome::NothingToReset), NOW + 3).unwrap();
+    sent(&db, &first, &Ok(Outcome::NothingToReset), NOW + 3).unwrap();
     polled(
         &db,
         "codex-a",

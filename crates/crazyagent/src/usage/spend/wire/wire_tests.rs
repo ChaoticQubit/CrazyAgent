@@ -136,8 +136,14 @@ fn codex_spend_failures_become_plain_codes() {
         (401, "usage_sign_in_lapsed"),
         (403, "usage_sign_in_lapsed"),
         (429, "usage_rate_limited"),
-        (404, "usage_spend_failed"),
+        (400, "usage_spend_refused"),
+        (404, "usage_spend_refused"),
+        (409, "usage_spend_refused"),
         (500, "usage_spend_failed"),
+        (502, "usage_spend_failed"),
+        (504, "usage_spend_failed"),
+        (302, "usage_spend_failed"),
+        (422, "usage_spend_failed"),
     ] {
         let server = Server::start(move |_, _| Answer::json(status, serde_json::json!({})));
         let key = attempt_key().unwrap();
