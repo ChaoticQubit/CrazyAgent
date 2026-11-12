@@ -95,6 +95,24 @@ fn the_wake_tool_records_a_wake_beside_the_delegations_and_the_engine_takes_both
     assert!(take_proposals(&drop).is_empty(), "taken once");
 }
 
+/// A reply opens a block only on a line that is exactly the fence, as `reply_blocks` reads
+/// it, so a quoted or indented fence is never taken for one (L6 review).
+#[test]
+fn only_a_whole_fence_line_opens_a_task_block() {
+    assert!(opens_block(&format!(
+        "Done.\n{BLOCK_FENCE}\n{{\"task\": \"a\"}}\n```"
+    )));
+    assert!(opens_block(&format!("{BLOCK_FENCE}  ")));
+    for reply in [
+        "Done.".to_owned(),
+        format!("> {BLOCK_FENCE}"),
+        format!("  {BLOCK_FENCE}"),
+        format!("{BLOCK_FENCE}-extra"),
+    ] {
+        assert!(!opens_block(&reply), "{reply}");
+    }
+}
+
 /// A conversation master's server leaves `wake` out, as `MasterTools::server_args` asks: it
 /// is not listed, a call to it is an unknown tool and nothing reaches the drop file, so no
 /// wake is recorded that the conversation master would never act on (L6).

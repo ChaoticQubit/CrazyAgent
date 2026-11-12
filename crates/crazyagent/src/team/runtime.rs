@@ -4854,6 +4854,19 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Tells the owner and a live master with team tools on, in one team note, that a
+    /// `crazyagent-task` block in its reply was not read (L6 review). Takes the project and
+    /// the turn's reply text. Returns any SQLite failure.
+    fn note_ignored_blocks(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
+        if !tool::opens_block(text) {
+            return Ok(());
+        }
+        self.note(
+            project,
+            &format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_TOOLS_ON),
+        )
+    }
+
     /// Hands the tasks and wakes a tools-off live master wrote as `crazyagent-task` blocks
     /// (L6, F16) to the team: each task through `admit` like any master task, with the role
     /// it gave, and each wake through `wake_in`. Refused tasks, the wakes' outcomes and the
@@ -8718,11 +8731,8 @@ impl TeamRuntime {
                         self.finish_task(task, &text, end, cause.as_deref())?
                     }
                     Some(Busy::Message(message)) => {
-                        let (proposed, unread) = if team_tool {
-                            (tool::take_proposals(&self.tool_record(id)), Vec::new())
-                        } else {
-                            tool::reply_blocks(&text)
-                        };
+                        let (proposed, unread) =
+                            turn_proposals(team_tool, &self.tool_record(id), &text);
                         self.finish_message(
                             &project,
                             message,
@@ -8821,7 +8831,9 @@ impl TeamRuntime {
                     )?;
                 }
                 self.count_turn(id, &project, master)?;
-                if !team_tool {
+                if team_tool {
+                    self.note_ignored_blocks(&project, &text)?;
+                } else {
                     self.admit_reply_blocks(&project, &text)?;
                 }
                 self.land_turn(
@@ -9572,6 +9584,26 @@ fn wake_text(finished: &[String], team_tool: bool) -> String {
         "To wake a finished sub-agent in its own worktree with your text as its next task, {how}\nPrefer waking a finished sub-agent that knows the work over starting a new one. Finished sub-agents you can wake, newest first:\n{}\n",
         finished.join("\n")
     )
+}
+
+/// What a non-live master's message turn proposed and why any block was not read: with team
+/// tools, its drop file's tasks and wakes, and one reason when its reply still holds a block
+/// (L6 review); without, its `crazyagent-task` blocks. Takes whether the tools are on, the
+/// drop file and the reply. Returns the proposals and the reasons.
+fn turn_proposals(
+    team_tool: bool,
+    record: &Path,
+    text: &str,
+) -> (Vec<tool::Proposal>, Vec<&'static str>) {
+    if !team_tool {
+        return tool::reply_blocks(text);
+    }
+    let unread = if tool::opens_block(text) {
+        vec![tool::BLOCK_TOOLS_ON]
+    } else {
+        Vec::new()
+    };
+    (tool::take_proposals(record), unread)
 }
 
 /// Tells a master without team tools how to hand a task to a sub-agent: one

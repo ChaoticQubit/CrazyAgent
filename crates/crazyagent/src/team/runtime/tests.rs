@@ -9572,6 +9572,44 @@ fn a_tools_off_live_master_turn_hands_out_only_its_task_blocks() {
     );
 }
 
+/// A master with team tools on hands out work only with its tools: a `crazyagent-task`
+/// block in its reply is not read, and it and the owner get one team note saying so, on
+/// the configured and the live path alike; a reply with no block gets none (L6 review).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_master_s_task_block_is_not_read_and_gets_one_note() {
+    let fixture = Fixture::new(1);
+    let project = fixture.setup.project_id.clone();
+    let drop = fixture.base.join("no-drop").join(tool::DROP_FILE);
+    assert_eq!(
+        turn_proposals(true, &drop, BLOCK_REPLY),
+        (Vec::new(), vec![tool::BLOCK_TOOLS_ON])
+    );
+    assert_eq!(
+        turn_proposals(true, &drop, "Handing it out."),
+        (Vec::new(), Vec::new())
+    );
+    let mut team = fixture.runtime();
+    team.note_ignored_blocks(&project, "Handing it out.")
+        .unwrap();
+    assert!(!fixture.note(&format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_TOOLS_ON)));
+    team.note_ignored_blocks(&project, BLOCK_REPLY).unwrap();
+    assert!(
+        fixture.note(&format!("{UNREAD_BLOCKS_NOTE}\n- {}", tool::BLOCK_TOOLS_ON)),
+        "{:#?}",
+        fixture.status().messages
+    );
+    let tasks: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_tasks WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tasks, 0, "a tools-on master's block hands out nothing");
+}
+
 /// A tools-off master on Claude Code hands out work the same way (L6, F16, DEC-141).
 #[cfg(target_os = "macos")]
 #[test]

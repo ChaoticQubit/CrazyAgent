@@ -44,6 +44,7 @@ pub(crate) const BLOCK_BOUNDS: &str =
     "a crazyagent-task block has an empty or overlong task, harness, role or agent name";
 pub(crate) const BLOCKS_FULL: &str =
     "the engine takes at most 8 crazyagent-task blocks from one reply";
+pub(crate) const BLOCK_TOOLS_ON: &str = "a crazyagent-task block is not read while your team tools are on; hand out work with your team tools instead";
 const UNWRITABLE: &str = "Not recorded: the engine's task record could not be written.";
 
 const _: () = assert!(DROP_BYTES_MAX as usize >= DELEGATIONS_PER_REPLY_MAX * TASK_PROMPT_BYTES_MAX);
@@ -1825,6 +1826,13 @@ pub fn reply_blocks(reply: &str) -> (Vec<Proposal>, Vec<&'static str>) {
     }
     assert!(found.len() <= DELEGATIONS_PER_REPLY_MAX && unread.len() <= 5);
     (found, unread)
+}
+
+/// Says whether a reply holds a line that opens a `crazyagent-task` block, exactly as
+/// `reply_blocks` would read it, so a master with team tools on is told such a block is not
+/// read (L6 review). Takes the reply. Returns the answer.
+pub fn opens_block(reply: &str) -> bool {
+    reply.split('\n').any(|line| line.trim_end() == BLOCK_FENCE)
 }
 
 /// Checks a block's role the way the `delegate` tool checks one, since no tool call checked
