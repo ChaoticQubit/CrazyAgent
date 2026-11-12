@@ -3928,11 +3928,10 @@ impl TeamRuntime {
         let planned = self.master_restarts.remove(project);
         let left = self.master_moves.remove(project);
         assert!(left.is_none() || planned, "a move is a planned restart");
-        let terminal = launch_harness(&harness).is_some_and(|launch| {
-            crate::harnesses::interactive::support(launch)
-                == crate::harnesses::interactive::Support::Terminal
-        });
-        if on && !terminal {
+        if on
+            && crate::harnesses::interactive::support(&harness)
+                != crate::harnesses::interactive::Support::Terminal
+        {
             super::master::set_live(&self.connection, project, false)?;
             self.live_starts.remove(project);
             return self.note(project, &live_gone(&harness));
@@ -10903,7 +10902,8 @@ fn next_lead_turn(
 /// when one is given. A kept session, a native lead's, also reports the turns its app
 /// starts by itself between orders, so its later work is recorded, landed and told to the
 /// master. A turn the owner interrupted while commands its agent started in the background
-/// still ran also ends the agent, so those commands stop with its process.
+/// still ran also ends the agent, so those commands stop with its process, and so does a
+/// turn the wrap flag ended, whose app may still run its own turn (F15).
 /// At the end it stops the agent, or, when the engine quits with the agent kept,
 /// stops the running turn and leaves the pane running for the next engine. A kept
 /// session's credential copy and custody use are released once its process stopped or was
@@ -10967,11 +10967,12 @@ fn serve(
             (cancel, interrupt, wrap),
             rules,
         );
-        let reusable = matches!(
+        let reusable = keeps_session(
             end,
-            TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
-        ) && (end != TurnEnd::Interrupted || session.background_running() == 0)
-            && !session.held();
+            session.background_running(),
+            session.held(),
+            wrap.load(Ordering::SeqCst),
+        );
         if end == TurnEnd::Closed {
             problem = Some(with_code(PROCESS_CLOSED, cause.as_deref()));
         }
@@ -11118,6 +11119,20 @@ fn per_turn(
         }
     }
     None
+}
+
+/// Tells whether `serve` hands the next turn to the same running agent after a turn ended:
+/// after a success, failure or interrupt, unless an interrupt left background commands, its
+/// app still holds the turn open for them, or the wrap flag ended it while the app's own
+/// turn may still run (F15). Inputs: the end, the background commands still running, whether
+/// the app holds the turn and whether the wrap flag ended it. Output: true to reuse it.
+fn keeps_session(end: TurnEnd, background: usize, held: bool, wrapped: bool) -> bool {
+    matches!(
+        end,
+        TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
+    ) && (end != TurnEnd::Interrupted || background == 0)
+        && !held
+        && !wrapped
 }
 
 const PROCESS_CLOSED: &str = "The agent process closed";
@@ -11975,7 +11990,8 @@ fn launch_end(problem: LaunchError) -> (TurnEnd, Option<String>) {
 /// it. Each change between held and running is reported, so a message can be typed into a
 /// held agent while it shows working on its task (DEC-119). The wrap flag, set once its agent
 /// reported done and stayed quiet for the owner's "End a turn after done" time, ends the turn
-/// as a success with `DONE_QUIET_ENDED` before its text (F15). Takes the session, the prompt,
+/// as a success with `DONE_QUIET_ENDED` before its text and stays set, since the app's own
+/// turn may still run, so its caller stops the agent (F15). Takes the session, the prompt,
 /// the reports channel, the cancel, interrupt and wrap flags and the turn's rules. Returns
 /// the turn's text, its end and the end's cause.
 fn turn(
@@ -12010,7 +12026,7 @@ fn turn(
         if interrupt.swap(false, Ordering::SeqCst) {
             let _ = session.interrupt();
         }
-        if wrap.swap(false, Ordering::SeqCst) {
+        if wrap.load(Ordering::SeqCst) {
             wrapped = true;
             break TurnEnd::Success;
         }

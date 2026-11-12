@@ -3504,6 +3504,21 @@ fn a_task_reported_done_ends_once_its_turn_stays_quiet_for_the_after_done_time()
     team.shutdown().unwrap();
 }
 
+/// F15: a turn the engine ended after its agent reported done never hands the next task to
+/// the same running agent, whose app may still run its own turn, while a plain finished turn
+/// still does, and the older reasons to stop the agent still hold.
+#[test]
+fn a_turn_ended_after_done_stops_its_agent_before_the_next_task() {
+    assert!(keeps_session(TurnEnd::Success, 0, false, false));
+    assert!(keeps_session(TurnEnd::Failed, 0, false, false));
+    assert!(keeps_session(TurnEnd::Interrupted, 0, false, false));
+    assert!(!keeps_session(TurnEnd::Success, 0, false, true));
+    assert!(!keeps_session(TurnEnd::Success, 0, true, false));
+    assert!(!keeps_session(TurnEnd::Interrupted, 1, false, false));
+    assert!(!keeps_session(TurnEnd::Cancelled, 0, false, false));
+    assert!(!keeps_session(TurnEnd::Closed, 0, false, false));
+}
+
 /// F15, one row per owner choice of End a turn after done: Off, 2 min, 10 min (default) and
 /// 1 h each keep a task turn its agent reported done running past a short quiet time, and
 /// the engine reads the chosen bound.
