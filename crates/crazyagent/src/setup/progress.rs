@@ -1,7 +1,5 @@
 use super::pack::PackManifest;
-use super::{
-    Dependency, DependencyState, DependencyStatus, InstallError, PackEntry, PackState, Version,
-};
+use super::{Dependency, DependencyState, DependencyStatus, PackEntry, PackState};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -27,10 +25,7 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
     pub at: Instant,
-    pub found: Vec<(
-        Dependency,
-        Result<Result<Version, crate::tools::Missing>, InstallError>,
-    )>,
+    pub found: Vec<(Dependency, crate::setup::Lookup)>,
 }
 
 static PROGRESS: Mutex<BTreeMap<PathBuf, Progress>> = Mutex::new(BTreeMap::new());
@@ -146,6 +141,7 @@ pub fn source_label(source: &super::pack::PackSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::{InstallError, Version};
 
     #[test]
     fn a_system_setup_cannot_install_on_shows_its_own_plain_reason() {

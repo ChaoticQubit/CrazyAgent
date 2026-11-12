@@ -384,16 +384,17 @@ pub fn locked_tool_args(
 /// now present; `install_tool` installs one pinned Python tool an MCP server needs into
 /// the app data folder; `program` finds a program setup installed or the system has.
 /// Implementations never use sudo and never change global configuration.
+/// What looking for one dependency found: its version, why it cannot run
+/// ([`crate::tools::Missing`]), or the check's code.
+pub type Lookup = Result<Result<Version, crate::tools::Missing>, InstallError>;
+
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
 
     /// Finds a dependency as [`Installer::find`] does, naming why it cannot run when it is
     /// missing ([`crate::tools::Missing`]), the answer the setup screen shows. Input: the
     /// dependency. Output: its version, why it cannot run, or the check's code.
-    fn lookup(
-        &self,
-        dep: Dependency,
-    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+    fn lookup(&self, dep: Dependency) -> Lookup {
         Ok(self.find(dep)?.ok_or_else(|| dep.not_found()))
     }
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError>;

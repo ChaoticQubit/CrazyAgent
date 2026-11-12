@@ -117,10 +117,7 @@ impl Installer for MacInstaller {
         self.pinned.find(dep)
     }
 
-    fn lookup(
-        &self,
-        dep: Dependency,
-    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+    fn lookup(&self, dep: Dependency) -> super::Lookup {
         self.pinned.lookup(dep)
     }
 

@@ -416,10 +416,7 @@ impl Installer for PinnedInstaller {
         Ok(self.lookup(dep)?.ok())
     }
 
-    fn lookup(
-        &self,
-        dep: Dependency,
-    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+    fn lookup(&self, dep: Dependency) -> super::Lookup {
         Ok(self.resolved(dep)?.map(|(_, version)| version))
     }
 
