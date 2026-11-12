@@ -365,6 +365,25 @@ async fn desktop_harness_install(
 }
 
 #[tauri::command]
+async fn desktop_harness_install_many(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    ids: Vec<String>,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_install_many(&ids).await
+}
+
+#[tauri::command]
+async fn desktop_harness_queued(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.harness_queued().await
+}
+
+#[tauri::command]
 async fn desktop_harness_find(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4814,6 +4833,8 @@ native_commands! {
     desktop_harness_versions,
     desktop_harness_update,
     desktop_harness_install,
+    desktop_harness_install_many,
+    desktop_harness_queued,
     desktop_harness_find,
     desktop_harness_choose_path,
     desktop_pick_harness_file,
