@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS team_model_refusals (
 /// (DEC-150 F8): a plan seldom gains a model sooner, and a refusal told wrongly passes.
 pub(crate) const MODEL_REFUSAL_MS: i64 = 6 * 60 * 60 * 1000;
 
-/// The most model refusals one project keeps, as an agent's transcript can tell any
+/// The most model refusals one project keeps, as an agent's harness stream can tell any
 /// number (DEC-150 F8); a new one past it drops the one closest to its end.
 pub(crate) const REFUSALS_MAX: usize = 64;
 

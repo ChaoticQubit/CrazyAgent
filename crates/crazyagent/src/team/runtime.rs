@@ -11557,9 +11557,6 @@ fn live_serve(
                 push_trimmed(&mut text, &said, LIVE_REPLY_BYTES_MAX);
             }
             Ok(Some(TranscriptEvent::TurnError { rate_limited })) => limited |= rate_limited,
-            Ok(Some(TranscriptEvent::ModelRefused)) => {
-                let _ = reports.send(Report::ModelRefused);
-            }
             Ok(Some(TranscriptEvent::Interrupted)) => interrupted = true,
             Ok(Some(TranscriptEvent::TurnFinished { success })) => {
                 let end = match (limited, interrupted, success) {
@@ -11969,9 +11966,6 @@ fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut Ow
                 push_trimmed(&mut own.text, &text, LIVE_REPLY_BYTES_MAX);
             }
             TranscriptEvent::TurnError { rate_limited } => own.limited |= rate_limited,
-            TranscriptEvent::ModelRefused => {
-                let _ = reports.send(Report::ModelRefused);
-            }
             TranscriptEvent::Interrupted => own.interrupted = true,
             TranscriptEvent::TurnFinished { success } if own.running => {
                 own.running = false;
