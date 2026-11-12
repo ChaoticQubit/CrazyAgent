@@ -4340,6 +4340,70 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
 }
 
 #[test]
+fn the_context_tab_names_the_docs_the_engine_left_out_as_the_desktop_does_never_a_silent_drop() {
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    let doc = |path: &str| ContextItem {
+        path: format!("repo/{path}"),
+        kind: ContextKind::Document,
+        bytes: 8,
+        linked: true,
+    };
+    let listed = |unlisted_docs: usize, docs_folder_cut: bool| ProjectContext {
+        project_id: project.clone(),
+        folder: "/private/tmp/ca-notes-cli/.crazyagent".into(),
+        items: vec![
+            doc("docs/adr/0001-store.md"),
+            doc("docs/roadmap/README.md"),
+        ],
+        unlisted_docs,
+        docs_folder_cut,
+    };
+    let look = Look::plain();
+    let mut words = |context: ProjectContext, width: u16| {
+        screen.context = Some(context);
+        let drawn = project_screen(&mut screen, width, 40, &look);
+        text(&drawn.rows)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for width in [80, 120] {
+        let whole = words(listed(0, false), width);
+        assert!(whole.contains("README.md"), "{whole}");
+        assert!(
+            !whole.contains("not listed"),
+            "a whole list says nothing: {whole}"
+        );
+        let cut = words(listed(6, false), width);
+        assert!(cut.contains("6 more docs not listed"), "{width}: {cut}");
+        assert!(
+            cut.find("README.md") < cut.find("6 more docs not listed"),
+            "the line follows the docs: {cut}"
+        );
+    }
+    let one = words(listed(1, false), 80);
+    assert!(one.contains("1 more doc not listed"), "{one}");
+    assert!(!one.contains("1 more docs"), "{one}");
+    let folder = words(listed(0, true), 80);
+    assert!(
+        folder.contains(
+            "More docs not listed: the docs folder has more files than CrazyAgent reads"
+        ),
+        "{folder}"
+    );
+    let both = words(listed(6, true), 80);
+    assert!(
+        both.contains(
+            "6 more docs not listed, and the docs folder has more files than CrazyAgent reads"
+        ),
+        "{both}"
+    );
+}
+
+#[test]
 fn a_file_linked_from_the_repo_says_so_opens_from_the_project_folder_and_is_not_deleted() {
     use super::project::OpenRequest;
     use crate::project_setup::{ContextItem, ProjectContext};
