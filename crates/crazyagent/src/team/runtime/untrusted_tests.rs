@@ -227,3 +227,53 @@ fn an_untrusted_team_agent_launch_profile_cannot_reach_a_non_model_host() {
         "an untrusted team agent reached a non-model host on 443: {said}"
     );
 }
+
+/// CU-2: an untrusted project's tools-on sub-agent on a managed account reaches the network
+/// only through its model proxy, under the None network as a reviewed one does and under
+/// Open too, since an untrusted agent gets only its model endpoint (threat model N2); its
+/// profile grants the proxy's loopback port and no host port, so it never reaches any host
+/// on 443.
+#[test]
+fn an_untrusted_managed_tools_on_agent_reaches_the_network_only_through_its_model_proxy() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    for network in [AgentNetwork::None, AgentNetwork::Open] {
+        let fixture = Fixture::new(1);
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        let runtime = untrusted_runtime(&fixture);
+        let profile = reference("managed-profile");
+        let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(managed.join("auth.json"), "{}").unwrap();
+        let account = TeamAccount {
+            connection: reference("managed-connection"),
+            reach: TeamReach::Managed {
+                profile_ref: profile,
+                model: None,
+            },
+        };
+        let plan = untrusted_launch(&runtime, &fixture, &account);
+        let port = plan.proxy.as_ref().map(|proxy| proxy.port());
+        assert!(
+            port.is_some(),
+            "{network:?}: an untrusted tools-on agent gets a model proxy"
+        );
+        let text = std::fs::read_to_string(&plan.sandbox_profile).unwrap();
+        assert!(
+            text.contains(&format!(
+                "(allow network-outbound (remote ip \"localhost:{}\"))",
+                port.unwrap()
+            )),
+            "{network:?}: {text}"
+        );
+        assert!(!text.contains("(remote ip \"*:"), "{network:?}: {text}");
+    }
+}
