@@ -171,6 +171,33 @@ impl NoticeKind {
         }
     }
 
+    /// The kind's short label, the same words on every client (DEC-141). Input: the kind.
+    /// Output: the fixed label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Question => "Question",
+            Self::AccountSignIn => "Account sign-in",
+            Self::ResearchPool => "Waiting for a pool",
+            Self::MemoryReview => "Memories to review",
+            Self::ChangeSetReview => "Change set to review",
+            Self::AgentFinished => "Agent finished",
+            Self::AgentFailed => "Agent failed",
+            Self::AgentStopped => "Agent stopped",
+            Self::MasterOff => "Master turned off",
+            Self::ChangeSetLanded => "Change set landed",
+            Self::ChangeSetConflict => "Change set conflict",
+            Self::ChangeSetRolledBack => "Change set rolled back",
+            Self::AccountNearLimit => "Account near its limit",
+            Self::AccountAtLimit => "Account at its limit",
+            Self::PoolFailover => "Pool failover",
+            Self::AppUpdateReady => "App update ready",
+            Self::EngineRestarted => "Engine restarted",
+            Self::EngineLost => "Engine lost",
+            Self::HarnessUpdate => "Harness update",
+            Self::TeamAlert => "Team alert",
+        }
+    }
+
     /// Reads a stored kind name. Input: the name. Output: the kind, or none for a name this
     /// engine does not know.
     pub fn parse(value: &str) -> Option<Self> {
