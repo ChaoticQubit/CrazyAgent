@@ -201,58 +201,136 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
 }
 
 #[test]
-fn the_folder_probes_run_again_after_a_failure_or_a_miss_once_the_backoff_passed_and_after_the_refresh_age()
- {
-    let start = Instant::now();
+fn the_folder_probes_run_again_only_after_a_failure_or_a_miss_backing_off_to_ten_minutes() {
+    let first = Instant::now();
     let tick = Duration::from_millis(1);
     let (a, b) = (PathBuf::from("/a/bin"), PathBuf::from("/b/bin"));
     let mut probes = Probes::new();
-    assert!(probes.start(start, false), "the first call starts a run");
+    assert!(probes.start(first, false), "the first use starts a run");
     assert!(
-        !probes.start(start + RETRY_AFTER, true),
+        !probes.start(first + RETRY_AFTER, true),
         "one run at a time"
     );
-    probes.finish(vec![a.clone()], false, start);
-    assert_eq!(probes.found, [a.clone()]);
-    assert!(!probes.start(start + RETRY_AFTER - tick, false));
-    let retried = start + RETRY_AFTER;
+    probes.finish(vec![a.clone()], true, first);
     assert!(
-        probes.start(retried, false),
-        "a failed run is retried after the backoff"
+        !probes.start(first + Duration::from_secs(24 * 3600), false),
+        "a complete run is never run again on its own"
     );
-    probes.finish(vec![b.clone()], false, retried);
+    assert!(!probes.start(first + RETRY_AFTER - tick, true));
+    let mut at = first + RETRY_AFTER;
+    assert!(probes.start(at, true), "a resolve that missed probes again");
+    probes.finish(vec![a.clone(), b.clone()], true, at);
     assert_eq!(
         probes.found,
-        [b.clone(), a.clone()],
-        "a failed run never drops what an earlier run found"
+        [a.clone(), b.clone()],
+        "a tool installed later is found"
     );
-    assert!(probes.start(retried + RETRY_AFTER, false));
-    let complete = retried + RETRY_AFTER;
-    probes.finish(vec![b.clone()], true, complete);
+    at += RETRY_AFTER;
+    assert!(probes.start(at, true));
+    probes.finish(Vec::new(), false, at);
+    assert_eq!(
+        probes.found,
+        [a, b.clone()],
+        "a failed run never drops what was found"
+    );
+    for seconds in [30, 60, 120, 240, 480, 600, 600] {
+        let wait = Duration::from_secs(seconds);
+        assert!(!probes.start(at + wait - tick, false), "{seconds} s");
+        at += wait;
+        assert!(
+            probes.start(at, false),
+            "a failed run is retried after {seconds} s"
+        );
+        probes.finish(Vec::new(), false, at);
+    }
+    at += BACKOFF_MAX;
+    assert!(probes.start(at, false));
+    probes.finish(vec![b.clone()], true, at);
     assert_eq!(
         probes.found,
         [b.clone()],
         "a complete run replaces the folders"
     );
+    assert!(!probes.start(at + BACKOFF_MAX, false));
     assert!(
-        !probes.start(complete + RETRY_AFTER, false),
-        "a complete run is kept"
+        probes.start(at + RETRY_AFTER, true),
+        "a success resets the backoff"
+    );
+    at += RETRY_AFTER;
+    probes.finish(vec![b.clone()], true, at);
+    assert!(probes.start(at + RETRY_AFTER, true));
+    at += RETRY_AFTER;
+    probes.finish(vec![b], true, at);
+    assert!(
+        !probes.start(at + 2 * RETRY_AFTER - tick, true),
+        "misses that find nothing new back off too"
+    );
+    assert!(probes.start(at + 2 * RETRY_AFTER, true));
+}
+
+#[test]
+fn steady_resolves_start_a_bounded_number_of_folder_runs_an_hour() {
+    for complete in [false, true] {
+        let first = Instant::now();
+        let mut probes = Probes::new();
+        let mut runs = 0;
+        for second in 0..3600 {
+            let now = first + Duration::from_secs(second);
+            if probes.start(now, true) {
+                runs += 1;
+                probes.finish(vec![PathBuf::from("/a/bin")], complete, now);
+            }
+        }
+        assert!(
+            (1..=12).contains(&runs),
+            "{runs} runs in an hour of misses, complete {complete}"
+        );
+    }
+}
+
+#[test]
+fn a_folder_run_that_panics_is_recorded_as_failed_so_a_later_one_can_start() {
+    let probes = Mutex::new(Probes::new());
+    let first = Instant::now();
+    assert!(lock(&probes).start(first, false));
+    let outcome = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let _running = Running::new(&probes);
+                panic!("a probe failed");
+            })
+            .join()
+    });
+    assert!(outcome.is_err());
+    let probes = lock(&probes);
+    assert!(!probes.running, "the run no longer counts as going");
+    assert_eq!(probes.last.map(|run| run.complete), Some(false));
+}
+
+#[test]
+fn a_daemon_holding_the_output_neither_keeps_the_run_waiting_nor_the_output_open() {
+    let (_folder, root) = scratch();
+    let daemon = program(
+        &root.join("daemon"),
+        "#!/bin/sh\n/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); $SIG{PIPE} = \"IGNORE\"; $| = 1; sleep 2; my $open = print STDOUT \"late\\n\"; open(my $f, \">\", $ARGV[0]) or exit 1; print $f ($open ? \"open\" : \"closed\"); close $f' \"$0.late\" &\necho done\n",
+    );
+    let started = Instant::now();
+    assert_eq!(
+        run_timed(&mut Command::new(&daemon), Duration::from_secs(10)).as_deref(),
+        Some(&b"done\n"[..])
     );
     assert!(
-        !probes.start(complete + RETRY_AFTER - tick, true),
-        "a resolve that missed waits for the backoff"
+        started.elapsed() < Duration::from_secs(2),
+        "the run ends a short grace after its program, not at the limit"
     );
-    assert!(
-        probes.start(complete + RETRY_AFTER, true),
-        "a resolve that missed probes again"
-    );
-    let missed = complete + RETRY_AFTER;
-    probes.finish(vec![a.clone(), b.clone()], true, missed);
-    assert_eq!(probes.found, [a, b], "a tool installed later is found");
-    assert!(!probes.start(missed + REFRESH_AGE - tick, false));
-    assert!(
-        probes.start(missed + REFRESH_AGE, false),
-        "a complete run is refreshed after the refresh age"
+    let late = root.join("daemon.late");
+    while !late.exists() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::read_to_string(&late).unwrap(),
+        "closed",
+        "the output's read end is closed once the run ends"
     );
 }
 
@@ -366,7 +444,11 @@ fn a_version_is_probed_again_when_its_file_changes_or_after_the_backoff_when_it_
     );
     let answered = known(Some("1.0"), Some(now));
     assert!(
-        !version_due(Some(&answered), identity, now + REFRESH_AGE),
+        !version_due(
+            Some(&answered),
+            identity,
+            now + Duration::from_secs(24 * 3600)
+        ),
         "a version stays while its file does"
     );
     assert!(
