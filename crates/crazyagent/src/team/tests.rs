@@ -7165,7 +7165,8 @@ fn pause_all_and_a_one_task_cancel_each_keep_their_reason_and_an_owner_action_ro
         Outcome::Applied
     );
     tx.commit().unwrap();
-    let rows: Vec<(i64, String, Option<String>, bool, Option<String>)> = connection
+    type Row = (i64, String, Option<String>, bool, Option<String>);
+    let rows: Vec<Row> = connection
         .prepare("SELECT id,status,error,cancel_requested,cancel_by FROM team_tasks ORDER BY id")
         .unwrap()
         .query_map([], |r| {
