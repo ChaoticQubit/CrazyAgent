@@ -24,30 +24,33 @@ impl Rows {
     /// `HEADER_BYTES_MAX` and the file, a JSON object header with exactly one tensor beside
     /// an optional `__metadata__`, dtype F32, shape [rows, width] and data offsets from 0 to
     /// rows * width * 4 that end at the end of the file. Inputs: the open file and the
-    /// expected shape. Output: the rows, or `search_model_format` or `search_model_read`.
+    /// expected shape. Output: the rows, or `search_model_mismatch` or `search_model_store_unavailable`.
     pub fn open(file: File, shape: &Shape) -> Result<Rows, &'static str> {
         assert!(shape.rows > 0 && shape.dims > 0 && shape.dims <= shape.width);
-        let length = file.metadata().map_err(|_| "search_model_read")?.len();
+        let length = file
+            .metadata()
+            .map_err(|_| "search_model_store_unavailable")?
+            .len();
         if length < LENGTH_BYTES {
-            return Err("search_model_format");
+            return Err("search_model_mismatch");
         }
         let mut prefix = [0; LENGTH_BYTES as usize];
         file.read_exact_at(&mut prefix, 0)
-            .map_err(|_| "search_model_read")?;
+            .map_err(|_| "search_model_store_unavailable")?;
         let header_bytes = u64::from_le_bytes(prefix);
         if header_bytes == 0
             || header_bytes > HEADER_BYTES_MAX
             || header_bytes > length - LENGTH_BYTES
         {
-            return Err("search_model_format");
+            return Err("search_model_mismatch");
         }
         let mut header = vec![0; header_bytes as usize];
         file.read_exact_at(&mut header, LENGTH_BYTES)
-            .map_err(|_| "search_model_read")?;
+            .map_err(|_| "search_model_store_unavailable")?;
         let data_start = LENGTH_BYTES + header_bytes;
         let data_bytes = tensor_bytes(&header, shape)?;
         if data_start.checked_add(data_bytes) != Some(length) {
-            return Err("search_model_format");
+            return Err("search_model_mismatch");
         }
         Ok(Rows {
             file,
@@ -65,7 +68,7 @@ impl Rows {
 
     /// Adds one row's leading `dims` floats, times a weight, into a sum. Inputs: the token
     /// id (below the row count, which the tokenizer checks), the weight and the sum of
-    /// `dims` floats. Output: unit, or `search_model_read`, or `search_model_format` for a
+    /// `dims` floats. Output: unit, or `search_model_store_unavailable`, or `search_model_mismatch` for a
     /// value that is not finite.
     pub fn add(&self, id: u32, weight: f32, sum: &mut [f32]) -> Result<(), &'static str> {
         let id = id as usize;
@@ -75,11 +78,11 @@ impl Rows {
         let offset = self.data_start + (id * self.width * FLOAT_BYTES) as u64;
         self.file
             .read_exact_at(&mut bytes, offset)
-            .map_err(|_| "search_model_read")?;
+            .map_err(|_| "search_model_store_unavailable")?;
         for (into, raw) in sum.iter_mut().zip(bytes.chunks_exact(FLOAT_BYTES)) {
             let value = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
             if !value.is_finite() {
-                return Err("search_model_format");
+                return Err("search_model_mismatch");
             }
             *into += weight * value;
         }
@@ -89,20 +92,20 @@ impl Rows {
 
 /// Reads the header JSON and returns the one tensor's data length when it is F32 of the
 /// expected shape with offsets starting at 0. Inputs: the header bytes and the shape.
-/// Output: the data length in bytes, or `search_model_format`.
+/// Output: the data length in bytes, or `search_model_mismatch`.
 fn tensor_bytes(header: &[u8], shape: &Shape) -> Result<u64, &'static str> {
     let parsed: serde_json::Value =
-        serde_json::from_slice(header).map_err(|_| "search_model_format")?;
-    let entries = parsed.as_object().ok_or("search_model_format")?;
+        serde_json::from_slice(header).map_err(|_| "search_model_mismatch")?;
+    let entries = parsed.as_object().ok_or("search_model_mismatch")?;
     let mut tensors = entries.iter().filter(|(name, _)| *name != "__metadata__");
-    let (_, tensor) = tensors.next().ok_or("search_model_format")?;
+    let (_, tensor) = tensors.next().ok_or("search_model_mismatch")?;
     if tensors.next().is_some() {
-        return Err("search_model_format");
+        return Err("search_model_mismatch");
     }
     let expected = (shape.rows as u64)
         .checked_mul(shape.width as u64)
         .and_then(|floats| floats.checked_mul(FLOAT_BYTES as u64))
-        .ok_or("search_model_format")?;
+        .ok_or("search_model_mismatch")?;
     let dtype = tensor.get("dtype").and_then(|value| value.as_str());
     let sizes: Option<Vec<u64>> = tensor
         .get("shape")
@@ -115,7 +118,7 @@ fn tensor_bytes(header: &[u8], shape: &Shape) -> Result<u64, &'static str> {
     let shaped = sizes == Some(vec![shape.rows as u64, shape.width as u64]);
     let placed = offsets == Some(vec![0, expected]);
     if dtype != Some("F32") || !shaped || !placed {
-        return Err("search_model_format");
+        return Err("search_model_mismatch");
     }
     Ok(expected)
 }

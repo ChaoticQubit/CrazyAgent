@@ -780,6 +780,8 @@ dependencies = [
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
+ "icu_normalizer",
+ "icu_properties",
  "keyring-core",
  "landlock",
  "libc",
