@@ -88,6 +88,11 @@ const MASTER_TOOLS_CONFIG: [&str; 10] = [
     PROJECT_DOCS_OFF,
 ];
 const PROJECT_DOCS_OFF: &str = "project_doc_max_bytes=0";
+
+/// The code a master turn ends with when its harness refused the master model for the
+/// turn's account, and a later turn under the owner's Stop fallback rule while that
+/// refusal holds (DEC-150 M-10).
+pub(super) const MASTER_MODEL_REFUSED: &str = "master_model_refused";
 const DELEGATE_SERVERS: &str = "mcp_servers=";
 
 impl OwnerRuntimeHandle {
@@ -99,9 +104,10 @@ impl OwnerRuntimeHandle {
 
     /// Reads the owner's harness settings and master model (DEC-150) one master turn
     /// applies on a blocking thread, so the store reads and a first version probe never
-    /// hold the async runtime. Input: the prepared turn. Output: the settings and the
-    /// master model, none for the account's own, both empty for an rcli master, or a
-    /// `HARNESS_SETTINGS_CODES` refusal or `model_choice_unavailable`.
+    /// hold the async runtime; a model the turn's account refused falls back by the
+    /// owner's rule (`master_choice`). Input: the prepared turn. Output: the settings and
+    /// the master model, none for the account's own, both empty for an rcli master, or a
+    /// `HARNESS_SETTINGS_CODES` refusal, `MASTER_MODEL_REFUSED` or `model_choice_unavailable`.
     pub(super) async fn master_settings(
         &self,
         prepared: &PreparedMasterTurn,
@@ -114,12 +120,42 @@ impl OwnerRuntimeHandle {
         let executable = executable.verified_path()?.to_path_buf();
         let root = super::changes::engine_root(&self.authority)?;
         let project = prepared.session.project_id.clone();
+        let connection = prepared.attempt.connection.id.clone();
         tokio::task::spawn_blocking(move || {
             let db = crate::storage::versioned::open(&root)?;
-            master_choice(&db, harness, &executable, &project)
+            let now = crate::team::now_ms();
+            master_choice(&db, harness, &executable, &project, &connection, now)
         })
         .await
         .map_err(|_| failure("harness_settings_unavailable"))?
+    }
+
+    /// Records that the turn's account refused the master model (DEC-150 M-10) on a
+    /// blocking thread, so the next turn on that account falls back by the owner's rule
+    /// (`master_choice`) for `MODEL_REFUSAL_MS`. A store that cannot be written logs only
+    /// its failure code. Inputs: the prepared turn and the model the turn pinned.
+    pub(super) async fn record_master_refusal(&self, prepared: &PreparedMasterTurn, model: String) {
+        assert!(!model.is_empty() && model.len() <= crate::model_choice::MODEL_BYTES_MAX);
+        let root = super::changes::engine_root(&self.authority);
+        let project = prepared.session.project_id.clone();
+        let connection = prepared.attempt.connection.id.clone();
+        let recorded = tokio::task::spawn_blocking(move || {
+            let db = crate::storage::versioned::open(&root?)?;
+            crate::team::model_pick::refuse(
+                &db,
+                &project,
+                &connection,
+                &model,
+                crate::team::now_ms(),
+            )
+        })
+        .await;
+        let problem = match recorded {
+            Ok(Ok(())) => return,
+            Ok(Err(problem)) => crate::protocol::plain_code(&problem.0).to_owned(),
+            Err(_) => "model_choice_unavailable".to_owned(),
+        };
+        eprintln!("master model refusal not recorded: {problem}");
     }
 
     pub(super) fn prepare_master_host(
@@ -3061,27 +3097,62 @@ mod codex_turn_tests;
 mod untrusted_tests;
 
 /// Reads the owner's harness settings and master model (DEC-150) for one Claude Code or
-/// Codex master turn: the master slot for the harness in the project, then the app's.
-/// Inputs: the engine database, the harness id, its registered executable and the project.
-/// Output: the settings and the model, none for the account's own, or a
-/// `HARNESS_SETTINGS_CODES` refusal or `model_choice_unavailable`.
+/// Codex master turn: the master slot for the harness in the project, then the app's. A
+/// model the turn's account refused (M-10) runs the account's own under Notice, told once,
+/// or Silent, and fails the turn under Stop; any other model marks it ran.
+/// Inputs: the database, the harness, its executable, the project, the account and the
+/// time. Output: the settings and the model, none for the account's own, or a
+/// `HARNESS_SETTINGS_CODES` refusal, `MASTER_MODEL_REFUSED` or `model_choice_unavailable`.
 fn master_choice(
     db: &rusqlite::Connection,
     harness: &str,
     executable: &Path,
     project: &crate::protocol::ProjectId,
+    connection: &crate::protocol::CredentialRef,
+    now: i64,
 ) -> Result<(crate::harness_settings::apply::Applied, Option<String>), EngineError> {
+    use crate::model_choice::rules::FallbackRule;
+    use crate::team::model_pick;
     assert!(matches!(harness, "claude-code" | "codex"));
+    assert!(now > 0);
     let settings =
         crate::harness_settings::apply::for_launch(db, harness, executable, Some(project))?;
-    let model = crate::model_choice::store::launch_model(
+    let Some(model) = crate::model_choice::store::launch_model(
         db,
         harness,
         &crate::model_choice::catalog(harness),
         Some(project),
         crate::model_choice::Slot::Master,
-    )?;
-    Ok((settings, model))
+    )?
+    else {
+        return Ok((settings, None));
+    };
+    let unavailable = |_| failure("model_choice_unavailable");
+    if !model_pick::refused(db, project, connection, &model, now).map_err(unavailable)? {
+        model_pick::ran(db, project, harness, &model).map_err(unavailable)?;
+        return Ok((settings, Some(model)));
+    }
+    match crate::model_choice::rules::rules(db)?.fallback {
+        FallbackRule::Stop => Err(failure(MASTER_MODEL_REFUSED)),
+        FallbackRule::Silent => Ok((settings, None)),
+        FallbackRule::Notice => {
+            let tx = db
+                .unchecked_transaction()
+                .map_err(|_| failure("model_choice_unavailable"))?;
+            model_pick::fell_back(
+                &tx,
+                project,
+                harness,
+                &model,
+                model_pick::Fallen::HostMaster,
+                now,
+            )
+            .map_err(unavailable)?;
+            tx.commit()
+                .map_err(|_| failure("model_choice_unavailable"))?;
+            Ok((settings, None))
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

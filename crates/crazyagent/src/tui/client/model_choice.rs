@@ -3,13 +3,16 @@ use super::*;
 use crate::engine::EngineError;
 use crate::engine::owner::ModelAdded;
 use crate::model_choice::rules::{Rule, RuleWritten, Rules};
+use crate::model_choice::test_launch::Tested;
 use crate::model_choice::{Models, Slot, Written};
+use crate::protocol::CredentialRef;
 use serde_json::Value;
 
 /// One model choice request a Models screen sends (DEC-150): read a harness's section at one
 /// scope, with the rules on the app page; set or reset one slot naming the version the owner
-/// read; add or remove an owner id; or set one rule naming its version. No project means the
-/// app-wide values. Runs on the owner worker as a Settings job.
+/// read; add or remove an owner id; run a pending id's test launch on a pool the owner
+/// picked; or set one rule naming its version. No project means the app-wide values. Runs
+/// on the owner worker as a Settings job; a test launch holds it until the engine decides.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::tui) enum ModelChoiceQuery {
     Read {
@@ -37,6 +40,11 @@ pub(in crate::tui) enum ModelChoiceQuery {
         harness: String,
         model: String,
     },
+    Test {
+        harness: String,
+        model: String,
+        pool: CredentialRef,
+    },
     SetRule {
         rule: Rule,
         version: u64,
@@ -45,7 +53,8 @@ pub(in crate::tui) enum ModelChoiceQuery {
 
 /// What the engine answered a model choice request with: the section with the rules (none
 /// on a project page), what a slot set or reset did, what an add or remove did with the
-/// app-wide section after it, or what a rule set did.
+/// app-wide section after it, what a test launch decided with its pending reason and the
+/// section after it, or what a rule set did.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::tui) enum ModelChoiceReply {
     Read {
@@ -55,6 +64,7 @@ pub(in crate::tui) enum ModelChoiceReply {
     Written(Written),
     Added(ModelAdded, Models),
     Removed(bool, Models),
+    Tested(Tested, Option<String>, Models),
     RuleWritten(RuleWritten),
 }
 
@@ -138,6 +148,14 @@ async fn run(
             .model_choice_remove(harness, model)
             .await
             .map(|(removed, models)| ModelChoiceReply::Removed(removed, models)),
+        ModelChoiceQuery::Test {
+            harness,
+            model,
+            pool,
+        } => controller
+            .model_choice_test(harness, model, pool.clone())
+            .await
+            .map(|(tested, reason, models)| ModelChoiceReply::Tested(tested, reason, models)),
         ModelChoiceQuery::SetRule { rule, version } => controller
             .model_choice_set_rule(*rule, *version)
             .await

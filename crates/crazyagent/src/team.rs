@@ -660,6 +660,8 @@ pub enum TeamAction {
         project_id: ProjectId,
         harness: Option<String>,
         prompt: String,
+        #[serde(default)]
+        model: Option<String>,
     },
     Cancel {
         project_id: ProjectId,
@@ -940,13 +942,24 @@ impl TeamAction {
                 .then_some(())
                 .ok_or_else(|| failure("team_message_invalid")),
             Self::Delegate {
-                harness, prompt, ..
+                harness,
+                prompt,
+                model,
+                ..
             } => {
                 if harness
                     .as_ref()
                     .is_some_and(|h| h.is_empty() || h.len() > 64 || !harness_name(h))
                 {
                     return Err(failure("team_harness_invalid"));
+                }
+                if let Some(model) = model {
+                    let rule = harness.as_deref().map_or("claude-code", |harness| {
+                        crate::model_choice::harness_id(harness).unwrap_or(harness)
+                    });
+                    if !crate::model_choice::model_valid(rule, model) {
+                        return Err(failure("team_model_invalid"));
+                    }
                 }
                 text_valid(prompt, TASK_PROMPT_BYTES_MAX)
                     .then_some(())
@@ -2250,6 +2263,66 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Admits one task the owner delegates and pins the model the owner named under the pick
+/// rule a master's spawn meets (DEC-150 addendum 7), inside a savepoint so a refused
+/// admission or pick writes nothing. Takes the transaction, the engine configuration, the
+/// project's setup, the harness, the prompt, the model and the time. Returns Applied or
+/// the rejection, or a SQLite failure.
+#[allow(clippy::too_many_arguments)]
+fn owner_delegate(
+    tx: &Transaction<'_>,
+    access: &ModelAccess,
+    stored: &StoredSetup,
+    harness: Option<&str>,
+    prompt: &str,
+    model: Option<&str>,
+    now: i64,
+) -> Result<Outcome, EngineError> {
+    tx.execute_batch("SAVEPOINT owner_delegate")
+        .map_err(error)?;
+    let admitted = admit(
+        tx,
+        access,
+        stored,
+        harness,
+        prompt,
+        TaskSource::Owner,
+        None,
+        now,
+    )?;
+    let outcome = match (admitted, model) {
+        (Err(code), _) => rejected(code),
+        (Ok(_), None) => Outcome::Applied,
+        (Ok(task), Some(model)) => {
+            let chosen: String = tx
+                .query_row(
+                    "SELECT harness FROM team_tasks WHERE id=?1",
+                    [task],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            let pick = tool::ModelPick {
+                model: model.to_owned(),
+                reason: model_pick::OWNER_PICK_REASON.to_owned(),
+            };
+            match model_pick::pin_or_refuse(tx, &stored.project_id, task, &chosen, Some(&pick))? {
+                Ok(_) => Outcome::Applied,
+                Err(refused) => rejected(match refused.code {
+                    "model_not_allowed" => "team_model_not_allowed",
+                    "model_not_supported" => "team_model_not_supported",
+                    code => unreachable!("a pick refusal names a known code, not {code}"),
+                }),
+            }
+        }
+    };
+    if outcome != Outcome::Applied {
+        tx.execute_batch("ROLLBACK TO owner_delegate")
+            .map_err(error)?;
+    }
+    tx.execute_batch("RELEASE owner_delegate").map_err(error)?;
+    Ok(outcome)
+}
+
 /// Deletes a project's oldest history rows so that one more row fits within `max`.
 /// Takes the transaction, the table, the SQL condition that marks history, the project and the bound.
 /// Returns any SQLite failure; live rows are never deleted, so live rows filling the bound is a broken invariant.
@@ -2466,21 +2539,18 @@ fn perform(
             },
         ),
         TeamAction::Delegate {
-            harness, prompt, ..
-        } => Ok(
-            match admit(
-                tx,
-                access,
-                &stored,
-                harness.as_deref(),
-                prompt,
-                TaskSource::Owner,
-                None,
-                now,
-            )? {
-                Ok(_) => Outcome::Applied,
-                Err(code) => rejected(code),
-            },
+            harness,
+            prompt,
+            model,
+            ..
+        } => owner_delegate(
+            tx,
+            access,
+            &stored,
+            harness.as_deref(),
+            prompt,
+            model.as_deref(),
+            now,
         ),
         TeamAction::Cancel { task, .. } => {
             let matched: i64 = tx
@@ -3100,6 +3170,18 @@ pub fn wait_line(status: TaskStatus, wait: Option<&str>) -> Option<String> {
     }
 }
 
+/// Says which model a task's spawn picked and why (DEC-150 M-7), the same words on desktop
+/// and TUI. Takes the pick. Returns one bounded line.
+pub fn pick_line(pick: &tool::ModelPick) -> String {
+    let model = events::one_line(&pick.model, crate::model_choice::MODEL_BYTES_MAX);
+    let reason = events::one_line(&pick.reason, tool::MODEL_REASON_BYTES_MAX);
+    if reason.is_empty() {
+        format!("Model: {model}")
+    } else {
+        format!("Model: {model}. Why: {reason}")
+    }
+}
+
 /// The longest task title an owner action line quotes.
 const AUDIT_TITLE_BYTES_MAX: usize = 80;
 
@@ -3466,6 +3548,11 @@ pub struct TeamTask {
     /// it waits for. None when it runs, ended, or no reason was stored yet.
     #[serde(default)]
     pub wait: Option<String>,
+    /// The model the spawn pinned to this task and the reason given for it (DEC-150 M-7),
+    /// so task views say which model was picked and why. None when the spawn left the
+    /// model to the default.
+    #[serde(default)]
+    pub pick: Option<tool::ModelPick>,
 }
 
 /// One entry of the team conversation between owner, master and engine.
@@ -3717,6 +3804,7 @@ pub(crate) fn task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTask> {
         finished_ms: row.get(14)?,
         parent: row.get(15)?,
         wait: row.get(16)?,
+        pick: None,
     })
 }
 
@@ -5323,7 +5411,7 @@ fn fit_status(
 }
 
 /// Cuts every free-form text of a status to `cap` bytes with `cut_text`: task prompts,
-/// results and problems, messages, agent problems, plan prompts, the live master problem,
+/// results, problems and model pick reasons, messages, agent problems, plan prompts, the live master problem,
 /// events, waiting questions and notifications. Takes the status and the cap.
 fn cut_texts(status: &mut TeamStatus, cap: usize) {
     let cut = move |text: &mut String| *text = cut_text(text, cap);
@@ -5332,6 +5420,7 @@ fn cut_texts(status: &mut TeamStatus, cap: usize) {
         task.result
             .iter_mut()
             .chain(task.problem.iter_mut())
+            .chain(task.pick.iter_mut().map(|pick| &mut pick.reason))
             .for_each(cut);
     }
     status.messages.iter_mut().for_each(|m| cut(&mut m.text));
@@ -5458,11 +5547,17 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             STATUS_TASKS_MAX,
         ))
         .map_err(error)?;
-    let tasks = statement
+    let mut tasks = statement
         .query_map([project.as_str()], task_row)
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
+    if let Some(first) = tasks.first().map(|task| task.id) {
+        let mut picks = model_pick::pinned_from(connection, project, first)?;
+        for task in &mut tasks {
+            task.pick = picks.remove(&task.id);
+        }
+    }
     let mut statement = connection
         .prepare(&recent(
             "SELECT id,author,text,state,created_ms FROM team_messages WHERE project=?1",

@@ -129,18 +129,33 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert!(matches!(sent.outcome, ActionOutcome::Applied), "{sent:?}");
     assert_eq!(sent.intent.kind, "team");
     let handed = bridge
-        .team_delegate(&id, Some("codex".into()), "Write chores.md".into(), 3)
+        .team_delegate(&id, Some("codex".into()), "Write chores.md".into(), None, 3)
         .await?;
     assert!(
         matches!(handed.outcome, ActionOutcome::Applied),
         "{handed:?}"
     );
     let refused = bridge
-        .team_delegate(&id, Some("gemini".into()), "Nope".into(), 4)
+        .team_delegate(&id, Some("gemini".into()), "Nope".into(), None, 4)
         .await?;
     assert_eq!(
         refused.rejection.as_deref(),
         Some("team_harness_not_in_plan")
+    );
+    let unshaped = bridge
+        .team_delegate(
+            &id,
+            Some("codex".into()),
+            "Write notes.md".into(),
+            Some("not a model".into()),
+            4,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (unshaped.code, unshaped.cause.as_deref()),
+        ("team_action_invalid", Some("team_model_invalid")),
+        "the owner's model pick travels with the task to the engine's check (DEC-150 M-8)"
     );
     let version = bridge.team_status(&id).await?.settings_version;
     let warm = bridge.team_keep_warm(&id, true, version, 5).await?;

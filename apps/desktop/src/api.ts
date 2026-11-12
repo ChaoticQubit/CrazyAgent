@@ -1662,7 +1662,8 @@ export function setLiveMaster(id: string, on: boolean, version: number): Promise
 }
 
 /** Hands one task straight to a sub-agent. Inputs: the project id, a harness of the team plan
- * or null for any, and the task. Output: the engine receipt, not ready, or a plain error. */
-export function delegateTeamTask(id: string, harness: string | null, prompt: string): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_delegate", { id, harness, prompt, generation: nextGeneration() });
+ * or null for any, the task, and the model picked for it or null for the harness's agent
+ * default (DEC-150 M-8). Output: the engine receipt, not ready, or a plain error. */
+export function delegateTeamTask(id: string, harness: string | null, prompt: string, model: string | null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_delegate", { id, harness, prompt, model, generation: nextGeneration() });
 }

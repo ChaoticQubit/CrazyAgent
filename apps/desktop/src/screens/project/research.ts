@@ -166,6 +166,7 @@ export interface TeamTaskRow {
   word: string;
   prompt: string;
   summary: string;
+  pick: string;
   result: string | null;
   elapsed: string;
   stop: { task: number; label: "Stop" | "Cancel" } | null;
@@ -235,11 +236,39 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
     summary: item.problem ?? (WAITING.includes(item.status) ? waitLine(item) : item.result !== null ? resultSummary(item.result) : ""),
+    pick: item.pick ? pickLine(item.pick) : "",
     result: item.result,
     elapsed: item.started_ms !== null ? elapsed((item.finished_ms ?? now) - item.started_ms) : "",
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** Says which model a task's spawn picked and why (DEC-150 M-7), the engine's team::pick_line
+ * words. Input: the pick. Output: one line. */
+export function pickLine(pick: { model: string; reason: string }): string {
+  const model = boundedLine(pick.model, PICK_MODEL_BYTES_MAX);
+  const reason = boundedLine(pick.reason, PICK_REASON_BYTES_MAX);
+  return reason === "" ? `Model: ${model}` : `Model: ${model}. Why: ${reason}`;
+}
+
+const PICK_MODEL_BYTES_MAX = 256;
+const PICK_REASON_BYTES_MAX = 240;
+const ENCODER = new TextEncoder();
+
+/** Joins text onto one line of words without control characters, cut to `max` UTF-8 bytes on a
+ * character boundary, as the engine's events::one_line does. Input: the text and the bound.
+ * Output: the line. */
+function boundedLine(text: string, max: number): string {
+  const joined = text.split(/\s+/u).map((word) => word.replace(/\p{Cc}/gu, "")).filter((word) => word !== "").join(" ");
+  let bytes = 0;
+  let kept = "";
+  for (const char of joined) {
+    bytes += ENCODER.encode(char).length;
+    if (bytes > max) break;
+    kept += char;
+  }
+  return kept;
 }
 
 /** Says why a waiting task waits (F11): the reason the engine stored, such as which cap, account
@@ -601,6 +630,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["protocol_fault", "it sent a message out of order. Send again to start a fresh turn"],
   ["frame_limit", "one message was larger than the master frame size limit. Raise it in Settings, Master, or at 1 MiB shorten the message or the instructions, then send again"],
   ["worktree_uncertain", "its copy of the project could not be checked. End the conversation, then send again"],
+  ["model_refused", "the harness refused the master model on this account. Send again to fall back as your model fallback setting says, or pick another master model in Settings, Harnesses"],
   ["cancelled", "you stopped this turn"],
 ]);
 

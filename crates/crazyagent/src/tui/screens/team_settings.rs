@@ -41,6 +41,11 @@ impl TeamSettings {
         if self.view.wants_catalog() {
             ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
         }
+        if let Some(query) = self.view.wants_models() {
+            ctx.request(Request::Settings(Box::new(SettingsJob::ModelChoice(
+                Box::new(query),
+            ))));
+        }
         if let Some(query) = self.view.next_query(now_ms())
             && !ctx.try_request(Request::Setup(query))
         {
@@ -122,11 +127,11 @@ impl Screen for TeamSettings {
                     self.view.apply(&event.query, event.result.clone());
                     self.read(ctx);
                 }
-                OwnerEvent::Settings(event) => {
-                    if let SettingsEvent::Harnesses(result) = event.as_ref() {
-                        self.view.take_catalog(result);
-                    }
-                }
+                OwnerEvent::Settings(event) => match event.as_ref() {
+                    SettingsEvent::Harnesses(result) => self.view.take_catalog(result),
+                    SettingsEvent::ModelChoice(event) => self.view.take_models(event),
+                    _ => {}
+                },
                 _ => {}
             },
             Arrival::Disconnected(_) => self.view.forget_reads(),

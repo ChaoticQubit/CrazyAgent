@@ -164,12 +164,13 @@ impl CodexEventBridge {
                 turn_id,
                 message,
                 will_retry,
-                ..
+                model_refused,
             } => {
                 observed.native_turn_id = Some(turn_id);
                 EventKind::TurnError {
                     message,
                     will_retry,
+                    model_refused,
                 }
             }
             Event::ApprovalRequired { id, kind, params } => {

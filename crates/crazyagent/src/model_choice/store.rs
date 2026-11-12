@@ -85,6 +85,7 @@ pub fn values(
         candidates,
         qualified: reason.is_none(),
         reason,
+        testable: super::test_launch::supported(harness),
     })
 }
 
@@ -268,11 +269,11 @@ fn terms(
     }))
 }
 
-/// Adds one model id the owner typed for a harness, waiting for its test launch, unless
-/// the harness's catalog lists it or it already passed. A failed id may be tried again.
-/// Inputs: the engine database, the harness name, its model catalog and the id. Output:
-/// what was done, or `model_choice_value_invalid`, `model_choice_custom_full`,
-/// `model_choice_harness_unknown` or `model_choice_unavailable`.
+/// Adds one model id the owner typed for a harness with a test launch, waiting for it,
+/// unless the harness's catalog lists it or it already passed. A failed id may be tried
+/// again. Inputs: the engine database, the harness name, its model catalog and the id.
+/// Output: what was done, or `model_choice_not_supported`, `model_choice_value_invalid`,
+/// `model_choice_custom_full`, `model_choice_harness_unknown` or `model_choice_unavailable`.
 pub fn custom_begin(
     db: &Connection,
     harness: &str,
@@ -280,6 +281,9 @@ pub fn custom_begin(
     model: &str,
 ) -> Result<Begun, EngineError> {
     let harness = known(harness)?;
+    if !super::test_launch::supported(harness) {
+        return Err(failure("model_choice_not_supported"));
+    }
     assert_catalog(harness, catalog);
     if !model_valid(harness, model) {
         return Err(failure("model_choice_value_invalid"));
@@ -352,6 +356,24 @@ pub fn custom_checked(
         return Err(failure("model_choice_custom_not_pending"));
     }
     tx.commit().map_err(unavailable)
+}
+
+/// Tells whether one owner id waits for its test launch, so a test never spends a run on
+/// an id that is listed, verified, failed or gone. Inputs: the engine database, the
+/// harness name and the id. Output: true when it is pending, or
+/// `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn custom_pending(db: &Connection, harness: &str, model: &str) -> Result<bool, EngineError> {
+    let harness = known(harness)?;
+    if !exists(db)? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_custom
+         WHERE harness = ?1 AND model = ?2 AND state = 'pending')",
+        params![harness, model],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
 }
 
 /// Removes one owner id from a harness. A slot that names it passes it over from then on

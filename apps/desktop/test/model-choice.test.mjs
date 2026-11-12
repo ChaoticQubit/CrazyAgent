@@ -184,7 +184,7 @@ test("the Models section says when it is loading, not ready or refused", () => {
 test("your model ids lists each owner id with its state and a remove, and adds one", () => {
   const owned = [{ id: "mine-a", origin: "pending" }, { id: "mine-b", origin: "verified" }];
   const markup = renderToStaticMarkup(createElement(view.OwnIdsView, {
-    candidates: candidates(owned), field: "", busy: null, note: "", onField: () => {}, onAdd: () => {}, onRemove: () => {},
+    candidates: candidates(owned), field: "", busy: null, note: "", onField: () => {}, onAdd: () => {}, onRemove: () => {}, testable: true,
   }));
   assert.match(markup, />Your model ids</);
   assert.match(markup, /<input id="models-add-id"/);

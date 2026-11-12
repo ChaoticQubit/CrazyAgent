@@ -806,6 +806,7 @@ export interface TeamTask {
   finished_ms: number | null;
   parent?: number | null;
   wait?: string | null;
+  pick?: { model: string; reason: string } | null;
 }
 
 export interface TeamMessage {
