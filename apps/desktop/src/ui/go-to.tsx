@@ -10,7 +10,7 @@ const PROJECT_TAB_LABELS = [
   ["overview", "Overview"], ["conversation", "Conversation"], ["agents", "Agents"], ["changes", "Changes"], ["questions", "Questions"], ["context", "Context"], ["settings", "Settings"],
 ] as const;
 const SETTINGS_LABELS = [
-  ["accounts", "Accounts"], ["pools", "Pools"], ["harnesses", "Harnesses"], ["plugins", "Plugins and skills"], ["memory", "Memory"], ["profile", "Profile"],
+  ["accounts", "Accounts"], ["pools", "Pools"], ["harnesses", "Harnesses"], ["plugins", "Plugins and skills"], ["memory", "Memory"],
 ] as const;
 
 /** One Go to destination: its label, what kind of place it is, and the route. */
@@ -30,8 +30,9 @@ export const SHORTCUTS: readonly (readonly [string, string])[] = [
   ["Arrow keys", "Move a focused box in the team graph"],
 ];
 
-/** Lists every Go to destination, like the TUI: each project and its tabs, Home, every
- * Settings section, then the actions. Input: the projects. Output: targets in display order. */
+/** Lists every Go to destination, like the TUI: each project and its tabs, Home, Profile
+ * (a dialog from the user menu since DEC-151), every Settings section, then the actions.
+ * Input: the projects. Output: targets in display order. */
 export function goToTargets(projects: readonly { id: string; name: string }[]): Target[] {
   const out: Target[] = [];
   for (const project of projects) {
@@ -43,7 +44,7 @@ export function goToTargets(projects: readonly { id: string; name: string }[]): 
       });
     }
   }
-  out.push({ label: "Home", kind: "Place", route: { name: "home" } });
+  out.push({ label: "Home", kind: "Place", route: { name: "home" } }, { label: "Profile", kind: "Place", route: { name: "settings", tab: "profile" } });
   for (const [tab, label] of SETTINGS_LABELS) out.push({ label: `Settings / ${label}`, kind: "Settings", route: { name: "settings", tab } });
   out.push(
     { label: "New project", kind: "Action", route: { name: "new-project", step: "basics" } },
