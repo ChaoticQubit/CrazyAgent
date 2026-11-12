@@ -37,6 +37,7 @@ pub mod master;
 pub mod memory;
 mod model_access;
 mod native_auth;
+mod notifications;
 pub mod notify;
 pub mod open;
 mod overview;
@@ -1370,7 +1371,7 @@ mod tests {
             ("ide reveal", ide_reveal::ide_error(engine())),
             ("ide extensions", ide_extensions::extensions_error(engine())),
             ("ide tab", ide::ide_error(engine())),
-            ("notify", notify::notify_error(engine())),
+            ("notifications", notifications::read_failure(CODE)),
             ("native auth", native_auth::auth_error(engine())),
             ("account profile", account_profile::profile_error(engine())),
             ("accounts", accounts::account_error(engine())),

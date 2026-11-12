@@ -282,7 +282,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       When the master or a sub-agent edits files, its changes wait here for you to review and accept.
     </ProjectEmpty>}
     {sets.length > 0 && <div className="ch-layout">
-      <ul className="pj-rows ch-list" aria-label="Change sets">{sets.map((set) => <li key={set.id}>
+      <ul className="pj-rows ch-list" aria-label="Change sets">{sets.map((set) => <li key={set.id} data-notice-anchor={`change-set-${set.id}`}>
         <ChangeRow set={set} active={shown?.id === set.id} onSelect={setSelected} />
       </li>)}</ul>
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={reread} />}

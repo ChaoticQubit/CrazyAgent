@@ -1,6 +1,6 @@
 use super::reconcile::{Condition, sync};
 use super::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 const NOW_MS: i64 = 1_800_000_000_000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -1363,4 +1363,214 @@ fn a_fold_change_with_no_folds_too_many_or_a_negative_bound_is_refused() {
         1
     );
     assert_eq!(rows(&connection), 1);
+}
+
+fn token() -> String {
+    ["gh", "p_", &"a1B2c3D4".repeat(5)].concat()
+}
+
+fn stored_texts(connection: &Connection) -> Vec<String> {
+    let mut statement = connection
+        .prepare("SELECT text FROM owner_notices ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn an_agent_item_with_a_token_is_stored_and_served_without_it() {
+    let (_folder, mut connection) = store();
+    let secret = token();
+    let text = format!("Sub-agent 2 finished: pushed with {secret} to main");
+    let tx = connection.transaction().unwrap();
+    let id = record(
+        &tx,
+        &InfoNotice {
+            kind: NoticeKind::AgentFinished,
+            project_id: Some(&project("p1")),
+            subject: "agent:2",
+            text: &text,
+            target: NoticeTarget::Agents {
+                project_id: project("p1"),
+            },
+        },
+        NOW_MS,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(id.is_some());
+    let page = listed(&connection, &query(NoticeFilter::All));
+    assert_eq!(
+        texts(&page),
+        vec!["Sub-agent 2 finished: pushed with [hidden] to main"]
+    );
+    assert!(
+        stored_texts(&connection)
+            .iter()
+            .all(|text| !text.contains(&secret))
+    );
+}
+
+#[test]
+fn a_question_with_a_credential_line_never_reaches_the_store_or_a_client() {
+    let (_folder, mut connection) = store();
+    let secret = token();
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question(
+            "p1",
+            "question:c9",
+            &format!("Master asks: deploy now?\nANTHROPIC_API_KEY={secret}"),
+        )],
+        NOW_MS,
+    );
+    let page = listed(&connection, &query(NoticeFilter::All));
+    assert_eq!(texts(&page), vec!["Master asks: deploy now? [hidden]"]);
+    let stored = stored_texts(&connection);
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].contains(&secret));
+    assert!(!stored[0].contains("ANTHROPIC_API_KEY"));
+}
+
+#[test]
+fn a_row_stored_with_a_token_before_redaction_is_served_without_it() {
+    let (_folder, connection) = store();
+    let secret = token();
+    let target = target_text(&NoticeTarget::Agents {
+        project_id: project("p1"),
+    })
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO owner_notices(kind,action,project,subject,text,target,created_ms)
+             VALUES ('agent_finished',0,'p1','agent:3',?1,?2,?3)",
+            params![format!("Sub-agent 3 used {secret}"), target, NOW_MS],
+        )
+        .unwrap();
+    let page = listed(&connection, &query(NoticeFilter::All));
+    assert_eq!(texts(&page), vec!["Sub-agent 3 used [hidden]"]);
+    let mut folded = query(NoticeFilter::All);
+    folded.fold = true;
+    assert_eq!(
+        texts(&listed(&connection, &folded)),
+        vec!["Sub-agent 3 used [hidden]"]
+    );
+}
+
+#[test]
+fn item_text_shown_again_is_unchanged() {
+    let secret = token();
+    for text in [
+        "Master asks: which database?".to_owned(),
+        format!("pushed with {secret} to main"),
+        format!("first line\npassword: {secret}"),
+        format!("-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----"),
+        format!("token: {secret} and /Users/me/work/app/notes.md"),
+        format!("pushed with {secret}\n9f8e7d6c5b4a3210 to main"),
+        "x".repeat(400),
+    ] {
+        let once = shown(&text);
+        assert!(!once.contains(&secret), "{once}");
+        assert_eq!(shown(&once), once, "shown twice differs for {text:?}");
+    }
+}
+
+#[test]
+fn a_token_wrapped_onto_the_next_line_loses_its_tail_too() {
+    let secret = token();
+    let tail = "9f8e7d6c5b4a3210";
+    let text = shown(&format!("pushed with {secret}\n{tail} to main"));
+    assert_eq!(text, "pushed with [hidden] [hidden] to main");
+    assert!(!text.contains(tail));
+}
+
+#[test]
+fn a_window_of_window_ids_max_unfolded_ids_is_never_cut_by_bytes() {
+    let (_folder, mut connection) = store();
+    let long = format!("Sub-agent {} finished", "\u{200b}x".repeat(120));
+    let tx = connection.transaction().unwrap();
+    for at in 0..usize::from(WINDOW_IDS_MAX) + 4 {
+        record(
+            &tx,
+            &InfoNotice {
+                kind: NoticeKind::AgentFinished,
+                project_id: Some(&project("p1")),
+                subject: &format!("agent:{at}"),
+                text: &long,
+                target: NoticeTarget::Agents {
+                    project_id: project("p1"),
+                },
+            },
+            NOW_MS,
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let mut window = query(NoticeFilter::All);
+    window.after = Some(0);
+    window.before = Some(i64::from(WINDOW_IDS_MAX) + 1);
+    window.limit = WINDOW_IDS_MAX;
+    let page = listed(&connection, &window);
+    assert_eq!(page.items.len(), usize::from(WINDOW_IDS_MAX));
+    assert!(!page.more);
+}
+
+#[test]
+fn a_question_that_only_mentions_a_password_or_a_secret_keeps_its_words() {
+    let (_folder, mut connection) = store();
+    let asked = [
+        "Master asks: should the login form have a password reset link?",
+        "Master asks: which secret manager should the deploy use?",
+        "Master asks: keep the cookie banner or drop it?",
+    ];
+    let live: Vec<Condition> = asked
+        .iter()
+        .enumerate()
+        .map(|(at, text)| question("p1", &format!("question:c{at}"), text))
+        .collect();
+    synced(&mut connection, &[NoticeKind::Question], &live, NOW_MS);
+    let page = listed(&connection, &query(NoticeFilter::All));
+    let mut shown_texts = texts(&page);
+    shown_texts.sort_unstable();
+    let mut expected = asked.to_vec();
+    expected.sort_unstable();
+    assert_eq!(shown_texts, expected);
+}
+
+#[test]
+fn a_password_or_token_given_in_a_question_is_still_hidden() {
+    let secret = token();
+    assert_eq!(
+        shown("Master asks: is the password: hunter2 still right?"),
+        "Master asks: is the password: [hidden] still right?"
+    );
+    assert_eq!(
+        shown("Master asks: use password=hunter2 here?"),
+        "Master asks: use [hidden] here?"
+    );
+    assert_eq!(
+        shown(&format!(
+            "Master asks: send Authorization: Bearer {secret} too?"
+        )),
+        "Master asks: send Authorization: [hidden] [hidden] too?"
+    );
+    assert_eq!(
+        shown("Master asks: the password:\nhunter2 is it?"),
+        "Master asks: the password: [hidden] is it?"
+    );
+}
+
+#[test]
+fn the_hidden_line_mark_of_a_key_block_never_hides_the_rest_of_the_notice() {
+    let secret = token();
+    let text = shown(&format!(
+        "Master asks: deploy?\n-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----"
+    ));
+    assert!(text.starts_with("Master asks: deploy? [hidden: this line may contain a secret]"));
+    assert!(!text.contains(&secret));
+    assert_eq!(shown(&text), text);
 }

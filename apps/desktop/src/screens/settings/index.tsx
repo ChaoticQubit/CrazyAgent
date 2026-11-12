@@ -7,6 +7,7 @@ import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
 import { MemorySettings } from "./memory";
+import { NotificationSettings } from "./notifications";
 import { PackSettings } from "./pack";
 import { PluginsAndSkills } from "./plugins";
 import { Pools } from "./pools";
@@ -35,7 +36,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "master", label: "Master" },
   ] },
   { title: "App", items: [
-    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" },
+    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "notifications", label: "Notifications" },
   ] },
 ];
 
@@ -94,6 +95,7 @@ export function Settings({ tab, action, account, skill, harness }: { tab: Listed
       : tab === "finished" ? <FinishedAgentsSettings />
       : tab === "quit" ? <QuittingSettings />
       : tab === "master" ? <MasterSettings />
+      : tab === "notifications" ? <NotificationSettings />
       : <TeamAlertsSettings />}
   </SettingsFrame>;
 }

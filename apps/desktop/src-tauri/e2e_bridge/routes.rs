@@ -18,6 +18,8 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::master_step_limit::MasterStepSettings;
     use crazyagent::master_time_limit::MasterTimeSettings;
     use crazyagent::memory::ReviewDecision;
+    use crazyagent::notifications::NoticeAction;
+    use crazyagent::notifications::NoticeQuery;
     use crazyagent::owner_profile::OwnerProfile;
     use crazyagent::plugins::Scope;
     use crazyagent::plugins::ServerSpec;
@@ -2359,6 +2361,37 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_learning_mark(step, on, generation) .await }.await;
+            routed(result)
+        }
+        "desktop_notifications" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                query: NoticeQuery,
+            }
+            let Args { query } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { read(state).await?.notifications(query).await }.await;
+            routed(result)
+        }
+        "desktop_notification_settings" => {
+            let result: Result<_, BridgeError> = async { read(state).await?.notification_settings().await }.await;
+            routed(result)
+        }
+        "desktop_notification_action" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                action: NoticeAction,
+                generation: u64,
+            }
+            let Args { action, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .notification_action(action, generation) .await }.await;
             routed(result)
         }
         "desktop_master_step_settings" => {

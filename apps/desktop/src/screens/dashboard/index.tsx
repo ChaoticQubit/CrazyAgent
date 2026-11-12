@@ -1,11 +1,11 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { PROJECT_LIST_MAX, harnessCatalog, listAccounts, memorySuggestions, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result, type Suggestion } from "../../api";
+import { PROJECT_LIST_MAX, harnessCatalog, listAccounts, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result } from "../../api";
 import { loadSetupStatus } from "../../api-intake";
 import { loadLearningProgress, setLearningMark, type LearningProgress } from "../../api-learning";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
-import { Button, EmptyState, Icon, LoadError, NotReady, PageHeader, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
+import { EmptyState, Icon, LoadError, NotReady, PageHeader, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
@@ -28,7 +28,6 @@ const LIVE_AGENT = new Set(["starting", "working"]);
 const LIVE_TASK = new Set(["queued", "needs_pool", "running"]);
 const ACTIVITY_POLL_MS = 10000;
 const ACTIVITY_PROJECTS_MAX = 60;
-const NEEDS_SHOWN = 3;
 
 /** What a project card says about its work: the research line, the working-agents line, whether
  * research waits for a pool, and whether anything is still moving so the dashboard keeps reading. */
@@ -132,67 +131,6 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
   return { items, visible: settled && !(accountsDone && poolsDone && (installTools.done || checking)), settled };
 }
 
-/** One Needs you row: the project it is about (none for an account), one sentence and one link. */
-export interface NeedRow {
-  key: string;
-  icon: IconName;
-  project: string | null;
-  text: string;
-  action: string;
-  href: string;
-}
-
-/** Lists what needs the owner across projects, for the Needs you strip: projects whose team
- * left unseen notifications (one row each, opening its conversation), accounts that are not
- * signed in (one row each, with Sign in again opening that account's sign-in; accounts sharing
- * a name and provider fold into one row that opens Accounts), research waiting for a pool, then
- * suggested memories grouped by project. Inputs: the accounts read, the projects, each
- * project's card activity, the suggestions read and each project's unseen notification count.
- * Output: the first three rows, every row and the total. */
-export function needsYou(accounts: Loaded<AccountView[]>, projects: ProjectRow[] = [], activity: Map<string, CardActivity> = new Map(),
-  suggestions: Loaded<Suggestion[]> = { kind: "loading" }, alerts: Map<string, number> = new Map()): { rows: NeedRow[]; all: NeedRow[]; total: number } {
-  const all: NeedRow[] = [];
-  for (const project of projects) {
-    const unseen = alerts.get(project.id) ?? 0;
-    if (unseen <= 0) continue;
-    all.push({ key: `alerts-${project.id}`, icon: "inbox", project: project.name,
-      text: `${unseen} new team notification${unseen === 1 ? "" : "s"}.`,
-      action: "Open conversation", href: formatRoute({ name: "project", id: project.id, tab: "conversation" }) });
-  }
-  const unsigned = new Map<string, AccountView[]>();
-  for (const account of accounts.kind === "ok" ? accounts.value : []) {
-    if (account.status !== "not_signed_in") continue;
-    const same = `${account.provider}\n${account.name}`;
-    unsigned.set(same, [...unsigned.get(same) ?? [], account]);
-  }
-  for (const [first, ...rest] of unsigned.values()) {
-    const row = { key: `account-${first!.id}`, icon: "circle-alert" as const, project: null };
-    if (rest.length === 0) {
-      all.push({ ...row, text: `${first!.name} isn't signed in.`, action: "Sign in again",
-        href: formatRoute({ name: "settings", tab: "accounts", action: "sign_in", account: first!.id }) });
-    } else {
-      all.push({ ...row, text: `${rest.length + 1} ${first!.provider_name} accounts named ${first!.name} aren't signed in.`,
-        action: "Open accounts", href: formatRoute({ name: "settings", tab: "accounts" }) });
-    }
-  }
-  for (const project of projects) {
-    const work = activity.get(project.id);
-    if (!work?.waiting || !work.research) continue;
-    all.push({ key: `pool-${project.id}`, icon: "layers", project: project.name, text: work.research,
-      action: "Choose pool", href: `${formatRoute({ name: "project", id: project.id, tab: "settings" })}?section=pool` });
-  }
-  const memories = new Map<string, { name: string; count: number }>();
-  for (const item of suggestions.kind === "ok" ? suggestions.value : []) {
-    const seen = memories.get(item.project_id);
-    memories.set(item.project_id, { name: item.project_name, count: (seen?.count ?? 0) + 1 });
-  }
-  for (const [id, { name, count }] of memories) {
-    all.push({ key: `memory-${id}`, icon: "brain", project: name, text: `${count} suggested ${count === 1 ? "memory" : "memories"} to review.`,
-      action: "Review", href: formatRoute({ name: "settings", tab: "memory" }) });
-  }
-  return { rows: all.slice(0, NEEDS_SHOWN), all, total: all.length };
-}
-
 function ProjectCard({ project, activity }: { project: ProjectRow; activity: CardActivity | undefined }) {
   const name = displayText(project.name);
   return <a className="project-card" href={formatRoute({ name: "project", id: project.id, tab: "overview" })} aria-label={name}>
@@ -218,13 +156,13 @@ function Projects({ projects, more, activity, onRetry }: { projects: Loaded<Proj
 }
 
 /** Home as a view of its engine reads: the Add actions (new, clone from GitHub, existing folder),
- * the Needs you strip (three rows, Show all for the rest), the projects folder section, project
- * cards with their live work or the empty state, a note when the list stops at its bound, and
- * the Get set up or Learn CrazyAgent panel (learnSteps). Inputs: the six reads (an engine
- * without the learning read counts as not ready), whether the engine holds more projects than
- * listed, each card's activity and the suggested memories when read, the projects folder
- * section, what Hide guide does and a retry for the project list. */
-export function HomeView({ projects, moreProjects = false, accounts, pools, harnesses, tools, learning = { kind: "not_ready" }, activity, suggestions, alerts, found,
+ * the projects folder section, project cards with their live work or the empty state, a note
+ * when the list stops at its bound, and the Get set up or Learn CrazyAgent panel
+ * (learnSteps); what needs the owner is in the bell. Inputs: the five reads (an engine
+ * without the learning read counts as not ready), whether the engine holds more projects
+ * than listed, each card's activity, the projects folder section, what Hide guide does and
+ * a retry for the project list. */
+export function HomeView({ projects, moreProjects = false, accounts, pools, harnesses, tools, learning = { kind: "not_ready" }, activity, found,
   onHideLearning, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
   moreProjects?: boolean;
@@ -236,27 +174,15 @@ export function HomeView({ projects, moreProjects = false, accounts, pools, harn
   learning?: Loaded<LearningProgress>;
   onHideLearning?: () => void;
   activity?: Map<string, CardActivity>;
-  suggestions?: Loaded<Suggestion[]>;
-  alerts?: Map<string, number>;
   found?: ReactNode;
 }) {
   const setup = learnSteps(setupSteps(accounts, pools, harnesses, tools), learning, projects.kind === "ok" ? projects.value : []);
-  const needs = needsYou(accounts, projects.kind === "ok" ? projects.value : [], activity, suggestions, alerts);
-  const [expanded, setExpanded] = useState(false);
   return <>
     <PageHeader title="Projects" actions={<>
       <a className="btn" href={formatRoute({ name: "add-project", way: "clone" })}><Icon name="git-branch" size={15} />Clone from GitHub</a>
       <a className="btn" href={formatRoute({ name: "add-project", way: "folder" })}><Icon name="folder-input" size={15} />Add folder</a>
       <a className="btn primary" href={formatRoute({ name: "new-project", step: "basics" })}><Icon name="plus" size={15} />New project</a>
     </>} />
-    {needs.total > 0 && <section className="needs" aria-label="Needs you">
-      {(expanded ? needs.all : needs.rows).map((row) => <div className="need" key={row.key}>
-        <span className="row"><Icon name={row.icon} /><span>{row.project && <><strong>{displayText(row.project)}</strong>{" "}</>}{row.text}</span></span>
-        <a className="btn small" href={row.href}>{row.action}</a>
-      </div>)}
-      {needs.total > NEEDS_SHOWN && <Button variant="quiet" size="small" aria-expanded={expanded} onClick={() => setExpanded(!expanded)}>
-        {expanded ? "Show fewer" : `Show all (${needs.total})`}</Button>}
-    </section>}
     {found}
     <div className={`home${setup.visible ? " with-setup" : ""}`}>
       <Projects projects={projects} more={moreProjects} activity={activity} onRetry={onRetryProjects} />
@@ -278,11 +204,10 @@ export function useToolsStatus(): Loaded<SetupStatus> {
   return tools;
 }
 
-/** Home: loads accounts, pools, harnesses, tool setup and the learning steps for the side panel,
- * each project's live work and the suggested memories for Needs you, and renders HomeView with
- * the session's projects. Hide guide sets the skipped mark and reads the steps again. Input:
- * each project's unseen team notification count, when the app watches them. */
-export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
+/** Home: loads accounts, pools, harnesses, tool setup and the learning steps for the side panel
+ * and each project's live work, and renders HomeView with the session's projects. Hide guide
+ * sets the skipped mark and reads the steps again. */
+export function Home() {
   const session = useAppSession();
   const [accounts] = useLoad(listAccounts, [], "accounts");
   const [pools] = useLoad(poolSummaries, [], "pool-summaries");
@@ -296,13 +221,7 @@ export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   };
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
   const activity = useProjectActivity(projects.map((project) => project.id));
-  const [suggestions, setSuggestions] = useState<Loaded<Suggestion[]>>({ kind: "loading" });
-  const named = projects.map((project) => `${project.id}\t${project.name}`).join("\n");
-  useEffect(() => {
-    let live = true;
-    void memorySuggestions(projects).then((found) => { if (live) setSuggestions(found); });
-    return () => { live = false; };
-  }, [named]);
   return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} learning={learning}
-    onHideLearning={() => void hideLearning()} activity={activity} suggestions={suggestions} alerts={alerts} moreProjects={session.projectsMore} found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
+    onHideLearning={() => void hideLearning()} activity={activity} moreProjects={session.projectsMore} found={<FoundProjects />}
+    onRetryProjects={() => void session.refreshProjects()} />;
 }

@@ -17,6 +17,10 @@ pub const TEXT_BYTES_MAX: usize = 240;
 pub const SUBJECT_BYTES_MAX: usize = 256;
 pub const TARGET_BYTES_MAX: usize = 1024;
 pub const PAGE_MAX: u16 = 50;
+/// How many ids an unfolded read may span, `after` to `before` exclusive, and still list
+/// every row in the span: that many rows of the largest size always fit `LISTED_BYTES_MAX`.
+/// The desktop banner watch reads the store in windows this wide, oldest first.
+pub const WINDOW_IDS_MAX: u16 = 12;
 pub const FOLD_IDS_MAX: usize = 32;
 pub const ACTION_IDS_MAX: usize = 256;
 pub const RETENTION_DAYS_MIN: u16 = 1;
@@ -33,6 +37,8 @@ const ITEM_BYTES_MAX: usize = TEXT_BYTES_MAX * 6 + TARGET_BYTES_MAX + FOLD_IDS_M
 
 const _: () = assert!(LISTED_BYTES_MAX + 4096 <= crate::protocol::FRAME_BYTES_MAX);
 const _: () = assert!(ITEM_BYTES_MAX * 4 < LISTED_BYTES_MAX);
+const _: () = assert!(WINDOW_IDS_MAX as usize * (ITEM_BYTES_MAX + 1) <= LISTED_BYTES_MAX - 1024);
+const _: () = assert!(0 < WINDOW_IDS_MAX && WINDOW_IDS_MAX <= PAGE_MAX);
 const _: () = assert!(PAGE_MAX as usize * 4 <= ACTION_IDS_MAX && FOLD_IDS_MAX <= ACTION_IDS_MAX);
 const _: () = assert!(RETENTION_DAYS_MIN <= RETENTION_DAYS_DEFAULT);
 const _: () = assert!(RETENTION_DAYS_DEFAULT <= RETENTION_DAYS_MAX);
@@ -534,11 +540,15 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
 
-/// Item text as every client shows it: hidden characters escaped, local paths cut to their
-/// last part, one line of at most `TEXT_BYTES_MAX` bytes. Input: the text. Output: the
-/// line, maybe empty.
+/// Item text as it is stored and as every client and banner gets it: credentials hidden by
+/// `project_setup::redact_values` line by line (a wrapped token loses its tail), then one
+/// line with hidden characters escaped and paths cut, redacted again as one line, at most
+/// `TEXT_BYTES_MAX` bytes. A notice naming a password keeps its words; showing it again
+/// changes nothing. Input: the text. Output: the line, maybe empty.
 pub(crate) fn shown(text: &str) -> String {
-    let words = crate::landing::scrubbed(text, &[]);
+    let lines = crate::project_setup::redact_values(text);
+    let words = crate::project_setup::redact_values(&crate::landing::scrubbed(&lines, &[]));
+    assert!(!words.contains('\n'));
     let mut end = words.len().min(TEXT_BYTES_MAX);
     while !words.is_char_boundary(end) {
         end -= 1;
@@ -768,8 +778,9 @@ fn stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored> {
     ))
 }
 
-/// One stored row as a single item. A row of a kind, project or target this engine does
-/// not read is skipped. Input: the values. Output: the item, or none.
+/// One stored row as a single item, its text through `shown` again so a row stored before
+/// redaction never serves a credential. A row of a kind, project or target this engine
+/// does not read is skipped. Input: the values. Output: the item, or none.
 fn item(row: Stored) -> Option<Notice> {
     let (id, kind, action, project, text, target, created_ms, read_ms, resolved_ms) = row;
     let kind = NoticeKind::parse(&kind)?;
@@ -787,7 +798,7 @@ fn item(row: Stored) -> Option<Notice> {
         kind,
         class,
         project_id,
-        text,
+        text: shown(&text),
         target,
         created_ms,
         read_ms,

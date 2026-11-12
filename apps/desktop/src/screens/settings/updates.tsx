@@ -1,6 +1,7 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { engineVersions, restartEngine, type EngineVersions, type Failure } from "../../api";
 import { checkForUpdate, installUpdate, linkCommandLineTool, loadUpdateSettings, restartApp, setUpdateChannel, type UpdateChannel, type UpdateSettings } from "../../api-updates";
+import { reportNotice } from "../../notify";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -197,6 +198,7 @@ export function useUpdateWatch(announce: (message: string) => void) {
       if (!live) return;
       if (result.kind === "ok") {
         updateStore.dispatch({ kind: "check_done", update: result.value, at: Date.now() });
+        if (result.value) void reportNotice({ kind: "app_update_ready", version: result.value.version });
         if (shouldAnnounce(announced, result.value) && result.value) {
           announced = result.value.version;
           announce(`CrazyAgent ${result.value.version} is ready. Install it from Updates in the menu under your name.`);

@@ -87,7 +87,7 @@ export function QuestionCard({ question, now, busy, onAnswer, onDismiss }: {
   useEffect(() => {
     if (commenting) document.getElementById(field)?.focus();
   }, [commenting, field]);
-  return <section className="pj-stack-s qs-card" aria-label={`Question from ${askerLabel(question.asker)}`}>
+  return <section className="pj-stack-s qs-card" data-notice-anchor={`question-${question.id}`} aria-label={`Question from ${askerLabel(question.asker)}`}>
     <div className="pj-row between">
       <strong>{askerLabel(question.asker)}</strong>
       <Badge word={badge.word} tone={badge.tone} />

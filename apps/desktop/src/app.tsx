@@ -4,7 +4,8 @@ import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, 
 import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
-import { questionWatch } from "./notify";
+import { engineLostStep, noticeWatch, reportNotice, type EngineWatch } from "./notify";
+import { NoticeBell } from "./screens/notifications/panel";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { DemoPage } from "./screens/demo/offer";
@@ -24,6 +25,7 @@ import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type 
 import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, formatRoute, isUserMenuTab, navigate, parseRoute, shortcutKey, useRoute, type Route, type SidebarProject } from "./ui";
 import { GoToLayer } from "./ui/go-to";
+import type { EngineState } from "./ui/shell";
 
 /** Support details the engine-down screen copies, like the TUI's: what is wrong, the window
  * size and the time, never paths, accounts or secrets. Inputs: the window size and the time.
@@ -129,12 +131,12 @@ function Launching() {
 
 /** The routed screen inside the shell. Each project page and onboarding review is keyed by its
  * project id, so a switch to another project starts a fresh page and never keeps the last
- * project's master ticket, name, settings or late reads. Inputs: the route, the session and
- * each project's unseen team notification count for Home. Output: the screen element. */
-export function Screen({ route, session, alerts }: { route: Route; session: Session; alerts?: Map<string, number> }) {
+ * project's master ticket, name, settings or late reads. Inputs: the route and the session.
+ * Output: the screen element. */
+export function Screen({ route, session }: { route: Route; session: Session }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
-    case "settings": return isUserMenuTab(route.tab) ? <Home alerts={alerts} />
+    case "settings": return isUserMenuTab(route.tab) ? <Home />
       : <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} harness={route.harness} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
@@ -142,7 +144,7 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "metrics": return <AppMetrics projects={projects ?? []} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
-    default: return <Home alerts={alerts} />;
+    default: return <Home />;
   }
 }
 
@@ -188,6 +190,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
   }) : undefined;
   return <SessionContext.Provider value={session}>
     <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
+      corner={<NoticeBell projects={session.projects.kind === "ok" ? session.projects.value : []} />}
       sidebar={<ShellSidebar route={page} projects={projects} profileName={profile?.name} session={session} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
@@ -205,7 +208,7 @@ export function AppView({ session, route, alerts, working, under, back }: { sess
         onClick={() => void session.clearStuckSignIn()}>Clear stuck sign-in</Button>}>
         {STUCK_SIGN_IN_LINE}
       </Banner>}
-      <Screen route={page} session={session} alerts={alerts} />
+      <Screen route={page} session={session} />
       <UserDialogLayer asked={asked} under={page} back={back} />
       <GoToLayer projects={projects ?? []} />
     </AppShell>
@@ -241,11 +244,10 @@ export interface TeamAlerts {
  * 10 s it reads them, shows a new notification as a toast, with Open to the Agents tab's
  * Questions for you drawer on an urgent question or an agent waiting in its terminal, keeps
  * the app icon badge at the unseen notifications plus the pending questions, and asks for
- * attention when a notification is new; a Normal question only counts toward the badge. The
- * same counts read drives the question notification watch, so the counts are read once per
- * look. Inputs: whether the engine runs and the toast action. Output: what each project's
- * sidebar flag counts and how many agents each has at work, none when a read fails or the
- * engine stops. */
+ * attention when a notification is new; a Normal question only counts toward the badge. Each
+ * read also drives the macOS banner watch over the notification store. Inputs: whether the
+ * engine runs and the toast action. Output: what each project's sidebar flag counts and how
+ * many agents each has at work, none when a read fails or the engine stops. */
 export function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): TeamAlerts {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const [working, setWorking] = useState<ReadonlyMap<string, number>>(NONE_WORKING);
@@ -260,7 +262,7 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
     let last: number | null = null;
     let shown = 0;
     let timer = 0;
-    const watch = questionWatch((line) => toast.current(line));
+    const watch = noticeWatch((line) => toast.current(line));
     const read = async () => {
       const [result, questions] = await Promise.all([loadTeamEvents(), loadQuestionCounts()]);
       if (!live) return;
@@ -278,7 +280,7 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
       } else {
         setWorking(NONE_WORKING);
       }
-      if (questions.kind === "ok") await watch.look(questions.value);
+      await watch.look();
       if (live && (result.kind !== "not_ready" || questions.kind !== "not_ready")) timer = window.setTimeout(read, ALERT_READ_MS);
     };
     void read();
@@ -297,6 +299,17 @@ export const IDE_FOCUS_POLL_MS = 1_000;
  * Input: the focus the engine handed over. Output: the route. */
 export function ideFocusRoute(focus: IdeFocus): Route {
   return { name: "project", id: focus.project, tab: "ide" };
+}
+
+/** Reports to the notification store when the engine went down after it ran and runs
+ * again, once per loss and never on the first connect. Input: the engine state. */
+function useEngineLostReport(engine: EngineState) {
+  const watch = useRef<EngineWatch>({ ran: false, lost: false });
+  useEffect(() => {
+    const step = engineLostStep(watch.current, engine);
+    watch.current = step.watch;
+    if (step.report) void reportNotice({ kind: "engine_lost" });
+  }, [engine]);
 }
 
 /** Brings forward the IDE tab a TUI "open in IDE" asked for: while the engine runs, every
@@ -336,8 +349,8 @@ export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnde
 }
 
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch, the new free reset notice and the TUI's "open in IDE"
- * focus. */
+ * notification and macOS banner watch, the engine lost report, the new free reset notice
+ * and the TUI's "open in IDE" focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
@@ -345,6 +358,7 @@ export function App() {
   under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();
   useUpdateWatch(session.showToast);
+  useEngineLostReport(session.engine);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
