@@ -30,7 +30,7 @@ Reply with one block per tab, each opened by a line ~~~<name> and closed by a li
 ";
 const COMPETITORS_RULE: &str = "~~~competitors: from the competitor research only: each competitor, what differs, where this project is better and where it is not.
 ";
-const CLOSING_RULE: &str = "Keep what is still true in a current tab and change only what the evidence changed. Leave out a tab you have no evidence for. Do not use ~~~ inside a tab.
+const CLOSING_RULE: &str = "Write every tab asked for. When the evidence says nothing for a tab, write one line saying what it does not show. Keep what is still true in a current tab and change only what the evidence changed. Do not use ~~~ inside a tab.
 ";
 
 const _: () = assert!(FILES_BYTES_MAX + RESEARCH_PART_BYTES_MAX < EVIDENCE_BYTES_MAX);
@@ -231,6 +231,33 @@ pub fn parse_reply(reply: &str) -> Vec<(Tab, String)> {
     assert!(tabs.len() <= Tab::ALL.len());
     assert!(tabs.iter().all(|(_, text)| text.len() <= TAB_BYTES_MAX));
     tabs
+}
+
+/// Why a reply that names `tab` gave [`parse_reply`] no text for it, read from the first
+/// block it opens for the tab: still open at the end, blank, or longer than one tab holds.
+/// Inputs: the reply and the tab. Output: the words, to follow "was" or "were".
+pub(super) fn dropped_why(reply: &str, tab: Tab) -> &'static str {
+    let mut body: Option<String> = None;
+    for line in reply.lines() {
+        let Some(name) = line.trim_end().strip_prefix(FENCE) else {
+            if let Some(text) = body.as_mut() {
+                text.push_str(line);
+                text.push('\n');
+            }
+            continue;
+        };
+        if let Some(text) = &body {
+            return if text.trim().is_empty() {
+                "blank in the reply"
+            } else {
+                "too long for a tab"
+            };
+        }
+        if name == tab.stem() {
+            body = Some(String::new());
+        }
+    }
+    "cut off in the reply"
 }
 
 /// The tabs a reply opens a block for, whether or not [`parse_reply`] kept their text.

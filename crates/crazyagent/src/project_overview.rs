@@ -137,6 +137,17 @@ impl Tab {
         }
     }
 
+    /// The tab's name as the Overview strip shows it. Input: the tab. Output: the label,
+    /// such as "Install & use".
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::QuickInfo => "Quick info",
+            Tab::Features => "Features",
+            Tab::Competitors => "Competitors",
+            Tab::InstallAndUse => "Install & use",
+        }
+    }
+
     /// The name the store and the wire use for the tab. Input: the tab. Output: its name,
     /// such as "install_and_use".
     fn name(self) -> &'static str {
