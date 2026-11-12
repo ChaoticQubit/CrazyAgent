@@ -317,7 +317,7 @@ fn observe(
 /// `CLAUDE_DETAIL_QUERY`. Any failure or bad body reads them absent and never becomes the
 /// account's poll failure. Inputs: the poll's URL, the credential, whether loopback is
 /// allowed and the time. Output: the resets, or absent.
-fn claude_detail(
+pub fn claude_detail(
     mut url: url::Url,
     credential: &PollCredential,
     loopback: bool,
