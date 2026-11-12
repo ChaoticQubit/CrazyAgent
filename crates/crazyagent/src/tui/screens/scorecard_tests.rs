@@ -157,16 +157,26 @@ fn the_panel_shows_the_four_numbers_with_targets_and_the_records_behind_them() {
     let ctx = ctx(120, 60);
     let names = HashMap::from([("project-harbor".to_owned(), "Harbor Notes".to_owned())]);
     let shown = text(&card_lines(&card(), 110, &names, NOW, 0, &ctx.theme));
+    let sentence = shown.replace('\n', " ");
+    assert!(
+        sentence.contains(
+            ": real tasks, clean ones, how much you coordinated per task and the days you chose it."
+        ),
+        "{shown}"
+    );
     for words in [
-        "Real tasks 3, target 10  Not met yet",
-        "Clean 2 of 3, target 8 of 10  Not met yet",
-        "Coordination 3 per task, baseline 4, 25% less; target 25% less  Target met",
-        "Chose CrazyAgent 4 of 5 days, target 7 of 10 answered days  Not met yet",
-        "Window: the last 14 days (w)",
-        "Baseline: its first 3 days (b)",
-        "Daily question: off (d)",
+        "Whether CrazyAgent earns its place over",
+        "Real tasks 3  Target 10 done tickets you accepted  Not met yet",
+        "Clean 2 of 3  Target 8 of 10, from 10 tasks  Not met yet",
+        "Coordination per task 3  Baseline 4, 25% less. Target 25% less  Target met",
+        "Chose CrazyAgent 4 of 5 days  Target 7 of 10 answered days  Not met yet",
+        "Window: Last 14 days (w)",
+        "Baseline: Its first 3 days (b)",
+        "Ask me once a day whether I chose CrazyAgent for my work: Off (d)",
+        "Real tasks behind the numbers",
+        "cs-4  Yes",
         "CA-9 Fix the export button",
-        "cs-2, cs-3  a change set was discarded; its first check batch didn't pass",
+        "cs-2, cs-3  A change set was discarded; Its first check batch didn't pass",
         "Showing the newest 2 of 3.",
         "Edit  Harbor Notes  src/inbox.rs",
         "2026-11-02 Yes",
@@ -185,8 +195,13 @@ fn the_panel_shows_the_four_numbers_with_targets_and_the_records_behind_them() {
         ..card()
     };
     let shown = text(&card_lines(&quiet, 110, &names, NOW, 0, &ctx.theme));
-    assert!(shown.contains("None in this window yet."), "{shown}");
-    assert!(shown.contains("the daily question is off"), "{shown}");
+    assert!(
+        shown.replace('\n', " ").contains(
+            "No real tasks in this window yet. A ticket counts once it is done and you accepted its change set."
+        ),
+        "{shown}"
+    );
+    assert!(shown.contains("The daily question is off"), "{shown}");
     assert!(!shown.contains("Daily answers"), "{shown}");
 }
 
@@ -247,7 +262,7 @@ fn a_settings_key_saves_by_version_and_every_answer_reads_again() {
     panel.arrive(&SettingsEvent::ScorecardSaved(refused), 0, &mut ctx);
     assert_eq!(
         ctx.message().unwrap().rest,
-        "That start day isn't a calendar day."
+        "That start day isn't a calendar day. Pick a day like 2026-11-03."
     );
     assert!(matches!(job(&mut ctx), SettingsJob::Scorecard { .. }));
     assert!(!panel.key(&Key::Char('t'), "2026-11-03", 0, &mut ctx));
@@ -295,4 +310,58 @@ fn g_opens_the_scorecard_in_usage_and_closes_it_again() {
     assert!(matches!(page.key(&Key::Char('g'), &mut ctx), Flow::Handled));
     assert!(!page.busy(&ctx));
     assert!(!text(&page.body(110, NOW, 0, &ctx)).contains(TITLE));
+}
+
+#[test]
+fn a_window_from_a_start_day_reads_in_the_desktop_words() {
+    let ctx = ctx(120, 60);
+    let from = Scorecard {
+        settings: Settings {
+            window: Window::FromDay("2026-10-21".into()),
+            baseline: Baseline::PreviousWindow,
+            daily_question: DailyQuestion::On,
+        },
+        ..card()
+    };
+    let shown = text(&card_lines(&from, 110, &HashMap::new(), NOW, 0, &ctx.theme));
+    for words in [
+        "Window: 14 days from a start day, 2026-10-21 (w, - and + move it)",
+        "Baseline: The 14 days before (b)",
+        "Ask me once a day whether I chose CrazyAgent for my work: On (d)",
+    ] {
+        assert!(shown.contains(words), "{words} in:\n{shown}");
+    }
+}
+
+#[test]
+fn every_usage_and_scorecard_key_stays_in_the_hint_bar_at_80_columns() {
+    use crate::tui::screens::settings_accounts::tests::{bar_rows, render};
+    use crate::tui::shell::Shell;
+    let mut shell = Shell::with(ctx(80, 24), Box::new(UsagePage::new()));
+    let bar = bar_rows(&render(&mut shell, 80, 24)).join("\n");
+    for key in [
+        "t Range",
+        "r Read again",
+        "c Check limits now",
+        "p Prices on or off",
+        "g Scorecard",
+        "Esc Back",
+        "? Help",
+    ] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+    shell.key(Key::Char('g'));
+    let bar = bar_rows(&render(&mut shell, 80, 24)).join("\n");
+    for key in [
+        "w Window",
+        "-/+ Start day",
+        "b Baseline",
+        "d Daily question",
+        "r Read again",
+        "g Usage",
+        "Esc Back",
+        "? Help",
+    ] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
 }
