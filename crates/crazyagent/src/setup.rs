@@ -243,6 +243,7 @@ pub enum DependencyState {
     Installing,
     Installed { version: Version },
     Failed { reason: String },
+    Unsupported,
 }
 
 /// One dependency as the setup screen lists it: which tool, its plain name and its state.

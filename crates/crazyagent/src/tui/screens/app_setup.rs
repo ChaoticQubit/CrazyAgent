@@ -296,6 +296,7 @@ fn tool_word(state: &DependencyState) -> String {
         DependencyState::Installing => "Installing".into(),
         DependencyState::Installed { version } => format!("Installed {}", version.as_str()),
         DependencyState::Failed { .. } => "Failed".into(),
+        DependencyState::Unsupported => "Not supported".into(),
     }
 }
 
