@@ -14,6 +14,9 @@ pub mod wire;
 #[cfg(all(test, unix))]
 mod tests;
 
+#[cfg(all(test, target_os = "macos"))]
+mod option_tests;
+
 /// The settled spend attempts kept, the latest first; open ones are always kept.
 pub const ATTEMPTS_KEPT: i64 = 64;
 /// How many times a spend that could not be sent yet, because its account was busy or not
@@ -478,7 +481,8 @@ pub fn settle_sent(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
 
 /// Sends one queued spend with its stored key: marks it sent first, makes the provider's
 /// call, records the result, and asks for a poll after any reply so the limits catch up.
-/// A Claude spend waits for its call shape and settles `usage_spend_unavailable` unsent.
+/// With spending turned off since it was asked for, it settles `usage_spend_off` unsent. A
+/// Claude spend waits for its call shape and settles `usage_spend_unavailable` unsent.
 /// Inputs: the store, the attempt, the provider, the credential the custody lease read,
 /// the Claude and Codex usage URLs, whether loopback URLs are allowed and the time.
 /// Output: done, or the store's failure.
@@ -494,6 +498,9 @@ pub fn send_one(
     now_ms: i64,
 ) -> Result<(), EngineError> {
     let _ = claude;
+    if !read(db)?.spends() {
+        return not_sent(db, attempt, Some(&failure("usage_spend_off")), now_ms);
+    }
     if provider == Provider::Claude {
         return not_sent(
             db,

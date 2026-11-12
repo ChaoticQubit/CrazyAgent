@@ -545,14 +545,12 @@ impl Usage {
     fn spend_all(&mut self, access: &ModelAccess, now_ms: i64) -> Result<(), EngineError> {
         spend::settle_sent(&self.db, now_ms)?;
         spend::track_pools(&self.db, access, now_ms)?;
-        let spends = spend::read(&self.db)?.spends();
         for attempt in spend::queued(&self.db)? {
             let connection = access
                 .connections
                 .iter()
                 .find(|connection| connection.id == attempt.account);
             let refused = match connection.map(MemberKind::of) {
-                _ if !spends => Some("usage_spend_off"),
                 None => Some("usage_spend_no_account"),
                 Some(MemberKind::Claude | MemberKind::Chatgpt) => None,
                 Some(_) => Some("usage_spend_not_in_app"),
