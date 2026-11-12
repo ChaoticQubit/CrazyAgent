@@ -24,6 +24,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[path = "keyed_relay_tests.rs"]
 mod keyed_relay_tests;
 
+#[cfg(target_os = "macos")]
+#[path = "live_terminal_probe_tests.rs"]
+mod live_terminal_probe_tests;
+
 const PROJECT: &str = "team-panes";
 
 const ENDPOINT: &str = "local-a";

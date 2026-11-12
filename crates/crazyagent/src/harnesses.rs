@@ -370,7 +370,7 @@ pub fn is_shim_folder(home: Option<&Path>, folder: &Path) -> bool {
 /// user bin folders, nvm's current link, fnm's default alias, pnpm's global bin, then nvm's
 /// installed Node versions with the default alias first and the newest after it. No shell
 /// is run and no shell file is read. Input: an absolute HOME. Output: the folders, bounded.
-fn home_places(home: &Path) -> Vec<PathBuf> {
+pub(crate) fn home_places(home: &Path) -> Vec<PathBuf> {
     assert!(home.is_absolute());
     let mut folders: Vec<PathBuf> = HOME_DIRECTORIES
         .iter()

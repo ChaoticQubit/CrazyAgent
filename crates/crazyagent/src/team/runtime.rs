@@ -721,6 +721,11 @@ impl Worker {
 /// Reads the live model access on every tick; none means no pool is configured.
 pub type AccessSource = Box<dyn Fn() -> Option<ModelAccess> + Send>;
 
+/// Looks for the engine's terminal host again, as tmux found now, for a runtime that started
+/// with none, such as an engine that started before setup installed tmux on a fresh Mac.
+/// Returns the host, or none while no terminal program is found.
+pub type TerminalProbe = Box<dyn Fn() -> Option<Arc<dyn Host>> + Send>;
+
 /// Runs each project's team: the master on the team plan's master harness and
 /// sub-agents on its sub-harnesses, each in the project sandbox, sub-agents in
 /// their own git worktrees. The engine admits every task; agents only propose.
@@ -738,6 +743,7 @@ pub struct TeamRuntime {
     delegation_tool: Option<RegisteredNativeAuthHost>,
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
+    terminal_probe: Option<TerminalProbe>,
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
@@ -1078,6 +1084,7 @@ impl TeamRuntime {
             delegation_tool: None,
             agents: None,
             terminal: None,
+            terminal_probe: None,
             swept: None,
             events: None,
             watch: super::events::Watch::default(),
@@ -1212,6 +1219,14 @@ impl TeamRuntime {
             }
         }
         Ok(self)
+    }
+
+    /// Lets a runtime with no terminal host look for one again each time a live master is
+    /// to start, so tmux installed after the engine started is used without a restart.
+    /// Takes the probe. Returns the runtime.
+    pub fn with_terminal_probe(mut self, probe: TerminalProbe) -> Self {
+        self.terminal_probe = Some(probe);
+        self
     }
 
     /// Reads and forgets the pane records an earlier engine kept, so each is used once.
