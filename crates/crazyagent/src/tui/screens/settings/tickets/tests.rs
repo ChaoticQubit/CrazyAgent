@@ -303,3 +303,121 @@ fn the_create_lines_and_the_saved_line_say_what_the_engine_does() {
     assert_eq!(message.lead, "Saved.");
     assert_eq!(message.rest, "It applies from the next change on.");
 }
+
+/// The help bar as an 80x24 window draws it, every row of it. Takes the shell. Returns the
+/// bar rows joined by newlines.
+fn bar_at_80(shell: &mut Shell) -> String {
+    crate::tui::screens::settings_accounts::tests::bar_rows(&render(shell, 80, 24)).join("\n")
+}
+
+fn says(shell: &mut Shell, text: &str) -> bool {
+    render(shell, 120, 40).iter().any(|row| row.contains(text))
+}
+
+#[test]
+fn every_ticket_settings_key_stays_in_the_hint_bar_at_80_columns() {
+    let mut engine = Engine::new();
+    let mut own = Shell::with(ctx(80, 24), Box::new(TicketSettingsPage::new(project())));
+    serve(&mut own, &mut engine);
+    own.key(Key::Enter);
+    own.key(Key::Right);
+    own.key(Key::Enter);
+    serve(&mut own, &mut engine);
+    let bar = bar_at_80(&mut own);
+    for key in [
+        "Enter Change",
+        "u Use the app value",
+        "a App values",
+        "Move",
+        "r Read again",
+        "Esc Back",
+        "? Help",
+    ] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+    let mut app = Shell::with(ctx(80, 24), Box::new(TicketSettingsPage::new(Scope::App)));
+    serve(&mut app, &mut engine);
+    let bar = bar_at_80(&mut app);
+    for key in ["Enter Change", "Move", "r Read again", "Esc Back", "? Help"] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+}
+
+#[test]
+fn ticket_settings_use_the_desktop_words() {
+    let mut engine = Engine::new();
+    let mut app = Shell::with(ctx(120, 40), Box::new(TicketSettingsPage::new(Scope::App)));
+    serve(&mut app, &mut engine);
+    let rows = render(&mut app, 120, 40);
+    let at = |text: &str| {
+        rows.iter()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("{text}:\n{}", rows.join("\n")))
+    };
+    let title = rows
+        .iter()
+        .position(|row| row.trim() == "Tickets")
+        .unwrap_or_else(|| panic!("a Tickets title row:\n{}", rows.join("\n")));
+    let purpose = at("The ticket settings every project with tickets starts from");
+    let rules = at("Ticket rules");
+    let effect = at("Changes apply to the next ticket action. Tickets already closed stay closed.");
+    let table = at("Who closes tickets");
+    assert!(title < purpose && purpose < rules && rules < effect && effect < table);
+    assert!(!says(&mut app, "for this project only."));
+    assert!(!says(&mut app, "Ticket settings"));
+
+    let mut own = Shell::with(ctx(120, 40), Box::new(TicketSettingsPage::new(project())));
+    serve(&mut own, &mut engine);
+    assert!(says(&mut own, "Ticket rules"));
+    assert!(says(
+        &mut own,
+        "Changes apply to the next ticket action. Tickets already closed stay closed."
+    ));
+    assert!(says(&mut own, "for this project only."));
+    assert!(!says(
+        &mut own,
+        "The ticket settings every project with tickets starts from"
+    ));
+}
+
+#[test]
+fn a_project_without_tickets_says_so_in_the_desktop_words() {
+    let mut shell = Shell::with(ctx(80, 24), Box::new(TicketSettingsPage::new(project())));
+    let TrackerJob::Settings { project } = one(&mut shell) else {
+        panic!("the page reads its settings first");
+    };
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Settings(Box::new(
+        SettingsEvent::Tracker(Box::new(TrackerEvent::Settings {
+            project,
+            result: Err("project_not_attached".into()),
+        })),
+    )))));
+    let rows = render(&mut shell, 80, 24).join("\n");
+    assert!(
+        rows.contains("Tickets aren't set up for this project yet."),
+        "{rows}"
+    );
+    assert!(rows.contains("Set them up on the Tickets tab"), "{rows}");
+    assert!(!rows.contains("Could not read"), "{rows}");
+    assert!(bar_at_80(&mut shell).contains("Esc Back"));
+}
+
+#[test]
+fn the_last_ticket_setting_s_choices_stay_in_view_at_80x24() {
+    let mut engine = Engine::new();
+    let mut shell = Shell::with(ctx(80, 24), Box::new(TicketSettingsPage::new(project())));
+    serve(&mut shell, &mut engine);
+    for _ in 0..7 {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    let rows = render(&mut shell, 80, 24).join("\n");
+    for words in [
+        "CI checks",
+        "CI evidence comes from CrazyAgent's own runs",
+        "Only you record CI evidence.",
+        "Agents may record CI evidence.",
+    ] {
+        assert!(rows.contains(words), "{words}:\n{rows}");
+    }
+}
