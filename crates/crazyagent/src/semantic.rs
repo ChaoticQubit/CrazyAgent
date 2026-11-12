@@ -231,10 +231,13 @@ pub(crate) fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalMod
             return Some(model);
         }
         let stamp = local_stamp(root)?;
-        if let Some((at, Err((failed_stamp, failed)))) = slot.as_ref() {
-            if at == root && *failed_stamp == stamp && now_ms - failed < LOCAL_RETRY_MS {
-                return None;
-            }
+        let waiting = matches!(
+            slot.as_ref(),
+            Some((at, Err((failed_stamp, failed))))
+                if at == root && *failed_stamp == stamp && now_ms - failed < LOCAL_RETRY_MS
+        );
+        if waiting {
+            return None;
         }
         stamp
     };
