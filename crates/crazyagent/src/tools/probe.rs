@@ -99,6 +99,13 @@ pub fn missed() {
     refreshed(true);
 }
 
+/// Starts a folder run in the background at once for a user's explicit retry (the live
+/// master's Try again or Start again, setup's Recheck or retry), whatever the backoff; a run
+/// already going is enough. Automatic resolves call [`missed`] instead. Never blocks.
+pub(crate) fn refresh_now() {
+    unimplemented!("probe refresh_now")
+}
+
 /// Starts a background folder run when one is due, recording a run that could not start as
 /// failed so it is retried. Input: whether a resolve missed. Output: the cached folders.
 fn refreshed(missed: bool) -> Vec<PathBuf> {
@@ -153,6 +160,12 @@ impl Probes {
             self.running = true;
         }
         due
+    }
+
+    /// Marks a run as going at once, whatever the backoff, unless one is going, for a user's
+    /// explicit retry. Output: whether the caller starts the run.
+    pub(crate) fn start_now(&mut self) -> bool {
+        unimplemented!("probe start_now")
     }
 
     /// Records a finished run: a complete one replaces the folders, a failed one adds its
