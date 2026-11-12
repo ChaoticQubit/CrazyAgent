@@ -492,13 +492,25 @@ fn read_write_opens_only_wholly_untracked_shared_top_level_folders() {
         access: SharedAccess::ReadWrite,
         ..SharedFolders::default()
     };
-    let plan = plan(&root, &all).unwrap();
-    assert!(plan.writes.contains(&root.join("program")), "{plan:?}");
-    assert!(plan.writes.contains(&root.join("build")), "{plan:?}");
-    assert!(!plan.writes.contains(&root.join("src")), "{plan:?}");
-    assert!(!plan.writes.contains(&root.join("linked")), "{plan:?}");
-    assert!(!plan.writes.contains(&root.join("notes.txt")), "{plan:?}");
-    assert!(plan.kept_out.is_empty(), "{plan:?}");
+    let all_plan = plan(&root, &all).unwrap();
+    assert!(
+        all_plan.writes.contains(&root.join("program")),
+        "{all_plan:?}"
+    );
+    assert!(
+        all_plan.writes.contains(&root.join("build")),
+        "{all_plan:?}"
+    );
+    assert!(!all_plan.writes.contains(&root.join("src")), "{all_plan:?}");
+    assert!(
+        !all_plan.writes.contains(&root.join("linked")),
+        "{all_plan:?}"
+    );
+    assert!(
+        !all_plan.writes.contains(&root.join("notes.txt")),
+        "{all_plan:?}"
+    );
+    assert!(all_plan.kept_out.is_empty(), "{all_plan:?}");
     let picked = SharedFolders {
         access: SharedAccess::ReadWrite,
         ..chosen(&["program"])
