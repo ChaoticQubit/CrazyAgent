@@ -2092,7 +2092,8 @@ pub(crate) mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
-        let lineage = Lineage::of(leftover.id(), None).unwrap();
+        let mut lineage = Lineage::of(leftover.id(), None).unwrap();
+        lineage.name();
         let account = CredentialRef::new("signed-out-full-access").unwrap();
         let other = CredentialRef::new("other-full-access").unwrap();
         let (held, released) = std::sync::mpsc::channel::<()>();
