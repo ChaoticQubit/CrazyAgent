@@ -298,6 +298,80 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     }
 }
 
+/// F19, DEC-107: with "Catch up with main" on, a lead's copy merges the landed main at
+/// `crazyagent/main` and its own workers' branches, still refuses another branch, and its
+/// refusal tells it how to catch up with main; with the setting off the lead's copy refuses
+/// main too and says nothing of it.
+#[test]
+fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_refusing() {
+    struct Removed(PathBuf);
+    impl Drop for Removed {
+        fn drop(&mut self) {
+            let _ = remove_tmp(&self.0);
+        }
+    }
+    let git = crate::research::runner::sandboxed_git();
+    for catch_up in [true, false] {
+        let home = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+            &["checkout", "-q", "-b", "landed"],
+            &["commit", "-q", "--allow-empty", "-m", "landed work"],
+            &["update-ref", "refs/crazyagent/main", "landed"],
+            &["checkout", "-q", "-b", "other", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "other work"],
+            &["checkout", "-q", "-b", "task--ann", "main"],
+            &["commit", "-q", "--allow-empty", "-m", "ann work"],
+            &["checkout", "-q", "-b", "task", "main"],
+        ] {
+            let done = git_run(git, repo.path(), home.path(), args);
+            assert!(done.status.success(), "{args:?} {done:?}");
+        }
+        let tmp = make_tmp(home.path()).unwrap();
+        let _removed = Removed(home.path().to_path_buf());
+        lead_git(&tmp, catch_up).unwrap();
+        let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+        let main = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "-q", "--no-edit", "crazyagent/main"],
+        );
+        assert_eq!(main.status.success(), catch_up, "{main:?}");
+        let ann = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "-q", "--no-ff", "--no-edit", "task--ann"],
+        );
+        assert!(
+            ann.status.success(),
+            "{}",
+            String::from_utf8_lossy(&ann.stderr)
+        );
+        let other = git_run(
+            &wrapper,
+            repo.path(),
+            home.path(),
+            &["merge", "--no-edit", "other"],
+        );
+        assert!(!other.status.success());
+        let stderr = String::from_utf8_lossy(&other.stderr);
+        assert!(stderr.contains("git merge is refused"), "{stderr}");
+        assert!(
+            stderr.contains("A lead merges only the branches of its own workers"),
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.contains("git merge crazyagent/main"),
+            catch_up,
+            "{stderr}"
+        );
+    }
+}
+
 /// The worker copy merges only the commit the engine keeps at `refs/crazyagent/main`: with
 /// that ref missing, a branch the agent named `crazyagent/main` holding other work is
 /// refused under either name and the agent's branch keeps its commit.
