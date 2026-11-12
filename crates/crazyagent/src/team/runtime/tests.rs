@@ -29666,6 +29666,102 @@ fn a_stop_fallback_waits_while_the_accounts_that_can_run_the_model_rest() {
     assert_eq!(agents, 0, "no agent on the other account's own model");
 }
 
+/// With idle agents kept for reuse, a task whose model no idle agent of its harness runs
+/// does not wait behind them forever (DEC-150 F3): when the harness slot is full, dispatch
+/// stops one idle agent on another model, so the task can start on its own model.
+#[test]
+fn a_task_for_a_model_no_idle_agent_runs_frees_a_full_slot_of_one_on_another_model() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    reuse_idle_on(&fixture);
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    let idle = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    team.workers.insert(
+        idle,
+        between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false),
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,created_ms) VALUES (?1,'master','codex',0,'Plan the page','queued',1)",
+            [PROJECT],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(
+        team.workers[&idle].stopping,
+        "the idle agent on another model stops"
+    );
+    assert_eq!(team.workers[&idle].stop_why, "engine_stop:idle");
+    let status: String = fixture
+        .connection
+        .query_row("SELECT status FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "queued");
+}
+
+/// Keep warm starts its agents on the owner's agent default, so a task for that model
+/// takes one (DEC-150 F3), and starts none while an agent of the project still stops, so
+/// an agent dispatch stopped to free its slot is not replaced before the task starts.
+#[cfg(target_os = "macos")]
+#[test]
+fn keep_warm_starts_agents_on_the_agent_default_and_none_while_one_stops() {
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.min_agents = 2;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    let host = fixture.host();
+    let mut team = limited_runtime(
+        &fixture,
+        &host,
+        "#!/bin/sh\nexec /bin/sleep 300\n",
+        TeamLimits::default(),
+    );
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::KeepWarm {
+            project_id: fixture.setup.project_id.clone(),
+            on: true,
+            version: crate::team::settings_version(&fixture.connection, &fixture.setup.project_id)
+                .unwrap(),
+        }],
+    );
+    codex_model(&fixture, "qwen2.5:0.5b", crate::model_choice::Slot::Agent);
+    let paused = BTreeSet::new();
+    let stopping = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let mut worker = between_turns(&fixture.setup.project_id, AgentRole::Sub, false, false);
+    worker.stopping = true;
+    team.workers.insert(stopping, worker);
+    team.keep_warm(&fixture.setup, &fixture.access, &paused)
+        .unwrap();
+    assert_eq!(team.workers.len(), 1, "no warm agent while one stops");
+    team.workers.remove(&stopping);
+    team.keep_warm(&fixture.setup, &fixture.access, &paused)
+        .unwrap();
+    let warm: Vec<i64> = team.workers.keys().copied().collect();
+    assert_eq!(warm.len(), 1, "{warm:?}");
+    assert!(team.workers[&warm[0]].warm);
+    assert_eq!(
+        super::super::model_pick::agent_model(&fixture.connection, warm[0]).unwrap(),
+        Some("qwen2.5:0.5b".to_owned())
+    );
+    assert_eq!(
+        team.workers[&warm[0]].model.as_deref(),
+        Some("qwen2.5:0.5b")
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// The owner's Wake of a sub-agent started on a model no pool account can run now picks
 /// its account as a new start does (DEC-150 F4): under the Stop fallback rule it stays
 /// stopped and the team note names the model, instead of waking on the endpoint's own.
