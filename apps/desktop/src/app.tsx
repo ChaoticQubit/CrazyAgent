@@ -337,7 +337,7 @@ export function App() {
   const session = useSession();
   const route = useRoute();
   const under = useRef<PageUnder>({ route: { name: "home" } });
-  under.current = pageUnder(route, window.location.hash, under.current);
+  under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
