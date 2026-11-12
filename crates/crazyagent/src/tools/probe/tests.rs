@@ -1,0 +1,215 @@
+use super::*;
+use std::os::unix::fs::PermissionsExt;
+use std::time::Instant;
+
+/// A scratch folder, its real path, so kept folders compare equal.
+fn scratch() -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::Builder::new()
+        .prefix("tools-probe-")
+        .tempdir()
+        .unwrap();
+    let real = folder.path().canonicalize().unwrap();
+    (folder, real)
+}
+
+/// Writes an executable file with the given text, its folders made first.
+fn program(file: &Path, text: &str) -> PathBuf {
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, text).unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    file.to_path_buf()
+}
+
+fn joined(folders: &[PathBuf]) -> OsString {
+    std::env::join_paths(folders).unwrap()
+}
+
+#[test]
+fn a_timed_run_keeps_its_output_and_kills_its_whole_group_at_the_limit_or_at_exit() {
+    let (_folder, root) = scratch();
+    let echo = run_timed(Command::new("/bin/echo").arg("hi"), Duration::from_secs(5));
+    assert_eq!(echo.as_deref(), Some(&b"hi\n"[..]));
+    let failing = program(&root.join("fails"), "#!/bin/sh\necho out\nexit 3\n");
+    assert_eq!(
+        run_timed(&mut Command::new(&failing), Duration::from_secs(5)),
+        None
+    );
+    let hanging = program(&root.join("hangs"), "#!/bin/sh\nexec /bin/sleep 30\n");
+    let started = Instant::now();
+    assert_eq!(
+        run_timed(&mut Command::new(&hanging), Duration::from_millis(300)),
+        None
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "killed at the limit"
+    );
+    let leaves_child = program(
+        &root.join("leaves"),
+        "#!/bin/sh\n/bin/sleep 30 &\necho done\n",
+    );
+    let started = Instant::now();
+    assert_eq!(
+        run_timed(&mut Command::new(&leaves_child), Duration::from_secs(10)).as_deref(),
+        Some(&b"done\n"[..]),
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a child left holding the output is killed with the group"
+    );
+}
+
+#[test]
+fn the_login_shell_path_is_read_between_markers_and_startup_noise_is_ignored() {
+    let output = format!("motd\n{BEGIN}\n/a/bin:/b/bin\n{END}\nbye\n");
+    assert_eq!(
+        between_markers(output.as_bytes()),
+        Some(OsString::from("/a/bin:/b/bin"))
+    );
+    assert_eq!(between_markers(format!("{BEGIN}\n/a\n").as_bytes()), None);
+    assert_eq!(between_markers(b"/a:/b\n"), None);
+    assert_eq!(
+        between_markers(format!("{BEGIN}\n/a\n/b\n{END}\n").as_bytes()),
+        None,
+        "one line only"
+    );
+}
+
+#[test]
+fn a_login_shell_run_gives_the_path_its_startup_files_set_and_a_hang_gives_none() {
+    let (_folder, home) = scratch();
+    let tools = home.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::write(
+        home.join(".profile"),
+        "echo noise\nPATH=\"$HOME/tools:$PATH\"\nexport PATH\n",
+    )
+    .unwrap();
+    let path = login_path(Path::new("/bin/sh"), &home, "owner", SHELL_LIMIT)
+        .expect("the shell printed its PATH");
+    assert!(
+        std::env::split_paths(&path).any(|folder| folder == tools),
+        "{path:?}"
+    );
+    let hanging = program(&home.join("hangs"), "#!/bin/sh\nexec /bin/sleep 30\n");
+    let started = Instant::now();
+    assert_eq!(
+        login_path(&hanging, &home, "owner", Duration::from_millis(300)),
+        None
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn kept_folders_drop_relative_missing_repeated_shared_crazyagent_and_project_folders() {
+    let (_folder, home) = scratch();
+    let tools = home.join("tools");
+    let project = home.join("projects/app");
+    let shared = home.join("shared");
+    let inside = home.join("x/.crazyagent/bin");
+    for folder in [&tools, &project.join(".crazyagent"), &shared, &inside] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::create_dir_all(project.join("node_modules/.bin")).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let file = home.join("plain-file");
+    std::fs::write(&file, "x").unwrap();
+    let path = joined(&[
+        tools.clone(),
+        PathBuf::from("relative/bin"),
+        home.join("missing"),
+        tools.clone(),
+        project.join("node_modules/.bin"),
+        project.clone(),
+        inside,
+        shared,
+        file,
+    ]);
+    assert_eq!(kept(&path, Some(&home)), [tools]);
+    assert_eq!(kept(OsStr::new(""), Some(&home)), Vec::<PathBuf>::new());
+    std::fs::create_dir_all(home.join(".crazyagent")).unwrap();
+    assert_eq!(
+        kept(&joined(&[home.join("tools")]), Some(&home)),
+        [home.join("tools")],
+        "a .crazyagent folder in HOME itself makes no project of HOME"
+    );
+    let many: Vec<PathBuf> = (0..FOLDERS_MAX + 10)
+        .map(|index| {
+            let folder = home.join(format!("many/{index}"));
+            std::fs::create_dir_all(&folder).unwrap();
+            folder
+        })
+        .collect();
+    assert_eq!(kept(&joined(&many), Some(&home)).len(), FOLDERS_MAX);
+}
+
+#[test]
+fn the_npm_prefix_bin_comes_from_the_found_npm_asked_with_a_cleared_environment() {
+    assert_eq!(
+        prefix_bin(b"/opt/homebrew\n"),
+        Some(PathBuf::from("/opt/homebrew/bin"))
+    );
+    assert_eq!(prefix_bin(b"relative\n"), None);
+    assert_eq!(prefix_bin(b""), None);
+    assert_eq!(prefix_bin(b"/a\n/b\n"), None, "one path only");
+    let (_folder, home) = scratch();
+    let npm = program(
+        &home.join("npm"),
+        "#!/bin/sh\necho \"$HOME/p-$1-$2-${CARGO_PKG_NAME:-clear}\"\n",
+    );
+    let places = crate::tools::Places::new(Vec::new(), Some(home.clone()));
+    let resolved = crate::tools::resolve_entry(&npm, &places).expect("a script npm resolves");
+    assert_eq!(
+        npm_bin(&resolved, &home, "owner", NPM_LIMIT),
+        Some(home.join("p-prefix--g-clear/bin")),
+        "asked for the global prefix, with no inherited variable"
+    );
+}
+
+#[test]
+fn a_version_is_the_first_word_with_a_digit_and_a_program_reports_its_own() {
+    assert_eq!(reported(b"tmux 3.4\n").as_deref(), Some("3.4"));
+    assert_eq!(
+        reported(b"codex-cli v0.164.0\n").as_deref(),
+        Some("0.164.0")
+    );
+    assert_eq!(
+        reported(b"uv 0.9.5 (0a1b2c3 2025-10-01)\n").as_deref(),
+        Some("0.9.5")
+    );
+    assert_eq!(reported(b"no digits here\n"), None);
+    assert_eq!(reported(b"x 1.0;rm\n"), None, "only version characters");
+    assert_eq!(
+        reported(format!("x 1{}\n", "0".repeat(80)).as_bytes()),
+        None
+    );
+    let (_folder, root) = scratch();
+    let tool = program(&root.join("tool"), "#!/bin/sh\necho \"tool v1.2.$#$1\"\n");
+    assert_eq!(
+        probe_version(&tool, VERSION_LIMIT).as_deref(),
+        Some("1.2.1--version"),
+        "asked with --version alone"
+    );
+    let hanging = program(&root.join("hangs"), "#!/bin/sh\nexec /bin/sleep 30\n");
+    let started = Instant::now();
+    assert_eq!(probe_version(&hanging, Duration::from_millis(300)), None);
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn version_answers_at_once_then_from_its_cache() {
+    let (_folder, root) = scratch();
+    let tool = program(&root.join("tool"), "#!/bin/sh\necho \"tool 4.5.6\"\n");
+    let started = Instant::now();
+    assert_eq!(version(&tool), None, "unknown until the probe ran");
+    assert!(started.elapsed() < Duration::from_secs(1), "never waits");
+    let mut found = None;
+    while found.is_none() && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+        found = version(&tool);
+    }
+    assert_eq!(found.as_deref(), Some("4.5.6"));
+    std::fs::write(&tool, "#!/bin/sh\necho \"tool 9.9.9\"\n").unwrap();
+    assert_eq!(version(&tool).as_deref(), Some("4.5.6"), "cached");
+    assert_eq!(version(Path::new("relative/tool")), None);
+}
