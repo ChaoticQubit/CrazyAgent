@@ -540,7 +540,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert!(!graph_shows(&graph, &AgentId::team(4)?));
 
     let handed = bridge
-        .team_delegate(&id, Some("codex".into()), "Write chores.md".into(), 2)
+        .team_delegate(&id, Some("codex".into()), "Write chores.md".into(), None, 2)
         .await?;
     assert!(
         matches!(handed.outcome, ActionOutcome::Applied),
