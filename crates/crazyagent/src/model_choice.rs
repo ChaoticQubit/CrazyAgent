@@ -1,6 +1,8 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
-use crate::harness_settings::{Access, HARNESS_BYTES_MAX, Scope, Source};
+use crate::harness_settings::{
+    Access, HARNESS_BYTES_MAX, SOURCE_BYTES_MAX, SOURCES_MAX, Scope, Source, VERSIONS_MAX,
+};
 use crate::storage::versioned::{ITEM_BYTES_MAX, Item};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,6 +33,16 @@ pub const MODEL_CHOICE_CODES: &[&str] = &[
     "model_choice_unavailable",
 ];
 
+/// The model catalogs the engine ships, by harness id, each a version-qualified JSON
+/// document built from the harness's published model reference (DEC-150 Q1).
+const SHIPPED: &[(&str, &str)] = &[
+    (
+        "claude-code",
+        include_str!("../assets/model-catalogs/claude-code.json"),
+    ),
+    ("codex", include_str!("../assets/model-catalogs/codex.json")),
+];
+const CATALOG_JSON_MAX: usize = 64 * 1024;
 const ITEM_PREFIX: &str = "model-choice";
 const PROJECT_BYTES_MAX: usize = 128;
 /// The longest stored value as JSON: a full allowed list of the longest ids.
@@ -150,16 +162,77 @@ pub fn model_valid(harness: &str, model: &str) -> bool {
         })
 }
 
-/// Lists the model ids a harness's model catalog offers, the candidates the store checks
-/// every choice against beside the owner's verified ids. None are listed until the catalog
-/// source is settled (DEC-150 Q1), so only ids the owner added and a test launch passed
-/// are offered. Input: the harness name. Output: the ids, valid and distinct.
+/// One harness's shipped model catalog: the harness, the exact versions it was checked
+/// against, the published references it was built from, and its model ids in page order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCatalog {
+    pub harness: String,
+    pub qualified_versions: Vec<String>,
+    pub sources: Vec<String>,
+    pub models: Vec<String>,
+}
+
+/// Lists the model ids a harness's shipped catalog offers, the candidates the store checks
+/// every choice against beside the owner's verified ids (DEC-150 Q1); a live read of the
+/// harness's own list comes later. Input: the harness name or alias. Output: the ids,
+/// valid and distinct, none for a harness without a catalog.
 pub fn catalog(harness: &str) -> Vec<String> {
-    let ids: Vec<String> = Vec::new();
+    let ids = shipped(harness)
+        .map(|catalog| catalog.models)
+        .unwrap_or_default();
     if let Some(id) = harness_id(harness) {
         assert_catalog(id, &ids);
     }
     ids
+}
+
+/// Reads the shipped model catalog of a harness name or alias. A shipped catalog out of
+/// contract is a broken build. Input: the name. Output: the catalog, none for a harness
+/// without one.
+pub fn shipped(name: &str) -> Option<ModelCatalog> {
+    let id = harness_id(name)?;
+    let (_, text) = SHIPPED.iter().find(|(harness, _)| *harness == id)?;
+    let catalog = parse_catalog(text.as_bytes());
+    assert!(
+        catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.harness == id),
+        "{id}"
+    );
+    catalog
+}
+
+/// Reads one model catalog and checks it against the contract: a harness CrazyAgent starts
+/// agents on, 1 to `VERSIONS_MAX` exact versions, 1 to `SOURCES_MAX` https sources and 1
+/// to `CATALOG_MODELS_MAX` distinct ids valid for the harness. Input: the JSON bytes.
+/// Output: the catalog, or none when it breaks the contract.
+pub(crate) fn parse_catalog(bytes: &[u8]) -> Option<ModelCatalog> {
+    if bytes.len() > CATALOG_JSON_MAX {
+        return None;
+    }
+    let catalog: ModelCatalog = serde_json::from_slice(bytes).ok()?;
+    let harness = catalog.harness.as_str();
+    let known = harness_id(harness) == Some(harness) && supported(harness, Slot::Agent);
+    let mut versions_seen = BTreeSet::new();
+    let versions = (1..=VERSIONS_MAX).contains(&catalog.qualified_versions.len())
+        && catalog.qualified_versions.iter().all(|version| {
+            crate::harness_settings::installed::version_valid(version)
+                && versions_seen.insert(version.as_str())
+        });
+    let sources = (1..=SOURCES_MAX).contains(&catalog.sources.len())
+        && catalog.sources.iter().all(|source| {
+            source.len() <= SOURCE_BYTES_MAX
+                && source.starts_with("https://")
+                && source.bytes().all(|byte| byte.is_ascii_graphic())
+        });
+    let mut models_seen = BTreeSet::new();
+    let models = (1..=CATALOG_MODELS_MAX).contains(&catalog.models.len())
+        && catalog
+            .models
+            .iter()
+            .all(|id| model_valid(harness, id) && models_seen.insert(id.as_str()));
+    (known && versions && sources && models).then_some(catalog)
 }
 
 /// Names the catalog harness id of a harness name or alias, such as `claude` for
