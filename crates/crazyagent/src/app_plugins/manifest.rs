@@ -147,7 +147,10 @@ fn fill(value: &serde_json::Value, inputs: &[&str], purpose: Purpose) -> serde_j
             serde_json::Value::String(purpose.word().to_owned())
         }
         serde_json::Value::Array(items) => serde_json::Value::Array(
-            items.iter().map(|item| fill(item, inputs, purpose)).collect(),
+            items
+                .iter()
+                .map(|item| fill(item, inputs, purpose))
+                .collect(),
         ),
         serde_json::Value::Object(entries) => serde_json::Value::Object(
             entries
@@ -262,9 +265,9 @@ pub fn parse(text: &str) -> Result<Manifest, Problem> {
         Value::Str(version)
             if !version.is_empty()
                 && version.len() <= VERSION_BYTES_MAX
-                && version
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-')) =>
+                && version.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-')
+                }) =>
         {
             version.clone()
         }
@@ -329,7 +332,11 @@ impl<'a> Fields<'a> {
     }
 
     fn only(&self, known: &[&str]) -> Result<(), Problem> {
-        match self.entries.iter().find(|(key, _)| !known.contains(&key.as_str())) {
+        match self
+            .entries
+            .iter()
+            .find(|(key, _)| !known.contains(&key.as_str()))
+        {
             Some((key, _)) => Err(problem("app_plugin_field_unknown", &self.path(key))),
             None => Ok(()),
         }
@@ -374,7 +381,12 @@ impl<'a> Fields<'a> {
         }
     }
 
-    fn number(&self, key: &str, code: &'static str, range: std::ops::RangeInclusive<u16>) -> Result<Option<u16>, Problem> {
+    fn number(
+        &self,
+        key: &str,
+        code: &'static str,
+        range: std::ops::RangeInclusive<u16>,
+    ) -> Result<Option<u16>, Problem> {
         match self.optional(key) {
             None => Ok(None),
             Some(Value::Int(number)) => u16::try_from(*number)
@@ -391,8 +403,8 @@ fn local_runs(value: &Value) -> Result<Runs, Problem> {
     let fields = Fields::new(value, "local")?;
     fields.only(&["runtime"])?;
     let id = fields.text("runtime", 64)?;
-    let runtime =
-        Runtime::from_id(&id).ok_or_else(|| problem("app_plugin_runtime_unknown", "local.runtime"))?;
+    let runtime = Runtime::from_id(&id)
+        .ok_or_else(|| problem("app_plugin_runtime_unknown", "local.runtime"))?;
     Ok(Runs::Local { runtime })
 }
 
@@ -444,7 +456,11 @@ fn http_spec(value: &Value) -> Result<HttpSpec, Problem> {
         _ => return Err(problem("app_plugin_vectors_invalid", "http.vectors")),
     };
     let dimensions = fields
-        .number("dimensions", "app_plugin_dimensions_invalid", DIMENSIONS_MIN..=DIMENSIONS_MAX)?
+        .number(
+            "dimensions",
+            "app_plugin_dimensions_invalid",
+            DIMENSIONS_MIN..=DIMENSIONS_MAX,
+        )?
         .ok_or_else(|| problem("app_plugin_field_missing", "http.dimensions"))?;
     let batch = fields
         .number("batch", "app_plugin_batch_invalid", 1..=BATCH_MAX)?

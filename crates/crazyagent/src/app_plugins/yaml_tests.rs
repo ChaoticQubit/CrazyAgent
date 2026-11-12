@@ -98,17 +98,38 @@ fn each_refused_construct_has_its_own_code_and_line() {
     assert_eq!(refused("a: &x 1\n"), ("app_plugin_yaml_anchor", 1));
     assert_eq!(refused("a: 1\nb: *x\n"), ("app_plugin_yaml_alias", 2));
     assert_eq!(refused("a: !!str 1\n"), ("app_plugin_yaml_tag", 1));
-    assert_eq!(refused("a: |\n  text\n"), ("app_plugin_yaml_block_scalar", 1));
-    assert_eq!(refused("a: >\n  text\n"), ("app_plugin_yaml_block_scalar", 1));
+    assert_eq!(
+        refused("a: |\n  text\n"),
+        ("app_plugin_yaml_block_scalar", 1)
+    );
+    assert_eq!(
+        refused("a: >\n  text\n"),
+        ("app_plugin_yaml_block_scalar", 1)
+    );
     assert_eq!(refused("a: {b: 1}\n"), ("app_plugin_yaml_flow_map", 1));
-    assert_eq!(refused("%YAML 1.2\na: 1\n"), ("app_plugin_yaml_directive", 1));
-    assert_eq!(refused("a: 1\n---\nb: 2\n"), ("app_plugin_yaml_documents", 2));
+    assert_eq!(
+        refused("%YAML 1.2\na: 1\n"),
+        ("app_plugin_yaml_directive", 1)
+    );
+    assert_eq!(
+        refused("a: 1\n---\nb: 2\n"),
+        ("app_plugin_yaml_documents", 2)
+    );
     assert_eq!(refused("a: 1\n...\n"), ("app_plugin_yaml_documents", 2));
-    assert_eq!(refused("a: 1\na: 2\n"), ("app_plugin_yaml_duplicate_key", 2));
-    assert_eq!(refused("a:\n  b: 1\n   c: 2\n"), ("app_plugin_yaml_indent", 3));
+    assert_eq!(
+        refused("a: 1\na: 2\n"),
+        ("app_plugin_yaml_duplicate_key", 2)
+    );
+    assert_eq!(
+        refused("a:\n  b: 1\n   c: 2\n"),
+        ("app_plugin_yaml_indent", 3)
+    );
     assert_eq!(refused("a: 1\n  b: 2\n"), ("app_plugin_yaml_indent", 2));
     assert_eq!(refused("a:\n  - b: 1\n"), ("app_plugin_yaml_list_map", 2));
-    assert_eq!(refused("a:\n  -\n    - b\n"), ("app_plugin_yaml_list_item", 2));
+    assert_eq!(
+        refused("a:\n  -\n    - b\n"),
+        ("app_plugin_yaml_list_item", 2)
+    );
     assert_eq!(refused("a: \"open\n"), ("app_plugin_yaml_quote", 1));
     assert_eq!(refused("a: 'open\n"), ("app_plugin_yaml_quote", 1));
     assert_eq!(refused("a: \"x\" y\n"), ("app_plugin_yaml_quote", 1));
@@ -125,7 +146,10 @@ fn each_refused_construct_has_its_own_code_and_line() {
 
 #[test]
 fn a_placeholder_must_be_quoted_or_it_reads_as_a_flow_map() {
-    assert_eq!(refused("input: {{inputs}}\n"), ("app_plugin_yaml_flow_map", 1));
+    assert_eq!(
+        refused("input: {{inputs}}\n"),
+        ("app_plugin_yaml_flow_map", 1)
+    );
     let value = parse("input: \"{{inputs}}\"\n").unwrap();
     assert_eq!(get(&value, "input"), &Value::Str("{{inputs}}".into()));
 }

@@ -1,7 +1,7 @@
 use super::manifest::{self, Manifest, Runs};
 use super::{
-    Binding, LOCAL_PLUGIN, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview,
-    Problem, SecretView, USER_PLUGINS_MAX, yaml,
+    Binding, LOCAL_PLUGIN, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, Problem,
+    SecretView, USER_PLUGINS_MAX, yaml,
 };
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
@@ -29,9 +29,18 @@ CREATE TABLE IF NOT EXISTS app_plugin_secrets (
 
 const BUNDLED: [(&str, &str); 4] = [
     ("local", include_str!("../../assets/app-plugins/local.yaml")),
-    ("openai", include_str!("../../assets/app-plugins/openai.yaml")),
-    ("voyage", include_str!("../../assets/app-plugins/voyage.yaml")),
-    ("ollama", include_str!("../../assets/app-plugins/ollama.yaml")),
+    (
+        "openai",
+        include_str!("../../assets/app-plugins/openai.yaml"),
+    ),
+    (
+        "voyage",
+        include_str!("../../assets/app-plugins/voyage.yaml"),
+    ),
+    (
+        "ollama",
+        include_str!("../../assets/app-plugins/ollama.yaml"),
+    ),
 ];
 
 const KEY_PREFIX: &str = "plugin-key-";
@@ -87,7 +96,10 @@ fn is_bundled(name: &str) -> bool {
 
 fn bundled_found(name: &str, text: &str) -> Found {
     let manifest = manifest::parse(text).expect("a bundled plugin parses");
-    assert_eq!(manifest.name, name, "a bundled plugin is listed under its own name");
+    assert_eq!(
+        manifest.name, name,
+        "a bundled plugin is listed under its own name"
+    );
     Found {
         name: name.to_owned(),
         origin: Origin::Bundled,
@@ -112,7 +124,11 @@ fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found {
             let sha256 = crate::semantic::sha256_hex(&bytes);
             let parsed = parse_file(&bytes).and_then(|manifest| {
                 if manifest.name != stem {
-                    Err(Problem::new("app_plugin_file_name_mismatch", None, Some("name")))
+                    Err(Problem::new(
+                        "app_plugin_file_name_mismatch",
+                        None,
+                        Some("name"),
+                    ))
                 } else if is_bundled(&manifest.name) {
                     Err(Problem::new("app_plugin_name_taken", None, Some("name")))
                 } else {
@@ -204,7 +220,10 @@ fn binding_row(
     .map_err(sqlite)
 }
 
-fn binding_rows(db: &Connection, plugin: &str) -> Result<Vec<(String, String, String)>, EngineError> {
+fn binding_rows(
+    db: &Connection,
+    plugin: &str,
+) -> Result<Vec<(String, String, String)>, EngineError> {
     let mut statement = db
         .prepare(
             "SELECT secret, source, reference FROM app_plugin_secrets WHERE plugin=?1
@@ -242,23 +261,27 @@ fn resolve(
     };
     if source == KEY {
         return Ok(match plugin_key(&reference) {
-            Some(key) if key_saved(root, PLUGIN_KEYS, &key) => (Binding::Key, Some(Bound::Key(key))),
+            Some(key) if key_saved(root, PLUGIN_KEYS, &key) => {
+                (Binding::Key, Some(Bound::Key(key)))
+            }
             _ => unbound,
         });
     }
     let Ok(account) = CredentialRef::new(reference) else {
         return Ok(unbound);
     };
-    Ok(match accounts::api_key_account(db, &account).ok().flatten() {
-        Some((name, Some(key))) if key_saved(root, ACCOUNT_KEYS, &key) => (
-            Binding::Account {
-                account: account.as_str().to_owned(),
-                name,
-            },
-            Some(Bound::Account(key)),
-        ),
-        _ => unbound,
-    })
+    Ok(
+        match accounts::api_key_account(db, &account).ok().flatten() {
+            Some((name, Some(key))) if key_saved(root, ACCOUNT_KEYS, &key) => (
+                Binding::Account {
+                    account: account.as_str().to_owned(),
+                    name,
+                },
+                Some(Bound::Account(key)),
+            ),
+            _ => unbound,
+        },
+    )
 }
 
 fn view(db: &Connection, root: &Path, found: Found) -> Result<PluginView, EngineError> {
@@ -358,7 +381,12 @@ pub fn review(root: &Path, name: &str) -> Result<Preview, EngineError> {
     })
 }
 
-fn settle(db: &Connection, root: &Path, manifest: &Manifest, now_ms: i64) -> Result<(), EngineError> {
+fn settle(
+    db: &Connection,
+    root: &Path,
+    manifest: &Manifest,
+    now_ms: i64,
+) -> Result<(), EngineError> {
     let hosts = hosts_key(manifest);
     let trusted_hosts: Option<String> = db
         .query_row(
@@ -369,8 +397,7 @@ fn settle(db: &Connection, root: &Path, manifest: &Manifest, now_ms: i64) -> Res
         .optional()
         .map_err(sqlite)?;
     for (secret, source, reference) in binding_rows(db, &manifest.name)? {
-        if trusted_hosts.as_deref() != Some(hosts.as_str())
-            || !manifest.secrets().contains(&secret)
+        if trusted_hosts.as_deref() != Some(hosts.as_str()) || !manifest.secrets().contains(&secret)
         {
             drop_binding(db, root, &manifest.name, &secret, &source, &reference)?;
         }
@@ -439,7 +466,12 @@ pub fn trust_file(
 /// Turns a plugin on or off. A user plugin turns on only while its trusted text is
 /// unchanged. Inputs: database, engine root, name and the new state. Output: Ok, or
 /// `app_plugin_not_found`, `_refused`, `_needs_review`.
-pub fn set_enabled(db: &Connection, root: &Path, name: &str, enabled: bool) -> Result<(), EngineError> {
+pub fn set_enabled(
+    db: &Connection,
+    root: &Path,
+    name: &str,
+    enabled: bool,
+) -> Result<(), EngineError> {
     tables(db)?;
     let found = found(root, name)?;
     if enabled {
@@ -556,11 +588,12 @@ pub fn bind_account(
     tables(db)?;
     bindable(db, root, name, secret)?;
     let id = CredentialRef::new(account).map_err(|_| error("app_plugin_account_not_found"))?;
-    let key = match accounts::api_key_account(db, &id).map_err(|_| error("app_plugins_unavailable"))? {
-        None => return Err(error("app_plugin_account_not_found")),
-        Some((_, None)) => return Err(error("app_plugin_account_has_no_key")),
-        Some((_, Some(key))) => key,
-    };
+    let key =
+        match accounts::api_key_account(db, &id).map_err(|_| error("app_plugins_unavailable"))? {
+            None => return Err(error("app_plugin_account_not_found")),
+            Some((_, None)) => return Err(error("app_plugin_account_has_no_key")),
+            Some((_, Some(key))) => key,
+        };
     if !accounts::key_saved_in(root, ACCOUNT_KEYS, &key)
         .map_err(|_| error("app_plugin_key_store_unavailable"))?
     {
@@ -793,7 +826,11 @@ mod folder {
         let Some(directory) = open(root, false)? else {
             return Ok(None);
         };
-        match rustix::fs::statat(&directory, file_name(name).as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        match rustix::fs::statat(
+            &directory,
+            file_name(name).as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        ) {
             Err(rustix::io::Errno::NOENT) => Ok(None),
             Ok(_) => Ok(Some(read_in(&directory, name))),
             Err(_) => Err(unavailable()),
@@ -817,8 +854,13 @@ mod folder {
         );
         let written = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
         if written.is_err()
-            || rustix::fs::renameat(&directory, staged.as_str(), &directory, file_name(name).as_str())
-                .is_err()
+            || rustix::fs::renameat(
+                &directory,
+                staged.as_str(),
+                &directory,
+                file_name(name).as_str(),
+            )
+            .is_err()
         {
             let _ = rustix::fs::unlinkat(&directory, staged.as_str(), AtFlags::empty());
             return Err(unavailable());

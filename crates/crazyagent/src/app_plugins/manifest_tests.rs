@@ -61,7 +61,11 @@ fn every_bundled_manifest_is_valid_and_named_as_its_entry() {
     let voyage = parse(bundled[2].1).unwrap();
     assert!(matches!(
         voyage.runs_view(),
-        RunsView::Http { local_unencrypted: false, dimensions: 256, .. }
+        RunsView::Http {
+            local_unencrypted: false,
+            dimensions: 256,
+            ..
+        }
     ));
 }
 
@@ -71,7 +75,10 @@ fn an_http_manifest_reads_hosts_secrets_headers_body_and_vectors() {
     assert_eq!(manifest.name, "acme");
     assert_eq!(manifest.title, "Acme embeddings");
     assert_eq!(manifest.version, "2.1.0");
-    assert_eq!(manifest.sha256, crate::semantic::sha256_hex(HTTP.as_bytes()));
+    assert_eq!(
+        manifest.sha256,
+        crate::semantic::sha256_hex(HTTP.as_bytes())
+    );
     let Runs::Http(http) = &manifest.runs else {
         panic!("an http plugin");
     };
@@ -85,7 +92,14 @@ fn an_http_manifest_reads_hosts_secrets_headers_body_and_vectors() {
         [Piece::Text("Bearer ".into()), Piece::Secret(0)]
     );
     assert_eq!(http.headers[1].value, [Piece::Text("crazyagent".into())]);
-    assert_eq!(http.vectors, [Step::Key("data".into()), Step::Each, Step::Key("embedding".into())]);
+    assert_eq!(
+        http.vectors,
+        [
+            Step::Key("data".into()),
+            Step::Each,
+            Step::Key("embedding".into())
+        ]
+    );
     assert_eq!((http.dimensions, http.batch), (256, 16));
     assert!(!http.local_unencrypted);
     assert_eq!(
@@ -126,7 +140,10 @@ fn a_non_https_host_is_refused() {
         "url: https://api.acme.example/v1/embed",
         "url: http://api.acme.example/v1/embed",
     );
-    assert_eq!(refused(&plain), ("app_plugin_url_not_https".into(), Some("http.url".into())));
+    assert_eq!(
+        refused(&plain),
+        ("app_plugin_url_not_https".into(), Some("http.url".into()))
+    );
     let ftp = with(
         "url: https://api.acme.example/v1/embed",
         "url: ftp://api.acme.example/v1/embed",
@@ -165,8 +182,16 @@ fn hosts_are_exact_declared_and_used() {
         "hosts: [api.acme.example]",
         "hosts: [api.acme.example, cdn.acme.example]",
     );
-    assert_eq!(refused(&unused), ("app_plugin_host_unused".into(), Some("http.hosts".into())));
-    for bad in ["\"*.acme.example\"", "API.acme.example", "api.acme.example:443", "-api.acme.example"] {
+    assert_eq!(
+        refused(&unused),
+        ("app_plugin_host_unused".into(), Some("http.hosts".into()))
+    );
+    for bad in [
+        "\"*.acme.example\"",
+        "API.acme.example",
+        "api.acme.example:443",
+        "-api.acme.example",
+    ] {
         let text = with("hosts: [api.acme.example]", &format!("hosts: [{bad}]"));
         assert_eq!(refused(&text).0, "app_plugin_host_invalid", "{bad}");
     }
@@ -192,14 +217,26 @@ fn secrets_are_declared_used_and_only_in_headers() {
     let undeclared = with("{{secret.api_key}}", "{{secret.other}}");
     assert_eq!(
         refused(&undeclared),
-        ("app_plugin_secret_undeclared".into(), Some("http.headers.Authorization".into()))
+        (
+            "app_plugin_secret_undeclared".into(),
+            Some("http.headers.Authorization".into())
+        )
     );
     let unused = with("secrets: [api_key]", "secrets: [api_key, spare]");
-    assert_eq!(refused(&unused), ("app_plugin_secret_unused".into(), Some("http.secrets".into())));
+    assert_eq!(
+        refused(&unused),
+        (
+            "app_plugin_secret_unused".into(),
+            Some("http.secrets".into())
+        )
+    );
     let in_body = with("model: acme-small", "model: \"{{secret.api_key}}\"");
     assert_eq!(
         refused(&in_body),
-        ("app_plugin_secret_outside_headers".into(), Some("http.body.model".into()))
+        (
+            "app_plugin_secret_outside_headers".into(),
+            Some("http.body.model".into())
+        )
     );
     let in_url = with(
         "url: https://api.acme.example/v1/embed",
@@ -232,7 +269,13 @@ fn placeholders_are_known_and_inputs_appear_once() {
 
 #[test]
 fn headers_are_bounded_and_the_app_s_own_headers_are_reserved() {
-    for reserved in ["Host", "content-length", "Content-Type", "Transfer-Encoding", "Connection"] {
+    for reserved in [
+        "Host",
+        "content-length",
+        "Content-Type",
+        "Transfer-Encoding",
+        "Connection",
+    ] {
         let text = with("X-Client: crazyagent", &format!("{reserved}: x"));
         assert_eq!(refused(&text).0, "app_plugin_header_reserved", "{reserved}");
     }
@@ -247,37 +290,80 @@ fn headers_are_bounded_and_the_app_s_own_headers_are_reserved() {
 #[test]
 fn fields_are_known_present_and_typed() {
     let extra = with("batch: 16", "batch: 16\n  timeout: 5");
-    assert_eq!(refused(&extra), ("app_plugin_field_unknown".into(), Some("http.timeout".into())));
+    assert_eq!(
+        refused(&extra),
+        (
+            "app_plugin_field_unknown".into(),
+            Some("http.timeout".into())
+        )
+    );
     let top = format!("{HTTP}color: red\n");
-    assert_eq!(refused(&top), ("app_plugin_field_unknown".into(), Some("color".into())));
+    assert_eq!(
+        refused(&top),
+        ("app_plugin_field_unknown".into(), Some("color".into()))
+    );
     let no_title = with("title: Acme embeddings\n", "");
-    assert_eq!(refused(&no_title), ("app_plugin_field_missing".into(), Some("title".into())));
+    assert_eq!(
+        refused(&no_title),
+        ("app_plugin_field_missing".into(), Some("title".into()))
+    );
     let no_url = with("  url: https://api.acme.example/v1/embed\n", "");
-    assert_eq!(refused(&no_url), ("app_plugin_field_missing".into(), Some("http.url".into())));
+    assert_eq!(
+        refused(&no_url),
+        ("app_plugin_field_missing".into(), Some("http.url".into()))
+    );
     let typed = with("title: Acme embeddings", "title: [a]");
-    assert_eq!(refused(&typed), ("app_plugin_field_invalid".into(), Some("title".into())));
-    assert_eq!(refused(&with("schema: 1", "schema: 2")).0, "app_plugin_schema_unknown");
-    assert_eq!(refused(&with("kind: embedding", "kind: chat")).0, "app_plugin_kind_unknown");
-    for name in ["Acme", "9acme", "acme_x", "a-very-long-name-that-goes-past-forty-bytes"] {
-        assert_eq!(refused(&with("name: acme", &format!("name: {name}"))).0, "app_plugin_name_invalid", "{name}");
+    assert_eq!(
+        refused(&typed),
+        ("app_plugin_field_invalid".into(), Some("title".into()))
+    );
+    assert_eq!(
+        refused(&with("schema: 1", "schema: 2")).0,
+        "app_plugin_schema_unknown"
+    );
+    assert_eq!(
+        refused(&with("kind: embedding", "kind: chat")).0,
+        "app_plugin_kind_unknown"
+    );
+    for name in [
+        "Acme",
+        "9acme",
+        "acme_x",
+        "a-very-long-name-that-goes-past-forty-bytes",
+    ] {
+        assert_eq!(
+            refused(&with("name: acme", &format!("name: {name}"))).0,
+            "app_plugin_name_invalid",
+            "{name}"
+        );
     }
     let both = format!("{HTTP}local:\n  runtime: static-retrieval-mrl-en-v1\n");
     assert_eq!(refused(&both).0, "app_plugin_runs_invalid");
     let neither = "schema: 1\nkind: embedding\nname: x\ntitle: X\nversion: 1\n";
     assert_eq!(refused(neither).0, "app_plugin_runs_invalid");
-    let runtime = "schema: 1\nkind: embedding\nname: x\ntitle: X\nversion: 1\nlocal:\n  runtime: llama\n";
+    let runtime =
+        "schema: 1\nkind: embedding\nname: x\ntitle: X\nversion: 1\nlocal:\n  runtime: llama\n";
     assert_eq!(refused(runtime).0, "app_plugin_runtime_unknown");
 }
 
 #[test]
 fn vectors_dimensions_and_batch_are_bounded() {
-    for path in ["data.embedding", "data.*.*", "data..embedding", "data.*.emb edding"] {
+    for path in [
+        "data.embedding",
+        "data.*.*",
+        "data..embedding",
+        "data.*.emb edding",
+    ] {
         let text = with("vectors: data.*.embedding", &format!("vectors: \"{path}\""));
         assert_eq!(refused(&text).0, "app_plugin_vectors_invalid", "{path}");
     }
     for dimensions in ["63", "1025", "256.5", "x"] {
         let text = with("dimensions: 256", &format!("dimensions: {dimensions}"));
-        assert_eq!(refused(&text).0, "app_plugin_dimensions_invalid", "{dimensions}");
+        assert_eq!(
+            refused(&text).0,
+            "app_plugin_dimensions_invalid",
+            "{dimensions}"
+        );
     }
     for batch in ["0", "129"] {
         let text = with("batch: 16", &format!("batch: {batch}"));

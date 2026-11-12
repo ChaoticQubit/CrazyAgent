@@ -198,8 +198,10 @@ pub(crate) fn key_saved_in(
         credential.as_str(),
         rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
     ) {
-        Ok(stat) => Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode)
-            == rustix::fs::FileType::RegularFile),
+        Ok(stat) => {
+            Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile)
+        }
         Err(rustix::io::Errno::NOENT) => Ok(false),
         Err(_) => Err(error("account_key_store_unavailable")),
     }

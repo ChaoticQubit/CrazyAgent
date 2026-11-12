@@ -2732,6 +2732,7 @@ fn remove(
     crate::coord::forget_project(tx, project_id)?;
     crate::activity::forget_project(tx, project_id)?;
     crate::usage::forget_project(tx, project_id.as_str())?;
+    crate::search_index::forget_project(tx, project_id)?;
     crate::ide::bridge::run_command::forget_project(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN

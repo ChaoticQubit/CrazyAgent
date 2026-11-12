@@ -42,8 +42,8 @@ use tokio::time::Instant;
 
 mod account_profile;
 pub(crate) mod accounts;
-pub(crate) mod app_plugins;
 pub(crate) mod agents;
+pub(crate) mod app_plugins;
 pub(crate) mod changes;
 pub(crate) mod checks;
 pub(crate) mod cleanup;
