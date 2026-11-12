@@ -1129,3 +1129,61 @@ fn a_sticky_group_writable_store_counts_only_as_an_entry_s_own_folder_or_above_a
     mode(&package, 0o755);
     mode(&bin, 0o755);
 }
+
+/// The ownership rule on synthetic parts, the entry first (leader 17:12, L8c): a /tmp-like
+/// folder (root 1777) above this user's 0700 folder passes for the tools the resolver runs
+/// and stays changeable for the engine service; a part another user owns below it is
+/// refused; a /nix/store-like folder (root:nixbld 1775) above 0555 packages passes for
+/// both; a missing part below a store, or a store as the entry's own folder, is refused.
+#[cfg(unix)]
+#[test]
+fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+    const NIXBLD: u32 = 30_000;
+    let found = |owner, group, mode, folder| Part::Found {
+        owner,
+        group,
+        mode,
+        folder,
+        link: false,
+    };
+    let system = found(0, 0, 0o755, true);
+    let tmp = found(0, 0, 0o1777, true);
+    let tool = found(ME, 20, 0o755, false);
+    let own = found(ME, 20, 0o700, true);
+    let under_tmp = [tool, own, tmp, system, system];
+    assert_eq!(first_changeable_part(&under_tmp, ME, true), None);
+    assert_eq!(
+        first_changeable_part(&under_tmp, ME, false),
+        Some(2),
+        "the service check is unchanged"
+    );
+    let theirs = [tool, found(OTHER, 20, 0o700, true), tmp, system];
+    assert_eq!(first_changeable_part(&theirs, ME, true), Some(1));
+    let deeper = [tool, own, found(OTHER, 20, 0o755, true), tmp, system];
+    assert_eq!(first_changeable_part(&deeper, ME, true), Some(2));
+    assert_eq!(
+        first_changeable_part(&[tool, tmp, system], ME, true),
+        Some(1)
+    );
+    let missing = [Part::Missing, Part::Missing, tmp, system];
+    assert_eq!(first_changeable_part(&missing, ME, true), Some(2));
+    let package = found(0, 0, 0o555, true);
+    let nix = [
+        found(0, 0, 0o555, false),
+        package,
+        package,
+        found(0, NIXBLD, 0o1775, true),
+        system,
+        system,
+    ];
+    assert_eq!(first_changeable_part(&nix, ME, true), None);
+    assert_eq!(first_changeable_part(&nix, ME, false), None);
+    let plain = [tool, own, found(ME, 20, 0o775, true), system];
+    assert_eq!(
+        first_changeable_part(&plain, ME, true),
+        Some(2),
+        "a group-writable folder with no sticky bit"
+    );
+}

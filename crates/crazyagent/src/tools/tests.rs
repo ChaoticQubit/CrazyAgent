@@ -520,3 +520,18 @@ fn a_path_folder_in_a_temp_folder_is_refused() {
         engine.folders()
     );
 }
+
+/// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
+/// can replace a folder this user owns there, so test stand-ins and engines started from a
+/// `/tmp` folder resolve (leader 17:12, L8c).
+#[test]
+fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
+    let folder = tempfile::Builder::new()
+        .prefix("tools-tmp-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let own = folder.path().canonicalize().unwrap();
+    let tool = program(&own.join("tool"), NODE);
+    let places = Places::new(vec![own.clone()], None);
+    assert_eq!(resolve("tool", &places).unwrap().program, tool);
+}
