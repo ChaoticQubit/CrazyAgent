@@ -9,7 +9,7 @@ import { createConnection, createServer } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as pause } from "node:timers/promises";
-import { createRunDirectories } from "./run-layout.mjs";
+import { chooseHome, createRunDirectories } from "./run-layout.mjs";
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const workRoot = resolve(appRoot, "../../.local-state/desktop-execution");
@@ -53,9 +53,11 @@ function binary(path) {
 
 function environment() {
   createRunDirectories(evidence);
+  const { home, prepared } = chooseHome(join(evidence, "home"));
   return {
     PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`,
-    HOME: join(evidence, "home"),
+    HOME: home,
+    ...(prepared ? { CFFIXED_USER_HOME: home } : {}),
     TMPDIR: join(evidence, "tmp"),
     LANG: "en_US.UTF-8",
     NO_COLOR: "1",
