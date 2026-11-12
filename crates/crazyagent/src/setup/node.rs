@@ -52,7 +52,7 @@ pub struct NodePin {
 }
 
 /// The engine's own Node: the `node` and `npm` programs under `<engine root>/setup/node` and
-/// the engine-owned npm prefix `<engine root>/harnesses` npm harnesses install into.
+/// the engine-owned npm prefix `<engine root>/setup/harnesses` npm harnesses install into.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeRuntime {
     pub node: PathBuf,

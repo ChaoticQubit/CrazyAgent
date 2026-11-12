@@ -133,7 +133,7 @@ impl Roots {
 
     /// The roots of this machine for one engine: [`Roots::system`] with the npm that npm
     /// harnesses install with, found by setup's one Node test on the engine's resolver
-    /// places, and the engine's own prefix `<engine root>/harnesses`. Nothing is run.
+    /// places, and the engine's own prefix `<engine root>/setup/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
         Self {
