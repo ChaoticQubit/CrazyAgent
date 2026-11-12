@@ -6,7 +6,7 @@ use crate::harness_settings::{
 use crate::storage::versioned::{ITEM_BYTES_MAX, Item};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub mod rules;
 pub mod store;
@@ -179,7 +179,8 @@ pub fn model_valid(harness: &str, model: &str) -> bool {
 }
 
 /// One harness's shipped model catalog: the harness, the exact versions it was checked
-/// against, the published references it was built from, and its model ids in page order.
+/// against, the published references it was built from, its model ids in page order and,
+/// for RCLI only, the provider that serves each id (DEC-150 M-5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelCatalog {
@@ -187,6 +188,29 @@ pub struct ModelCatalog {
     pub qualified_versions: Vec<String>,
     pub sources: Vec<String>,
     pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, String>,
+}
+
+/// The providers an RCLI catalog id may name: the keyed account kinds that serve a listed
+/// id. URL and Ollama accounts serve only their own model, so none is listed for them.
+pub const RCLI_PROVIDERS: &[&str] = &["anthropic", "openai", "openrouter"];
+
+/// Names the provider RCLI's shipped catalog lists for one model id (DEC-150 M-5). Inputs:
+/// the harness name and the model id. Output: the provider, none for an id the catalog
+/// does not list or a harness whose catalog names no providers.
+pub fn catalog_provider(harness: &str, model: &str) -> Option<&'static str> {
+    let _ = (harness, model);
+    None
+}
+
+/// Tells whether one RCLI account can run a master model (DEC-150 M-5, leader 17:09): its
+/// own model always, and a keyed Anthropic, OpenAI or OpenRouter account any id the catalog
+/// lists for its provider. Inputs: the model id and the account connection. Output: the
+/// answer.
+pub fn rcli_serves(model: &str, connection: &crate::config::ModelConnection) -> bool {
+    let _ = (model, connection);
+    false
 }
 
 /// Lists the model ids a harness's shipped catalog offers, the candidates the store checks

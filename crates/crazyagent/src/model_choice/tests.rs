@@ -264,7 +264,7 @@ fn a_stale_set_is_refused_with_the_current_row() {
 fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
     let (_tmp, db) = engine();
     let models = store::values(&db, "rcli", &catalog(&["local"]), &Scope::App, None).unwrap();
-    for slot in [Slot::Master, Slot::Agent, Slot::Allowed] {
+    for slot in [Slot::Agent, Slot::Allowed] {
         assert_eq!(
             row(&models, slot).access,
             Access::ReadOnly {
@@ -273,7 +273,7 @@ fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
             "{slot:?}"
         );
     }
-    for slot in [Slot::Master, Slot::Agent] {
+    for slot in [Slot::Agent] {
         match set(&db, "rcli", &["local"], &Scope::App, slot, json!("local")).unwrap() {
             Written::Refused { code, row } => {
                 assert_eq!(code, "model_choice_not_supported");
@@ -286,6 +286,178 @@ fn a_slot_the_harness_cannot_apply_shows_not_supported_and_refuses_a_set() {
     assert_eq!(unknown.0, "model_choice_harness_unknown");
     let alias = store::values(&db, "claude", &catalog(&["sonnet"]), &Scope::App, None).unwrap();
     assert_eq!(alias.harness, "claude-code");
+}
+
+/// DEC-150 M-5: the RCLI master's model is chosen like Claude Code's and Codex's, from
+/// RCLI's shipped catalog, at app and project scope; with none set it runs each account's
+/// own model.
+#[test]
+fn the_rcli_master_model_is_chosen_from_its_catalog_and_none_runs_the_account_s_own() {
+    let (_tmp, db) = engine();
+    let ids = super::catalog("rcli");
+    assert!(ids.len() >= 3, "{ids:?}");
+    let alpha_id = ProjectId::new(PROJECT).unwrap();
+    let models = store::values(&db, "rcli", &ids, &Scope::App, None).unwrap();
+    assert_eq!(row(&models, Slot::Master).access, Access::Editable);
+    assert_eq!(row(&models, Slot::Master).effective, Value::Null);
+    assert_eq!(
+        store::launch_model(&db, "rcli", &ids, Some(&alpha_id), Slot::Master).unwrap(),
+        None
+    );
+    let written = store::set(
+        &db,
+        "rcli",
+        &ids,
+        &Scope::App,
+        Slot::Master,
+        &json!(ids[0]),
+        row(&models, Slot::Master).version,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    let project = store::values(&db, "rcli", &ids, &alpha(), None).unwrap();
+    let written = store::set(
+        &db,
+        "rcli",
+        &ids,
+        &alpha(),
+        Slot::Master,
+        &json!(ids[2]),
+        row(&project, Slot::Master).version,
+    )
+    .unwrap();
+    assert!(matches!(written, Written::Saved { .. }), "{written:?}");
+    assert_eq!(
+        store::launch_model(&db, "rcli", &ids, Some(&alpha_id), Slot::Master).unwrap(),
+        Some(ids[2].clone())
+    );
+    assert_eq!(
+        store::launch_model(&db, "rcli", &ids, None, Slot::Master).unwrap(),
+        Some(ids[0].clone())
+    );
+    assert_eq!(
+        store::launch_model(&db, "rcli", &ids, Some(&alpha_id), Slot::Agent).unwrap(),
+        None
+    );
+    let refused = store::set(
+        &db,
+        "rcli",
+        &ids,
+        &Scope::App,
+        Slot::Master,
+        &json!("gpt-unknown"),
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "model_choice_value_invalid");
+}
+
+/// Builds one RCLI account connection the way Accounts saves it: the provider, protocol,
+/// endpoint and own model of a keyed, URL or local account. Inputs: the provider, the
+/// protocol, the URL, the own model and whether it holds a key. Output: the connection.
+fn rcli_account(
+    provider: &str,
+    protocol: &str,
+    url: &str,
+    own: &str,
+    keyed: bool,
+) -> crate::config::ModelConnection {
+    use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
+    use crate::protocol::CredentialRef;
+    let reference = |text: &str| CredentialRef::new(text).unwrap();
+    ModelConnection {
+        id: reference(&format!("{provider}-{own}").replace([':', '.', '/'], "-")),
+        provider: reference(provider),
+        harness: reference("rcli"),
+        protocol: reference(protocol),
+        account_ref: reference("account-a"),
+        endpoint: ModelEndpoint::Http { url: url.into() },
+        model: ModelReference {
+            id: own.into(),
+            author: reference(provider),
+        },
+        auth: if keyed {
+            ModelAuthentication::ApiKey {
+                credential_ref: reference("key-a"),
+            }
+        } else {
+            ModelAuthentication::None {}
+        },
+    }
+}
+
+/// DEC-150 M-5 filter (leader 17:09): a master model runs only on an account whose
+/// provider serves it. Keyed Anthropic, OpenAI and OpenRouter accounts serve the ids the
+/// catalog names for their provider and their own model; a URL or Ollama account serves
+/// only its own model.
+#[test]
+fn an_rcli_master_model_runs_only_on_an_account_whose_provider_serves_it() {
+    let anthropic = rcli_account(
+        "anthropic",
+        "anthropic-messages",
+        "https://api.anthropic.com/v1",
+        "claude-sonnet-5-5",
+        true,
+    );
+    let openai = rcli_account(
+        "openai",
+        "openai-chat",
+        "https://api.openai.com/v1",
+        "gpt-6-luna",
+        true,
+    );
+    let openrouter = rcli_account(
+        "openrouter",
+        "openai-chat",
+        "https://openrouter.ai/api/v1",
+        "openai/gpt-6-luna",
+        true,
+    );
+    let url = rcli_account(
+        "openai-compatible",
+        "openai-chat",
+        "https://llm.example.com/v1",
+        "qwen3-coder",
+        true,
+    );
+    let local = rcli_account(
+        "openai-compatible",
+        "openai-chat",
+        "http://127.0.0.1:11434/v1",
+        "llama3.2",
+        false,
+    );
+    let all = [&anthropic, &openai, &openrouter, &url, &local];
+    for (model, served_by) in [
+        ("claude-opus-5-5", &anthropic),
+        ("claude-sonnet-5-5", &anthropic),
+        ("gpt-6.1-sol", &openai),
+        ("anthropic/claude-opus-5.5", &openrouter),
+        ("qwen3-coder", &url),
+        ("llama3.2", &local),
+    ] {
+        assert!(rcli_serves(model, served_by), "{model}");
+        for other in all.iter().filter(|other| other.id != served_by.id) {
+            assert!(
+                !rcli_serves(model, other),
+                "{model} on {}",
+                other.id.as_str()
+            );
+        }
+    }
+    assert!(rcli_serves("openai/gpt-6-luna", &openrouter));
+    assert!(!rcli_serves("gpt-6-luna", &openrouter));
+    assert_eq!(
+        catalog_provider("rcli", "claude-opus-5-5"),
+        Some("anthropic")
+    );
+    assert_eq!(catalog_provider("rcli", "gpt-6.1-sol"), Some("openai"));
+    assert_eq!(
+        catalog_provider("rcli", "anthropic/claude-opus-5.5"),
+        Some("openrouter")
+    );
+    assert_eq!(catalog_provider("rcli", "qwen3-coder"), None);
+    assert_eq!(catalog_provider("codex", "gpt-6.1-sol"), None);
 }
 
 #[test]
@@ -597,20 +769,67 @@ fn every_refusal_code_is_listed() {
 
 #[test]
 fn each_launch_harness_ships_a_checked_model_catalog() {
-    for harness in ["claude-code", "codex"] {
+    for harness in ["claude-code", "codex", "rcli"] {
         let shipped = shipped(harness).unwrap();
         assert_eq!(shipped.harness, harness);
         assert!(!shipped.qualified_versions.is_empty());
         assert!(!shipped.sources.is_empty());
         assert!(!shipped.models.is_empty());
         assert_eq!(super::catalog(harness), shipped.models);
+        assert_eq!(shipped.providers.is_empty(), harness != "rcli", "{harness}");
     }
     assert!(super::catalog("codex").contains(&"gpt-6.1-sol".to_owned()));
     assert!(super::catalog("claude-code").contains(&"opus[1m]".to_owned()));
     assert_eq!(super::catalog("claude"), super::catalog("claude-code"));
-    assert!(shipped("rcli").is_none());
-    assert!(super::catalog("rcli").is_empty());
+    let rcli = shipped("rcli").unwrap();
+    assert_eq!(rcli.qualified_versions, ["3.0.4"]);
+    assert_eq!(rcli.providers.len(), rcli.models.len());
+    let mut served = std::collections::BTreeSet::new();
+    for id in &rcli.models {
+        let provider = catalog_provider("rcli", id).unwrap_or_else(|| panic!("{id}"));
+        assert!(RCLI_PROVIDERS.contains(&provider), "{id}");
+        assert_eq!(provider == "openrouter", id.contains('/'), "{id}");
+        served.insert(provider);
+    }
+    assert_eq!(served.len(), RCLI_PROVIDERS.len());
+    assert_eq!(unqualified("rcli", Some("3.0.4")), None);
+    assert!(unqualified("rcli", Some("3.0.5")).is_some());
     assert!(super::catalog("no-such-harness").is_empty());
+}
+
+#[test]
+fn an_rcli_catalog_names_one_known_provider_for_exactly_every_id() {
+    let good = json!({
+        "harness": "rcli",
+        "qualified_versions": ["3.0.4"],
+        "sources": ["https://openrouter.ai/api/v1/models"],
+        "models": ["claude-opus-5-5", "openai/gpt-6-luna"],
+        "providers": {"claude-opus-5-5": "anthropic", "openai/gpt-6-luna": "openrouter"},
+    });
+    let parsed = parse_catalog(good.to_string().as_bytes()).unwrap();
+    assert_eq!(parsed.providers.len(), 2);
+    let with = |providers: Value| {
+        let mut catalog = good.clone();
+        catalog["providers"] = providers;
+        catalog.to_string()
+    };
+    let mut missing = good.clone();
+    missing.as_object_mut().unwrap().remove("providers");
+    for bad in [
+        missing.to_string(),
+        with(json!({})),
+        with(json!({"claude-opus-5-5": "anthropic"})),
+        with(json!({
+            "claude-opus-5-5": "anthropic",
+            "openai/gpt-6-luna": "openrouter",
+            "gpt-6-luna": "openai",
+        })),
+        with(json!({"claude-opus-5-5": "ollama", "openai/gpt-6-luna": "openrouter"})),
+        with(json!({"claude-opus-5-5": "anthropic", "openai/gpt-6-luna": ""})),
+        with(json!(["anthropic", "openrouter"])),
+    ] {
+        assert!(parse_catalog(bad.as_bytes()).is_none(), "{bad}");
+    }
 }
 
 #[test]
@@ -649,6 +868,10 @@ fn a_model_catalog_out_of_contract_is_refused() {
         broken("models", json!(["gpt-6-luna", "gpt-6-luna"])),
         broken("models", json!(too_many)),
         broken("extra", json!(1)),
+        broken(
+            "providers",
+            json!({"gpt-6.1-sol": "openai", "gpt-6-luna": "openai"}),
+        ),
         "not json".to_owned(),
     ] {
         assert!(parse_catalog(bad.as_bytes()).is_none(), "{bad}");
