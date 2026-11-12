@@ -30,6 +30,7 @@ pub(super) mod conflict;
 pub(super) mod editor;
 pub(super) mod ide;
 pub(super) mod intake;
+pub(super) mod learning;
 pub(super) mod process;
 mod project_setup;
 pub(super) mod questions;
@@ -70,6 +71,7 @@ enum Job {
     Questions(Box<questions::QuestionsQuery>),
     Cleanup(Box<cleanup::CleanupQuery>),
     Reveal(Box<ide::RevealQuery>),
+    Learning(Box<learning::LearningQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -196,6 +198,7 @@ pub(super) enum OwnerEvent {
     Questions(Box<questions::QuestionsEvent>),
     Cleanup(Box<cleanup::CleanupEvent>),
     Reveal(Box<ide::RevealEvent>),
+    Learning(Box<learning::LearningEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -846,6 +849,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Cleanup(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Learning(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.learning(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => learning::LearningEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Learning(Box::new(event)),
                                 })
                                 .is_err()
                             {

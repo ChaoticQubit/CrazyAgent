@@ -1,6 +1,7 @@
 use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::engine::owner::{OwnerMutation, OwnerRead};
+use crazyagent::learning::{LearningProgress, MarkStep};
 use crazyagent::master_frame_limit::MasterFrameSettings;
 use crazyagent::master_step_limit::MasterStepSettings;
 use crazyagent::master_time_limit::MasterTimeSettings;
@@ -176,6 +177,50 @@ impl NativeBridge {
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         assert!(self.status().pending);
         self.deliver_intent(false).await
+    }
+
+    /// Reads the Learn CrazyAgent steps: their words, how many engine rows or marks show each
+    /// done, and whether the owner skipped the guide. Input: none. Output: the progress.
+    pub async fn learning_progress(&mut self) -> Result<LearningProgress, BridgeError> {
+        if !self.status().connected {
+            return Err(failure("not_connected"));
+        }
+        self.controller()?
+            .learning_progress()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))
+    }
+
+    /// Sets or clears one learning mark as a retained owner intent: a page opened, or the
+    /// guide skipped or shown again. Sends nothing when the engine already holds it that way.
+    /// Inputs: the mark, whether it is set and a fresh draft generation. Output: None when
+    /// nothing was sent, else the intent receipt.
+    pub async fn set_learning_mark(
+        &mut self,
+        step: MarkStep,
+        on: bool,
+        generation: u64,
+    ) -> Result<Option<IntentReceipt>, BridgeError> {
+        self.allow_new_auth().await?;
+        if self.blocked() {
+            return Err(failure("pending_intent"));
+        }
+        if generation == 0 || generation > 9_007_199_254_740_991 {
+            return Err(failure("draft_generation_limit"));
+        }
+        let progress = self
+            .controller()?
+            .learning_progress()
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        if progress.marked(step) == on {
+            return Ok(None);
+        }
+        self.controller()?
+            .begin_mutation(OwnerMutation::SetLearningMark { step, on }, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        assert!(self.status().pending);
+        self.deliver_intent(false).await.map(Some)
     }
 
     /// Reads how many steps a master with its tools on may take for one message. Input:
