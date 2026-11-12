@@ -1367,6 +1367,7 @@ impl Fixture {
             INDEXED_AT,
         )
         .unwrap()
+        .caught_up
     }
 
     /// Runs one indexer round for the project within small bounds. Inputs: the most chunks
@@ -1381,6 +1382,7 @@ impl Fixture {
             bytes,
         )
         .unwrap()
+        .caught_up
     }
 
     /// Reads the indexed chunks of one conversation of the project, by message number.
