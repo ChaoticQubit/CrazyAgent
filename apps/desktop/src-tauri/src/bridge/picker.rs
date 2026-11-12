@@ -63,6 +63,10 @@ return reply";
 /// instructions editor, such as a CLAUDE.md or AGENTS.md. Fixed text.
 pub const INSTRUCTIONS_SCRIPT: &str = "POSIX path of (choose file with prompt \"Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.\")";
 
+/// The macOS file chooser for one app plugin manifest whose text goes to its trust screen.
+/// Fixed text.
+pub const APP_PLUGIN_SCRIPT: &str = "";
+
 /// The macOS file chooser for the program file of a harness CrazyAgent did not find, hidden
 /// folders such as `~/.nvm` shown. Fixed text.
 pub const HARNESS_FILE_SCRIPT: &str = "POSIX path of (choose file with prompt \"Choose the harness program file, such as codex or claude.\" with invisibles)";

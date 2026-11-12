@@ -20,6 +20,7 @@ mod account_profile;
 mod account_setup;
 mod accounts;
 mod agents;
+pub mod app_plugins;
 mod changes;
 pub mod checks;
 mod cleanup;
