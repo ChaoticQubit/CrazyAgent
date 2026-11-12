@@ -259,6 +259,8 @@ pub enum Place {
     TicketSettings {
         project: Option<(ProjectId, String)>,
     },
+    AppPlugins,
+    SearchSettings,
 }
 
 /// What the shell does after a screen handled a key or an arrival.
@@ -435,7 +437,9 @@ pub trait Screen {
             | Place::Usage
             | Place::Notifications
             | Place::NotificationSettings
-            | Place::Demo => None,
+            | Place::Demo
+            | Place::AppPlugins
+            | Place::SearchSettings => None,
         }
     }
 }
@@ -531,6 +535,8 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
             }))
         }
         Place::Demo => Box::new(demo::DemoPage::new()),
+        Place::AppPlugins => Box::new(settings::app_plugins::AppPluginsPage::new()),
+        Place::SearchSettings => Box::new(settings::search::SearchPage::new()),
         Place::Onboarding {
             path,
             name,

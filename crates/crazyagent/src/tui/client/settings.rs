@@ -167,6 +167,7 @@ pub(in crate::tui) enum SettingsJob {
     ModelChoice(Box<super::model_choice::ModelChoiceQuery>),
     Checks(Box<super::checks::ChecksJob>),
     Tracker(Box<super::tracker::TrackerJob>),
+    AppPlugins(Box<super::app_plugins::AppPluginsJob>),
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -289,6 +290,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::ModelChoice(_) => "ModelChoice",
             Self::Checks(job) => super::checks::job_name(job),
             Self::Tracker(job) => super::tracker::job_name(job),
+            Self::AppPlugins(job) => super::app_plugins::job_name(job),
         })
     }
 }
@@ -430,6 +432,7 @@ pub(in crate::tui) enum SettingsEvent {
     ModelChoice(Box<super::model_choice::ModelChoiceEvent>),
     Checks(Box<super::checks::ChecksEvent>),
     Tracker(Box<super::tracker::TrackerEvent>),
+    AppPlugins(Box<super::app_plugins::AppPluginsEvent>),
 }
 
 impl SettingsEvent {
@@ -524,6 +527,9 @@ impl SettingsEvent {
             SettingsJob::Tracker(job) => {
                 Self::Tracker(Box::new(super::tracker::TrackerEvent::unavailable(job)))
             }
+            SettingsJob::AppPlugins(job) => Self::AppPlugins(Box::new(
+                super::app_plugins::AppPluginsEvent::unavailable(job),
+            )),
         }
     }
 }
@@ -901,6 +907,9 @@ impl NativeOwner {
             }
             SettingsJob::Tracker(job) => {
                 SettingsEvent::Tracker(Box::new(self.tracker(*job, lost).await))
+            }
+            SettingsJob::AppPlugins(job) => {
+                SettingsEvent::AppPlugins(Box::new(self.app_plugins(*job, lost).await))
             }
             SettingsJob::Ranking => SettingsEvent::Ranking(match self.settings_controller() {
                 Ok(controller) => controller

@@ -4047,6 +4047,195 @@ async fn desktop_scorecard_set(
 }
 
 #[tauri::command]
+async fn desktop_app_plugins(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugins()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_preview(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    yaml: String,
+) -> Result<crazyagent::app_plugins::Preview, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_preview(yaml)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_review(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::app_plugins::Preview, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_review(name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_add(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    yaml: String,
+    sha256: String,
+    replace: bool,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_add(yaml, sha256, replace)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_trust(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    sha256: String,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_trust(name, sha256)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_set_enabled(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    enabled: bool,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_set_enabled(name, enabled)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_remove(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_remove(name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_bind_account(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    secret: String,
+    account: String,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .app_plugin_bind_account(name, secret, account)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_set_key(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    secret: String,
+    key: String,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_set_key(name, secret, key)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_app_plugin_unbind(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    name: String,
+    secret: String,
+) -> Result<crazyagent::app_plugins::Listing, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.app_plugin_unbind(name, secret)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_search_settings(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::semantic::SearchView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.search_settings()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_set_search(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    choice: crazyagent::semantic::SearchChoice,
+    confirm_host: Option<String>,
+    version: u64,
+) -> Result<bridge::app_plugins::SearchSave, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state)
+        .await?
+        .set_search(choice, confirm_host, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_search_model_download(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    confirm_bytes: u64,
+) -> Result<crazyagent::semantic::SearchView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.search_model_download(confirm_bytes)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_search_model_cancel(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::semantic::SearchView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.search_model_cancel()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_search_model_delete(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<crazyagent::semantic::SearchView, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.search_model_delete()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_pick_app_plugin_file(webview: Webview) -> Result<Option<String>, BridgeError> {
+    main_window(&webview)?;
+    let path = match bridge::picker::choose(bridge::picker::APP_PLUGIN_SCRIPT).await? {
+        Pick::Canceled => return Ok(None),
+        Pick::Paths(mut paths) => {
+            assert!(!paths.is_empty());
+            paths.swap_remove(0)
+        }
+    };
+    bridge::app_plugins::read_picked(path).await.map(Some)
+}
+
+#[tauri::command]
 async fn desktop_ide_extension_asks(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5467,6 +5656,22 @@ native_commands! {
     desktop_usage_set_spend,
     desktop_scorecard,
     desktop_scorecard_set,
+    desktop_app_plugins,
+    desktop_app_plugin_preview,
+    desktop_app_plugin_review,
+    desktop_app_plugin_add,
+    desktop_app_plugin_trust,
+    desktop_app_plugin_set_enabled,
+    desktop_app_plugin_remove,
+    desktop_app_plugin_bind_account,
+    desktop_app_plugin_set_key,
+    desktop_app_plugin_unbind,
+    desktop_search_settings,
+    desktop_set_search,
+    desktop_search_model_download,
+    desktop_search_model_cancel,
+    desktop_search_model_delete,
+    desktop_pick_app_plugin_file,
     desktop_tests_read,
     desktop_checks,
     desktop_ide_extension_asks,

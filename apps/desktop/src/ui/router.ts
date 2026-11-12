@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "notifications", "profile", "updates"] as const;
+export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "notifications", "app-plugins", "search", "profile", "updates"] as const;
 /** The settings tabs the user menu under the profile name opens as dialogs over the page
  * (DEC-151), in menu order; the Settings list leaves them out, and their routes stay so a
  * deep link opens the dialog. */
