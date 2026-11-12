@@ -139,35 +139,7 @@ impl PinnedInstaller {
         let staging = staging_folder(&self.setup, "download")?;
         let result = (|| {
             let archive = staging.join("archive.tar.gz");
-            let (fetched, _) = run(
-                Path::new(CURL),
-                &[
-                    "-q".into(),
-                    "-fsSL".into(),
-                    "--proto".into(),
-                    "=https,file".into(),
-                    "--max-filesize".into(),
-                    ARCHIVE_BYTES_MAX.to_string().into(),
-                    "--max-time".into(),
-                    DOWNLOAD_TIME.as_secs().to_string().into(),
-                    "-o".into(),
-                    archive.clone().into_os_string(),
-                    url.into(),
-                ],
-                &self.env(),
-                &staging,
-                DOWNLOAD_TIME + Duration::from_secs(5),
-            )?;
-            let size = std::fs::symlink_metadata(&archive)
-                .map(|metadata| metadata.is_file().then_some(metadata.len()))
-                .ok()
-                .flatten();
-            if !fetched || size.is_none_or(|size| size > ARCHIVE_BYTES_MAX) {
-                return Err(InstallError("setup_download_failed"));
-            }
-            if file_sha256(&archive)? != sha256 {
-                return Err(InstallError("setup_checksum_mismatch"));
-            }
+            self.download(url, sha256, &archive, &staging)?;
             let out = staging.join("out");
             private_folder(&out)?;
             let (unpacked, _) = run(
@@ -198,6 +170,50 @@ impl PinnedInstaller {
         })();
         let _ = std::fs::remove_dir_all(&staging);
         result
+    }
+
+    /// Downloads one pinned archive with curl over https (or a local `file:///` source),
+    /// bounded in size and time, and keeps it only when its SHA-256 is the pinned one.
+    /// Inputs: the URL, the SHA-256, where to save it and the staging folder curl runs in.
+    /// Output: Ok, `setup_download_failed` or `setup_checksum_mismatch`.
+    pub(super) fn download(
+        &self,
+        url: &str,
+        sha256: &str,
+        archive: &Path,
+        staging: &Path,
+    ) -> Result<(), InstallError> {
+        assert!(is_sha256(sha256));
+        let (fetched, _) = run(
+            Path::new(CURL),
+            &[
+                "-q".into(),
+                "-fsSL".into(),
+                "--proto".into(),
+                "=https,file".into(),
+                "--max-filesize".into(),
+                ARCHIVE_BYTES_MAX.to_string().into(),
+                "--max-time".into(),
+                DOWNLOAD_TIME.as_secs().to_string().into(),
+                "-o".into(),
+                archive.as_os_str().to_owned(),
+                url.into(),
+            ],
+            &self.env(),
+            staging,
+            DOWNLOAD_TIME + Duration::from_secs(5),
+        )?;
+        let size = std::fs::symlink_metadata(archive)
+            .map(|metadata| metadata.is_file().then_some(metadata.len()))
+            .ok()
+            .flatten();
+        if !fetched || size.is_none_or(|size| size > ARCHIVE_BYTES_MAX) {
+            return Err(InstallError("setup_download_failed"));
+        }
+        if file_sha256(archive)? != sha256 {
+            return Err(InstallError("setup_checksum_mismatch"));
+        }
+        Ok(())
     }
 
     fn uv_tool(&self, package: &str, version: &Version, python: &str) -> Result<(), InstallError> {
@@ -352,7 +368,10 @@ fn plain_name(name: &str) -> bool {
         })
 }
 
-fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
+/// Points `at` at `target` with a new link put in place by one rename, so a reader never
+/// sees it missing. Inputs: the target and the link path. Output: Ok, or
+/// `setup_store_unavailable`.
+pub(super) fn link(target: &Path, at: &Path) -> Result<(), InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
     let random = crate::engine::owner::random_id().map_err(|_| unavailable)?;
     let name = at.file_name().ok_or(unavailable)?.to_string_lossy();

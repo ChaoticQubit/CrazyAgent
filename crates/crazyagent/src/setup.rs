@@ -386,10 +386,14 @@ pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 /// profile reads: the Setup note, and a refused agent git step.
 pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
 
-const REASONS: [(&str, &str); 26] = [
+const REASONS: [(&str, &str); 27] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
+    ),
+    (
+        "setup_archive_unsafe",
+        "The download held a file it should not, so it was not installed.",
     ),
     (
         "setup_download_failed",
