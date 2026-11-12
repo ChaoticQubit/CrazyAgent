@@ -1187,3 +1187,43 @@ fn a_sticky_store_passes_only_above_parts_this_user_or_root_owns() {
         "a group-writable folder with no sticky bit"
     );
 }
+
+/// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
+/// for the engine service and for the tools the resolver runs: a 0775 staff file in this
+/// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
+/// never read.
+#[cfg(unix)]
+#[test]
+fn a_file_an_untrusted_group_can_write_is_changeable_like_a_folder() {
+    const ME: u32 = 501;
+    const STAFF: u32 = 20;
+    let found = |group, mode, folder, link| Part::Found {
+        owner: ME,
+        group,
+        mode,
+        folder,
+        link,
+    };
+    let own = found(STAFF, 0o755, true, false);
+    let system = Part::Found {
+        owner: 0,
+        group: 0,
+        mode: 0o755,
+        folder: true,
+        link: false,
+    };
+    for open_stores in [false, true] {
+        let grouped = [found(STAFF, 0o775, false, false), own, system];
+        assert_eq!(first_changeable_part(&grouped, ME, open_stores), Some(0));
+        let plain = [found(STAFF, 0o755, false, false), own, system];
+        assert_eq!(first_changeable_part(&plain, ME, open_stores), None);
+        let root_group = [found(0, 0o775, false, false), own, system];
+        assert_eq!(first_changeable_part(&root_group, ME, open_stores), None);
+        let link = [found(STAFF, 0o777, false, true), own, system];
+        assert_eq!(
+            first_changeable_part(&link, ME, open_stores),
+            None,
+            "a link's own mode is not read"
+        );
+    }
+}

@@ -610,3 +610,38 @@ fn a_refused_tool_names_its_file_and_why_and_never_says_it_is_missing() {
         "{line}"
     );
 }
+
+/// R2-L1: a tool file the staff group can write, in this user's 0755 folder, is passed over
+/// with the refused line naming the file; at 0755 it is found, and an admin-group file is
+/// still trusted.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_file_the_staff_group_can_write_is_passed_over() {
+    let (_folder, home) = scratch();
+    let bin = home.join("tools");
+    let tool = program(&bin.join("tool"), NODE);
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::chown(&tool, None, Some(STAFF)).unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let places = Places::new(vec![bin.clone()], Some(home));
+    let missing = resolve("tool", &places).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(
+        missing.refused,
+        Some(Refused {
+            file: tool.clone(),
+            why: Refusal::OthersCanChange(tool.clone()),
+        })
+    );
+    assert!(missing.line().contains(&tool.display().to_string()));
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(resolve("tool", &places).unwrap().program, tool);
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o775)).unwrap();
+    if std::os::unix::fs::chown(&tool, None, Some(80)).is_ok() {
+        assert_eq!(
+            resolve("tool", &places).unwrap().program,
+            tool,
+            "admin's group is trusted"
+        );
+    }
+}
