@@ -52,6 +52,45 @@ fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
     );
 }
 
+/// Setup reads the version of the copy the tool resolver finds first, the one a launch runs,
+/// and never passes over it to a later copy: a first copy that reports no version shows
+/// Failed with the plain reason, while the good copy later in the places stays unused.
+#[test]
+fn a_broken_first_copy_shows_failed_and_a_later_good_copy_is_not_used() {
+    let root = private_root();
+    let first = root.path().join("first");
+    let later = root.path().join("later");
+    for (folder, text) in [
+        (&first, "#!/bin/sh\nexit 1\n"),
+        (&later, "#!/bin/sh\necho 'tmux 3.5a'\n"),
+    ] {
+        std::fs::create_dir_all(folder).unwrap();
+        let tmux = folder.join("tmux");
+        std::fs::write(&tmux, text).unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let places = crate::tools::Places::new(vec![first, later], None);
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places);
+    let unreadable = InstallError("setup_version_unreadable");
+    assert_eq!(installer.lookup(Dependency::Tmux), Err(unreadable));
+    assert_eq!(installer.find(Dependency::Tmux), Err(unreadable));
+    assert_eq!(installer.locate(Dependency::Tmux), None);
+    let progress = crate::setup::progress::Progress {
+        checked: Some(crate::setup::progress::Checked {
+            at: std::time::Instant::now(),
+            found: vec![(Dependency::Tmux, installer.lookup(Dependency::Tmux))],
+        }),
+        ..crate::setup::progress::Progress::default()
+    };
+    let rows = crate::setup::progress::dependency_rows(&progress);
+    assert_eq!(
+        rows[0].state,
+        crate::setup::DependencyState::Failed {
+            reason: crate::setup::plain_reason("setup_version_unreadable").to_owned()
+        }
+    );
+}
+
 fn found(name: &str) -> PathBuf {
     let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())

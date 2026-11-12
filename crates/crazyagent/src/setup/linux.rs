@@ -248,6 +248,64 @@ mod tests {
         }
     }
 
+    /// On Linux, setup answers tmux wherever the tool resolver looks, as the live master's
+    /// start does ([`crate::terminal::tmux::installed`]): a tmux only in `~/.local/bin`
+    /// shows Found with its version, and none anywhere gives the resolver's tmux line.
+    #[test]
+    fn a_linux_tmux_row_resolves_where_the_live_start_does() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let home = root.path().join("home");
+        let local = home.join(".local/bin");
+        std::fs::create_dir_all(&local).unwrap();
+        let places = crate::tools::Places::new(
+            vec![root.path().join("setup/bin"), local.clone()],
+            Some(home),
+        );
+        let shared = PinnedInstaller::with_places(root.path(), vec![], places.clone());
+        let installer = LinuxInstaller::new(Box::new(shared));
+        let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
+        assert_eq!(missing, crate::tools::resolve("tmux", &places).unwrap_err());
+        assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+        assert_eq!(installer.find(Dependency::Tmux), Ok(None));
+        let tmux = local.join("tmux");
+        std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.5a'\n").unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            installer.lookup(Dependency::Tmux).unwrap(),
+            Ok(Version::parse("3.5a").unwrap())
+        );
+        assert_eq!(
+            installer.find(Dependency::Tmux),
+            Ok(Some(Version::parse("3.5a").unwrap()))
+        );
+    }
+
+    /// The tool resolver looks in Linux's package folders that are often not on the engine's
+    /// PATH, Linuxbrew where setup installs tmux and the NixOS system and default profiles,
+    /// before the system folders, so a tmux setup finds there is the one the live start runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_resolver_looks_in_linuxbrew_and_the_nixos_profiles() {
+        let places = crate::tools::Places::engine(None, None, None, None);
+        let folders = places.folders();
+        let system = folders
+            .iter()
+            .position(|folder| folder == Path::new("/usr/bin"))
+            .unwrap();
+        for folder in [
+            "/home/linuxbrew/.linuxbrew/bin",
+            "/run/current-system/sw/bin",
+            "/nix/var/nix/profiles/default/bin",
+        ] {
+            let at = folders
+                .iter()
+                .position(|found| found == Path::new(folder))
+                .unwrap_or_else(|| panic!("{folder} is not looked in"));
+            assert!(at < system, "{folder} comes after the system folders");
+        }
+    }
+
     #[test]
     fn tmux_is_found_with_the_version_it_reports() {
         let found = tmux_version().unwrap();
