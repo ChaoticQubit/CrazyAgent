@@ -136,15 +136,31 @@ impl AgentKeychain {
     /// that never locks itself as that home's default and only search-list keychain, and
     /// only then deletes any an earlier launch left, so the harness, even one still running
     /// there, stores its sign-in there instead of asking macOS to create a login keychain.
-    /// Every call names the keychain or runs with `HOME` set to the agent home, so the
-    /// owner's keychain settings are untouched. Input: the agent home. Output: the
-    /// keychain, or `native_profile_agent_keychain_unavailable`.
-    fn prepare(home: &Path) -> Result<Self, EngineError> {
+    /// A native lead's teammates' home, when there is one beside it, gets the same keychain
+    /// as its default, since teammates file the lead's sign-in under the lead's item name.
+    /// The home must lie below the engine's own folder and outside the account profiles,
+    /// see [`crate::engine::keychain::fresh_profile_keychain`]. Every call names the
+    /// keychain or runs with `HOME` set to an agent home, so the owner's keychain settings
+    /// are untouched. Inputs: the engine folder and the agent home. Output: the keychain,
+    /// or `native_profile_agent_keychain_unavailable`.
+    fn prepare(engine: &Path, home: &Path) -> Result<Self, EngineError> {
         let text = home
             .to_str()
             .filter(|text| text.is_ascii())
             .ok_or_else(keychain_unavailable)?;
-        let keychain = crate::engine::keychain::fresh_profile_keychain(home)
+        if std::fs::canonicalize(engine.join(super::ROOT))
+            .map_or(true, |profiles| home.starts_with(profiles))
+        {
+            return Err(keychain_unavailable());
+        }
+        let mates = crate::launch_context::mates_home(home);
+        let sharers: Vec<&Path> =
+            if std::fs::symlink_metadata(&mates).is_ok_and(|metadata| metadata.is_dir()) {
+                vec![mates.as_path()]
+            } else {
+                Vec::new()
+            };
+        let keychain = crate::engine::keychain::fresh_profile_keychain(engine, home, &sharers)
             .map_err(|_| keychain_unavailable())?;
         assert_eq!(
             keychain.parent(),
@@ -177,14 +193,19 @@ impl AgentKeychain {
 
 /// The keychain the agent's harness keeps its sign-in in, given before its copy is written:
 /// one for Claude Code on macOS and none for Codex, which runs with its file store. Inputs:
-/// the harness and the agent home. Output: the keychain or none, or the refusal.
-fn agent_keychain(harness: Harness, home: &Path) -> Result<Option<AgentKeychain>, EngineError> {
+/// the harness, the agent home and the engine folder agent homes lie below. Output: the
+/// keychain or none, or the refusal.
+fn agent_keychain(
+    harness: Harness,
+    home: &Path,
+    engine: &Path,
+) -> Result<Option<AgentKeychain>, EngineError> {
     match harness {
         #[cfg(target_os = "macos")]
-        Harness::Claude => AgentKeychain::prepare(home).map(Some),
+        Harness::Claude => AgentKeychain::prepare(engine, home).map(Some),
         #[cfg(not(target_os = "macos"))]
         Harness::Claude => {
-            let _ = home;
+            let _ = (home, engine);
             Ok(None)
         }
         Harness::Codex => Ok(None),
@@ -326,7 +347,7 @@ impl NativeProfileUse {
             None
         };
         let name = harness.copy_name();
-        let keychain = agent_keychain(harness, agent_home)?;
+        let keychain = agent_keychain(harness, agent_home, &self.custody.anchor.path)?;
         place(&home, name, &record.copy)?;
         let mut credential = AgentCredential {
             home,

@@ -9,7 +9,9 @@ const STEP_TIME: Duration = Duration::from_secs(10);
 const ITEM_NOT_FOUND: i32 = 44;
 const RECORDS_MAX: usize = 8;
 const KEYCHAIN_SUFFIX: &str = ".keychain-db";
-const KEYCHAINS_MAX: usize = 8;
+const AGENT_PREFIX: &str = "agent-";
+const NONCE_HEX: usize = 16;
+const LOGIN_KEYCHAIN: &str = "login.keychain-db";
 const FOLDER_ENTRIES_MAX: usize = 64;
 
 fn failure() -> EngineError {
@@ -141,10 +143,60 @@ pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
     Ok(keychain)
 }
 
-/// The keychain files an earlier launch left in a private home's keychain folder, read
-/// without following a link. Input: the folder, already checked as a real folder or absent.
-/// Output: their paths, or a failure for a link, a hard-linked file or any other entry with
-/// a keychain name, for more than eight of them, or for a folder of more than 64 entries.
+/// Whether `name` is one this module gives an agent keychain: `agent-`, sixteen lowercase
+/// hex digits and `.keychain-db`. No other keychain file is ever deleted. Input: the file
+/// name. Output: true or false.
+fn agent_keychain_name(name: &str) -> bool {
+    name.strip_prefix(AGENT_PREFIX)
+        .and_then(|rest| rest.strip_suffix(KEYCHAIN_SUFFIX))
+        .is_some_and(|hex| {
+            hex.len() == NONCE_HEX
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
+/// The home the owner's account record names, read from the user database rather than from
+/// `HOME`, canonical. Input: none. Output: the folder, or a failure when it cannot be read.
+fn owner_home() -> Result<PathBuf, EngineError> {
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .map_err(|_| failure())?
+        .ok_or_else(failure)?;
+    std::fs::canonicalize(&user.dir).map_err(|_| failure())
+}
+
+/// Refuses a home the engine may not give an agent keychain, before any `security` call: it
+/// must be its own canonical path, so no link sits anywhere on it, lie strictly below the
+/// canonical engine-owned `root`, not be the owner's own home, and hold no
+/// `login.keychain-db`, which only a signed-in account's profile home or a real login home
+/// has. Inputs: the root the engine keeps agent homes under and the home. Output: done, or a
+/// failure.
+fn agent_home_guard(root: &Path, home: &Path) -> Result<(), EngineError> {
+    if !root.is_absolute() || !home.is_absolute() {
+        return Err(failure());
+    }
+    let root = std::fs::canonicalize(root).map_err(|_| failure())?;
+    if std::fs::canonicalize(home).map_err(|_| failure())? != home
+        || !home.starts_with(&root)
+        || home == root
+        || home == owner_home()?
+    {
+        return Err(failure());
+    }
+    match std::fs::symlink_metadata(home.join("Library/Keychains").join(LOGIN_KEYCHAIN)) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(failure()),
+    }
+    assert!(home.starts_with(&root) && home != root);
+    Ok(())
+}
+
+/// The agent keychains an earlier launch left in a private home's keychain folder, read
+/// without following a link; a keychain under any other name stays where it is. Input: the
+/// folder, already checked as a real folder or absent. Output: their paths, or a failure
+/// for an agent keychain name on a link, a hard-linked file or any other entry, or for a
+/// folder of more than 64 entries.
 fn earlier_keychains(directory: &Path) -> Result<Vec<PathBuf>, EngineError> {
     if !present(directory, true)? {
         return Ok(Vec::new());
@@ -159,41 +211,29 @@ fn earlier_keychains(directory: &Path) -> Result<Vec<PathBuf>, EngineError> {
         }
         let path = entry.map_err(|_| failure())?.path();
         if path
-            .to_str()
-            .is_some_and(|text| text.ends_with(KEYCHAIN_SUFFIX))
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(agent_keychain_name)
             && present(&path, false)?
         {
             earlier.push(path);
         }
     }
-    if earlier.len() > KEYCHAINS_MAX {
-        return Err(failure());
-    }
+    assert!(earlier.len() < FOLDER_ENTRIES_MAX);
     Ok(earlier)
 }
 
-/// Gives a private agent home a newly created keychain under a name no earlier launch used,
-/// and makes it the home's default and only search-list keychain before it deletes every
-/// keychain an earlier launch left there. A harness still running in the home, as a live
-/// agent taken over after an engine restart is, never finds the home without a default,
-/// which would make macOS ask the owner to create one. An earlier keychain may be locked,
-/// as every keychain is after a restart, and `security` cannot unlock one with an empty
-/// password; nothing in it outlives a turn anyway. The new keychain is unlocked and locks
-/// neither on a timeout nor on sleep. Input: the absolute agent home. Output: the keychain
-/// path, or a failure, with nothing written when a folder or keychain there is a link.
-pub(crate) fn fresh_profile_keychain(home: &Path) -> Result<PathBuf, EngineError> {
-    if !home.is_absolute() || !home.is_dir() {
-        return Err(failure());
-    }
+/// Makes the `Library` and `Library/Preferences` folders a home's keychain settings live in,
+/// refusing a link at either, at `Library/Keychains` or at the settings file. Input: the
+/// home. Output: done, or a failure.
+fn settings_folders(home: &Path) -> Result<(), EngineError> {
     let library = home.join("Library");
-    let directory = library.join("Keychains");
     let preferences = library.join("Preferences");
-    for folder in [&library, &directory, &preferences] {
+    for folder in [&library, &library.join("Keychains"), &preferences] {
         present(folder, true)?;
     }
     present(&preferences.join("com.apple.security.plist"), false)?;
-    let earlier = earlier_keychains(&directory)?;
-    for folder in [&library, &directory, &preferences] {
+    for folder in [&library, &preferences] {
         if !present(folder, true)? {
             std::fs::DirBuilder::new()
                 .mode(0o700)
@@ -201,33 +241,120 @@ pub(crate) fn fresh_profile_keychain(home: &Path) -> Result<PathBuf, EngineError
                 .map_err(|_| failure())?;
         }
     }
+    Ok(())
+}
+
+/// Makes `keychain` the default and only search-list keychain of `home`, default first, so
+/// the home's default always exists. Inputs: the home and the keychain. Output: done, or a
+/// failure.
+fn point_at(home: &Path, keychain: &Path) -> Result<(), EngineError> {
+    for setting in ["default-keychain", "list-keychains"] {
+        set_setting(home, setting, keychain)?;
+    }
+    Ok(())
+}
+
+/// Sets one of a home's own keychain settings, `default-keychain` or `list-keychains`, to
+/// `keychain` alone, in that home's user domain. Inputs: the home, the setting and the
+/// keychain. Output: done, or a failure.
+fn set_setting(home: &Path, setting: &str, keychain: &Path) -> Result<(), EngineError> {
+    assert!(matches!(setting, "default-keychain" | "list-keychains"));
+    security(
+        home,
+        &[
+            setting.as_ref(),
+            "-d".as_ref(),
+            "user".as_ref(),
+            "-s".as_ref(),
+            keychain.as_os_str(),
+        ],
+    )
+}
+
+/// Deletes one agent keychain this module created, through `security` and then from the
+/// folder when `security` could not. Inputs: the home and the keychain. Output: done, or a
+/// failure for a keychain under another name or one that will not go.
+fn discard(home: &Path, keychain: &Path) -> Result<(), EngineError> {
+    if !keychain
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(agent_keychain_name)
+    {
+        return Err(failure());
+    }
+    let _ = security(home, &["delete-keychain".as_ref(), keychain.as_os_str()]);
+    if present(keychain, false)? {
+        std::fs::remove_file(keychain).map_err(|_| failure())?;
+    }
+    assert!(!keychain.exists());
+    Ok(())
+}
+
+/// Gives an engine-made agent home a newly created keychain under a name no earlier launch
+/// used, makes it the default and only search-list keychain of that home and of every home
+/// in `sharers`, such as a native lead's teammates' home, and only then deletes every agent
+/// keychain an earlier launch left in the home. A harness still running in either home, as
+/// a live agent taken over after an engine restart is, never finds it without a default,
+/// which would make macOS ask the owner to create one. When a step fails before the home's
+/// default moved, the new keychain is deleted again, so a failing handoff leaves nothing
+/// behind; after that it stays as the default and the next handoff deletes it. An earlier
+/// keychain may be locked, as every keychain is after a restart, and `security` cannot
+/// unlock one with an empty password; nothing in it outlives a turn anyway. The new keychain
+/// is unlocked and locks neither on a timeout nor on sleep. Only `agent-<16 hex>.keychain-db`
+/// files are ever deleted. Inputs: the canonical root the engine keeps agent homes under,
+/// the home and the homes that share its keychain. Output: the keychain path, or a failure,
+/// with nothing written when a home fails [`agent_home_guard`] or a folder or keychain there
+/// is a link.
+pub(crate) fn fresh_profile_keychain(
+    root: &Path,
+    home: &Path,
+    sharers: &[&Path],
+) -> Result<PathBuf, EngineError> {
+    agent_home_guard(root, home)?;
+    for sharer in sharers {
+        agent_home_guard(root, sharer)?;
+        if *sharer == home {
+            return Err(failure());
+        }
+    }
+    let directory = home.join("Library/Keychains");
+    settings_folders(home)?;
+    for sharer in sharers {
+        settings_folders(sharer)?;
+    }
+    let earlier = earlier_keychains(&directory)?;
+    if !present(&directory, true)? {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|_| failure())?;
+    }
     let mut nonce = [0_u8; 8];
     getrandom::fill(&mut nonce).map_err(|_| failure())?;
     let keychain = directory.join(format!(
-        "agent-{:016x}{KEYCHAIN_SUFFIX}",
+        "{AGENT_PREFIX}{:016x}{KEYCHAIN_SUFFIX}",
         u64::from_le_bytes(nonce)
     ));
     assert!(!earlier.contains(&keychain));
+    assert_eq!(keychain.parent(), Some(directory.as_path()));
+    assert!(keychain.starts_with(home));
     let path = keychain.as_os_str();
     let empty = std::ffi::OsStr::new("");
     security(
         home,
         &["create-keychain".as_ref(), "-p".as_ref(), empty, path],
     )?;
-    security(home, &["set-keychain-settings".as_ref(), path])?;
-    for setting in ["list-keychains", "default-keychain"] {
-        security(
-            home,
-            &[
-                setting.as_ref(),
-                "-d".as_ref(),
-                "user".as_ref(),
-                "-s".as_ref(),
-                path,
-            ],
-        )?;
+    let settled = security(home, &["set-keychain-settings".as_ref(), path])
+        .and_then(|()| set_setting(home, "default-keychain", &keychain));
+    if let Err(error) = settled {
+        discard(home, &keychain)?;
+        return Err(error);
     }
-    for private in [&library, &directory] {
+    set_setting(home, "list-keychains", &keychain)?;
+    for sharer in sharers {
+        point_at(sharer, &keychain)?;
+    }
+    for private in [&home.join("Library"), &directory] {
         std::fs::set_permissions(private, std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .map_err(|_| failure())?;
     }
@@ -238,28 +365,31 @@ pub(crate) fn fresh_profile_keychain(home: &Path) -> Result<PathBuf, EngineError
     .map_err(|_| failure())?;
     assert!(present(&keychain, false)?);
     for old in &earlier {
-        let _ = security(home, &["delete-keychain".as_ref(), old.as_os_str()]);
-        if present(old, false)? {
-            std::fs::remove_file(old).map_err(|_| failure())?;
-        }
+        discard(home, old)?;
     }
     assert!(earlier.iter().all(|old| !old.exists()));
     Ok(keychain)
 }
 
-/// Deletes every item filed under `service` from one keychain in a private home's keychain
-/// folder, so the harness there reads the credential file the engine wrote instead of a
-/// stale copy. The keychain is named in each call and no link is followed to it; a keychain
-/// or an item already gone is fine. Inputs: the absolute home, the keychain file in its
-/// keychain folder and the service. Output: done, or a failure, also for a keychain outside
-/// that folder.
+/// Deletes every item filed under `service` from one agent keychain in a private home's
+/// keychain folder, so the harness there reads the credential file the engine wrote instead
+/// of a stale copy. The keychain is named in each call and no link is followed to it; a
+/// keychain or an item already gone is fine. Inputs: the absolute home, the agent keychain
+/// file in its keychain folder and the service. Output: done, or a failure, also for a
+/// keychain outside that folder or under a name this module never gives one.
 pub(crate) fn forget_record(
     home: &Path,
     keychain: &Path,
     service: &str,
 ) -> Result<(), EngineError> {
     let directory = home.join("Library/Keychains");
-    if !home.is_absolute() || keychain.parent() != Some(directory.as_path()) {
+    if !home.is_absolute()
+        || keychain.parent() != Some(directory.as_path())
+        || !keychain
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(agent_keychain_name)
+    {
         return Err(failure());
     }
     if !present(&home.join("Library"), true)?
@@ -399,7 +529,7 @@ mod tests {
         symlink(&preferences, home.join("Library/Preferences")).unwrap();
         symlink(&keychains, home.join("Library/Keychains")).unwrap();
         assert!(prepare_profile_keychain(&home).is_err());
-        assert!(fresh_profile_keychain(&home).is_err());
+        assert!(fresh_profile_keychain(root.path(), &home, &[]).is_err());
         assert!(
             forget_record(
                 &home,
@@ -426,7 +556,7 @@ mod tests {
         std::fs::create_dir(home.join("Library/Keychains")).unwrap();
         symlink(&planted, home.join("Library/Keychains/login.keychain-db")).unwrap();
         assert!(prepare_profile_keychain(&home).is_err());
-        assert!(fresh_profile_keychain(&home).is_err());
+        assert!(fresh_profile_keychain(root.path(), &home, &[]).is_err());
         assert!(
             forget_record(
                 &home,
@@ -469,12 +599,12 @@ mod tests {
         let bare = private_home(root.path(), "bare");
         forget_record(
             &bare,
-            &bare.join("Library/Keychains/login.keychain-db"),
+            &bare.join("Library/Keychains/agent-0123456789abcdef.keychain-db"),
             "crazyagent-forget-test",
         )
         .unwrap();
         assert_eq!(entries(&bare), Vec::<String>::new());
-        let keychain = prepare_profile_keychain(&home).unwrap();
+        let keychain = fresh_profile_keychain(root.path(), &home, &[]).unwrap();
         let adopted = TestKeychain::adopt(&home, keychain.clone());
         adopted.add("probe", "crazyagent-forget-test", "stale");
         adopted.add("other", "crazyagent-forget-test", "stale too");
@@ -509,6 +639,19 @@ mod tests {
             )
             .is_err()
         );
+        let profile = private_home(root.path(), "profile");
+        let login = TestKeychain::adopt(&profile, prepare_profile_keychain(&profile).unwrap());
+        login.add("probe", "crazyagent-forget-test", "signed in");
+        for named in [
+            login.path().to_path_buf(),
+            home.join("Library/Keychains/login.keychain-db"),
+            home.join("Library/Keychains/agent-0123456789ABCDEF.keychain-db"),
+            home.join("Library/Keychains/agent-0123.keychain-db"),
+        ] {
+            let owner = named.parent().unwrap().parent().unwrap().parent().unwrap();
+            assert!(forget_record(owner, &named, "crazyagent-forget-test").is_err());
+        }
+        assert_eq!(login.find("crazyagent-forget-test"), "signed in");
     }
 
     fn keychain_files(home: &Path) -> Vec<PathBuf> {
@@ -525,12 +668,15 @@ mod tests {
     fn a_fresh_keychain_under_a_new_name_is_the_default_before_the_locked_one_is_deleted() {
         let root = scratch();
         let home = private_home(root.path(), "home");
-        let earlier = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        let earlier = TestKeychain::adopt(
+            &home,
+            fresh_profile_keychain(root.path(), &home, &[]).unwrap(),
+        );
         let earlier_text = earlier.path().to_str().unwrap().to_owned();
         earlier.add("probe", "crazyagent-fresh-test", "old");
         earlier.security(&["lock-keychain", &earlier_text], None);
 
-        let fresh = fresh_profile_keychain(&home).unwrap();
+        let fresh = fresh_profile_keychain(root.path(), &home, &[]).unwrap();
         assert_ne!(fresh, earlier.path());
         assert_eq!(fresh.parent(), earlier.path().parent());
         assert!(!earlier.path().exists());
@@ -545,7 +691,10 @@ mod tests {
         keychain.add("probe", "crazyagent-fresh-test", "new");
         assert_eq!(keychain.find("crazyagent-fresh-test"), "new");
 
-        let again = TestKeychain::adopt(&home, fresh_profile_keychain(&home).unwrap());
+        let again = TestKeychain::adopt(
+            &home,
+            fresh_profile_keychain(root.path(), &home, &[]).unwrap(),
+        );
         assert_ne!(again.path(), fresh);
         assert!(!fresh.exists());
         assert_eq!(keychain_files(&home), [again.path().to_path_buf()]);
@@ -554,7 +703,7 @@ mod tests {
                 .setting("default-keychain")
                 .contains(again.path().to_str().unwrap())
         );
-        assert!(fresh_profile_keychain(Path::new("relative")).is_err());
+        assert!(fresh_profile_keychain(root.path(), Path::new("relative"), &[]).is_err());
     }
 
     #[test]
@@ -687,7 +836,7 @@ mod tests {
             other_keychain.setting("default-keychain"),
             other_keychain.setting("list-keychains"),
         ];
-        let keychain = fresh_profile_keychain(&home).unwrap();
+        let keychain = fresh_profile_keychain(&team, &home, &[]).unwrap();
         assert!(keychain.is_file());
 
         crate::team::cleanup::remove_agent_files(&team, 7).unwrap();
@@ -702,6 +851,159 @@ mod tests {
             after
                 .iter()
                 .all(|text| !text.contains(keychain.to_str().unwrap()))
+        );
+    }
+
+    #[test]
+    fn an_agent_keychain_is_refused_outside_the_root_through_a_link_or_beside_a_login_keychain() {
+        use std::os::unix::fs::symlink;
+        let root = scratch();
+        let engine = private_home(root.path(), "engine");
+        let outside = private_home(root.path(), "outside");
+        let profile = private_home(&engine, "native-profiles/k/home");
+        let login = TestKeychain::adopt(&profile, prepare_profile_keychain(&profile).unwrap());
+        login.add("probe", "crazyagent-guard-test", "signed in");
+        let before = login.setting("default-keychain");
+        let agent = private_home(&engine, "agents/agent-1/home");
+        let linked = engine.join("linked");
+        symlink(&agent, &linked).unwrap();
+        let none: Vec<&Path> = Vec::new();
+        for (home, sharers) in [
+            (outside.as_path(), none.clone()),
+            (engine.as_path(), none.clone()),
+            (profile.as_path(), none.clone()),
+            (linked.as_path(), none.clone()),
+            (agent.as_path(), vec![profile.as_path()]),
+            (agent.as_path(), vec![outside.as_path()]),
+            (agent.as_path(), vec![agent.as_path()]),
+        ] {
+            assert!(
+                fresh_profile_keychain(&engine, home, &sharers).is_err(),
+                "{home:?} with {sharers:?} got an agent keychain"
+            );
+        }
+        for home in [&outside, &agent] {
+            assert!(
+                std::fs::symlink_metadata(home.join("Library")).is_err(),
+                "a refused handoff wrote into {home:?}"
+            );
+        }
+        assert_eq!(login.find("crazyagent-guard-test"), "signed in");
+        assert_eq!(login.setting("default-keychain"), before);
+        assert_eq!(keychain_files(&profile), [login.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn the_owners_home_and_any_login_keychain_name_are_refused_before_any_security_call() {
+        let owner = owner_home().unwrap();
+        assert!(agent_home_guard(Path::new("/"), &owner).is_err());
+        assert!(!agent_keychain_name(LOGIN_KEYCHAIN));
+        assert!(agent_keychain_name("agent-0123456789abcdef.keychain-db"));
+        for name in [
+            "agent-0123456789ABCDEF.keychain-db",
+            "agent-0123456789abcdef.keychain",
+            "agent-0123456789abcdef0.keychain-db",
+            "agent-0123456789abcde.keychain-db",
+            "xagent-0123456789abcdef.keychain-db",
+            "agent-0123456789abcdeg.keychain-db",
+        ] {
+            assert!(
+                !agent_keychain_name(name),
+                "{name} passed as an agent keychain"
+            );
+        }
+    }
+
+    #[test]
+    fn leftover_agent_keychains_past_the_old_cap_are_swept_and_other_keychains_stay() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let directory = home.join("Library/Keychains");
+        let mut leftovers = vec![fresh_profile_keychain(root.path(), &home, &[]).unwrap()];
+        let empty = std::ffi::OsStr::new("");
+        for index in 0..10_u64 {
+            let leftover =
+                directory.join(format!("agent-{:016x}.keychain-db", 0xfeed_0000 + index));
+            assert!(
+                security(
+                    &home,
+                    &[
+                        "create-keychain".as_ref(),
+                        "-p".as_ref(),
+                        empty,
+                        leftover.as_os_str()
+                    ],
+                )
+                .is_ok()
+            );
+            leftovers.push(leftover);
+        }
+        let foreign = directory.join("notes.keychain-db");
+        assert!(
+            security(
+                &home,
+                &[
+                    "create-keychain".as_ref(),
+                    "-p".as_ref(),
+                    empty,
+                    foreign.as_os_str()
+                ],
+            )
+            .is_ok()
+        );
+        let foreign = TestKeychain::adopt(&home, foreign);
+
+        let fresh = TestKeychain::adopt(
+            &home,
+            fresh_profile_keychain(root.path(), &home, &[]).unwrap(),
+        );
+        assert!(leftovers.iter().all(|old| !old.exists()));
+        assert_eq!(
+            keychain_files(&home),
+            [fresh.path().to_path_buf(), foreign.path().to_path_buf()]
+        );
+        for which in ["default-keychain", "list-keychains"] {
+            let setting = fresh.setting(which);
+            assert!(setting.contains(fresh.path().to_str().unwrap()));
+            assert!(!setting.contains(foreign.path().to_str().unwrap()));
+        }
+    }
+
+    #[test]
+    fn a_sharing_home_follows_the_new_keychain_before_the_old_one_is_deleted() {
+        let root = scratch();
+        let lead = private_home(root.path(), "agents/agent-3/home");
+        let mates = private_home(root.path(), "agents/agent-3/mates-home");
+        let first = TestKeychain::adopt(
+            &lead,
+            fresh_profile_keychain(root.path(), &lead, &[&mates]).unwrap(),
+        );
+        let first_text = first.path().to_str().unwrap().to_owned();
+        for which in [
+            ["default-keychain", "-d", "user"],
+            ["list-keychains", "-d", "user"],
+        ] {
+            assert!(read(&mates, &which).contains(&first_text));
+        }
+
+        let second = TestKeychain::adopt(
+            &lead,
+            fresh_profile_keychain(root.path(), &lead, &[&mates]).unwrap(),
+        );
+        assert!(!first.path().exists());
+        let second_text = second.path().to_str().unwrap();
+        for which in [
+            ["default-keychain", "-d", "user"],
+            ["list-keychains", "-d", "user"],
+        ] {
+            let setting = read(&mates, &which);
+            assert!(setting.contains(second_text) && !setting.contains(&first_text));
+        }
+        assert!(
+            std::fs::read_dir(mates.join("Library/Keychains")).map_or(true, |found| found
+                .map(|entry| entry.unwrap().file_name())
+                .all(|name| !name.to_string_lossy().ends_with(KEYCHAIN_SUFFIX))),
+            "the sharing home got a keychain of its own"
         );
     }
 }

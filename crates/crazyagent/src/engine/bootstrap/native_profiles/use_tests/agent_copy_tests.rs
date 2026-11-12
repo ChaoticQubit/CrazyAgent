@@ -49,8 +49,10 @@ fn codex_auth(expires: u64) -> Vec<u8> {
     .into_bytes()
 }
 
+/// A private agent home below the engine folder, where the engine makes every agent home.
+/// Input: the case. Output: the home.
 fn agent_home(case: &UseCase) -> PathBuf {
-    let home = case.root.path().join("agent-home");
+    let home = case.state.join("agent-home");
     private_directory(&home);
     home
 }
@@ -751,6 +753,102 @@ fn only_keychain(agent: &Path) -> std::path::PathBuf {
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(std::fs::symlink_metadata(&found[0]).unwrap().is_file());
     found.into_iter().next().unwrap()
+}
+
+/// A Claude handoff to the account's own profile home or to a home outside the engine
+/// folder is refused before any keychain is made, swapped or deleted there: the managed
+/// keychain keeps its record and settings, and the outside home gets no keychain folder
+/// and no copy (DEC-146 r1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_handoff_refuses_the_profile_home_and_a_home_outside_the_engine_folder() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (keychain, service) = claude_keychain(&home, &claude_record(expires));
+    let managed = keychain.path().to_str().unwrap().to_owned();
+    let default = keychain.setting("default-keychain");
+    assert!(default.contains(&managed));
+    let outside = case.root.path().join("outside-home");
+    private_directory(&outside);
+    let guard = execution(&mut case);
+    for agent in [home.clone(), outside.clone()] {
+        assert_eq!(
+            refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+            "native_profile_agent_keychain_unavailable",
+            "{agent:?}"
+        );
+    }
+    assert!(entries(&outside).is_empty());
+    assert_eq!(keychain.setting("default-keychain"), default);
+    assert_eq!(
+        serde_json::from_str::<Value>(&keychain.find(&service)).unwrap(),
+        claude_record(expires)
+    );
+}
+
+/// One keychain setting of a home as `security` reports it with `HOME` set to that home
+/// and nothing else in its environment. Inputs: the home and `default-keychain` or
+/// `list-keychains`. Output: the report text.
+#[cfg(target_os = "macos")]
+fn home_setting(home: &Path, which: &str) -> String {
+    assert!(matches!(which, "default-keychain" | "list-keychains"));
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/security")
+            .args([which, "-d", "user"])
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "security {which} failed");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A native lead's teammates run under the lead's teammate home and file the lead's
+/// sign-in under the lead's item name, so that home's default and search list follow the
+/// lead's newest keychain before the earlier one is deleted, and the teammate home gets no
+/// keychain of its own (DEC-146 r1 F1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_home_uses_the_leads_keychain_from_each_handoff() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (_keychain, _service) = claude_keychain(&home, &claude_record(expires));
+    let agent = agent_home(&case);
+    let mates = crate::launch_context::mates_home(&agent);
+    private_directory(&mates);
+    let guard = execution(&mut case);
+    let mut earlier: Option<PathBuf> = None;
+    for _ in 0..2 {
+        let copy = guard
+            .hand_to_agent(&agent, TURN, &no_harness(&case))
+            .unwrap();
+        let lead = only_keychain(&agent);
+        let text = lead.to_str().unwrap();
+        assert!(home_setting(&mates, "default-keychain").contains(text));
+        assert!(home_setting(&mates, "list-keychains").contains(text));
+        if let Some(earlier) = &earlier {
+            assert_ne!(earlier, &lead);
+            assert!(!earlier.exists(), "the lead's earlier keychain was left");
+            assert!(!home_setting(&mates, "list-keychains").contains(earlier.to_str().unwrap()));
+        }
+        assert!(
+            std::fs::read_dir(mates.join("Library/Keychains")).map_or(true, |found| found
+                .map(|entry| entry.unwrap().file_name())
+                .all(|name| !name.to_string_lossy().ends_with(".keychain-db"))),
+            "the teammate home got a keychain of its own"
+        );
+        drop(copy);
+        earlier = Some(lead);
+    }
+    let last = earlier.unwrap();
+    drop(TestKeychain::adopt(&agent, last.clone()));
+    assert!(!last.exists());
 }
 
 #[cfg(target_os = "macos")]

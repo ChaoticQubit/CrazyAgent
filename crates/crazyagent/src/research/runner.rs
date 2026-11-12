@@ -907,7 +907,10 @@ impl ResearchRunner {
                     .hand_to_agent(&home, self.limits.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let policy = jobs
             .agent_policy(&project)
@@ -1599,7 +1602,10 @@ impl ResearchRunner {
                     .hand_to_agent(&home, run.wall_time, executable)
                     .map_err(|problem| RunError::Account(problem.0))?,
             ),
-            None => None,
+            None => {
+                endpoint_keychain(&self.state, harness, &home)?;
+                None
+            }
         };
         let work = agent.join("work");
         private_directory(&work)?;
@@ -3172,6 +3178,22 @@ fn codex_retry_limited(line: &str) -> bool {
         && line
             .split_once("sampling_error=")
             .is_some_and(|(_, cause)| rate_limited(cause))
+}
+
+/// Gives a Claude Code research agent that reaches its model by key or address, with no
+/// signed-in account handed to it, its own keychain in its home as a handoff gives a
+/// signed-in one, so a harness that stores anything there never makes macOS ask the owner
+/// to create a keychain (DEC-146 KCA-M2). Codex keeps nothing in a keychain. Inputs: the
+/// research state folder, the harness and the agent home. Output: done, or the refusal.
+fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Result<(), RunError> {
+    #[cfg(target_os = "macos")]
+    if matches!(harness, ResearchHarness::ClaudeCode) {
+        crate::engine::keychain::fresh_profile_keychain(state, home, &[])
+            .map_err(|_| RunError::Account("agent_keychain_unavailable".into()))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (state, harness, home);
+    Ok(())
 }
 
 /// Tells whether a research agent that exited failing was refused for a rate or usage
