@@ -74,6 +74,14 @@ impl NodeRuntime {
     }
 }
 
+/// A Node the tool resolver finds whole: the `node` entry and an `npm` entry whose own
+/// interpreter resolves too, as found on the places, before any link is followed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Usable {
+    pub node: PathBuf,
+    pub npm: PathBuf,
+}
+
 /// The bounds an unpacked archive must stay within: how many entries, how many file bytes
 /// and how many folders deep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +149,19 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
         && private(&prefix.join("lib"))
         && private(&prefix.join("lib").join("node_modules"));
     (own_file && inside && prefix_ready).then_some(NodeRuntime { node, npm, prefix })
+}
+
+/// Finds a usable Node on the resolver's places. Input: the places. Output: the Node, or
+/// none when node or npm is missing.
+pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
+    let _ = places;
+    None
+}
+
+/// Makes the engine npm prefix. Input: the prefix folder. Output: Ok, or the setup code.
+pub fn make_prefix(prefix: &Path) -> Result<(), InstallError> {
+    let _ = prefix;
+    Err(InstallError("setup_store_unavailable"))
 }
 
 /// Installs this target's pinned Node into the engine root, as `install_pin` does. Input:

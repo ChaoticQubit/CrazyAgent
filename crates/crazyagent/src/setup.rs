@@ -110,6 +110,7 @@ pub enum Dependency {
     Tmux,
     Uv,
     Graphify,
+    Node,
 }
 
 impl Dependency {
@@ -122,6 +123,7 @@ impl Dependency {
             Self::Tmux => "tmux",
             Self::Uv => "uv",
             Self::Graphify => "graphify",
+            Self::Node => "node",
         }
     }
 
@@ -132,6 +134,7 @@ impl Dependency {
             Self::Tmux => "tmux",
             Self::Uv => "uv",
             Self::Graphify => "Graphify command",
+            Self::Node => "node",
         }
     }
 }
@@ -218,6 +221,12 @@ pub enum Pin {
     Winget {
         id: String,
         version: Version,
+    },
+    Archive {
+        version: Version,
+        url: String,
+        sha256: String,
+        top: String,
     },
 }
 
@@ -596,6 +605,7 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
         Dependency::Tmux => Some(Pin::Homebrew {
             formula: "tmux".to_owned(),
         }),
+        Dependency::Node => None,
     }
 }
 
@@ -614,6 +624,7 @@ pub enum SetupAction {
     Run { pack: Vec<String> },
     Set { id: String, on: bool, version: u64 },
     Remove { id: String, version: u64 },
+    Install { name: Dependency },
 }
 
 const PACK_ID_BYTES_MAX: usize = 64;
@@ -641,6 +652,7 @@ impl SetupAction {
                         .all(|(index, id)| !pack[..index].contains(id))
             }
             Self::Set { id, .. } | Self::Remove { id, .. } => valid_pack_id(id),
+            Self::Install { .. } => true,
         };
         if !valid {
             return Err(InstallError("pack_unknown"));
@@ -843,5 +855,57 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    #[test]
+    fn node_is_a_setup_row_the_owner_installs_alone_from_the_official_archive() {
+        assert_eq!(Dependency::ALL.last(), Some(&Dependency::Node));
+        assert_eq!(Dependency::Node.program(), "node");
+        assert_eq!(Dependency::Node.label(), "Node.js");
+        assert_eq!(
+            serde_json::to_value(Dependency::Node).unwrap(),
+            serde_json::json!("node")
+        );
+        let unix = [
+            "aarch64-apple-darwin",
+            "x86_64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-unknown-linux-gnu",
+        ];
+        for target in unix {
+            let pinned = node::pin(target).unwrap();
+            assert_eq!(
+                pin_for(target, Dependency::Node),
+                Some(Pin::Archive {
+                    version: Version::parse(node::NODE_VERSION).unwrap(),
+                    url: pinned.url,
+                    sha256: pinned.sha256,
+                    top: pinned.top,
+                }),
+                "{target}"
+            );
+        }
+        for target in WINGET_TARGETS.into_iter().chain(["unknown"]) {
+            assert_eq!(pin_for(target, Dependency::Node), None, "{target}");
+        }
+        let install = crate::engine::owner::OwnerMutation::InstallDependency {
+            name: Dependency::Node,
+        };
+        assert_eq!(
+            serde_json::to_value(&install).unwrap(),
+            serde_json::json!({"kind": "InstallDependency", "name": "node"})
+        );
+        let action = SetupAction::Install {
+            name: Dependency::Node,
+        };
+        assert!(matches!(
+            install.command().unwrap(),
+            crate::protocol::Command::OwnerSetup { action: mapped } if mapped == action
+        ));
+        assert_eq!(action.validate(), Ok(()));
+        assert_eq!(
+            serde_json::to_value(&action).unwrap(),
+            serde_json::json!({"kind": "install", "name": "node"})
+        );
     }
 }

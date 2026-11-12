@@ -210,6 +210,9 @@ pub enum OwnerMutation {
         id: String,
         version: u64,
     },
+    InstallDependency {
+        name: crate::setup::Dependency,
+    },
     SetProjectsHome {
         path: String,
     },
@@ -471,6 +474,9 @@ impl OwnerMutation {
                     on: *on,
                     version: *version,
                 },
+            },
+            Self::InstallDependency { .. } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Run { pack: Vec::new() },
             },
             Self::RemovePackEntry { id, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Remove {

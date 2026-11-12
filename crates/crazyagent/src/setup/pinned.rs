@@ -59,6 +59,13 @@ impl PinnedInstaller {
         Self { setup, search }
     }
 
+    /// Uses the given resolver places for the Node lookup. Input: the places. Output: the
+    /// installer.
+    pub fn with_places(self, places: crate::tools::Places) -> Self {
+        let _ = places;
+        self
+    }
+
     /// Returns the private install folder, `<engine root>/setup`.
     pub fn setup_folder(&self) -> &Path {
         &self.setup
@@ -98,7 +105,7 @@ impl PinnedInstaller {
     fn version(&self, dep: Dependency, program: &Path) -> Result<Version, InstallError> {
         let flag = match dep {
             Dependency::Tmux => "-V",
-            Dependency::Uv | Dependency::Graphify => "--version",
+            Dependency::Uv | Dependency::Graphify | Dependency::Node => "--version",
         };
         let (ok, output) = run(
             program,
@@ -434,7 +441,7 @@ impl Installer for PinnedInstaller {
                 self.uv_tool(package, version, python)?;
                 version
             }
-            Pin::Homebrew { .. } | Pin::Winget { .. } => {
+            Pin::Homebrew { .. } | Pin::Winget { .. } | Pin::Archive { .. } => {
                 return Err(InstallError("setup_pin_invalid"));
             }
         };

@@ -236,6 +236,134 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
     assert_eq!(check_tree(&deep, limits), unsafe_tree);
 }
 
+fn places(folders: Vec<PathBuf>) -> crate::tools::Places {
+    crate::tools::Places::new(folders, None)
+}
+
+fn npm_launcher(folder: &Path) {
+    std::fs::create_dir_all(folder).unwrap();
+    let npm = folder.join("npm");
+    std::fs::write(&npm, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&npm, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn private(folder: &Path) {
+    let metadata = std::fs::symlink_metadata(folder).unwrap();
+    assert!(metadata.is_dir(), "{}", folder.display());
+    assert_eq!(
+        metadata.permissions().mode() & 0o077,
+        0,
+        "{}",
+        folder.display()
+    );
+}
+
+#[test]
+fn a_usable_node_is_a_node_and_an_npm_the_resolver_finds_and_neither_alone_counts() {
+    let work = tempfile::tempdir().unwrap();
+    let bin = work.path().join("bin");
+    script(&bin.join("node"), "v22.11.0");
+    assert_eq!(usable(&places(vec![bin.clone()])), None, "node alone");
+    npm_launcher(&bin);
+    assert_eq!(
+        usable(&places(vec![bin.clone()])),
+        Some(Usable {
+            node: bin.join("node"),
+            npm: bin.join("npm"),
+        })
+    );
+    std::fs::remove_file(bin.join("node")).unwrap();
+    assert_eq!(usable(&places(vec![bin])), None, "npm alone");
+}
+
+#[test]
+fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    install_pin(root.path(), &pin_for(&archive, &sha256)).unwrap();
+    let setup_bin = root.path().join("setup/bin");
+    let empty = work.path().join("no-system-node");
+    std::fs::create_dir_all(&empty).unwrap();
+    let only_engine = places(vec![empty, setup_bin.clone()]);
+    let node = crate::tools::resolve("node", &only_engine).unwrap();
+    assert_eq!(node.entry, setup_bin.join("node"));
+    assert_eq!(
+        node.program,
+        folder(root.path()).join("bin/node").canonicalize().unwrap()
+    );
+    assert_eq!(
+        usable(&only_engine),
+        Some(Usable {
+            node: setup_bin.join("node"),
+            npm: setup_bin.join("npm"),
+        })
+    );
+    let engine = crate::tools::Places::engine(Some(root.path()), None, None, None);
+    let at = |wanted: &Path| engine.folders().iter().position(|found| found == wanted);
+    assert_eq!(at(&setup_bin), Some(0));
+    assert_eq!(at(&prefix(root.path()).join("bin")), Some(1));
+}
+
+#[test]
+fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
+    let root = root();
+    let made = prefix(root.path());
+    make_prefix(&made).unwrap();
+    for folder in [
+        made.clone(),
+        made.join("bin"),
+        made.join("lib"),
+        made.join("lib/node_modules"),
+    ] {
+        private(&folder);
+    }
+    assert_eq!(runtime(root.path()), None);
+    assert_eq!(make_prefix(&made), Ok(()), "making it again keeps it");
+}
+
+#[test]
+fn setup_finds_a_usable_node_through_the_resolver_and_installs_the_pinned_archive_only_as_node() {
+    use crate::setup::{Dependency, Installer, Pin, Version};
+    let root = root();
+    let work = tempfile::tempdir().unwrap();
+    let system = work.path().join("system");
+    script(&system.join("node"), "v22.11.0");
+    npm_launcher(&system);
+    let installer = PinnedInstaller::with_paths(root.path(), Vec::new())
+        .with_places(places(vec![root.path().join("setup/bin"), system.clone()]));
+    assert_eq!(
+        installer.find(Dependency::Node),
+        Ok(Some(Version::parse("22.11.0").unwrap()))
+    );
+    std::fs::remove_file(system.join("npm")).unwrap();
+    assert_eq!(installer.find(Dependency::Node), Ok(None));
+
+    let source = work.path().join("source");
+    tree(&source, TOP, "v26.13.1");
+    let (archive, sha256) = pack(work.path(), &source);
+    let pinned = pin_for(&archive, &sha256);
+    let pin = Pin::Archive {
+        version: Version::parse(NODE_VERSION).unwrap(),
+        url: pinned.url,
+        sha256: pinned.sha256,
+        top: pinned.top,
+    };
+    assert_eq!(
+        installer.install(Dependency::Uv, &pin),
+        Err(InstallError("setup_pin_invalid"))
+    );
+    assert!(std::fs::symlink_metadata(folder(root.path())).is_err());
+    let installed = Version::parse(NODE_VERSION).unwrap();
+    assert_eq!(
+        installer.install(Dependency::Node, &pin),
+        Ok(installed.clone())
+    );
+    assert_eq!(installer.find(Dependency::Node), Ok(Some(installed)));
+}
+
 #[test]
 fn every_mac_and_linux_target_pins_the_official_node_lts_archive_and_no_other_target_does() {
     let expected = [

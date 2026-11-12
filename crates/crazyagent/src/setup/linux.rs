@@ -132,7 +132,7 @@ impl Installer for LinuxInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
         match dep {
             Dependency::Tmux => tmux_version(),
-            Dependency::Uv | Dependency::Graphify => self.common.find(dep),
+            Dependency::Uv | Dependency::Graphify | Dependency::Node => self.common.find(dep),
         }
     }
 

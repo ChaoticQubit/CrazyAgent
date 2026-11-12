@@ -587,6 +587,7 @@ pub(crate) fn apply_owner(
             set(tx, root, &mut record, *on)?;
             Ok(Outcome::Applied)
         }
+        SetupAction::Install { .. } => Ok(rejected("pack_unknown")),
         SetupAction::Remove { id, version } => {
             let Some(known) = entry(id.as_str()) else {
                 return Ok(rejected("pack_unknown"));

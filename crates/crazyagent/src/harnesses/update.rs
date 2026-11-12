@@ -172,6 +172,15 @@ pub struct Roots {
     pub home: PathBuf,
     pub brew_prefixes: Vec<PathBuf>,
     pub casks: bool,
+    pub npm: Option<NpmInstall>,
+}
+
+/// The npm an npm harness installs with and the engine-owned prefix it installs into.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NpmInstall {
+    pub program: PathBuf,
+    pub search: Vec<PathBuf>,
+    pub prefix: PathBuf,
 }
 
 /// One command the engine may start: an absolute program, arguments that are all strings of

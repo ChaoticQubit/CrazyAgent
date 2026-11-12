@@ -499,6 +499,23 @@ fn a_setup_run_already_going_refuses_another() {
 }
 
 #[test]
+fn the_owner_installs_one_dependency_alone_and_not_while_setup_runs() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let install = || SetupAction::Install {
+        name: crate::setup::Dependency::Node,
+    };
+    assert_eq!(owner(&mut connection, root, install()), Outcome::Applied);
+    assert!(!progress::snapshot(root).graph_tool);
+    progress::with(root, |state| state.running = true);
+    assert_eq!(
+        rejected_with(owner(&mut connection, root, install())),
+        "setup_busy"
+    );
+    progress::with(root, |state| state.running = false);
+}
+
+#[test]
 fn an_entry_whose_skill_name_is_taken_installs_nothing() {
     let (dir, mut connection) = database();
     let root = dir.path();

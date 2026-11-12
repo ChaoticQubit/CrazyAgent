@@ -127,6 +127,7 @@ impl Roots {
             home,
             brew_prefixes: BREW_PREFIXES.iter().map(PathBuf::from).collect(),
             casks: cfg!(target_os = "macos"),
+            npm: None,
         }
     }
 }
