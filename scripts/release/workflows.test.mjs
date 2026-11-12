@@ -188,6 +188,12 @@ test("a release builds the bundled tmux from its pinned script before staging si
   assert.match(build[tmux], /scripts\/release\/build-tmux\.sh --target "\$TARGET" --work "\$work\/build" --out "\$work\/crazyagent-tmux"/);
   assert.match(build[tmux], /TMUX_SIDECAR=\$work\/crazyagent-tmux" >> "\$GITHUB_ENV"/);
   assert(!/continue-on-error/.test(build[tmux]), "a failed tmux check, such as a weak import, fails the release");
+  const rosetta = index("Install Rosetta for the x86_64 tmux start check");
+  assert(rosetta >= 0 && rosetta < tmux, "Rosetta is in place before the x86_64 tmux is built and started");
+  assert.match(build[rosetta], /^ {8}if: matrix\.target == 'x86_64-apple-darwin'$/m);
+  assert.match(build[rosetta], /^ {10}if \[ "\$\(uname -m\)" = arm64 \]; then sudo softwareupdate --install-rosetta --agree-to-license; fi$/m);
+  assert.match(build[rosetta], /^ {10}\/usr\/bin\/arch -x86_64 \/usr\/bin\/true$/m, "the step fails when x86_64 still cannot run");
+  assert(!/continue-on-error/.test(build[rosetta]), "a failed Rosetta install fails the release, never skips the start check");
   assert.match(build[stage], /--tmux "\$TMUX_SIDECAR"/);
   assert.match(build[index("Install Linux build packages")], /--no-install-recommends [^\n]*\bbison\b[^\n]*\bmusl-tools\b/);
   assert.match(build[verify], /^ {8}if: matrix\.os == 'macos'$/m);

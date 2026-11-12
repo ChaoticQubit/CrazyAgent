@@ -103,6 +103,14 @@ test("the built tmux must start a server on a private socket, keep its session a
   assert.equal(pin(text, "SOCKET_PATH_MAX"), "103", "macOS sun_path holds 104 bytes with the NUL");
 });
 
+test("a Mac that cannot run the built architecture fails the build, so the release never ships a tmux whose version and server start were not checked (leader 15:59)", () => {
+  const text = readFileSync(SCRIPT, "utf8");
+  const body = text.match(/^check_macos\(\) \{\n([^]*?)\n\}$/m)?.[1];
+  assert(body, "check_macos is defined");
+  assert(!/not checked/.test(body), "no path skips the run checks");
+  assert.match(body, /if ! \/usr\/bin\/arch "-\$arch" \/usr\/bin\/true 2> \/dev\/null; then\n\s+fail "build_tmux_cannot_run: /);
+});
+
 test("the tmux build refuses a work folder whose private socket path would not fit in a unix socket address, before it downloads anything", () => {
   const root = mkdtempSync(join(tmpdir(), "build-tmux-"));
   try {
