@@ -583,7 +583,11 @@ async fn an_untrusted_project_refuses_own_branch_when_chosen_and_names_the_trust
             .unwrap()
             .ide_git_hooks
     );
-    assert!(crate::ide::workspace::ide_policy(engine.root.path(), &project).unwrap().hooks);
+    assert!(
+        crate::ide::workspace::ide_policy(engine.root.path(), &project)
+            .unwrap()
+            .hooks
+    );
 
     let lowered = owner
         .set_project_trust(project.clone(), 0, Trust::Untrusted, false, 4)
@@ -622,7 +626,11 @@ async fn an_untrusted_project_refuses_own_branch_when_chosen_and_names_the_trust
         !view.ide_git_hooks,
         "an untrusted project's IDE never runs its hooks"
     );
-    assert!(!crate::ide::workspace::ide_policy(engine.root.path(), &project).unwrap().hooks);
+    assert!(
+        !crate::ide::workspace::ide_policy(engine.root.path(), &project)
+            .unwrap()
+            .hooks
+    );
     assert_eq!(
         crate::ide::workspace::project_trust(engine.root.path(), &project).unwrap(),
         Trust::Untrusted
@@ -669,7 +677,11 @@ async fn an_untrusted_project_ide_opens_in_restricted_mode_with_git_hooks_off() 
         Enforcement::for_level(crate::ide::workspace::project_trust(root, &project).unwrap())
             .ide_workspace_trust
     );
-    assert!(crate::ide::workspace::ide_policy(root, &project).unwrap().hooks);
+    assert!(
+        crate::ide::workspace::ide_policy(root, &project)
+            .unwrap()
+            .hooks
+    );
     let lowered = owner
         .set_project_trust(project.clone(), 0, Trust::Untrusted, false, 4)
         .await
@@ -679,7 +691,11 @@ async fn an_untrusted_project_ide_opens_in_restricted_mode_with_git_hooks_off() 
         !Enforcement::for_level(crate::ide::workspace::project_trust(root, &project).unwrap())
             .ide_workspace_trust
     );
-    assert!(!crate::ide::workspace::ide_policy(root, &project).unwrap().hooks);
+    assert!(
+        !crate::ide::workspace::ide_policy(root, &project)
+            .unwrap()
+            .hooks
+    );
     let kept = crate::sandbox::policy::load(
         &Connection::open(root.join("engine.db")).unwrap(),
         project.as_str(),

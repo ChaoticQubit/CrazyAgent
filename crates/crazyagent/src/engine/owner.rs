@@ -43,8 +43,8 @@ pub use transport::recovery::{
     BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
     RecoveryBanner, RunShown,
 };
-pub use transport::scorecard::{SCORECARD_CODES, Saved as ScorecardSaved};
 pub use transport::roadmap::ROADMAP_CODES;
+pub use transport::scorecard::{SCORECARD_CODES, Saved as ScorecardSaved};
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::tracker::{
     CustomBounds, SettingChoices, SettingsSaved, TRACKER_CODES, TRACKER_REPLY_BYTES_MAX,

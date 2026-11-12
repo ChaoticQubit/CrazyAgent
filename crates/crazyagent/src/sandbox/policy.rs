@@ -1425,8 +1425,13 @@ mod tests {
             assert_eq!(read.ide_agent_files, choice);
             assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
             assert_eq!(
-                read.view(nowhere, &ToolHomes::at(nowhere), 0, crate::trust::Trust::Reviewed)
-                    .ide_agent_files,
+                read.view(
+                    nowhere,
+                    &ToolHomes::at(nowhere),
+                    0,
+                    crate::trust::Trust::Reviewed
+                )
+                .ide_agent_files,
                 choice
             );
         }

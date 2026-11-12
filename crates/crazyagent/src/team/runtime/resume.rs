@@ -493,13 +493,7 @@ impl TeamRuntime {
                     .map_err(error)?;
                 assert!(started <= 1);
                 if started == 1 {
-                    crate::tracker::hooks::task_taken(
-                        &taken,
-                        &run.project,
-                        task,
-                        run.agent,
-                        now,
-                    )?;
+                    crate::tracker::hooks::task_taken(&taken, &run.project, task, run.agent, now)?;
                 }
                 taken.commit().map_err(error)?;
                 if started == 1 {

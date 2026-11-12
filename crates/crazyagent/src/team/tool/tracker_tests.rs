@@ -314,7 +314,8 @@ fn team_tools_match_the_catalog() {
     );
 
     let drop = case.base.join("tmp").join(crate::team::tool::DROP_FILE);
-    let reply_end = listed(|input, output| crate::team::tool::serve(input, output, &drop, None, &[]).unwrap());
+    let reply_end =
+        listed(|input, output| crate::team::tool::serve(input, output, &drop, None, &[]).unwrap());
     assert!(
         reply_end
             .iter()

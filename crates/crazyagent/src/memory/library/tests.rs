@@ -2154,7 +2154,14 @@ fn an_app_wide_agent_memory_stays_in_its_project_unless_the_owner_lets_agents_ch
     assert_eq!(page_scope(&mut db), AgentScope::Project);
 
     assert_eq!(
-        agent_remember(&mut db, &alpha, (None, "Master"), true, "Gotcha in the parser.").unwrap(),
+        agent_remember(
+            &mut db,
+            &alpha,
+            (None, "Master"),
+            true,
+            "Gotcha in the parser."
+        )
+        .unwrap(),
         Ok(AgentSaved {
             waiting: false,
             narrowed: true
