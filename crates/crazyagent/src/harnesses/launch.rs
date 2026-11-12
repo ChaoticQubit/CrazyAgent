@@ -17,7 +17,7 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
@@ -40,6 +40,10 @@ const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
 pub const DURABLE_OUTPUT: &str = "output.log";
+/// The most bytes a durable harness output log holds before the engine empties it: the
+/// session's reader once it has read all of it, the watcher of a reattached agent, whose log
+/// nothing reads, at once. The agent runs on either way (owner 11-11).
+pub const DURABLE_OUTPUT_KEPT_MAX: u64 = 64 * 1024 * 1024;
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
@@ -1801,7 +1805,7 @@ impl DurableIo {
         )?;
         rustix::fs::flock(&child_output, FlockOperation::NonBlockingLockExclusive)
             .map_err(|_| failure("launch_state_in_use"))?;
-        let reader = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
+        let reader = open(output.as_path(), OFlags::RDWR, Mode::empty())?;
         let probe = open(output.as_path(), OFlags::RDONLY, Mode::empty())?;
         assert!(holder_alive(&probe));
         Ok(Self {
@@ -1840,6 +1844,56 @@ pub fn holder_alive(probe: &File) -> bool {
         }
         Err(error) => matches!(error, std::fs::TryLockError::WouldBlock),
     }
+}
+
+/// Empties a durable output log its reader has read to the end once it holds more than
+/// `DURABLE_OUTPUT_KEPT_MAX` bytes, and moves the reader back to its start, where the
+/// harness's appends now land. Only bytes already read are dropped, unless the harness
+/// writes between the length check and the cut, which are microseconds apart. Takes the
+/// reader at the log's end. Returns whether it emptied the log.
+fn trim_read_output(reader: &mut BufReader<File>) -> bool {
+    let Ok(at) = reader.stream_position() else {
+        return false;
+    };
+    if at <= DURABLE_OUTPUT_KEPT_MAX
+        || !reader
+            .get_ref()
+            .metadata()
+            .is_ok_and(|log| log.is_file() && log.len() == at)
+        || reader.get_ref().set_len(0).is_err()
+    {
+        return false;
+    }
+    let rewound = reader.seek(SeekFrom::Start(0));
+    assert!(rewound.is_err() || reader.buffer().is_empty());
+    rewound.is_ok_and(|start| start == 0)
+}
+
+/// Empties a durable output log that nothing reads, such as a reattached agent's, once it
+/// holds more than `DURABLE_OUTPUT_KEPT_MAX` bytes, so the log on disk stays bounded while
+/// the agent runs on. The path is opened without following a link or waiting on a FIFO and
+/// must still name the probed file. Takes the log path and the probe's open of it. Returns
+/// whether it emptied the log.
+#[cfg(unix)]
+pub fn trim_unread_output(output: &Path, probe: &File) -> bool {
+    let Ok(probed) = probe.metadata() else {
+        return false;
+    };
+    if probed.len() <= DURABLE_OUTPUT_KEPT_MAX {
+        return false;
+    }
+    let Ok(log) = rustix::fs::open(
+        output,
+        OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(File::from) else {
+        return false;
+    };
+    let same = log.metadata().is_ok_and(|opened| {
+        opened.is_file() && (opened.dev(), opened.ino()) == (probed.dev(), probed.ino())
+    });
+    same && log.set_len(0).is_ok()
 }
 
 /// Turns a child's stdin pipe into the file the session writes prompts to.
@@ -1894,8 +1948,10 @@ fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
 
 /// Hands each line a durable harness writes to its output file to the session until the
 /// holder of the file is gone and the file is read to its end. A line longer than
-/// `LINE_BYTES_MAX` is passed over to its newline and reported once as skipped. Takes the
-/// output file, the holder probe and the sender.
+/// `LINE_BYTES_MAX` is passed over to its newline and reported once as skipped. A log read
+/// to its end past `DURABLE_OUTPUT_KEPT_MAX` is emptied at a line boundary, so the log on
+/// disk stays bounded and the agent runs on. Takes the output file, open for reading and
+/// writing, the holder probe and the sender.
 fn tail(output: File, probe: File, sender: SyncSender<Line>) {
     let mut reader = BufReader::new(output);
     let mut line = Vec::new();
@@ -1944,6 +2000,9 @@ fn tail(output: File, probe: File, sender: SyncSender<Line>) {
             return;
         }
         if holder_alive(&probe) {
+            if (line.is_empty() || skipping) && trim_read_output(&mut reader) {
+                eprintln!("launch_output_trimmed over={DURABLE_OUTPUT_KEPT_MAX}");
+            }
             std::thread::sleep(TAIL_POLL);
         } else {
             draining = true;

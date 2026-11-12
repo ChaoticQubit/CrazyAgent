@@ -823,7 +823,7 @@ impl Agents {
             folder: self.folder(&id),
         };
         let thread = {
-            let (probe, quit) = (probe.clone(), quit.clone());
+            let (output, probe, quit) = (output.clone(), probe.clone(), quit.clone());
             std::thread::Builder::new()
                 .name("agent-reattached".into())
                 .spawn(move || {
@@ -831,6 +831,9 @@ impl Agents {
                         if !launch::holder_alive(&probe) {
                             recorder.finish(AgentState::Exited, None, None);
                             return;
+                        }
+                        if launch::trim_unread_output(&output, &probe) {
+                            eprintln!("agent_output_trimmed agent={}", recorder.id);
                         }
                         std::thread::sleep(MONITOR_POLL);
                     }
