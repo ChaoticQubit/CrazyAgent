@@ -15509,6 +15509,57 @@ fn merge_commit_landing_refuses_a_carried_commit_whose_tree_fails_the_landing_ch
     }
 }
 
+/// Under Merge commit an agent's merge of main is checked only for what its own side and
+/// the merge bring, against the main parent the owner's history holds: a gitlink the owner
+/// added on main before the agent merged it never refuses the set, which lands as a merge
+/// commit with the agent's head as its second parent, as it lands under Squash (L3R2-M1).
+#[test]
+fn merge_commit_landing_lands_a_set_whose_agent_merged_main_with_the_owner_s_gitlink() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line");
+    let linked = case.tip();
+    case.owner(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{linked},lib"),
+    ]);
+    case.owner(&["commit", "-q", "-m", "Add the lib submodule"]);
+    let tip = case.tip();
+    case.agent(&["merge", "-q", "--no-edit", "main"]);
+    let merged = case.agent_head();
+    assert_eq!(
+        case.agent(&["rev-list", "--parents", "-n", "1", &merged])
+            .split_whitespace()
+            .count(),
+        3,
+        "the agent made a merge commit"
+    );
+    case.edit("NOTES", "five\n");
+    let head = owner_named_commit(&case, "Add the notes");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the set did not land");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![tip, head]);
+    assert_eq!(
+        case.owner(&["ls-tree", &commit, "lib"])
+            .split_whitespace()
+            .next(),
+        Some("160000"),
+        "the owner's gitlink stays"
+    );
+}
+
 /// Under Merge commit a carried commit must name the owner's identity, which the engine
 /// gives agents' own commits, or the engine's own: an agent commit written under another
 /// author or committer is refused, so no commit lands in the owner's history under a name

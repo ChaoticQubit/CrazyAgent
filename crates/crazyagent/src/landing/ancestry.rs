@@ -6,6 +6,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::team::LandingMode;
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -70,7 +71,8 @@ pub(super) fn merge_parent(
 /// with no `encoding` other than UTF-8, no hidden text and no control character other than
 /// a newline or a tab in any header or message line. Its author and committer must be the
 /// owner's identity, which the engine gives agents' commits, or the engine's own (L3-L1).
-/// Its tree must pass the landing's own tree checks against its first parent (L3-M1).
+/// Its tree must pass the landing's own tree checks against a parent the owner's history
+/// already holds when it has one, else its first parent (L3-M1, L3R2-M1).
 /// Inputs: the owner repository and checkout, the tip, the head and the owner's identity.
 /// Output: Ok, or `changes_merge_unsafe` or `changes_git_failed`.
 pub(super) fn check_carried(
@@ -96,17 +98,22 @@ pub(super) fn check_carried(
     if lines.len() > MERGED_COMMITS_MAX {
         return Err(failure("changes_merge_unsafe"));
     }
-    let mut carried: Vec<(&str, &str)> = Vec::with_capacity(lines.len());
+    let mut listed: Vec<Vec<&str>> = Vec::with_capacity(lines.len());
     for line in lines {
         let ids: Vec<&str> = line.split(' ').collect();
         if !ids.iter().all(|id| super::git::is_object_id(id)) {
             return Err(failure("changes_git_failed"));
         }
-        let &[commit, first, ..] = ids.as_slice() else {
+        if ids.len() < 2 {
             return Err(failure("changes_merge_unsafe"));
-        };
-        carried.push((commit, first));
+        }
+        listed.push(ids);
     }
+    let inside: BTreeSet<&str> = listed.iter().map(|ids| ids[0]).collect();
+    let carried: Vec<(&str, &str)> = listed
+        .iter()
+        .map(|ids| (ids[0], checked_against(&ids[1..], &inside)))
+        .collect();
     assert!(carried.len() <= MERGED_COMMITS_MAX);
     let mut read = 0usize;
     for &(commit, _) in &carried {
@@ -128,6 +135,20 @@ pub(super) fn check_carried(
         check_carried_tree(owner, checkout, parent, commit)?;
     }
     Ok(())
+}
+
+/// The parent a carried commit's tree is checked against: one outside the carried set,
+/// which the owner's history already holds, when it has one, so a merge of main is checked
+/// only for what the agent's side and the merge itself bring, never for main's own changes
+/// (L3R2-M1); else its first parent. Inputs: the commit's parents, at least one, and the
+/// carried commits. Output: the parent.
+fn checked_against<'a>(parents: &[&'a str], inside: &BTreeSet<&str>) -> &'a str {
+    assert!(!parents.is_empty());
+    parents
+        .iter()
+        .copied()
+        .find(|parent| !inside.contains(parent))
+        .unwrap_or(parents[0])
 }
 
 /// Tells whether one raw commit object may enter the owner's history under Merge commit:
@@ -172,7 +193,8 @@ fn person(value: &str) -> Option<(&str, &str)> {
     Some((name, email))
 }
 
-/// Runs the landing's tree checks on one carried commit against its first parent, as
+/// Runs the landing's tree checks on one carried commit against the parent
+/// [`checked_against`] picks, as
 /// [`flow::check_merged`] and [`owner::uses_configured_commands`] check a set's merged
 /// tree: a refusal of either becomes `changes_merge_unsafe`. Inputs: the owner repository
 /// and checkout, the parent and the commit. Output: Ok, or the refusal.
