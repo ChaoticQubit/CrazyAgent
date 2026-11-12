@@ -831,8 +831,9 @@ pub(crate) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
 
 /// Builds a Codex launch's `-c` settings from [`codex_configuration`] and what its installed
 /// context asks for: a native lead (PA-7) leaves out the multi-agent v2 off switch, so its
-/// `config.toml` turns Codex's own sub-agents on. Inputs: the request, the installed
-/// context, if any, and the key file. Output: the settings, in order.
+/// `config.toml` turns Codex's own sub-agents on, and one on a chosen model whose sub-agents
+/// follow it names that model as `agents.default_subagent_model` (DEC-150 M-11). Inputs: the
+/// request, the installed context, if any, and the key file. Output: the settings, in order.
 pub(super) fn codex_launch_settings(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -850,8 +851,24 @@ pub(super) fn codex_launch_settings(
             .any(|setting| setting == CODEX_MULTI_AGENT_V2_OFF),
         request.tools && !native
     );
+    let follows = native && installed.is_some_and(Installed::native_follows);
+    if let Some(model) = request.model.as_ref().filter(|_| follows) {
+        assert!(crate::model_choice::model_valid("codex", model));
+        settings.push(format!("{CODEX_SUBAGENT_MODEL}=\"{model}\""));
+    }
+    assert_eq!(
+        settings
+            .iter()
+            .filter(|setting| setting.starts_with(&format!("{CODEX_SUBAGENT_MODEL}=")))
+            .count(),
+        usize::from(follows && request.model.is_some())
+    );
     settings
 }
+
+/// The Codex key that names the model a lead's child threads start on when neither a role
+/// nor the spawn names one (Codex 0.167.1 `[agents]`); the owner's settings lock it.
+const CODEX_SUBAGENT_MODEL: &str = "agents.default_subagent_model";
 
 /// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
 /// the account's provider, the model and the tools switch, and for an untrusted project no
