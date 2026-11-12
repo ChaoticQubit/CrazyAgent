@@ -92,6 +92,16 @@ impl Slot {
     }
 }
 
+/// What a native lead's own sub-agents run on (DEC-150 M-11): the lead's model, so the
+/// owner's model choice and allowed list hold for them too, or whatever the harness picks,
+/// such as a Claude Code agent definition's model or a Codex role's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeModel {
+    Follow,
+    Harness,
+}
+
 /// Where one candidate model id comes from: the harness's model catalog, or an id the
 /// owner added, waiting for its test launch, passed or failed. Only catalog and verified
 /// ids may be set, ticked or launched.

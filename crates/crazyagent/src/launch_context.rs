@@ -193,6 +193,7 @@ pub struct AgentContext {
     off_tools: Vec<(String, Vec<String>)>,
     native_team: Option<(PathBuf, PathBuf)>,
     native_threads: Option<u8>,
+    native_model: crate::model_choice::NativeModel,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
     terminal_display: TerminalDisplay,
@@ -226,6 +227,7 @@ pub struct Installed {
     denied: Vec<String>,
     native: Option<NativeTeam>,
     native_threads: bool,
+    native_follows: bool,
     model_proxy: Option<u16>,
     terminal_display: TerminalDisplay,
     settings: Applied,
@@ -294,6 +296,7 @@ pub fn for_project(
         off_tools,
         native_team: None,
         native_threads: None,
+        native_model: crate::model_choice::NativeModel::Follow,
         relay: None,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
@@ -770,6 +773,14 @@ impl AgentContext {
         self
     }
 
+    /// Says what a native lead's own sub-agents run on, the owner's Native sub-agent model
+    /// setting (DEC-150 M-11): its own model, the default, or the harness's pick. A launch
+    /// that is no native lead ignores it. Input: the setting. Output: the context.
+    pub fn with_native_model(mut self, model: crate::model_choice::NativeModel) -> Self {
+        self.native_model = model;
+        self
+    }
+
     /// Sends a team agent's model traffic through its model proxy (S4b): its launch gets
     /// `HTTPS_PROXY` and `HTTP_PROXY` naming the proxy on 127.0.0.1 and an empty `NO_PROXY`,
     /// and its pane record keeps the port for a later engine. Input: the proxy's port.
@@ -1049,6 +1060,7 @@ impl AgentContext {
             off_tools: Vec::new(),
             native_team: None,
             native_threads: None,
+            native_model: crate::model_choice::NativeModel::Follow,
             relay: None,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
@@ -1129,6 +1141,7 @@ impl AgentContext {
             denied: Vec::new(),
             native: None,
             native_threads: false,
+            native_follows: false,
             model_proxy: self.model_proxy,
             terminal_display: self.terminal_display,
             settings: self.settings.clone(),
@@ -1328,6 +1341,9 @@ impl AgentContext {
         assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
         assert!(installed.native.is_none() || (id == "claude-code" && tools));
         assert!(!installed.native_threads || (id == "codex" && tools));
+        installed.native_follows = self.native_model == crate::model_choice::NativeModel::Follow
+            && (installed.native.is_some() || installed.native_threads);
+        assert!(!installed.native_follows || tools);
         assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
@@ -1403,6 +1419,14 @@ impl Installed {
         self.native_threads
     }
 
+    /// Tells whether this launch is a native lead whose own sub-agents must run on its
+    /// model (DEC-150 M-11): a Claude Code team lead or a Codex threads lead whose owner
+    /// left Native sub-agent model on Follow the agent's model.
+    pub fn native_follows(&self) -> bool {
+        assert!(!self.native_follows || self.native.is_some() || self.native_threads);
+        self.native_follows
+    }
+
     /// Names the loopback port of the model proxy this launch's variables point at, none
     /// for a launch that reaches its model directly.
     pub fn model_proxy(&self) -> Option<u16> {
@@ -1437,6 +1461,7 @@ impl Installed {
             denied: Vec::new(),
             native: None,
             native_threads: false,
+            native_follows: false,
             model_proxy: None,
             terminal_display: TerminalDisplay::Classic,
             _lock: lock,
@@ -2306,6 +2331,7 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
         denied: Vec::new(),
         native: None,
         native_threads: false,
+        native_follows: false,
         model_proxy: None,
         terminal_display: TerminalDisplay::Classic,
         _lock: lock,
