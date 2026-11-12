@@ -375,6 +375,7 @@ impl Screen for Notifications {
             hint("a", "All read"),
             hint("f", "Filter"),
             hint("p", "Project"),
+            hint("s", "Settings"),
         ];
         hints.push(if self.marked.is_empty() {
             hint("Esc", "Back")
@@ -415,6 +416,7 @@ impl Screen for Notifications {
             Key::Char('f') => self.walk_filter(true, ctx),
             Key::Char('p') => self.walk_project(true, ctx),
             Key::Char('P') => self.walk_project(false, ctx),
+            Key::Char('s') => return Flow::Open(Place::NotificationSettings),
             Key::Esc if !self.marked.is_empty() => self.marked.clear(),
             _ => return Flow::Ignored,
         }

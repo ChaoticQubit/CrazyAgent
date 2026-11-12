@@ -111,6 +111,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Settings",
         place: Place::TicketSettings { project: None },
     });
+    out.push(Target {
+        label: "Settings / Notifications".into(),
+        kind: "Settings",
+        place: Place::NotificationSettings,
+    });
     for (label, place) in [
         ("New project", Place::NewProject),
         ("Add account", Place::AddAccount),
