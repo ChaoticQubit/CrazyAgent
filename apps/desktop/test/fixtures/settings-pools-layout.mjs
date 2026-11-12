@@ -10,6 +10,7 @@ const APPLIED = { pending: false, outcome: "applied", rejection: null };
 const SAVED_LINE_MS = 6000;
 let timers = [];
 let usageSince;
+let extrasAsks = [];
 let current = {};
 let schedule = null;
 let saves = [];
@@ -65,6 +66,11 @@ const reading = (used_percent) => (used_percent === null ? null : { used_percent
 const limit = (index, weekly, fiveHour = null) => ({ account: `acct-${index}`, plan: null, weekly: reading(weekly), five_hour: reading(fiveHour), five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: 0, checked_ms: 0, failure: null });
 const others = (count) => Array.from({ length: count }, (_, index) => limit(100 + index, 40));
 const LIMITS = { ok: [limit(2, 62, 18), limit(0, 30)], near: [limit(2, 80), limit(0, 79), limit(1, 100)], mixed: [limit(2, 80), limit(1, 100)], capped: others(64), uncapped: others(63) };
+const extra = (index, over) => ({ account: `acct-${index}`, extras: { harness: "Codex", adapter: "codex", may_break: false, resets: null, credits: null, spend: { kind: "not_reported" }, not_reported: "not reported by Codex", resets_checked_ms: null, credits_checked_ms: null, resets_gained_ms: null, ...over } });
+const EXTRAS = {
+  ok: [extra(2, { resets: { count: 2, kinds: ["weekly"], next_expiry_ms: null }, credits: "$4.20 left" }), extra(0, { resets: { count: 0, kinds: [], next_expiry_ms: null } }), extra(1, {})],
+  spend: [extra(2, { resets: { count: 2, kinds: [], next_expiry_ms: null }, spend: { kind: "elsewhere", place: "chatgpt.com" } }), extra(0, {}), extra(1, {})],
+};
 
 /** Applies one change to the fake schedule and moves its version on, as the engine does.
  * Inputs: the schedule and the change. Output: the new schedule. */
@@ -162,6 +168,10 @@ function answer(scene, command, args) {
   if (command === "desktop_account_schedule") return failing(scene.schedule ?? "ok", { ok: schedule });
   if (command === "desktop_account_ranking") return scene.ranking === "pools" ? poolsRanking() : scene.ranking === "live" ? liveRanking() : failing(scene.ranking ?? "ok", RANKINGS);
   if (command === "desktop_set_account_schedule") return saveChange(scene, args);
+  if (command === "desktop_usage_extras") {
+    extrasAsks.push(args.detail);
+    return failing(scene.extras ?? "ok", EXTRAS);
+  }
   if (command === "desktop_usage_report") {
     usageSince = args.sinceMs;
     const limits = failing(scene.limits ?? "ok", LIMITS);
@@ -180,6 +190,7 @@ export async function mount(scene = {}, theme = "light") {
   current = scene;
   timers = [];
   saves = [];
+  extrasAsks = [];
   gated = null;
   gatedAnswers = [];
   savedLineTimers = [];
@@ -315,7 +326,7 @@ export function orderRows() {
       holds: [...row.querySelectorAll(".pool-hold")].map(say),
       link: link && { href: link.getAttribute("href"), label: link.getAttribute("aria-label") },
       limits: [...row.querySelectorAll(".pool-limit")].map((line) => [say(line), line.classList.contains("near") ? "near" : line.classList.contains("full") ? "full" : "ok"]),
-      none: say(row.querySelector(".pool-limit-none")), whoWidth: row.querySelector(".pool-who").getBoundingClientRect().width,
+      none: say(row.querySelector(".pool-limit-none")), extras: say(row.querySelector(".pool-extras")), whoWidth: row.querySelector(".pool-who").getBoundingClientRect().width,
     };
   });
 }
@@ -358,6 +369,11 @@ export async function fireTimer(ms) {
 }
 
 /** Reads the range start of the last usage read. Output: it in ms, or null for all of time. */
+/** Reads what each extras read asked for. Output: its detail flag, one per read, in order. */
+export function extrasDetail() {
+  return extrasAsks;
+}
+
 export function lastUsageSince() {
   return usageSince;
 }
