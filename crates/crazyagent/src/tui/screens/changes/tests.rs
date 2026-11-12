@@ -68,6 +68,39 @@ fn listed(sets: Vec<ChangeSetView>) -> ProjectChanges {
 }
 
 #[test]
+fn a_wanted_change_set_is_picked_on_the_first_list_and_a_missing_one_picks_the_first() {
+    let sets = || {
+        vec![
+            set('1', ChangeState::Pending),
+            set('2', ChangeState::Pending),
+        ]
+    };
+    let mut view = ProjectChanges::new(project());
+    view.painting(true);
+    view.want(id('2'));
+    reply(&mut view, Ok(ChangesView::List(sets())));
+    assert_eq!(view.chosen().map(|set| set.id.clone()), Some(id('2')));
+    view.key(key(KeyCode::Up), NOW);
+    view.refresh();
+    reply(&mut view, Ok(ChangesView::List(sets())));
+    assert_eq!(
+        view.chosen().map(|set| set.id.clone()),
+        Some(id('1')),
+        "the wanted set counts only for the first list"
+    );
+
+    let mut view = ProjectChanges::new(project());
+    view.painting(true);
+    view.want(id('9'));
+    reply(&mut view, Ok(ChangesView::List(sets())));
+    assert_eq!(
+        view.chosen().map(|set| set.id.clone()),
+        Some(id('1')),
+        "a set no longer listed opens the list as before"
+    );
+}
+
+#[test]
 fn changes_unavailable_shows_not_ready_yet_and_stops_polling_until_the_tab_opens_again() {
     let mut view = ProjectChanges::new(project());
     reply(&mut view, Err("changes_unavailable".into()));

@@ -296,6 +296,24 @@ fn enter_opens_each_items_page_and_marks_an_unread_item_read() {
             project(ProjectTab::Changes),
         ),
         (
+            NoticeTarget::ChangeSet {
+                project_id: id(TIDEPOOL),
+                change_set: Some(crate::landing::ChangeSetId::new("a".repeat(32)).unwrap()),
+            },
+            project(ProjectTab::Changes),
+        ),
+        (
+            NoticeTarget::Questions {
+                project_id: id(TIDEPOOL),
+                question: None,
+                agent: Some(5),
+            },
+            Place::Team {
+                id: id(TIDEPOOL),
+                name: "Tidepool".into(),
+            },
+        ),
+        (
             NoticeTarget::Agents {
                 project_id: id(TIDEPOOL),
             },
@@ -376,6 +394,163 @@ fn enter_on_a_fold_reads_every_item_it_holds_under_the_listed_filter() {
         }],
         "the fold names the filter it was listed under"
     );
+}
+
+#[test]
+fn enter_on_an_agents_question_opens_its_team_with_the_questions_box_on_that_agent() {
+    use crate::coord::{QuestionFor, Severity, Waiting};
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::questions::{Inbox, OwnerQuestion, WaitingAgent};
+    let mut item = question(7);
+    item.target = NoticeTarget::Questions {
+        project_id: id(TIDEPOOL),
+        question: None,
+        agent: Some(5),
+    };
+    let mut shell = loaded(vec![item]);
+    shell.key(Key::Enter);
+    let team = Place::Team {
+        id: id(TIDEPOOL),
+        name: "Tidepool".into(),
+    };
+    assert_eq!(shell.place(), Some(team.clone()));
+    let inbox = SetupQuery::CoordQuestions {
+        project: id(TIDEPOOL),
+    };
+    let asked: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        asked
+            .iter()
+            .any(|request| matches!(request, Request::Setup(query) if *query == inbox)),
+        "the box reads the project's questions inbox: {asked:?}"
+    );
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Setup(Box::new(
+        crate::tui::client::SetupEvent {
+            query: inbox,
+            result: Ok(SetupView::CoordQuestions(Box::new(Inbox {
+                project_id: id(TIDEPOOL),
+                questions: vec![OwnerQuestion {
+                    id: 41,
+                    agent: 3,
+                    label: "Sub-agent 3".into(),
+                    severity: Severity::High,
+                    asked_for: QuestionFor::Me,
+                    for_label: "Me".into(),
+                    text: "May I delete the old fixtures?".into(),
+                    assumption: None,
+                    created_ms: 1,
+                    terminal: None,
+                }],
+                more: 0,
+                waiting: vec![WaitingAgent {
+                    agent: 5,
+                    label: "Sub-agent 5".into(),
+                    waiting: Waiting::Permission,
+                    since_ms: 1,
+                    terminal: None,
+                }],
+            }))),
+        },
+    )))));
+    let shown = screen(&mut shell);
+    let line = |text: &str| {
+        shown
+            .lines()
+            .find(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text} is listed:\n{shown}"))
+            .to_owned()
+    };
+    assert!(line("Sub-agent 5").contains("> "), "{shown}");
+    assert!(
+        !line("May I delete the old fixtures?").contains("> "),
+        "{shown}"
+    );
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(team), "Esc closes the box first");
+    shell.key(Key::Esc);
+    assert_eq!(shell.place(), Some(Place::Notifications), "then returns");
+}
+
+#[test]
+fn enter_on_a_change_set_notice_opens_changes_with_that_set_picked() {
+    use crate::landing::{
+        AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
+    };
+    use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
+    let set = |digit: char, message: &str| ChangeSetView {
+        id: ChangeSetId::new(digit.to_string().repeat(32)).unwrap(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: "agent-1".into(),
+            label: crate::team::AgentRole::Sub.agent_label(1),
+        },
+        state: ChangeState::Pending,
+        base: "b".repeat(40),
+        head: digit.to_string().repeat(40),
+        files: 1,
+        added: 1,
+        removed: 0,
+        last_outcome: TurnOutcome::Succeeded,
+        checked: false,
+        created_ms: 1,
+        updated_ms: 2,
+        restorable_until_ms: None,
+        conflicts: Vec::new(),
+        message: message.into(),
+        waiting: false,
+        outside: false,
+        regenerated: Vec::new(),
+        number: None,
+        landing_result: LandingResult::None,
+    };
+    let item = notice(
+        7,
+        NoticeKind::ChangeSetReview,
+        Some(TIDEPOOL),
+        NoticeTarget::ChangeSet {
+            project_id: id(TIDEPOOL),
+            change_set: Some(ChangeSetId::new("2".repeat(32)).unwrap()),
+        },
+    );
+    let mut shell = loaded(vec![item]);
+    shell.key(Key::Enter);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: id(TIDEPOOL),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Changes,
+        })
+    );
+    let list = ChangesQuery::List {
+        project: id(TIDEPOOL),
+    };
+    let asked: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    assert!(
+        asked
+            .iter()
+            .any(|request| matches!(request, Request::Changes(query) if **query == list)),
+        "the Changes tab reads its list: {asked:?}"
+    );
+    shell.arrive(Arrival::Owner(Box::new(OwnerEvent::Changes(Box::new(
+        ChangesEvent {
+            query: list,
+            result: Ok(ChangesView::List(vec![
+                set('1', "Add the first page"),
+                set('2', "Add the second page"),
+            ])),
+        },
+    )))));
+    let shown = screen(&mut shell);
+    let line = |text: &str| {
+        shown
+            .lines()
+            .find(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text} is listed:\n{shown}"))
+            .to_owned()
+    };
+    assert!(line("Add the second page").contains("> "), "{shown}");
+    assert!(!line("Add the first page").contains("> "), "{shown}");
 }
 
 #[test]
@@ -473,6 +648,27 @@ fn a_marks_every_item_of_the_picked_project_read() {
         vec![NoticeAction::ReadAll {
             project_id: Some(id(TIDEPOOL))
         }]
+    );
+}
+
+#[test]
+fn a_clears_the_marks_once_every_item_read_stands_and_keeps_them_when_refused() {
+    let mut shell = loaded(vec![question(1), question(2)]);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Char('a'));
+    let all = sent(&mut shell).remove(0);
+    assert!(screen(&mut shell).contains("1 selected"));
+    shell.arrive(reply(all, Err("notification_ids_invalid".into())));
+    assert!(
+        screen(&mut shell).contains("1 selected"),
+        "a refused read keeps them"
+    );
+    shell.key(Key::Char('a'));
+    let all = sent(&mut shell).remove(0);
+    shell.arrive(reply(all, Ok(NoticesReply::Done)));
+    assert!(
+        !screen(&mut shell).contains("selected"),
+        "every item read clears the marks, as the desktop panel does"
     );
 }
 

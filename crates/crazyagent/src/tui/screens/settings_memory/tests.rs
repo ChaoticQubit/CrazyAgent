@@ -322,6 +322,78 @@ fn add_memory_saves_a_note_for_the_chosen_projects() {
 }
 
 #[test]
+fn a_memory_review_notice_opens_the_first_suggestion_once_the_suggestions_arrive() {
+    let review = crate::tui::screens::Spot::MemoryReview;
+    let tidepool = ProjectId::new("tidepool").unwrap();
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::for_project(tidepool.clone(), "Tidepool".into());
+    screen.open_at(&review, &mut ctx);
+    screen.shown(&mut ctx);
+    let asked: Vec<Request> = std::iter::from_fn(|| ctx.next_request()).collect();
+    assert!(
+        asked.iter().any(|request| matches!(
+            request,
+            Request::Settings(job) if matches!(
+                job.as_ref(),
+                SettingsJob::Suggestions { projects } if *projects == vec![tidepool.clone()]
+            )
+        )),
+        "a review notice makes Project memory ask for its own project's suggestions: {asked:?}"
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(Vec::new()),
+        )),
+        &mut ctx,
+    );
+    assert!(
+        screen.modal(&ctx).is_none(),
+        "nothing to review before the suggestions arrive"
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(vec![
+            suggestion("harbor", "Buoys report every minute."),
+            suggestion("tidepool", "Labs want hourly exports."),
+        ]))),
+        &mut ctx,
+    );
+    let (modal, _) = screen
+        .modal(&ctx)
+        .expect("the first suggestion opens for review");
+    assert_eq!(modal.title, "Suggested memory");
+    assert!(
+        !texts(&modal.body)
+            .iter()
+            .any(|line| line.contains("Buoys report every minute.")),
+        "Project memory keeps only its own project's suggestions from a reply"
+    );
+    assert!(
+        texts(&modal.body)
+            .iter()
+            .any(|line| line.contains("From research in Tidepool."))
+    );
+
+    let mut screen = Memory::for_project(tidepool.clone(), "Tidepool".into());
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.open_at(&review, &mut ctx);
+    let asked = job(&mut ctx);
+    assert!(
+        matches!(&asked, SettingsJob::Suggestions { projects } if *projects == vec![tidepool]),
+        "the shell shows a pushed screen before open_at, which then asks for the suggestions"
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(Vec::new()))),
+        &mut ctx,
+    );
+    assert!(
+        screen.modal(&ctx).is_none(),
+        "with nothing left to review the list opens as before"
+    );
+}
+
+#[test]
 fn research_suggestions_come_first_and_save_for_every_project() {
     let mut ctx = memory_ctx(120, 36);
     let mut screen = Memory::new();

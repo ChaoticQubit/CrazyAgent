@@ -56,6 +56,7 @@ pub(super) struct Questions {
     problem: Option<String>,
     cursor: usize,
     answer: Option<Answer>,
+    wanted: Option<i64>,
 }
 
 impl Questions {
@@ -67,7 +68,20 @@ impl Questions {
             problem: None,
             cursor: 0,
             answer: None,
+            wanted: None,
         }
+    }
+
+    /// Opens the box on one agent, as when a notification of its question or wait opens
+    /// the Team screen: reads the inbox and picks the agent's first row once it arrives,
+    /// else the first row. Inputs: the agent, the project and the context. Output: one
+    /// Setup request.
+    pub(super) fn show(&mut self, agent: i64, project: &ProjectId, ctx: &mut Ctx) {
+        self.open = true;
+        self.cursor = 0;
+        self.answer = None;
+        self.wanted = Some(agent);
+        Self::read(project, ctx);
     }
 
     /// Says whether the box is open, so it takes every key.
@@ -259,6 +273,16 @@ impl Questions {
                 assert_eq!(&inbox.project_id, project);
                 self.inbox = Some((**inbox).clone());
                 self.problem = None;
+                if let Some(agent) = self.wanted.take()
+                    && let Some(at) = self.rows().iter().position(|row| match *row {
+                        Row::Question(at) => {
+                            self.question(at).is_some_and(|row| row.agent == agent)
+                        }
+                        Row::Waiting(at) => self.waiting(at).is_some_and(|row| row.agent == agent),
+                    })
+                {
+                    self.cursor = at;
+                }
                 self.cursor = self.cursor.min(self.rows().len().saturating_sub(1));
             }
             (SetupQuery::CoordQuestions { project: asked }, Err(code)) if asked == project => {

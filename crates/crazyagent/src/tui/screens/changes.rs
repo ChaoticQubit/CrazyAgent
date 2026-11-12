@@ -225,6 +225,7 @@ pub(in crate::tui) struct ProjectChanges {
     reveal: Option<RevealTarget>,
     pub checks: SetChecks,
     painting: Cell<bool>,
+    wanted: Option<ChangeSetId>,
 }
 
 impl ProjectChanges {
@@ -263,7 +264,15 @@ impl ProjectChanges {
             edit: None,
             reveal: None,
             painting: Cell::new(false),
+            wanted: None,
         }
+    }
+
+    /// Picks one change set on the first list that names it, as when a notification opens
+    /// the tab on it; a set that list does not name leaves the usual first pick.
+    /// Input: the set. Output: none.
+    pub fn want(&mut self, id: ChangeSetId) {
+        self.wanted = Some(id);
     }
 
     /// The next checks request of the change set shown: its checks once it opens and while
@@ -373,6 +382,11 @@ impl ProjectChanges {
                 self.sets = sets.clone();
                 self.loaded = true;
                 self.not_ready = false;
+                if let Some(wanted) = self.wanted.take()
+                    && let Some(index) = self.sets.iter().position(|set| set.id == wanted)
+                {
+                    self.select(index);
+                }
                 if let Some(diff) = self.diff.as_mut() {
                     match self.sets.iter().find(|set| set.id == diff.id) {
                         None => self.diff = None,

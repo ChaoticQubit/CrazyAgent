@@ -1531,6 +1531,12 @@ impl Screen for Team {
         self.settings.as_ref().is_some_and(TeamView::typing) || self.questions.typing()
     }
 
+    fn open_at(&mut self, spot: &super::Spot, ctx: &mut Ctx) {
+        if let super::Spot::Agent(agent) = spot {
+            self.questions.show(*agent, &self.project, ctx);
+        }
+    }
+
     fn asking(&self) -> bool {
         if self.focus == Focus::Terminal || self.master {
             return false;

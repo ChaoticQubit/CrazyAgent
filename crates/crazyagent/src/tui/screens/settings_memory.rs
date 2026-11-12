@@ -216,6 +216,8 @@ pub struct Memory {
     filtering: bool,
     mode: Mode,
     project: Option<(ProjectId, String)>,
+    review: bool,
+    pick: bool,
 }
 
 impl Default for Memory {
@@ -251,12 +253,15 @@ impl Memory {
             filtering: false,
             mode: Mode::List,
             project: None,
+            review: false,
+            pick: false,
         }
     }
 
     /// One project's memory, opened from its Context tab: only that project's memories, read
     /// afresh each time it shows, with y approving a memory an agent asked for right there and
-    /// s opening Settings, Memory for the app-wide setting and research suggestions.
+    /// s opening Settings, Memory for the app-wide setting and research suggestions. Opened
+    /// by a memory review notice, it also lists that project's suggestions and opens the first.
     /// Input: the project id and name. Output: the screen; `shown` asks the engine.
     pub fn for_project(id: ProjectId, name: String) -> Self {
         let mut screen = Self::new();
@@ -493,7 +498,7 @@ impl Memory {
                 MemoryScope::Global => None,
             })
             .collect();
-        if projects.is_empty() || self.project.is_some() {
+        if projects.is_empty() || (self.project.is_some() && !self.review) {
             self.suggestions.clear();
             return;
         }
@@ -1227,6 +1232,14 @@ impl Screen for Memory {
         matches!(self.mode, Mode::Suggestion { .. })
     }
 
+    fn open_at(&mut self, spot: &super::Spot, ctx: &mut Ctx) {
+        if *spot == super::Spot::MemoryReview {
+            self.review = true;
+            self.pick = true;
+            self.reload_suggestions(ctx);
+        }
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             Mode::Delete { .. } => return self.delete_key(key, ctx),
@@ -1457,10 +1470,21 @@ impl Screen for Memory {
             }
             Some(SettingsEvent::Suggestions(result)) if self.suggesting => {
                 self.suggesting = false;
+                let pick = std::mem::take(&mut self.pick);
                 match result {
                     Ok(found) => {
-                        self.suggestions = found.clone();
+                        let own = self.project.as_ref().map(|(id, _)| id);
+                        self.suggestions = found
+                            .iter()
+                            .filter(|item| own.is_none_or(|id| item.project == *id))
+                            .cloned()
+                            .collect();
+                        assert!(self.suggestions.len() <= found.len());
                         self.clamp(ctx);
+                        if pick && !self.suggested(ctx).is_empty() {
+                            self.selected = 0;
+                            self.mode = Mode::Suggestion { save_focused: true };
+                        }
                     }
                     Err(code) if code == NOT_READY => {}
                     Err(code) => ctx.say(Message::warning(

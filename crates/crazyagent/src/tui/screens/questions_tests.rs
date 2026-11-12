@@ -271,6 +271,44 @@ async fn questions_page_lists_pending_first_with_the_recommendation() {
 }
 
 #[tokio::test]
+async fn a_wanted_question_is_picked_on_the_first_list_and_a_missing_one_leaves_the_first() {
+    let mut engine = Engine::start().await;
+    engine.ask(
+        "Which hosting region should the shop use?",
+        &["Europe", "North America"],
+        "Europe",
+    );
+    let newsletter = engine.ask(
+        "Should the shop send a weekly newsletter?",
+        &["Yes", "No"],
+        "No",
+    );
+    let mut picked = screen(&engine);
+    picked.questions.want(newsletter);
+    assert!(engine.pump(&mut picked, NOW).await.is_some());
+    let shown_now = shown(&mut picked, 120, 36);
+    assert!(
+        shown_now.contains("2. No (recommended)") && !shown_now.contains("1. Europe (recommended)"),
+        "the wanted question is picked, not the first one listed:\n{shown_now}"
+    );
+    assert!(picked.questions.key(key(KeyCode::Up)));
+    picked.questions.refresh();
+    assert!(engine.pump(&mut picked, NOW + 1).await.is_some());
+    assert!(
+        shown(&mut picked, 120, 36).contains("1. Europe (recommended)"),
+        "the wanted question counts only for the first list"
+    );
+
+    let mut missing = screen(&engine);
+    missing.questions.want(newsletter + 100);
+    assert!(engine.pump(&mut missing, NOW).await.is_some());
+    assert!(
+        shown(&mut missing, 120, 36).contains("1. Europe (recommended)"),
+        "a question no longer listed opens the list as before"
+    );
+}
+
+#[tokio::test]
 async fn answer_sends_the_version_read() {
     let mut engine = Engine::start().await;
     let region = engine.ask(
