@@ -23,8 +23,9 @@ const ROWS_START: usize = 10;
 const TABS_HEIGHT: usize = 2;
 const HEAD_HEIGHT: usize = 4;
 const MODAL_TEXT: usize = 50;
-/// How often an open Pools screen asks the engine for the detail rows again, as the desktop's
-/// Pools reread does, so the engine's lease on them never lapses while Pools stays open.
+/// How often Pools on top asks the engine for the detail rows again, as the desktop's Pools
+/// reread does, so the engine's lease on them never lapses while Pools stays open. The shell
+/// shows the top screen every few seconds; only an ask this old is sent again.
 const DETAIL_ASK_EVERY_MS: i64 = 60_000;
 
 /// Settings, Pools: every pool with its size, readiness and the projects using
@@ -78,8 +79,15 @@ impl Pools {
     }
 
     /// Asks the engine for every account's extras with the detail rows, which it reads only
-    /// while Pools is open (DEC-154). Inputs: the context and now.
+    /// while Pools is open (DEC-154), unless it asked within `DETAIL_ASK_EVERY_MS`. Inputs:
+    /// the context and now.
     fn ask_detail(&mut self, ctx: &mut Ctx, now_ms: i64) {
+        if self
+            .detail_asked_ms
+            .is_some_and(|at| now_ms - at <= DETAIL_ASK_EVERY_MS)
+        {
+            return;
+        }
         ctx.request(Request::Settings(Box::new(SettingsJob::Extras {
             detail: true,
         })));
@@ -395,13 +403,6 @@ impl Screen for Pools {
                     .collect();
             }
             _ => {}
-        }
-        let now = crate::tui::clock::now_ms();
-        if self
-            .detail_asked_ms
-            .is_some_and(|at| now - at > DETAIL_ASK_EVERY_MS)
-        {
-            self.ask_detail(ctx, now);
         }
         match arrival {
             Arrival::Pools(Ok(pools)) => self.follow(pools.len()),
@@ -1538,20 +1539,34 @@ mod tests {
     }
 
     #[test]
-    fn an_open_pools_screen_asks_for_the_detail_rows_again_once_a_minute_has_passed() {
+    fn pools_on_top_asks_for_the_detail_rows_again_only_once_a_minute_has_passed() {
+        let extras_asks = |ctx: &mut Ctx| {
+            let mut asks = 0;
+            while let Some(request) = ctx.next_request() {
+                if let Request::Settings(job) = request
+                    && matches!(*job, SettingsJob::Extras { detail: true })
+                {
+                    asks += 1;
+                }
+            }
+            asks
+        };
         let mut ctx = ctx();
         let mut screen = Pools::new();
         screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
         assert_eq!(ctx.queued(), 0, "a screen never shown asks for nothing");
         screen.shown(&mut ctx);
-        while ctx.next_request().is_some() {}
+        assert_eq!(extras_asks(&mut ctx), 1);
+        screen.shown(&mut ctx);
+        assert_eq!(
+            extras_asks(&mut ctx),
+            0,
+            "the shell's 5 s refresh never asks again so soon"
+        );
         screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
-        assert_eq!(ctx.queued(), 0, "a fresh ask is not sent twice");
+        assert_eq!(extras_asks(&mut ctx), 0, "an arrival never asks on its own");
         screen.detail_asked_ms = Some(crate::tui::clock::now_ms() - DETAIL_ASK_EVERY_MS - 1);
-        screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
-        assert!(matches!(
-            ctx.next_request(),
-            Some(Request::Settings(job)) if matches!(*job, SettingsJob::Extras { detail: true })
-        ));
+        screen.shown(&mut ctx);
+        assert_eq!(extras_asks(&mut ctx), 1, "a minute on, the ask is renewed");
     }
 }
