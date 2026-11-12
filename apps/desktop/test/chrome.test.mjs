@@ -21,8 +21,15 @@ exec /bin/sleep 600
 `;
 const CHILD = `const { chromeExecutable, startChrome } = await import(${JSON.stringify(MODULE)});
 const { chrome, profile } = startChrome(chromeExecutable());
+process.once("SIGUSR2", () => process.exit(0));
 process.stdout.write(JSON.stringify({ pid: chrome.pid, profile }) + "\\n");
 setInterval(() => {}, 1000);`;
+const ENDINGS = [
+  { send: "SIGTERM", end: { code: null, killed: "SIGTERM" }, how: "killed by SIGTERM" },
+  { send: "SIGINT", end: { code: null, killed: "SIGINT" }, how: "killed by SIGINT" },
+  { send: "SIGHUP", end: { code: null, killed: "SIGHUP" }, how: "killed by SIGHUP" },
+  { send: "SIGUSR2", end: { code: 0, killed: null }, how: "that exits on its own" },
+];
 
 /** Whether a process id is still taken. Input: the pid. Output: true until the process is gone. */
 function alive(pid) {
@@ -41,6 +48,18 @@ async function until(done, what) {
   while (!done()) {
     assert.ok(Date.now() < deadline, `${what} within ${WAIT_MS} ms`);
     await pause(20);
+  }
+}
+
+/** Waits for a promise, failing after WAIT_MS so a test never hangs on a child that will not end.
+ * Inputs: the promise and what it means. Output: what the promise gives. */
+async function within(promise, what) {
+  let timer;
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} within ${WAIT_MS} ms`)), WAIT_MS); });
+  try {
+    return await Promise.race([promise, late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -65,7 +84,7 @@ test("the test Chrome starts with a mock keychain and basic password storage, so
 });
 
 test("an unset, empty or missing CRAZYAGENT_CHROME fails naming the variable and never falls back to Google Chrome", () => {
-  const root = mkdtempSync(join(tmpdir(), "ca-chrome-test-"));
+  const root = mkdtempSync(join(tmpdir(), "ca-kc-test-"));
   try {
     for (const env of [{}, { CRAZYAGENT_CHROME: "" }, { CRAZYAGENT_CHROME: join(root, "absent") }]) {
       assert.throws(() => chromeExecutable(env), /CRAZYAGENT_CHROME/);
@@ -76,9 +95,9 @@ test("an unset, empty or missing CRAZYAGENT_CHROME fails naming the variable and
   }
 });
 
-for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-  test(`a test file process killed by ${signal} leaves no Chrome process and no profile`, async () => {
-    const root = mkdtempSync(join(tmpdir(), "ca-chrome-test-"));
+for (const { send, end, how } of ENDINGS) {
+  test(`a test file process ${how} leaves no Chrome process and no profile`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "ca-kc-test-"));
     const temp = join(root, "tmp");
     const fake = join(root, "chrome");
     const argsFile = join(root, "args");
@@ -92,14 +111,14 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
     const ended = new Promise((resolve) => child.once("exit", (code, killed) => resolve({ code, killed })));
     let pid = null;
     try {
-      const ready = JSON.parse(await firstLine(child.stdout));
+      const ready = JSON.parse(await within(firstLine(child.stdout), "the child's ready line"));
       pid = ready.pid;
       assert.ok(Number.isInteger(pid) && pid > 0, "the stand-in Chrome pid");
       await until(() => existsSync(join(ready.profile, "Local State")), "the stand-in Chrome wrote into its profile");
       const passed = readFileSync(argsFile, "utf8").split("\n");
       for (const flag of KEYCHAIN) assert.ok(passed.includes(flag), `the spawned Chrome got ${flag}`);
-      child.kill(signal);
-      assert.deepEqual(await ended, { code: null, killed: signal }, `the test file process still dies by ${signal}`);
+      child.kill(send);
+      assert.deepEqual(await within(ended, `the test file process ending after ${send}`), end, `the test file process ends as it would without Chrome after ${send}`);
       await until(() => !alive(pid), "the stand-in Chrome is gone");
       assert.equal(existsSync(ready.profile), false, "the profile is removed");
       assert.deepEqual(readdirSync(temp).filter((name) => name.startsWith("ca-chrome-")), [], "no ca-chrome-* profile is left");
