@@ -811,13 +811,14 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 id: String,
                 harness: Option<String>,
                 prompt: String,
+                model: Option<String>,
                 generation: u64,
             }
-            let Args { id, harness, prompt, generation } = match parse(args) {
+            let Args { id, harness, prompt, model, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { lock(state) .await? .team_delegate(&id, harness, prompt, generation) .await }.await;
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_delegate(&id, harness, prompt, model, generation) .await }.await;
             routed(result)
         }
         "desktop_team_cancel" => {
@@ -3359,6 +3360,176 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Err(invalid) => return invalid,
             };
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.scorecard_set(settings, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugins" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugins()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_preview" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                yaml: String,
+            }
+            let Args { yaml } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_preview(yaml)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_review" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_review(name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_add" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                yaml: String,
+                sha256: String,
+                replace: bool,
+            }
+            let Args { yaml, sha256, replace } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_add(yaml, sha256, replace)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_trust" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                sha256: String,
+            }
+            let Args { name, sha256 } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_trust(name, sha256)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_set_enabled" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                enabled: bool,
+            }
+            let Args { name, enabled } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_set_enabled(name, enabled)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_remove" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+            }
+            let Args { name } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_remove(name)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_bind_account" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                secret: String,
+                account: String,
+            }
+            let Args { name, secret, account } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .app_plugin_bind_account(name, secret, account)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_set_key" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                secret: String,
+                key: String,
+            }
+            let Args { name, secret, key } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_set_key(name, secret, key)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_app_plugin_unbind" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                name: String,
+                secret: String,
+            }
+            let Args { name, secret } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.app_plugin_unbind(name, secret)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_search_settings" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.search_settings()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_set_search" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                choice: crazyagent::semantic::SearchChoice,
+                confirm_host: Option<String>,
+                version: u64,
+            }
+            let Args { choice, confirm_host, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .set_search(choice, confirm_host, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_search_model_download" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                confirm_bytes: u64,
+            }
+            let Args { confirm_bytes } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.search_model_download(confirm_bytes)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_search_model_cancel" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.search_model_cancel()?; call.await }.await;
+            routed(result)
+        }
+        "desktop_search_model_delete" => {
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.search_model_delete()?; call.await }.await;
             routed(result)
         }
         "desktop_ide_extension_approve" => {

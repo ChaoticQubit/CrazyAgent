@@ -32,7 +32,7 @@ mod tests;
 
 const DETAIL_ROWS: usize = 4;
 const PAGE_STEP: isize = 10;
-const ACCOUNT_MODEL: &str = "Account's own model";
+pub(in crate::tui) const ACCOUNT_MODEL: &str = "Account's own model";
 const APP_VALUE: &str = "Use the app value";
 const ID_RULE: &str = "Use letters, digits and - _ . : / @ +, starting with a letter or digit.";
 const OUT_OF_SHAPE: &str = "The engine's answer does not fit this page. Press r to read again.";

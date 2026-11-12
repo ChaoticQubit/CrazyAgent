@@ -4,6 +4,7 @@ use super::new_project_page::harness_choices_from;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
+use super::settings::models_page::ACCOUNT_MODEL;
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
@@ -12,8 +13,10 @@ use crate::coord::settings::{
     TerminalDisplay, native_scope, native_sub_agents,
 };
 use crate::engine::owner::OwnerResult;
+use crate::harness_settings::Source;
 use crate::harnesses::HarnessEntry;
 use crate::harnesses::leftovers::HoldState;
+use crate::model_choice::{ALLOWED_MAX, Models, Slot};
 use crate::project_setup::{
     ProjectSetup, SetupAction, SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
@@ -26,6 +29,7 @@ use crate::team::{
     MasterLands, ReuseIdle, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus,
     TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
+use crate::tui::client::model_choice::{ModelChoiceEvent, ModelChoiceQuery, ModelChoiceReply};
 use crate::tui::keys::Key;
 use crate::tui::seam::{AccountRow, account_label};
 use crate::tui::theme::Role;
@@ -39,6 +43,7 @@ pub(in crate::tui) const TABS: (&str, &str) = ("Shift-\u{2190}\u{2192}", "Tabs")
 const WIDE: usize = 96;
 const PANEL_TEXT_LINES: usize = 2;
 const DRAFT_LINES: usize = 3;
+const DEFAULT_MODEL: &str = "Default";
 
 /// One short line under a live view after a change, a hint or a failed read.
 /// Holds the plain text and whether it reports a problem.
@@ -120,12 +125,24 @@ pub(in crate::tui) struct MasterPick {
 }
 
 /// A task the owner is writing for a sub-agent.
-/// Holds the text and the chosen sub-agent harness; none lets the engine pick
-/// the least busy one. Stays open until the engine takes the task.
+/// Holds the text, the chosen sub-agent harness (none lets the engine pick the least busy
+/// one), the model picked for it (none runs the harness's agent default) and the models that
+/// harness offers once read. Stays open until the engine takes the task.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct Draft {
     pub input: TextInput,
     pub harness: Option<String>,
+    pub model: Option<String>,
+    pub models: Option<DraftModels>,
+}
+
+/// The models a handed task may run on one harness (DEC-150 M-8): the words for the
+/// harness's agent default, then each allowed id the harness offers, once, without the
+/// default's own id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct DraftModels {
+    pub default: String,
+    pub ids: Vec<String>,
 }
 
 /// Which wake rule the owner edits: the app's, this project's or one sub-agent's.
@@ -283,6 +300,7 @@ pub(in crate::tui) struct TeamView {
     saving: Option<SetupAction>,
     catalog: Option<Vec<HarnessChoice>>,
     catalog_due: bool,
+    models_due: Option<String>,
     settings_scroll: usize,
     settings_scroll_max: std::cell::Cell<usize>,
     settings_window: std::cell::Cell<usize>,
@@ -336,6 +354,7 @@ impl TeamView {
             saving: None,
             catalog: None,
             catalog_due: false,
+            models_due: None,
             settings_scroll: 0,
             settings_scroll_max: std::cell::Cell::new(0),
             settings_window: std::cell::Cell::new(0),
@@ -396,6 +415,52 @@ impl TeamView {
     /// per open of the picker, and never once the catalog is read.
     pub fn wants_catalog(&mut self) -> bool {
         std::mem::take(&mut self.catalog_due)
+    }
+
+    /// Says once which harness's Models section the open composer needs, read at this
+    /// project's scope with `SettingsJob::ModelChoice` (DEC-150 M-8). Takes the view. Returns
+    /// the read at most once per harness pick, none while any sub-agent is picked or no
+    /// composer is open.
+    pub fn wants_models(&mut self) -> Option<ModelChoiceQuery> {
+        let harness = self.models_due.take()?;
+        if self.draft.is_none() {
+            return None;
+        }
+        Some(ModelChoiceQuery::Read {
+            harness,
+            project: Some(self.project.clone()),
+        })
+    }
+
+    /// Takes the engine's answer to the composer's Models read. Takes the event. Returns
+    /// nothing; an answer for another harness or project, or with no composer open, is left
+    /// alone, and a failed read offers Default only, so the hand-off never waits on it.
+    pub fn take_models(&mut self, event: &ModelChoiceEvent) {
+        let ModelChoiceQuery::Read {
+            harness,
+            project: Some(project),
+        } = &event.query
+        else {
+            return;
+        };
+        let Some(draft) = self.draft.as_mut() else {
+            return;
+        };
+        if *project != self.project || draft.harness.as_deref() != Some(harness.as_str()) {
+            return;
+        }
+        let offer = match &event.result {
+            Ok(ModelChoiceReply::Read { models, .. }) => Some(draft_models(models)),
+            _ => None,
+        };
+        if draft.model.as_ref().is_some_and(|model| {
+            !offer
+                .as_ref()
+                .is_some_and(|offer| offer.ids.contains(model))
+        }) {
+            draft.model = None;
+        }
+        draft.models = offer;
     }
 
     /// Takes the engine's harness catalog for the master harness picker.
@@ -1153,9 +1218,12 @@ impl TeamView {
             return;
         }
         self.notice = None;
+        self.models_due = None;
         self.draft = Some(Draft {
             input: TextInput::multi(TASK_PROMPT_BYTES_MAX),
             harness: None,
+            model: None,
+            models: None,
         });
     }
 
@@ -1163,11 +1231,16 @@ impl TeamView {
         match key.code {
             KeyCode::Esc => {
                 self.draft = None;
+                self.models_due = None;
                 TeamReply::Handled
             }
             KeyCode::Enter => self.send_draft(),
             KeyCode::Tab | KeyCode::BackTab => {
                 self.pick_harness(key.code == KeyCode::Tab);
+                TeamReply::Handled
+            }
+            KeyCode::Up | KeyCode::Down => {
+                self.pick_model(key.code == KeyCode::Down);
                 TeamReply::Handled
             }
             _ => {
@@ -1196,6 +1269,32 @@ impl TeamView {
             (at + choices.len() - 1) % choices.len()
         };
         draft.harness = choices[next].clone();
+        draft.model = None;
+        draft.models = None;
+        self.models_due = draft.harness.clone();
+    }
+
+    fn pick_model(&mut self, forward: bool) {
+        let Some(draft) = &mut self.draft else {
+            return;
+        };
+        let ids = draft
+            .models
+            .as_ref()
+            .map_or(&[][..], |offer| offer.ids.as_slice());
+        let choices: Vec<Option<&str>> = std::iter::once(None)
+            .chain(ids.iter().map(|id| Some(id.as_str())))
+            .collect();
+        let at = choices
+            .iter()
+            .position(|choice| *choice == draft.model.as_deref())
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % choices.len()
+        } else {
+            (at + choices.len() - 1) % choices.len()
+        };
+        draft.model = choices[next].map(str::to_owned);
     }
 
     fn send_draft(&mut self) -> TeamReply {
@@ -1204,6 +1303,7 @@ impl TeamView {
         };
         let prompt = draft.input.value().trim().to_owned();
         let harness = draft.harness.clone();
+        let model = draft.model.clone();
         if prompt.is_empty() {
             self.notice = Some(Notice::plain("Write what the sub-agent should do first."));
             return TeamReply::Handled;
@@ -1223,7 +1323,7 @@ impl TeamView {
             project_id: self.project.clone(),
             harness,
             prompt,
-            model: None,
+            model,
         })
     }
 
@@ -3903,6 +4003,7 @@ impl TeamView {
                 ("Enter", "Hand over"),
                 ("Ctrl-J", "New line"),
                 ("Tab", "Sub-agent"),
+                ("\u{2191}\u{2193}", "Model"),
                 ("Esc", "Close"),
             ];
         }
@@ -4465,6 +4566,15 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_harness_not_in_plan" => "That harness is no longer part of this team.".into(),
         "team_harness_invalid" => "That harness name is not valid.".into(),
         "team_task_invalid" => "The task is empty or too long.".into(),
+        "team_model_invalid" => "That model id isn't valid. Pick a model from the list.".into(),
+        "team_model_not_allowed" => {
+            "That model isn't on this harness's allowed list. Pick another model, or Default."
+                .into()
+        }
+        "team_model_not_supported" => {
+            "This harness doesn't take a model from CrazyAgent. Hand the task over with Default."
+                .into()
+        }
         "team_queue_full" => {
             "Too much work is waiting already. Try again when some finishes.".into()
         }
@@ -4523,16 +4633,65 @@ pub(in crate::tui) fn title(text: &str) -> String {
         .map_or_else(|| "Untitled task".to_owned(), str::to_owned)
 }
 
+/// The models a handed task may run on one harness, from its Models section at the
+/// project's scope (DEC-150 M-8): Default names the agent default, or the account's own
+/// model when none is set or the harness takes no model from CrazyAgent; then each allowed
+/// id the harness offers, in list order, once, without the default's own id. Input: the
+/// section. Output: the offer, at most `ALLOWED_MAX` ids.
+fn draft_models(models: &Models) -> DraftModels {
+    let applied = |slot: Slot| {
+        models
+            .rows
+            .iter()
+            .find(|row| row.slot == slot && row.source != Source::NotApplied)
+    };
+    let agent = applied(Slot::Agent).and_then(|row| row.effective.as_str());
+    let usable: Vec<&str> = models
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.origin.usable())
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    let listed = applied(Slot::Allowed)
+        .and_then(|row| row.effective.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str);
+    let mut ids: Vec<String> = Vec::new();
+    for id in listed {
+        if ids.len() < ALLOWED_MAX
+            && Some(id) != agent
+            && usable.contains(&id)
+            && !ids.iter().any(|kept| kept == id)
+        {
+            ids.push(id.to_owned());
+        }
+    }
+    DraftModels {
+        default: format!("{DEFAULT_MODEL} ({})", agent.unwrap_or(ACCOUNT_MODEL)),
+        ids,
+    }
+}
+
 fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
     let who = draft.harness.as_deref().map_or_else(
         || "Any sub-agent".to_owned(),
         |name| harness_name(name, None),
     );
-    let mut rows = vec![spread(
-        content,
-        Row::of("New task from you", look.heading),
-        Row::of("For  ", look.muted).push(format!("< {who} >"), look.accent),
-    )];
+    let model = draft.model.clone().unwrap_or_else(|| {
+        draft
+            .models
+            .as_ref()
+            .map_or_else(|| DEFAULT_MODEL.to_owned(), |offer| offer.default.clone())
+    });
+    let mut rows = vec![
+        spread(
+            content,
+            Row::of("New task from you", look.heading),
+            Row::of("For  ", look.muted).push(format!("< {who} >"), look.accent),
+        ),
+        Row::of("Model  ", look.muted).push(format!("< {model} >"), look.accent),
+    ];
     let inner = content.saturating_sub(4).max(2);
     let (lines, (line, column)) = draft.input.wrap(inner - 1);
     let first = (line + 1).saturating_sub(DRAFT_LINES);

@@ -1564,7 +1564,14 @@ fn the_composer_offers_the_harness_default_and_its_allowed_models_and_sends_the_
         composer_models(
             "claude-code",
             serde_json::json!("sonnet"),
-            serde_json::json!(["sonnet", "opus", "team-haiku", "my-draft", "gone-model", "opus"]),
+            serde_json::json!([
+                "sonnet",
+                "opus",
+                "team-haiku",
+                "my-draft",
+                "gone-model",
+                "opus"
+            ]),
             true,
         ),
     ));
@@ -1603,7 +1610,11 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
     let mut view = loaded();
     view.key(press(KeyCode::Char('+')));
     view.key(press(KeyCode::Down));
-    assert_eq!(draft_model(&view), None, "any sub-agent offers only Default");
+    assert_eq!(
+        draft_model(&view),
+        None,
+        "any sub-agent offers only Default"
+    );
     view.key(press(KeyCode::Tab));
     assert_eq!(view.wants_models(), Some(claude_read()));
     view.key(press(KeyCode::Down));
@@ -1625,7 +1636,12 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
     for query in [&codex, &other] {
         view.take_models(&models_answer(
             query,
-            composer_models("claude-code", serde_json::Value::Null, allowed.clone(), true),
+            composer_models(
+                "claude-code",
+                serde_json::Value::Null,
+                allowed.clone(),
+                true,
+            ),
         ));
         view.key(press(KeyCode::Down));
         assert_eq!(
@@ -1646,7 +1662,12 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
 
     view.take_models(&models_answer(
         &claude_read(),
-        composer_models("claude-code", serde_json::Value::Null, allowed.clone(), false),
+        composer_models(
+            "claude-code",
+            serde_json::Value::Null,
+            allowed.clone(),
+            false,
+        ),
     ));
     view.key(press(KeyCode::Down));
     assert_eq!(
@@ -1654,9 +1675,7 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
         None,
         "a harness that takes no model from CrazyAgent offers only Default"
     );
-    assert!(
-        find(&frame(&view, 120, 36), "Model  <").contains("< Default (Account's own model) >")
-    );
+    assert!(find(&frame(&view, 120, 36), "Model  <").contains("< Default (Account's own model) >"));
 
     view.take_models(&models_answer(
         &claude_read(),
@@ -1665,7 +1684,11 @@ fn the_composer_keeps_default_without_a_usable_read_and_a_new_harness_starts_fro
     view.key(press(KeyCode::Down));
     assert_eq!(draft_model(&view).as_deref(), Some("opus"));
     view.key(press(KeyCode::Tab));
-    assert_eq!(draft_model(&view), None, "a new harness starts from Default");
+    assert_eq!(
+        draft_model(&view),
+        None,
+        "a new harness starts from Default"
+    );
     assert_eq!(view.wants_models(), None);
     view.key(press(KeyCode::BackTab));
     assert_eq!(

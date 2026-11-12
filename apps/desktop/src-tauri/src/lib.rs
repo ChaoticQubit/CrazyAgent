@@ -1063,12 +1063,13 @@ async fn desktop_team_delegate(
     id: String,
     harness: Option<String>,
     prompt: String,
+    model: Option<String>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;
     lock(&state)
         .await?
-        .team_delegate(&id, harness, prompt, generation)
+        .team_delegate(&id, harness, prompt, model, generation)
         .await
 }
 

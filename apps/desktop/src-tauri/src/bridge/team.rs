@@ -143,13 +143,17 @@ impl NativeBridge {
     }
 
     /// Hands one task straight to a sub-agent when the master cannot delegate.
-    /// Takes the project id, an optional harness of the team plan, the task and the client generation.
-    /// Returns the actual commit receipt; a harness outside the plan is a plain rejection.
+    /// Takes the project id, an optional harness of the team plan, the task, the model the
+    /// owner picked for it, none for the harness's agent default (DEC-150 M-8), and the client
+    /// generation. Returns the actual commit receipt; a harness outside the plan or a model
+    /// the pick rule refuses is a plain rejection, a model id of the wrong shape
+    /// `team_action_invalid`.
     pub async fn team_delegate(
         &mut self,
         id: &str,
         harness: Option<String>,
         prompt: String,
+        model: Option<String>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
@@ -157,7 +161,7 @@ impl NativeBridge {
             project_id,
             harness,
             prompt,
-            model: None,
+            model,
         };
         self.team_action(action, generation).await
     }
