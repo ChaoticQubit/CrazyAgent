@@ -120,6 +120,7 @@ fn an_endpoint_runs_only_its_own_model_and_a_managed_profile_any() {
     let endpoint = TeamReach::Endpoint {
         base_url: "http://127.0.0.1:11434/v1".into(),
         model: "qwen3:32b".into(),
+        key: None,
     };
     let managed = TeamReach::Managed {
         profile_ref: CredentialRef::new("codex-profile").unwrap(),
