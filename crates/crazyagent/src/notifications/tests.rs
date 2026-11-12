@@ -48,9 +48,19 @@ fn synced(connection: &mut Connection, kinds: &[NoticeKind], live: &[Condition],
     tx.commit().unwrap();
 }
 
-fn synced_in_part(connection: &mut Connection, kinds: &[NoticeKind], live: &[Condition], now: i64) {
+fn synced_in_part(
+    connection: &mut Connection,
+    kinds: &[NoticeKind],
+    held: Option<&str>,
+    live: &[Condition],
+    now: i64,
+) {
+    let partial: Vec<(NoticeKind, Option<ProjectId>)> = kinds
+        .iter()
+        .map(|kind| (*kind, held.map(project)))
+        .collect();
     let tx = connection.transaction().unwrap();
-    sync(&tx, kinds, kinds, live, now).unwrap();
+    sync(&tx, kinds, &partial, live, now).unwrap();
     tx.commit().unwrap();
 }
 
@@ -232,6 +242,7 @@ fn a_kind_its_source_read_only_in_part_opens_new_items_and_resolves_none() {
     synced_in_part(
         &mut connection,
         &[NoticeKind::Question],
+        None,
         &[question("p1", "question:q2", "Which host?")],
         NOW_MS + 5,
     );
@@ -239,6 +250,31 @@ fn a_kind_its_source_read_only_in_part_opens_new_items_and_resolves_none() {
     assert_eq!(texts(&pending), ["Which host?", "Which port?"]);
     assert_eq!(pending.counts.pending, 2);
     assert!(texts(&listed(&connection, &query(NoticeFilter::Done))).is_empty());
+}
+
+#[test]
+fn a_kind_read_only_in_part_for_one_project_still_resolves_the_other_projects_items() {
+    let (_folder, mut connection) = store();
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[
+            question("p1", "question:q1", "Which port?"),
+            question("p2", "question:q2", "Which host?"),
+        ],
+        NOW_MS,
+    );
+    synced_in_part(
+        &mut connection,
+        &[NoticeKind::Question],
+        Some("p1"),
+        &[],
+        NOW_MS + 5,
+    );
+    let pending = listed(&connection, &query(NoticeFilter::Pending));
+    assert_eq!(texts(&pending), ["Which port?"]);
+    let done = listed(&connection, &query(NoticeFilter::Done));
+    assert_eq!(texts(&done), ["Which host?"]);
 }
 
 #[test]
