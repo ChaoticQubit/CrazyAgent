@@ -175,6 +175,7 @@ const TOOL_FILES_MAX: usize = 4;
 const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
+#[cfg(unix)]
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
 const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
 
@@ -2588,7 +2589,6 @@ impl ProjectSandbox {
                 .iter()
                 .all(|service| !KEYCHAIN_SERVICES.contains(service))
         );
-        assert!(text.len() <= PROFILE_BYTES_MAX);
         text
     }
 
@@ -2823,7 +2823,8 @@ impl ProjectSandbox {
 
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
     /// atomically. The path must lie outside every writable root, so no agent
-    /// can rewrite the profile its next launch uses.
+    /// can rewrite the profile its next launch uses. A profile holding a string Seatbelt
+    /// cannot read, or longer than [`PROFILE_BYTES_MAX`], is refused as `Invalid`, never written.
     #[cfg(unix)]
     pub fn install(&self, path: &Path) -> Result<(), SandboxError> {
         let parent = path
@@ -2847,6 +2848,9 @@ impl ProjectSandbox {
             return Err(invalid(
                 "a path or name in the sandbox profile is longer than Seatbelt reads",
             ));
+        }
+        if profile.len() > PROFILE_BYTES_MAX {
+            return Err(invalid("the sandbox profile is larger than its 64 KiB cap"));
         }
         let staging = parent.join(format!(".{name}.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
@@ -4365,10 +4369,11 @@ mod profile_string_tests {
         assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
     }
 
-    /// The default secret rule and 64 long open top-level names, as a Chosen folders
-    /// launch can keep open, give a profile with no string past the limit; a project folder
-    /// so deep that one secret name no longer fits is refused at install, before a profile
-    /// sandbox-exec cannot read is written.
+    /// The default secret rule and 64 long open top-level names give a profile with no string
+    /// past the limit; a project folder so deep that one secret name no longer fits, and the
+    /// most open names at the longest length, which pass the 64 KiB cap, are each refused at
+    /// install with `Invalid`, never a panic, before a profile sandbox-exec cannot load is
+    /// written.
     #[test]
     fn a_profile_keeps_every_string_seatbelt_reads_or_is_refused_at_install() {
         let temp = tempfile::tempdir().unwrap();
@@ -4392,6 +4397,27 @@ mod profile_string_tests {
         assert!(text.matches("(require-not (regex #\"").count() >= 2);
         assert!(text.matches(KEPT_OUT_DENY).count() >= 3);
         wide.install(&profiles.join("wide.sb")).unwrap();
+
+        let most: Vec<String> = (0..OPEN_TOPS_MAX)
+            .map(|at| format!("{at:03}{}", "n".repeat(252)))
+            .collect();
+        let crowded = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&most)
+            .unwrap();
+        let text = crowded.profile();
+        assert!(sbpl_overlong(&text).is_empty());
+        assert!(text.len() > PROFILE_BYTES_MAX);
+        let target = profiles.join("crowded.sb");
+        match crowded.install(&target) {
+            Err(SandboxError::Invalid(reason)) => {
+                assert_eq!(reason, "the sandbox profile is larger than its 64 KiB cap")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!target.exists());
 
         let mut deep = base.join("deep");
         while deep.as_os_str().len() < 1000 {
