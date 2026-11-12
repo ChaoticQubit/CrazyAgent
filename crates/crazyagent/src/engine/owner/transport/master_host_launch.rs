@@ -3127,16 +3127,18 @@ fn master_choice(
     else {
         return Ok((settings, None));
     };
-    if !model_pick::refused(db, project, connection, &model, now)? {
-        model_pick::ran(db, project, harness, &model)?;
+    let unavailable = |_| failure("model_choice_unavailable");
+    if !model_pick::refused(db, project, connection, &model, now).map_err(unavailable)? {
+        model_pick::ran(db, project, harness, &model).map_err(unavailable)?;
         return Ok((settings, Some(model)));
     }
     match crate::model_choice::rules::rules(db)?.fallback {
         FallbackRule::Stop => Err(failure(MASTER_MODEL_REFUSED)),
         FallbackRule::Silent => Ok((settings, None)),
         FallbackRule::Notice => {
-            let unavailable = |_| failure("model_choice_unavailable");
-            let tx = db.unchecked_transaction().map_err(unavailable)?;
+            let tx = db
+                .unchecked_transaction()
+                .map_err(|_| failure("model_choice_unavailable"))?;
             model_pick::fell_back(
                 &tx,
                 project,
@@ -3144,8 +3146,10 @@ fn master_choice(
                 &model,
                 model_pick::Fallen::HostMaster,
                 now,
-            )?;
-            tx.commit().map_err(unavailable)?;
+            )
+            .map_err(unavailable)?;
+            tx.commit()
+                .map_err(|_| failure("model_choice_unavailable"))?;
             Ok((settings, None))
         }
     }

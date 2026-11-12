@@ -155,7 +155,15 @@ fn a_refused_master_model_falls_back_by_the_owner_s_rule_on_that_account_only() 
     };
     let told = || -> i64 {
         db.query_row(
-            "SELECT COUNT(*) FROM team_messages WHERE project='alpha' AND text LIKE '%(model_fallback)'",
+            "SELECT COUNT(*) FROM owner_notices WHERE kind='pool_failover' AND subject LIKE 'model_fallback:alpha:codex:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let team_lines = || -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM team_messages WHERE project='alpha'",
             [],
             |row| row.get(0),
         )
@@ -173,7 +181,7 @@ fn a_refused_master_model_falls_back_by_the_owner_s_rule_on_that_account_only() 
     assert_eq!(told(), 1, "Notice tells the owner once");
     let line: String = db
         .query_row(
-            "SELECT text FROM team_messages WHERE project='alpha' AND text LIKE '%(model_fallback)'",
+            "SELECT text FROM owner_notices WHERE subject LIKE 'model_fallback:alpha:codex:%'",
             [],
             |row| row.get(0),
         )
@@ -185,6 +193,11 @@ fn a_refused_master_model_falls_back_by_the_owner_s_rule_on_that_account_only() 
     assert!(
         !line.contains("No account in this project's pool"),
         "{line}"
+    );
+    assert_eq!(
+        team_lines(),
+        0,
+        "an owner-host fallback leaves no team message that would wake a team master"
     );
     assert_eq!(choose(&refusing, 1_003).unwrap(), None);
     assert_eq!(told(), 1, "a held fallback is told once");
@@ -208,4 +221,5 @@ fn a_refused_master_model_falls_back_by_the_owner_s_rule_on_that_account_only() 
         2,
         "a refusal after the model ran again is told again"
     );
+    assert_eq!(team_lines(), 0);
 }

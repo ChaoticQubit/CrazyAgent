@@ -400,12 +400,11 @@ pub(crate) enum Fallen {
     HostMaster,
 }
 
-/// Tells the owner and the master once that no pool account, or the owner-host master's
-/// own, could run a model chosen for a harness's agents or master, so a start runs on the default (DEC-150): one owner Pool
-/// failover notification (DEC-136a) and one engine message to the master, then nothing
-/// more for that project, harness and model until it runs again (`ran`). Takes the
-/// transaction, the project, the harness, the model, who falls back and the time. Returns
-/// whether this call told them.
+/// Tells the owner once that no pool account, or an owner-host master's own (M-10), could
+/// run a model chosen for a harness, so a start runs on the default (DEC-150): one Pool
+/// failover notice (DEC-136a), plus one engine message to a team master but never for an
+/// owner-host master, then nothing until the model runs again (`ran`). Takes the
+/// transaction, project, harness, model, who falls back and time. Returns whether it told.
 pub(crate) fn fell_back(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -472,19 +471,22 @@ pub(crate) fn fell_back(
         },
         now,
     );
-    let _ = super::append_message(
-        tx,
-        project,
-        super::MessageAuthor::Engine,
-        &format!("{text} (model_fallback)"),
-        super::MessageState::Pending,
-        now,
-    )?;
+    if !host {
+        let _ = super::append_message(
+            tx,
+            project,
+            super::MessageAuthor::Engine,
+            &format!("{text} (model_fallback)"),
+            super::MessageState::Pending,
+            now,
+        )?;
+    }
     Ok(true)
 }
 
-/// Forgets a told fallback once a model runs again, so a later fallback is told anew.
-/// Takes the database, the project, the harness and the model. Returns a SQLite failure.
+/// Forgets a told fallback once a model runs again, so a later fallback is told anew; with
+/// none told it only reads, so a start takes no write lock. Takes the database, the
+/// project, the harness and the model. Returns a SQLite failure.
 pub(crate) fn ran(
     db: &Connection,
     project: &ProjectId,
@@ -492,6 +494,16 @@ pub(crate) fn ran(
     model: &str,
 ) -> Result<(), EngineError> {
     if !table(db, "team_model_fallbacks")? {
+        return Ok(());
+    }
+    let told: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_model_fallbacks WHERE project=?1 AND harness=?2 AND model=?3)",
+            params![project.as_str(), harness, model],
+            |row| row.get(0),
+        )
+        .map_err(super::error)?;
+    if !told {
         return Ok(());
     }
     db.execute(
