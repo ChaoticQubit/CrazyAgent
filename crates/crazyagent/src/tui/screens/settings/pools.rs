@@ -1412,4 +1412,115 @@ mod tests {
             "paused until 02:00"
         );
     }
+
+    /// DEC-154: Pools asks the engine for the detail rows when it opens and again while it
+    /// stays open, and each account in Next accounts shows its free resets and credits line
+    /// under it, word for word the desktop's.
+    #[test]
+    fn pools_asks_for_the_detail_rows_and_each_next_account_shows_its_free_resets_line() {
+        use crate::scheduling::{PoolRanking, RankedAccount, Standing, Strategy};
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.shown(&mut ctx);
+        let mut details = Vec::new();
+        while let Some(request) = ctx.next_request() {
+            if let Request::Settings(job) = request
+                && let SettingsJob::Extras { detail } = *job
+            {
+                details.push(detail);
+            }
+        }
+        assert_eq!(
+            details,
+            [true],
+            "Pools asks for the detail rows once it opens"
+        );
+
+        screen.arrive(
+            &settings(SettingsEvent::Schedule(Ok(Schedule::default()))),
+            &mut ctx,
+        );
+        screen.key(&Key::Char('o'), &mut ctx);
+        screen.arrive(
+            &settings(SettingsEvent::Ranking(Ok(vec![PoolRanking {
+                pool: CredentialRef::new("pool-main").unwrap(),
+                strategy: Strategy::UseItOrLoseIt,
+                accounts: vec![RankedAccount {
+                    connection: CredentialRef::new("member-1").unwrap(),
+                    standing: Standing::NeverUse,
+                    held_for: Vec::new(),
+                }],
+                own_order_projects: 0,
+            }]))),
+            &mut ctx,
+        );
+        let mut extras = crate::usage::extras::LimitExtras {
+            harness: "Codex".into(),
+            adapter: crate::usage::extras::Adapter::Codex,
+            may_break: false,
+            resets: Some(crate::usage::extras::Resets {
+                count: 2,
+                kinds: vec![crate::usage::extras::ResetKind::Weekly],
+                next_expiry_ms: None,
+            }),
+            credits: None,
+            spend: crate::usage::extras::Spend::NotReported,
+            not_reported: "not reported by Codex".into(),
+            resets_checked_ms: None,
+            credits_checked_ms: None,
+        };
+        screen.arrive(
+            &settings(SettingsEvent::Extras(Ok(vec![
+                crate::engine::owner::AccountExtras {
+                    account: CredentialRef::new("member-1").unwrap(),
+                    extras: extras.clone(),
+                },
+            ]))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        let at = shown.find("member-1").expect("the account shows");
+        let line = shown
+            .find("    2 free resets (weekly) \u{b7} Credits: not reported by Codex")
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(line > at, "the line comes under its account: {shown}");
+
+        extras.resets = None;
+        screen.arrive(
+            &settings(SettingsEvent::Extras(Ok(vec![
+                crate::engine::owner::AccountExtras {
+                    account: CredentialRef::new("member-1").unwrap(),
+                    extras,
+                },
+            ]))),
+            &mut ctx,
+        );
+        let shown = body(&screen.modal(&ctx).unwrap().0);
+        assert!(
+            shown.contains("    Free resets and credits: not reported by Codex"),
+            "{shown}"
+        );
+        assert!(
+            !shown.contains(" 0 free"),
+            "nothing missing reads as 0: {shown}"
+        );
+    }
+
+    #[test]
+    fn an_open_pools_screen_asks_for_the_detail_rows_again_once_a_minute_has_passed() {
+        let mut ctx = ctx();
+        let mut screen = Pools::new();
+        screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
+        assert_eq!(ctx.queued(), 0, "a screen never shown asks for nothing");
+        screen.shown(&mut ctx);
+        while ctx.next_request().is_some() {}
+        screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
+        assert_eq!(ctx.queued(), 0, "a fresh ask is not sent twice");
+        screen.detail_asked_ms = Some(crate::tui::clock::now_ms() - DETAIL_ASK_EVERY_MS - 1);
+        screen.arrive(&Arrival::Pools(Ok(Vec::new())), &mut ctx);
+        assert!(matches!(
+            ctx.next_request(),
+            Some(Request::Settings(job)) if matches!(*job, SettingsJob::Extras { detail: true })
+        ));
+    }
 }
