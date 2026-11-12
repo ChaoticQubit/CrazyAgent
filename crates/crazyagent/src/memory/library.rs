@@ -806,6 +806,9 @@ pub(crate) fn recall(
     Ok(recall_ranked(connection, project, query)?.map(|(found, _)| found))
 }
 
+/// The memories recall found and the ranking note to show with them, if any.
+pub(crate) type Recalled = (Vec<SavedMemory>, Option<String>);
+
 /// Finds the memories [`recall`] finds, with the hybrid ranking note when the search index
 /// answered (P-14), worded for memories ([`recall_note`]); the scan carries none. Inputs and
 /// refusals as [`recall`]. Output: the memories and the note.
@@ -813,7 +816,7 @@ pub(crate) fn recall_ranked(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
     query: &str,
-) -> Result<Result<(Vec<SavedMemory>, Option<String>), String>, EngineError> {
+) -> Result<Result<Recalled, String>, EngineError> {
     let query = query.trim();
     let search = (!query.is_empty()).then_some(query);
     if let Err(problem) = validate_page(search, PAGE_ITEMS_MAX) {
