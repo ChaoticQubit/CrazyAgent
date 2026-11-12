@@ -744,6 +744,8 @@ pub struct TeamRuntime {
     agents: Option<Arc<Agents>>,
     terminal: Option<Arc<dyn Host>>,
     terminal_probe: Option<TerminalProbe>,
+    tools_refresh: fn(),
+    live_switched_on: BTreeSet<ProjectId>,
     swept: Option<Instant>,
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
@@ -1085,6 +1087,8 @@ impl TeamRuntime {
             agents: None,
             terminal: None,
             terminal_probe: None,
+            tools_refresh: crate::tools::probe::refresh_now,
+            live_switched_on: BTreeSet::new(),
             swept: None,
             events: None,
             watch: super::events::Watch::default(),
@@ -1236,6 +1240,14 @@ impl TeamRuntime {
     /// Takes the probe. Returns the runtime.
     pub fn with_terminal_probe(mut self, probe: TerminalProbe) -> Self {
         self.terminal_probe = Some(probe);
+        self
+    }
+
+    /// Replaces what the runtime runs to look for tools again when the owner switches a live
+    /// master on, for a row that counts those looks. Takes the function. Returns the runtime.
+    #[cfg(test)]
+    fn with_tools_refresh(mut self, refresh: fn()) -> Self {
+        self.tools_refresh = refresh;
         self
     }
 
@@ -1537,7 +1549,8 @@ impl TeamRuntime {
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
     /// the questions masters' harnesses ask the owner in their own terminals, then alerts the
-    /// owner to new questions and terminal waits by severity.
+    /// owner to new questions and terminal waits by severity. A project no longer active has
+    /// its live switch off, so its next switch-on counts as a new start.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -1546,7 +1559,10 @@ impl TeamRuntime {
         let access = (self.access)().unwrap_or_default();
         self.owner_restarts(&access)?;
         self.owner_wakes(&access)?;
-        for project in self.active_projects()? {
+        let active = self.active_projects()?;
+        self.live_switched_on
+            .retain(|project| active.contains(project));
+        for project in active {
             self.step(&project, &access)?;
         }
         self.collect()?;
@@ -4147,8 +4163,9 @@ impl TeamRuntime {
     /// once no turn is open and the owner is not typing, and clears those starts, so switching
     /// it off and on never counts as a crash. With no master running and a saved master
     /// harness that has no live terminal, such as RCLI, it turns the live master off with one
-    /// note, so the one-turn master answers (F06). Takes the setup, live access and paused
-    /// accounts.
+    /// note, so the one-turn master answers (F06). Each time the owner switches it on, as
+    /// Start or Try again, the tool probes look again at once, so a tool the owner just
+    /// installed is found. Takes the setup, live access and paused accounts.
     fn keep_live(
         &mut self,
         stored: &StoredSetup,
@@ -4157,6 +4174,11 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let project = &stored.project_id;
         let on = super::master::live(&self.connection, project)?;
+        if !on {
+            self.live_switched_on.remove(project);
+        } else if self.live_switched_on.insert(project.clone()) {
+            (self.tools_refresh)();
+        }
         if self.workers.values().any(|w| {
             &w.project == project && w.role == AgentRole::Master && (w.restarting || w.stopping)
         }) {

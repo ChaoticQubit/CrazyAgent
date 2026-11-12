@@ -260,16 +260,16 @@ fn shebang_flags_and_absolute_interpreters_are_kept() {
         ],
         "macOS runs no interpreter that is itself a script, so it is split out (N3)"
     );
+    assert_eq!(
+        resolved.grants(),
+        vec![absolute, node, PathBuf::from("/bin/sh")]
+    );
     let native = program(&home.join(".local/bin/native"), "#!/bin/sh --native\n");
     let resolved = resolve("native", &home_only(&home)).unwrap();
     assert_eq!(
         resolved.argv(),
         vec![native.into_os_string()],
         "the system runs a script whose interpreter by path is a program"
-    );
-    assert_eq!(
-        resolved.grants(),
-        vec![absolute, node, PathBuf::from("/bin/sh")]
     );
 }
 
@@ -499,10 +499,11 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
     assert_eq!(resolve("tmux", &places).unwrap().program, own);
 }
 
-/// R-M1: a PATH or probed folder in a temp folder, which agents with the temp folder grant
-/// and other users write, is refused.
+/// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
+/// that sits in a temp folder, which agents with the temp folder grant and other users
+/// write, is refused. Probed folders pass the probes' own rule instead (`probe::kept`).
 #[test]
-fn a_path_or_probed_folder_in_a_temp_folder_is_refused() {
+fn a_path_folder_in_a_temp_folder_is_refused() {
     let (_folder, home) = scratch();
     let owner_temp = std::env::temp_dir().join("tools-planted/bin");
     let shared = PathBuf::from("/private/tmp/tools-planted/bin");
@@ -518,7 +519,19 @@ fn a_path_or_probed_folder_in_a_temp_folder_is_refused() {
         "{:?}",
         engine.folders()
     );
-    let probed = engine.with_probed(vec![owner_temp.clone(), shared.clone()]);
-    assert!(!probed.folders().contains(&owner_temp));
-    assert!(!probed.folders().contains(&shared));
+}
+
+/// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
+/// can replace a folder this user owns there, so test stand-ins and engines started from a
+/// `/tmp` folder resolve (leader 17:12, L8c).
+#[test]
+fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
+    let folder = tempfile::Builder::new()
+        .prefix("tools-tmp-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let own = folder.path().canonicalize().unwrap();
+    let tool = program(&own.join("tool"), NODE);
+    let places = Places::new(vec![own.clone()], None);
+    assert_eq!(resolve("tool", &places).unwrap().program, tool);
 }

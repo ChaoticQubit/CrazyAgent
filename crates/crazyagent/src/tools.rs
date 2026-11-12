@@ -181,19 +181,16 @@ impl Places {
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
-    /// program and before the system folders; folders in a temp folder and folders agents
-    /// can write are dropped. Input: the probed folders. Output: the places.
+    /// program and before the system folders; folders agents can write are dropped. The
+    /// probes keep only folders [`probe::kept`] passes, which also drops shared temp folders
+    /// others can change. Input: the probed folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
             .into_iter()
             .partition(|folder| system.contains(folder));
-        folders.extend(
-            probed
-                .into_iter()
-                .filter(|folder| !system.contains(folder) && !in_temp(folder)),
-        );
+        folders.extend(probed.into_iter().filter(|folder| !system.contains(folder)));
         folders.extend(last);
         Self::kept(folders, self.home, self.engine_roots)
     }
@@ -217,17 +214,24 @@ impl Places {
         std::iter::once(path).chain(real.as_deref()).any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
                 || in_project(self.home(), path)
-                || self
-                    .engine_roots
-                    .iter()
-                    .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+                || in_engine_data(&self.engine_roots, path)
         })
     }
 }
 
+/// Whether a path lies in the engine's data folder outside its `setup` folder, where the
+/// agents' HOMEs, worktrees and team state live, which agents write. The one rule for the
+/// resolver and the harness pins. Inputs: the data folder as given and real
+/// ([`engine_roots`]) and the path. Output: the answer.
+pub(crate) fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
+    roots
+        .iter()
+        .any(|root| path.starts_with(root) && !path.starts_with(root.join("setup")))
+}
+
 /// The engine data folder as given and with its links resolved. Input: the folder, or
 /// none. Output: the folders.
-fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
+pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = root.map(Path::to_path_buf).into_iter().collect();
     if let Some(real) = root.and_then(|root| root.canonicalize().ok())
         && !roots.contains(&real)
@@ -678,13 +682,13 @@ fn install_hint(tool: &str) -> &'static str {
 
 /// Whether a found file can be used: an executable file that is not a version-manager shim,
 /// that agents cannot write, as found or through its links ([`Places::agent_writable`]),
-/// and that no other user can change. Inputs: the places and the file. Output: the answer.
+/// and that no other user can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the file. Output: the answer.
 fn usable_candidate(places: &Places, candidate: &Path) -> bool {
     executable_file(candidate)
         && candidate.canonicalize().is_ok()
         && !crate::harnesses::is_shim(places.home(), candidate)
         && !places.agent_writable(candidate)
-        && crate::service::changeable_by_others(candidate).is_none()
+        && crate::service::changeable_past_sticky(candidate).is_none()
 }
 
 fn valid_name(name: &str) -> bool {

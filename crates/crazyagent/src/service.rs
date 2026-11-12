@@ -745,35 +745,116 @@ WantedBy=default.target\n",
 }
 
 /// The first entry on a path that someone other than this user or root can change: an
-/// entry another user owns, a world-writable entry such as `/tmp`, or a folder its group
-/// can write unless that group is trusted ([`trusted_group`]). It reads the path as written
-/// and with its links resolved; a link's own mode bits and missing entries are not counted,
-/// an unreadable entry is. Input: the absolute path. Output: the entry, or none.
+/// entry another user owns, a world-writable entry such as `/tmp`, or a folder an untrusted
+/// group can write ([`trusted_group`]), except a sticky store such as /nix/store above an
+/// entry's own folder ([`first_changeable_part`]). It reads the path as written and with its
+/// links resolved; an unreadable entry counts. Input: the absolute path. Output: the entry.
 #[cfg(unix)]
 pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
-    use std::os::unix::fs::MetadataExt;
+    changeable(path, false)
+}
+
+/// Like [`changeable_by_others`] for the tools the resolver runs, where a sticky folder
+/// others can write, such as `/tmp`, also passes as a store above an entry's own folder,
+/// since no one can replace a part this user or root owns there. Input: the absolute path.
+/// Output: the entry, or none.
+#[cfg(unix)]
+pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
+    changeable(path, true)
+}
+
+/// Reads a path as written and with its links resolved and names its first changeable part
+/// ([`first_changeable_part`]). Inputs: the path and whether world-writable stores pass.
+/// Output: the entry, or none.
+#[cfg(unix)]
+fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    [path, resolved.as_path()]
-        .into_iter()
-        .flat_map(Path::ancestors)
-        .find(|entry| match std::fs::symlink_metadata(entry) {
-            Ok(metadata) => {
-                (metadata.uid() != me && metadata.uid() != 0)
-                    || (!metadata.file_type().is_symlink() && metadata.mode() & 0o002 != 0)
-                    || (metadata.is_dir()
-                        && metadata.mode() & 0o020 != 0
-                        && !trusted_group(metadata.gid()))
+    [path, resolved.as_path()].into_iter().find_map(|path| {
+        let parts: Vec<Part> = path.ancestors().map(read_part).collect();
+        first_changeable_part(&parts, me, open_stores)
+            .and_then(|depth| path.ancestors().nth(depth))
+            .map(Path::to_path_buf)
+    })
+}
+
+/// One part of a path as the ownership rule reads it: missing, unreadable, or its owner,
+/// group, mode and whether it is a folder or a link.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    Missing,
+    Unreadable,
+    Found {
+        owner: u32,
+        group: u32,
+        mode: u32,
+        folder: bool,
+        link: bool,
+    },
+}
+
+/// Reads one part of a path without following a link. Input: the part. Output: the read.
+#[cfg(unix)]
+fn read_part(entry: &Path) -> Part {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(entry) {
+        Ok(metadata) => Part::Found {
+            owner: metadata.uid(),
+            group: metadata.gid(),
+            mode: metadata.mode(),
+            folder: metadata.is_dir(),
+            link: metadata.file_type().is_symlink(),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Part::Missing,
+        Err(_) => Part::Unreadable,
+    }
+}
+
+/// The first part, the entry first, that someone other than `me` or root can change. A
+/// sticky folder `me` or root owns, two or more parts above the entry with the part below
+/// it present, is a store: its group's write passes, and with `open_stores` everyone's
+/// does too. Inputs: the parts, `me` and `open_stores`. Output: the part's index, or none.
+#[cfg(unix)]
+pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) -> Option<usize> {
+    let mut below_exists = false;
+    for (depth, part) in parts.iter().enumerate() {
+        let changeable = match *part {
+            Part::Missing => false,
+            Part::Unreadable => true,
+            Part::Found {
+                owner,
+                group,
+                mode,
+                folder,
+                link,
+            } => {
+                let owned = owner == me || owner == 0;
+                let store = depth >= 2 && below_exists && owned && folder && mode & 0o1000 != 0;
+                let world = !link && mode & 0o002 != 0;
+                let grouped = folder && mode & 0o020 != 0 && !trusted_group(group);
+                !owned || (world && !(store && open_stores)) || (grouped && !store)
             }
-            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
-        })
-        .map(Path::to_path_buf)
+        };
+        if changeable {
+            return Some(depth);
+        }
+        below_exists = *part != Part::Missing;
+    }
+    None
 }
 
 /// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
 /// runs from the folder the installer chose. Input unused. Output: none.
 #[cfg(not(unix))]
 pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Reports no changeable entry where Unix owners and modes do not exist. Input unused.
+/// Output: none.
+#[cfg(not(unix))]
+pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
     None
 }
 
