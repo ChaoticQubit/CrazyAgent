@@ -275,9 +275,33 @@ pub(crate) fn mark(
 
 /// Keeps every step ticked now as a learning mark under the step's own name, so a removal
 /// of rows (a project removed or deleted, a master session deleted) never unticks what the
-/// owner already did. Runs in that removal's transaction before its rows go. Input: the
-/// transaction. Output: Ok, or `learning_mark_unavailable`.
-pub(crate) fn latch(tx: &Transaction<'_>) -> Result<(), EngineError> {
+/// owner already did. Runs in that removal's transaction before its rows go, under its own
+/// savepoint: a failure rolls back only these marks, logs `learning_latch_failed` and lets
+/// the removal go on. Input: the transaction. Output: none.
+pub(crate) fn latch(tx: &Transaction<'_>) {
+    if tx.execute_batch("SAVEPOINT learning_latch").is_err() {
+        eprintln!("learning_latch_failed cause=savepoint");
+        return;
+    }
+    match keep_ticked(tx) {
+        Ok(()) => {
+            if tx.execute_batch("RELEASE learning_latch").is_err() {
+                eprintln!("learning_latch_failed cause=release");
+            }
+        }
+        Err(error) => {
+            eprintln!("learning_latch_failed cause={}", error.0);
+            if tx
+                .execute_batch("ROLLBACK TO learning_latch; RELEASE learning_latch")
+                .is_err()
+            {
+                eprintln!("learning_latch_failed cause=rollback");
+            }
+        }
+    }
+}
+
+fn keep_ticked(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for (id, _, _, _, signal) in STEPS {
         if let Some(signal) = signal
             && count(tx, signal)? > 0

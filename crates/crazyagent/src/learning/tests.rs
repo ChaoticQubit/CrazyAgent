@@ -248,7 +248,7 @@ fn a_latch_keeps_every_ticked_step_once_its_rows_go_and_ticks_nothing_else() {
     set(&mut db, MarkStep::Process, true);
     for _ in 0..2 {
         let tx = db.transaction().unwrap();
-        latch(&tx).unwrap();
+        latch(&tx);
         tx.commit().unwrap();
     }
     db.execute_batch(
@@ -283,7 +283,7 @@ fn a_failed_latch_keeps_none_of_its_marks_and_leaves_the_transaction_usable() {
     )
     .unwrap();
     let tx = db.transaction().unwrap();
-    let _ = latch(&tx);
+    latch(&tx);
     tx.execute("DELETE FROM projects", []).unwrap();
     tx.commit().unwrap();
     assert!(

@@ -1672,7 +1672,7 @@ fn execute(
         Command::ProjectSetup { action } => {
             let caches = match action {
                 crate::project_setup::SetupAction::Remove { project_id } => {
-                    crate::learning::latch(tx)?;
+                    crate::learning::latch(tx);
                     projects_home::forgotten_caches(tx, path, project_id)?
                 }
                 _ => Vec::new(),
@@ -2441,7 +2441,7 @@ fn owner_apply_with(
         }
         (Some(Effect::NewProject(_)), _) => return Err(error("setup_record_invalid")),
         (Some(Effect::Delete(outcome)), Command::ProjectSetup { action }) => {
-            crate::learning::latch(&tx)?;
+            crate::learning::latch(&tx);
             crate::project_setup::record_delete(&tx, action, outcome, revision)?
         }
         (Some(Effect::Delete(_)), _) => return Err(error("delete_record_invalid")),
