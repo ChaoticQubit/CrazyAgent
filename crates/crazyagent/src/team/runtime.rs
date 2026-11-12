@@ -6544,13 +6544,12 @@ impl TeamRuntime {
                     };
                     if let Some(reason) = self.room_wait(project, &room) {
                         self.wait(task, &reason)?;
-                        if !reuse {
-                            let counted = |w: &Worker| {
-                                (!slot_full || w.harness == harness)
-                                    && (!cap_full || w.parent == parent)
-                            };
-                            self.stop_idle_for(project, &harness, counted, &reserved)?;
-                        }
+                        let counted = |w: &Worker| {
+                            (!slot_full || w.harness == harness)
+                                && (!cap_full || w.parent == parent)
+                                && (!reuse || w.model != wanted)
+                        };
+                        self.stop_idle_for(project, &harness, counted, &reserved)?;
                         continue;
                     }
                     let Some((account, run)) = self.account_or_wait(
@@ -6746,6 +6745,10 @@ impl TeamRuntime {
         Ok(())
     }
 
+    /// Keeps a project's sub-agents at the owner's warm floor, each started on the owner's
+    /// agent default for its harness (DEC-150 F3), and starts none while an agent of the
+    /// project still stops, so one dispatch stopped to free a slot is not replaced first.
+    /// Takes the setup, the live access and the paused accounts. Returns any failure.
     fn keep_warm(
         &mut self,
         stored: &StoredSetup,
@@ -6756,9 +6759,23 @@ impl TeamRuntime {
         if !super::keep_warm(&self.connection, project)? {
             return Ok(());
         }
+        if self
+            .workers
+            .values()
+            .any(|w| &w.project == project && w.role == AgentRole::Sub && w.stopping)
+        {
+            return Ok(());
+        }
         let floor = usize::from(stored.team.min_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         for slot in &stored.team.sub_harnesses {
+            let own = crate::model_choice::store::launch_model(
+                &self.connection,
+                &slot.harness,
+                &crate::model_choice::catalog(&slot.harness),
+                Some(project),
+                crate::model_choice::Slot::Agent,
+            )?;
             while self.live(project, AgentRole::Sub, None) < floor
                 && self.live(project, AgentRole::Sub, Some(&slot.harness))
                     < usize::from(slot.agents)
@@ -6766,18 +6783,21 @@ impl TeamRuntime {
                 && !self.harnesses_full(project, harness_cap)
             {
                 let Ok(Some(account)) =
-                    self.account_for(access, project, &slot.harness, paused, None)
+                    self.account_for(access, project, &slot.harness, paused, own.as_deref())
                 else {
                     break;
                 };
-                match self.spawn(
+                self.run_model = own.clone();
+                let started = self.spawn(
                     stored,
                     AgentRole::Sub,
                     &slot.harness,
                     slot.tools,
                     &account,
                     None,
-                )? {
+                );
+                self.run_model = None;
+                match started? {
                     Start::Started(agent) => {
                         self.workers.get_mut(&agent).expect("worker exists").warm = true;
                     }
