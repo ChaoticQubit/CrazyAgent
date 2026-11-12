@@ -7,6 +7,51 @@ fn private_root() -> tempfile::TempDir {
     root
 }
 
+/// Setup finds a tool exactly where a launch finds it, in the tool resolver's places: a tmux
+/// only in ~/.local/bin shows the entry and version the launch would run, and a tool found
+/// nowhere, or a script whose interpreter is missing, gives the resolver's own answer for
+/// that reason, whose line the setup row and the launch's failure both say.
+#[test]
+fn setup_finds_a_tool_where_the_launch_does_and_says_why_it_cannot_run() {
+    let root = private_root();
+    let home = root.path().join("home");
+    let local = home.join(".local/bin");
+    std::fs::create_dir_all(&local).unwrap();
+    let places = crate::tools::Places::new(
+        vec![root.path().join("setup/bin"), local.clone()],
+        Some(home),
+    );
+    let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
+    let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
+    assert_eq!(missing, crate::tools::resolve("tmux", &places).unwrap_err());
+    assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+    let script = |name: &str, text: &str| {
+        let file = local.join(name);
+        std::fs::write(&file, text).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    script("tmux", "#!/bin/sh\necho 'tmux 3.5a'\n");
+    let launch = crate::tools::resolve("tmux", &places).unwrap();
+    assert_eq!(
+        installer.locate(Dependency::Tmux),
+        Some((launch.entry, Version::parse("3.5a").unwrap()))
+    );
+    assert_eq!(
+        installer.lookup(Dependency::Tmux).unwrap(),
+        Ok(Version::parse("3.5a").unwrap())
+    );
+    script(
+        "graphify",
+        "#!/usr/bin/env crazyagent-test-missing-python\nprint('graphify 0.9.9')\n",
+    );
+    let needs = installer.lookup(Dependency::Graphify).unwrap().unwrap_err();
+    assert_eq!(needs.reason, crate::tools::Reason::NeedsInterpreter);
+    assert_eq!(
+        needs,
+        crate::tools::resolve("graphify", &places).unwrap_err()
+    );
+}
+
 fn found(name: &str) -> PathBuf {
     let mut folders: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path| std::env::split_paths(&path).collect())

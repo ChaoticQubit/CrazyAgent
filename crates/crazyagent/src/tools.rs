@@ -435,7 +435,7 @@ fn shebang(file: &Path) -> Option<Shebang> {
 /// `clean-mac-gate` feature, never a release, reads them under the gate's root
 /// ([`gate_root`]), so the clean-Mac gate sees none of this computer's Homebrew tools.
 /// Output: the two folders.
-fn homebrew_folders() -> Vec<PathBuf> {
+pub(crate) fn homebrew_folders() -> Vec<PathBuf> {
     let root = gate_root();
     HOMEBREW_FOLDERS
         .iter()

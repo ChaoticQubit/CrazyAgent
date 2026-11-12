@@ -7,8 +7,7 @@ use std::time::Duration;
 
 pub use super::{GRAPHIFY_PACKAGE, GRAPHIFY_VERSION, UV_VERSION};
 
-const BREW: [&str; 2] = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"];
-const SYSTEM_PATH: [&str; 4] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+const SYSTEM_PATH: [&str; 2] = ["/usr/bin", "/bin"];
 const BREW_TIME: Duration = Duration::from_secs(1800);
 const NAME_BYTES_MAX: usize = 64;
 
@@ -29,15 +28,25 @@ pub struct MacInstaller {
 }
 
 impl MacInstaller {
-    /// Uses the engine root's `setup` folder and searches it, the owner's `~/.local/bin`,
-    /// the engine's own absolute `PATH` folders and the usual Homebrew and system folders.
-    /// Input: the engine root. Output: the installer.
+    /// Uses the engine root's `setup` folder and finds programs wherever the tool resolver
+    /// looks for this engine ([`crate::tools::Places::from_environment`]), the answer every
+    /// launch uses. Homebrew's folders and its `brew` come from the resolver's own list
+    /// ([`crate::tools::homebrew_folders`]), so the clean-Mac gate's remap covers them; the
+    /// programs setup starts search `setup/bin`, `~/.local/bin`, the engine's `PATH`,
+    /// Homebrew and the system folders. Input: the engine root. Output: the installer.
     pub fn new(engine_root: &Path) -> Self {
-        Self::with_paths(
-            engine_root,
-            system_folders(&SYSTEM_PATH),
-            BREW.iter().map(PathBuf::from).collect(),
-        )
+        let homebrew = crate::tools::homebrew_folders();
+        let brew: Vec<PathBuf> = homebrew.iter().map(|folder| folder.join("brew")).collect();
+        let mut fixed = homebrew;
+        fixed.extend(SYSTEM_PATH.iter().map(PathBuf::from));
+        Self {
+            pinned: PinnedInstaller::with_places(
+                engine_root,
+                system_folders(fixed),
+                crate::tools::Places::from_environment(Some(engine_root)),
+            ),
+            brew: brew.into_iter().filter(|path| path.is_absolute()).collect(),
+        }
     }
 
     /// Same as `new` with the system folders and Homebrew programs given exactly.
@@ -106,6 +115,13 @@ impl MacInstaller {
 impl Installer for MacInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
         self.pinned.find(dep)
+    }
+
+    fn lookup(
+        &self,
+        dep: Dependency,
+    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+        self.pinned.lookup(dep)
     }
 
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {

@@ -341,6 +341,11 @@ test("setup lists each tool's state in plain words", () => {
   assert.deepEqual(intake.dependencyView(dep("tmux", { state: "checking" })),
     { title: "tmux", about: "Runs each agent in a live terminal.", word: "Checking", tone: "info", line: null });
   assert.deepEqual(intake.dependencyView(dep("tmux", { state: "missing" })).line, "Setup installs it.");
+  const tmuxMissing = "tmux is missing, so the live master's terminal can't open. Install tmux: run setup again from Settings (it needs Homebrew, from brew.sh), or run brew install tmux in Terminal. Then try again.";
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "missing", line: tmuxMissing })),
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Not installed", tone: "warn", line: tmuxMissing });
+  assert.equal(intake.dependencyView(dep("graphify", { state: "missing", line: "graphify needs python3, which is missing.\u0007 Then try again." })).line,
+    "graphify needs python3, which is missing.\\u0007 Then try again.", "a control character in the engine's line shows as a visible escape");
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "uv (Python tools)")).title, "uv (Python tools)");
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "  ")).title, "uv");
 });

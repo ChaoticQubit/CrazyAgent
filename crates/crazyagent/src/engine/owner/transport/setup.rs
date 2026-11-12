@@ -175,7 +175,7 @@ fn start_check(root: &Path) {
     let installer = platform_installer(root);
     tokio::spawn(async move {
         let found = tokio::task::spawn_blocking(move || {
-            Dependency::ALL.map(|dep| (dep, installer.find(dep)))
+            Dependency::ALL.map(|dep| (dep, installer.lookup(dep)))
         })
         .await;
         if let Ok(found) = found {

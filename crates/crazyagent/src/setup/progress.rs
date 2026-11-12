@@ -27,7 +27,10 @@ pub struct Progress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checked {
     pub at: Instant,
-    pub found: Vec<(Dependency, Result<Option<Version>, InstallError>)>,
+    pub found: Vec<(
+        Dependency,
+        Result<Result<Version, crate::tools::Missing>, InstallError>,
+    )>,
 }
 
 static PROGRESS: Mutex<BTreeMap<PathBuf, Progress>> = Mutex::new(BTreeMap::new());
@@ -66,13 +69,18 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
             let state = match (progress.dependencies.get(dep), seen) {
                 (Some(step), _) => step.clone(),
                 (None, None) => DependencyState::Checking,
-                (None, Some(Some(Ok(Some(version))))) => DependencyState::Found {
+                (None, Some(Some(Ok(Ok(version))))) => DependencyState::Found {
                     version: version.clone(),
                 },
                 (None, Some(Some(Err(code)))) => DependencyState::Failed {
                     reason: super::plain_reason(code.0).to_owned(),
                 },
-                (None, Some(Some(Ok(None)) | None)) => DependencyState::Missing,
+                (None, Some(Some(Ok(Err(missing))))) => DependencyState::Missing {
+                    line: missing.line(),
+                },
+                (None, Some(None)) => DependencyState::Missing {
+                    line: dep.not_found().line(),
+                },
             };
             DependencyStatus {
                 name: *dep,
@@ -158,5 +166,42 @@ mod tests {
             assert_ne!(reason, super::super::plain_reason("setup_code_nobody_uses"));
             assert!(reason.contains("this system"), "{reason}");
         }
+    }
+
+    /// A tool setup finds nowhere, or a script whose interpreter is missing, shows the tool
+    /// resolver's owner line for that reason on its row, word for word what a launch that
+    /// needs it says, such as the live master's tmux line.
+    #[test]
+    fn a_missing_tool_row_shows_the_resolvers_line_for_its_reason() {
+        let needs = crate::tools::Missing {
+            tool: "graphify".into(),
+            reason: crate::tools::Reason::NeedsInterpreter,
+            needs: Some("python3".into()),
+            looked: Vec::new(),
+        };
+        let progress = Progress {
+            checked: Some(Checked {
+                at: Instant::now(),
+                found: vec![
+                    (Dependency::Tmux, Ok(Err(Dependency::Tmux.not_found()))),
+                    (Dependency::Uv, Ok(Ok(Version::parse("0.13.5").unwrap()))),
+                    (Dependency::Graphify, Ok(Err(needs.clone()))),
+                ],
+            }),
+            ..Progress::default()
+        };
+        let rows = dependency_rows(&progress);
+        assert_eq!(
+            rows[0].state,
+            DependencyState::Missing {
+                line: crate::tools::TMUX_MISSING.to_owned()
+            }
+        );
+        assert!(matches!(rows[1].state, DependencyState::Found { .. }));
+        assert_eq!(
+            rows[2].state,
+            DependencyState::Missing { line: needs.line() }
+        );
+        assert!(needs.line().contains("python3"), "{}", needs.line());
     }
 }
