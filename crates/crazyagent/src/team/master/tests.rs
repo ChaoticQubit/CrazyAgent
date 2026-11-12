@@ -1023,10 +1023,16 @@ fn a_live_master_s_team_calls_take_effect_while_its_turn_still_runs() {
             true
         )
     );
-    assert!(
-        text(&answers[2])
-            .0
-            .starts_with("Not sent: no agent of this project is called @page-writer"),
+    assert_eq!(
+        text(&answers[2]),
+        (
+            format!(
+                "Not sent: @page-writer is the handle of task {task}, which has not started yet. Send it again once {}() shows it running.",
+                tool::INSPECT_WORK_TOOL
+            )
+            .as_str(),
+            true
+        ),
         "{answers:#?}"
     );
     assert!(!text(&answers[3]).1, "{answers:#?}");
