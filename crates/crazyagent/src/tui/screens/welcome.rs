@@ -23,11 +23,16 @@ pub struct Welcome {
 }
 
 impl Welcome {
-    /// A new, empty welcome form.
+    /// The welcome form: empty on a first run, prefilled with the saved profile when the
+    /// owner runs first-run setup again from Settings, Profile (DEC-153).
     /// Input: the context. Output: the screen.
-    pub fn new(_ctx: &Ctx) -> Self {
+    pub fn new(ctx: &Ctx) -> Self {
+        let saved = match &ctx.store.profile {
+            Load::Ready(profile) => profile.as_ref(),
+            _ => None,
+        };
         Self {
-            form: ProfileForm::new(None, None),
+            form: ProfileForm::new(saved, None),
         }
     }
 
