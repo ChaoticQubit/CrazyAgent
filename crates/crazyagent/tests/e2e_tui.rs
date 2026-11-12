@@ -4,10 +4,14 @@ mod e2e_support;
 
 use crazyagent::engine::owner::{OwnerData, OwnerRead, OwnerResult};
 use crazyagent::master_session::{MasterReason, MasterTurnPhase, MasterTurnView};
+use crazyagent::notifications::{NoticeAction, NoticeReport};
 use crazyagent::protocol::ProjectId;
+use crazyagent::questions::{self, Ask, EngineSource, QuestionKind};
 use crazyagent::setup::{Dependency, DependencyState, PackState, SetupStatus};
 use crazyagent::terminal::tmux::installed;
-use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, repository, scratch, stop_tmux};
+use e2e_support::{
+    ENGINE, Engine, Owner, TMUX, hex, profile, repository, result, scratch, stop_tmux,
+};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -1684,6 +1688,110 @@ fn first_run_with_the_guide_unticked_adds_an_account_and_skips_the_guide() {
         );
         std::thread::sleep(POLL_TIME);
     }
+    drop(pty);
+    engine.stop();
+}
+
+const NOTICE_PROJECT: &str = "e2e-notice";
+
+/// The header row of a captured screen, where the notification counts show.
+/// Input: the screen. Output: its first line, empty for an empty capture.
+fn header_row(screen: &str) -> &str {
+    screen.lines().next().unwrap_or("")
+}
+
+/// Sends one change to the notification store as the owner, the way another client does
+/// while the TUI runs, and expects it applied. Inputs: the runtime, the engine and the
+/// change. Output: none; panics when the engine refuses it.
+fn notice_change(runtime: &tokio::runtime::Runtime, engine: &Engine, action: NoticeAction) {
+    runtime.block_on(async {
+        let mut owner = Owner::attach(engine).await;
+        let generation = owner.next();
+        let response = owner
+            .controller
+            .notification_action(action, generation)
+            .await
+            .unwrap();
+        owner.controller.detach();
+        assert_eq!(result(response), OwnerResult::Applied);
+    });
+}
+
+/// DEC-136a decision 10: the TUI header shows the notification store's unread and pending
+/// counts over every project and reads them again on each refresh: a reported app update
+/// counts as unread, an open question as unread and pending, and marking everything read
+/// from another client leaves only the pending question.
+#[test]
+fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
+    let mut engine = Engine::start("ca-e2e-notice-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-notice-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner.create_project(NOTICE_PROJECT, PROJECT).await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    let screen = pty.screen();
+    assert!(
+        !header_row(&screen).contains("unread") && !header_row(&screen).contains("pending"),
+        "an empty store shows no counts:\n{screen}"
+    );
+
+    notice_change(
+        &runtime,
+        &engine,
+        NoticeAction::Report {
+            report: NoticeReport::AppUpdateReady {
+                version: "3.0.1".into(),
+            },
+        },
+    );
+    pty.until("the header counts the unread app update", |screen| {
+        header_row(screen).contains("1 unread") && !header_row(screen).contains("pending")
+    });
+
+    let db = questions::open(engine.path()).unwrap();
+    questions::raise(
+        &db,
+        &ProjectId::new(NOTICE_PROJECT).unwrap(),
+        &EngineSource::Planning,
+        &Ask {
+            question: "Which page ships first?".into(),
+            kind: QuestionKind::Single,
+            options: vec!["Shop".into(), "Blog".into()],
+            recommended: Some("Shop".into()),
+            context: None,
+        },
+    )
+    .unwrap();
+    drop(db);
+    pty.until("the header counts the open question as pending", |screen| {
+        header_row(screen).contains("2 unread, 1 pending")
+    });
+
+    notice_change(
+        &runtime,
+        &engine,
+        NoticeAction::ReadAll { project_id: None },
+    );
+    pty.until("mark all read leaves the pending question", |screen| {
+        let header = header_row(screen);
+        header.contains("1 pending") && !header.contains("unread")
+    });
     drop(pty);
     engine.stop();
 }

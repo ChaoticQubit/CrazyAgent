@@ -988,6 +988,14 @@ fn waiting_text(
     }
 }
 
+/// The header's notification counts over every project (DEC-136a decision 10): unread
+/// items and pending Actions, each left out at zero. Input: the last counts read, none
+/// before the first read. Output: "N unread, M pending", or None when both are zero.
+fn notice_text(counts: Option<&crate::notifications::NoticeCounts>) -> Option<String> {
+    let _ = counts;
+    None
+}
+
 /// Counts change sets in one sentence. Inputs: the count and where they wait.
 /// Output: "1 change set waits <place>" or "N change sets wait <place>"; None for zero.
 fn waiting_sets(count: u32, place: &str) -> Option<String> {
@@ -1001,8 +1009,10 @@ fn waiting_sets(count: u32, place: &str) -> Option<String> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::notifications::{NoticeCounts, NoticePage};
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
+    use crate::tui::client::notifications::{NoticesEvent, NoticesQuery, NoticesReply};
     use crate::tui::glyphs::UNICODE;
     use crate::tui::keys::{ShiftArrows, ShiftEnter};
     use crate::tui::seam::{Activity, ResearchCounts};
@@ -1047,6 +1057,149 @@ mod tests {
         std::iter::from_fn(|| shell.ctx.next_request())
             .map(|request| format!("{request:?}"))
             .collect()
+    }
+
+    fn notices(query: NoticesQuery, result: Result<NoticesReply, String>) -> Arrival {
+        Arrival::Owner(Box::new(OwnerEvent::Notices(Box::new(NoticesEvent {
+            query,
+            result,
+        }))))
+    }
+
+    fn page(unread: u32, pending: u32) -> Result<NoticesReply, String> {
+        Ok(NoticesReply::Page(NoticePage {
+            items: Vec::new(),
+            counts: NoticeCounts { unread, pending },
+            more: false,
+            newest: 0,
+        }))
+    }
+
+    fn header_line(shell: &mut Shell) -> String {
+        crate::tui::render_tests::render(shell, 160, 30)
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn the_header_notice_text_names_unread_and_pending_and_drops_zero_parts() {
+        let counts = |unread, pending| NoticeCounts { unread, pending };
+        assert_eq!(notice_text(None), None);
+        assert_eq!(notice_text(Some(&counts(0, 0))), None);
+        assert_eq!(
+            notice_text(Some(&counts(3, 0))).as_deref(),
+            Some("3 unread")
+        );
+        assert_eq!(
+            notice_text(Some(&counts(0, 1))).as_deref(),
+            Some("1 pending")
+        );
+        assert_eq!(
+            notice_text(Some(&counts(2, 5))).as_deref(),
+            Some("2 unread, 5 pending")
+        );
+    }
+
+    #[test]
+    fn the_header_shows_the_notification_counts_on_every_view() {
+        let project = ProjectId::new("project-tidepool").unwrap();
+        let places = [
+            Place::Home,
+            Place::Settings(SettingsSection::Profile),
+            Place::Project {
+                id: project.clone(),
+                name: "Tidepool".into(),
+                tab: ProjectTab::Overview,
+            },
+            Place::Team {
+                id: project,
+                name: "Tidepool".into(),
+            },
+        ];
+        for place in places {
+            let mut shell = at(place.clone(), ctx());
+            let before = header_line(&mut shell);
+            assert!(!before.contains("unread"), "{place:?}: {before}");
+            shell.arrive(notices(NoticesQuery::counts(), page(4, 2)));
+            let line = header_line(&mut shell);
+            assert!(line.contains("4 unread, 2 pending"), "{place:?}: {line}");
+            shell.arrive(notices(NoticesQuery::counts(), page(0, 0)));
+            let line = header_line(&mut shell);
+            assert!(!line.contains("unread"), "{place:?}: {line}");
+            assert!(!line.contains("pending"), "{place:?}: {line}");
+        }
+    }
+
+    fn notice_reads(shell: &mut Shell) -> Vec<NoticesQuery> {
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Notices(query) => Some(*query),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn show_and_every_tick_read_the_notification_counts_once() {
+        let mut ctx = ctx();
+        ctx.link = Link::Connecting;
+        let mut shell = Shell::new(ctx);
+        notice_reads(&mut shell);
+        shell.arrive(Arrival::Connected(None));
+        assert_eq!(
+            notice_reads(&mut shell),
+            vec![NoticesQuery::counts()],
+            "show reads the counts"
+        );
+        let mut shell = at(Place::Home, ctx());
+        notice_reads(&mut shell);
+        shell.tick();
+        shell.tick();
+        assert_eq!(
+            notice_reads(&mut shell),
+            vec![NoticesQuery::counts()],
+            "a tick reads the counts, and a read already queued is not queued twice"
+        );
+    }
+
+    #[test]
+    fn only_a_read_over_every_project_sets_the_header_counts_and_a_change_reads_them_again() {
+        let mut shell = at(Place::Home, ctx());
+        shell.arrive(notices(NoticesQuery::counts(), page(2, 1)));
+        assert_eq!(
+            shell.ctx.store.notices,
+            Some(NoticeCounts {
+                unread: 2,
+                pending: 1
+            })
+        );
+        let NoticesQuery::Page(mut scoped) = NoticesQuery::counts() else {
+            unreachable!("counts() is a page read")
+        };
+        scoped.project_id = Some(ProjectId::new("project-tidepool").unwrap());
+        shell.arrive(notices(NoticesQuery::Page(scoped), page(9, 9)));
+        let line = header_line(&mut shell);
+        assert!(line.contains("2 unread, 1 pending"), "{line}");
+        shell.arrive(notices(NoticesQuery::counts(), Err("owner_busy".into())));
+        let line = header_line(&mut shell);
+        assert!(
+            line.contains("2 unread, 1 pending"),
+            "a failed read keeps the last: {line}"
+        );
+        notice_reads(&mut shell);
+        shell.arrive(notices(
+            NoticesQuery::Act {
+                action: crate::notifications::NoticeAction::ReadAll { project_id: None },
+                generation: 7,
+            },
+            Ok(NoticesReply::Done),
+        ));
+        assert_eq!(
+            notice_reads(&mut shell),
+            vec![NoticesQuery::counts()],
+            "a change reads the counts again"
+        );
     }
 
     #[test]

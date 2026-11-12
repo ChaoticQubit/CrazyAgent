@@ -33,6 +33,7 @@ pub(super) mod harness_settings;
 pub(super) mod ide;
 pub(super) mod intake;
 pub(super) mod learning;
+pub(super) mod notifications;
 pub(super) mod process;
 mod project_setup;
 pub(super) mod questions;
@@ -75,6 +76,7 @@ enum Job {
     Cleanup(Box<cleanup::CleanupQuery>),
     Reveal(Box<ide::RevealQuery>),
     Learning(Box<learning::LearningQuery>),
+    Notices(Box<notifications::NoticesQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -202,6 +204,7 @@ pub(super) enum OwnerEvent {
     Cleanup(Box<cleanup::CleanupEvent>),
     Reveal(Box<ide::RevealEvent>),
     Learning(Box<learning::LearningEvent>),
+    Notices(Box<notifications::NoticesEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -880,6 +883,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Learning(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Notices(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.notices(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => notifications::NoticesEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Notices(Box::new(event)),
                                 })
                                 .is_err()
                             {
