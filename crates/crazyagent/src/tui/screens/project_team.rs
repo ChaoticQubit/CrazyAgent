@@ -423,9 +423,7 @@ impl TeamView {
     /// composer is open.
     pub fn wants_models(&mut self) -> Option<ModelChoiceQuery> {
         let harness = self.models_due.take()?;
-        if self.draft.is_none() {
-            return None;
-        }
+        self.draft.as_ref()?;
         Some(ModelChoiceQuery::Read {
             harness,
             project: Some(self.project.clone()),
