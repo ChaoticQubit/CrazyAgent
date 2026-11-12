@@ -1005,14 +1005,14 @@ async function endGroup(group) {
  * Prints an HTML file to PDF with Google Chrome headless under umask 077, in a throwaway profile with a mock
  * keychain, every request sent to a closed proxy and every host name unresolvable. Chrome runs in its own process
  * group, killed whole on the timeout, on this process's exit or SIGTERM, SIGINT or SIGHUP, and after Chrome ends.
- * Input: the HTML path, the PDF path and optionally the Chrome executable (CRAZYAGENT_CHROME or the macOS app).
+ * Input: the HTML path, the PDF path and optionally the Chrome executable (CRAZYAGENT_PDF_CHROME, then CRAZYAGENT_CHROME, then the macOS app).
  * Output: the PDF path, mode 0600, moved into place only once complete. Throws a BLOCKED error when Chrome is missing.
  */
-export async function printPdf(htmlPath, pdfPath, { chrome = process.env.CRAZYAGENT_CHROME || CHROME, timeout = 120_000 } = {}) {
+export async function printPdf(htmlPath, pdfPath, { chrome = process.env.CRAZYAGENT_PDF_CHROME || process.env.CRAZYAGENT_CHROME || CHROME, timeout = 120_000 } = {}) {
   try {
     await stat(chrome);
   } catch {
-    fail(`BLOCKED: Google Chrome is not at ${chrome}; set CRAZYAGENT_CHROME to its executable`);
+    fail(`BLOCKED: Google Chrome is not at ${chrome}; set CRAZYAGENT_PDF_CHROME or CRAZYAGENT_CHROME to its executable`);
   }
   const profile = await mkdtemp(join(tmpdir(), "trial-report-chrome-"));
   const staging = await mkdtemp(join(dirname(pdfPath), ".report-pdf-"));
