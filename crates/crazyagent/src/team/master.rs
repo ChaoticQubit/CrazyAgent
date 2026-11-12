@@ -248,6 +248,24 @@ pub(crate) const SIGN_INS_CHECKING: &str = "Checking account sign-ins after the 
 /// yet (LMS-1); the views show it as is.
 pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another process is using its profile, such as a sign-in or a sign-out. The live master starts once the profile is free.";
 
+/// The live master's problem line and one team note when it cannot start because no terminal
+/// program is found, which on macOS and Linux is tmux: it names what is missing and how to
+/// install it, and the views offer Try again. The views show it as is.
+#[cfg(target_os = "macos")]
+pub(crate) const TERMINAL_MISSING: &str = "tmux is missing, so the live master's terminal can't open. Install tmux: run setup again from Settings (it needs Homebrew, from brew.sh), or run brew install tmux in Terminal. Then try again.";
+
+/// The live master's problem line and one team note when it cannot start because no terminal
+/// program is found, which on macOS and Linux is tmux: it names what is missing and how to
+/// install it, and the views offer Try again. The views show it as is.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) const TERMINAL_MISSING: &str = "tmux is missing, so the live master's terminal can't open. Install tmux: run setup again from Settings, or install it with your package manager. Then try again.";
+
+/// The live master's problem line and one team note when it cannot start because this
+/// computer's terminal host cannot run, and the views offer Try again. The views show it as is.
+#[cfg(not(unix))]
+pub(crate) const TERMINAL_MISSING: &str =
+    "The live master's terminal can't open on this computer. Try again in a moment.";
+
 /// The live master's problem line and one team note while an owner line has waited longer
 /// than a first screen may take for the master's app to read keys (F2); the line is typed
 /// once the app turns bracketed paste on.
