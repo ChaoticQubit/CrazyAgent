@@ -272,7 +272,7 @@ fn a_late_failure_puts_the_earlier_node_back_and_drops_the_new_tree() {
         "the new tree goes with the staging folder: {hidden:?}"
     );
 
-    let fresh = super::super::harness_prefix(work.path().join("fresh").as_path());
+    let fresh = crate::setup::harness_prefix(&work.path().join("fresh"));
     std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
     std::fs::set_permissions(
         fresh.parent().unwrap(),

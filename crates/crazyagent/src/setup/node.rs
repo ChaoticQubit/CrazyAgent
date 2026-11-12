@@ -14,6 +14,7 @@ const UNPACK_TIME: Duration = Duration::from_secs(300);
 const VERSION_TIME: Duration = Duration::from_secs(10);
 const TOP_BYTES_MAX: usize = 64;
 const LINKED: [&str; 3] = ["node", "npm", "npx"];
+const EARLIER: &str = "earlier";
 const LIMITS: Limits = Limits {
     entries: 20_000,
     bytes: 512 * 1024 * 1024,
@@ -191,9 +192,9 @@ pub fn install(engine_root: &Path) -> Result<NodeRuntime, InstallError> {
 /// with the pinned SHA-256, unpacks it there, checks the tree (`check_tree`) and that its
 /// node reports the pinned version, then moves it to `<engine root>/setup/node`, links
 /// node, npm and npx in `setup/bin` and makes the private npm prefix. A failure removes the
-/// staging folder; before the move it leaves any earlier Node as it was, after it the checked
-/// new Node stays and the earlier one is gone. Nothing runs with sudo. Inputs: the engine
-/// root and the pin. Output: the runtime, or the setup code.
+/// staging folder and leaves any earlier Node as it was, putting it back when a step after
+/// the move fails ([`take_back`]). Nothing runs with sudo. Inputs: the engine root and the
+/// pin. Output: the runtime, or the setup code.
 pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRuntime, InstallError> {
     let valid = (pin.url.starts_with("https://") || pin.url.starts_with("file:///"))
         && pin.url.len() <= 2048
@@ -241,13 +242,11 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
             return Err(InstallError("setup_version_mismatch"));
         }
         put_in_place(&top, &folder(engine_root), &staging)?;
-        let bin = setup.join("bin");
-        private_folder(&bin)?;
-        for name in LINKED {
-            link(&folder(engine_root).join("bin").join(name), &bin.join(name))?;
+        let placed = link_in(engine_root, &setup);
+        if placed.is_err() {
+            take_back(engine_root, &setup, &staging);
         }
-        make_prefix(&super::harness_prefix(engine_root), &bin.join("node"))?;
-        runtime(engine_root).ok_or(InstallError("setup_install_failed"))
+        placed
     })();
     let _ = std::fs::remove_dir_all(&staging);
     result
@@ -351,12 +350,45 @@ fn only_top(out: &Path, top: &str) -> Result<PathBuf, InstallError> {
     plain.then_some(found).ok_or(unsafe_tree)
 }
 
+/// The steps after the new tree is moved in: links node, npm and npx in `setup/bin`, makes
+/// the engine npm prefix and reads the runtime back. Inputs: the engine root and the setup
+/// folder. Output: the runtime, or the setup code.
+fn link_in(engine_root: &Path, setup: &Path) -> Result<NodeRuntime, InstallError> {
+    let bin = setup.join("bin");
+    private_folder(&bin)?;
+    for name in LINKED {
+        link(&folder(engine_root).join("bin").join(name), &bin.join(name))?;
+    }
+    make_prefix(&super::harness_prefix(engine_root), &bin.join("node"))?;
+    runtime(engine_root).ok_or(InstallError("setup_install_failed"))
+}
+
+/// Undoes the move after a later step failed: the new tree goes into the staging folder,
+/// which is removed after, and the earlier Node comes back; with no earlier Node, the
+/// `setup/bin` links naming the new tree go too, so none points at nothing. Inputs: the
+/// engine root, the setup folder and the staging folder.
+fn take_back(engine_root: &Path, setup: &Path, staging: &Path) {
+    let kept = folder(engine_root);
+    let earlier = staging.join(EARLIER);
+    let _ = std::fs::rename(&kept, staging.join("dropped"));
+    if std::fs::symlink_metadata(&earlier).is_ok() {
+        let _ = std::fs::rename(&earlier, &kept);
+        return;
+    }
+    for name in LINKED {
+        let at = setup.join("bin").join(name);
+        if std::fs::read_link(&at).is_ok_and(|target| target == kept.join("bin").join(name)) {
+            let _ = std::fs::remove_file(&at);
+        }
+    }
+}
+
 /// Moves a checked tree to its kept folder, first moving any earlier one into the staging
 /// folder, which is removed later, and putting it back when the move fails. Inputs: the
 /// tree, the kept folder and the staging folder. Output: Ok, or `setup_store_unavailable`.
 fn put_in_place(tree: &Path, kept: &Path, staging: &Path) -> Result<(), InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
-    let earlier = staging.join("earlier");
+    let earlier = staging.join(EARLIER);
     let had = std::fs::symlink_metadata(kept).is_ok();
     if had {
         std::fs::rename(kept, &earlier).map_err(|_| unavailable)?;
