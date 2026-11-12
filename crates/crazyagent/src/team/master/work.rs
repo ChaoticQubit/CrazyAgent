@@ -159,7 +159,11 @@ pub(super) fn start_work(
                 work: Some(overlap.theirs.work),
                 reply_to: None,
                 body: bound_text(&note, coord::BODY_BYTES_MAX),
-                idempotency_key: None,
+                idempotency_key: Some(format!(
+                    "{}{work}-{}",
+                    coord::delivery::OVERLAP_KEY,
+                    overlap.theirs.agent
+                )),
             },
             now,
         ))?;
@@ -195,6 +199,50 @@ fn wide_claims(answering: &Answering<'_>, claims: &[String]) -> Result<Vec<Strin
         }
     }
     Ok(notes)
+}
+
+/// Reads the whole stored result of one ended task for `inspect_work` with a task (F32),
+/// which a results message names when it cut the result: the master reads any task of its
+/// project, another agent a task it ran or one an agent it leads ran. Takes the database,
+/// what the answers need, the caller, whether it is the master and the task. Returns the
+/// text, or a refusal and true, or a SQLite failure.
+pub(super) fn inspect_task(
+    connection: &Connection,
+    answering: &Answering<'_>,
+    agent: i64,
+    master: bool,
+    task: i64,
+) -> Result<(String, bool), EngineError> {
+    assert!(task > 0);
+    let project = &answering.stored.project_id;
+    let ended: Option<(String, String, Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT harness,status,result,error FROM team_tasks
+             WHERE id=?1 AND project=?2 AND status IN ('done','failed','cancelled')
+             AND (?3 OR agent=?4 OR parent=?4)",
+            params![task, project.as_str(), master, agent],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((harness, status, result, problem)) = ended else {
+        return Ok((
+            format!("Not shown: task {task} is not an ended task you or an agent you lead ran."),
+            true,
+        ));
+    };
+    let label = crate::team::TaskStatus::parse(&status).map_or("Finished", |status| status.label());
+    let mut text = format!(
+        "Task {task} ({}): {label}\n",
+        bound_text(&harness, AGENT_SHOWN_MAX)
+    );
+    for part in [problem, result].into_iter().flatten() {
+        text.push_str(&crate::team::events::agent_text(part.trim()));
+        text.push('\n');
+    }
+    let text = bound_text(&text, tool::REPLY_TEXT_MAX);
+    assert!(text.len() <= tool::REPLY_TEXT_MAX);
+    Ok((text, false))
 }
 
 /// Reads the caller's place in the team for `inspect_work` (DEC-104): its work, the

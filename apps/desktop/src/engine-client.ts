@@ -1026,7 +1026,7 @@ export interface AgentMessages {
 }
 
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
-export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped";
+export type TeamEventState = "queued" | "delivered" | "muted" | "carried" | "dropped" | "settled";
 export type WakeRuleLevel = "shipped" | "app" | "project" | "agent";
 
 export interface TeamEvent {

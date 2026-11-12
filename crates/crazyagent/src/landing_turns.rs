@@ -50,6 +50,27 @@ pub fn record(
     Ok(Landed::Added(id))
 }
 
+/// Records one ended turn as [`record`] does and tells whether the owner and the master
+/// hear of it (F31): a set this turn opened, or one that waited on its agent and is pending
+/// again, is news; edits a turn adds to a set already pending for the owner are not, so a
+/// master working in short turns posts one notice per set. Inputs: as `record`. Output:
+/// the landing and whether it is news, never news unless it is `Landed::Added`.
+pub fn record_news(
+    db: &Connection,
+    workspace: &Workspace,
+    end: &TurnEnd,
+    settings: Option<&(PathBuf, PathBuf)>,
+) -> Result<(Landed, bool), EngineError> {
+    let before = landing::open_change_set(db, &workspace.worktree)?.map(|set| (set.id, set.state));
+    let landed = record(db, workspace, end, settings)?;
+    let news = match &landed {
+        Landed::Added(id) => before != Some((id.clone(), ChangeState::Pending)),
+        Landed::Nothing | Landed::Waiting(_) => false,
+    };
+    assert!(!news || matches!(landed, Landed::Added(_)));
+    Ok((landed, news))
+}
+
 /// Sends a team agent's change set that conflicts with main back to its agent at its turn
 /// end (OS-8): once `landing::conflicts_with_main` finds the clash, the agent must be able
 /// to take its resolve task as the engine starts it, which an agent the owner stopped
