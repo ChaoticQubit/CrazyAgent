@@ -210,12 +210,13 @@ fn an_archive_without_crazyagent_is_refused_before_anything_changes() {
 }
 
 #[test]
-fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary() {
+fn every_helper_the_release_ships_is_replaced_including_the_windows_boundary_and_the_bundled_tmux() {
     let install = tempfile::tempdir().unwrap();
     script(&install.path().join("crazyagent"), "echo crazyagent 0.0.1");
     let helpers = [
         "crazyagent-rcli",
         "crazyagent-runner",
+        "crazyagent-tmux",
         "crazyagent-landlock",
         "crazyagent-win-boundary",
     ];
