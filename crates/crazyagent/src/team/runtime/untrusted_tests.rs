@@ -196,8 +196,9 @@ fn an_untrusted_team_agent_launch_profile_keeps_every_repository_harness_file_un
 
 /// U3-17 on the real team launch: an untrusted tools-on sub-agent whose model is a managed
 /// account reached on port 443 connects to another host on 443, and the installed profile
-/// denies it. Seatbelt filters by port only, so this stays red until the S4b model-only
-/// proxy carries the untrusted network (gap G2).
+/// denies it. Seatbelt filters by port only, so the agent reaches its model only through
+/// the S4b model proxy, which an untrusted project gets at every network choice (gap G2,
+/// CU-2).
 #[test]
 fn an_untrusted_team_agent_launch_profile_cannot_reach_a_non_model_host() {
     let fixture = Fixture::new(1);

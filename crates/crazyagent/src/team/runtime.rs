@@ -8762,7 +8762,7 @@ impl TeamRuntime {
             return Err(with_code(line, Some(code)));
         }
         let open = tools && !enforcement.model_endpoints_only;
-        let kept = match (open, &self.settings) {
+        let kept = match (tools, &self.settings) {
             (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
                 .map_err(|code| {
                     with_code(
@@ -8779,8 +8779,8 @@ impl TeamRuntime {
             }
             (false, _) => Vec::new(),
         };
-        let proxy = if open
-            && policy.network == AgentNetwork::None
+        let proxy = if tools
+            && (policy.network == AgentNetwork::None || enforcement.model_endpoints_only)
             && !matches!(remote, SandboxRemote::Loopback(_))
         {
             let hosts = model_hosts(launch, &account.reach)?;
