@@ -77,7 +77,7 @@ const PATH_COPY: [(&str, &str); 13] = [
     ),
     ("owner_runtime_stale", "The engine restarted. Try again."),
 ];
-const COPY: [(&str, &str); 26] = [
+const COPY: [(&str, &str); 28] = [
     (
         UNKNOWN_INSTALL,
         "CrazyAgent can't tell how this was installed, so it won't update it.",
@@ -167,6 +167,14 @@ const COPY: [(&str, &str); 26] = [
         "The install finished, but CrazyAgent can't find the harness. Choose Check again.",
     ),
     ("harness_install_failed", "The install didn't finish."),
+    (
+        "harness_install_needs_node",
+        "CrazyAgent installs this one with npm, and Node.js isn't on this Mac yet.",
+    ),
+    (
+        "harness_install_list_invalid",
+        "CrazyAgent couldn't install that list of harnesses. Pick them again.",
+    ),
 ];
 
 /// What an owner-confirmed job does to a harness: update an installed one or install a
@@ -1422,7 +1430,9 @@ impl Screen for Harnesses {
     }
 }
 
-fn plain_update(code: &str) -> &'static str {
+/// The plain sentence for a harness code, or for any other engine code the sentence the
+/// Settings pages use. Input: the code. Output: one sentence.
+pub(super) fn plain_update(code: &str) -> &'static str {
     if code.starts_with("harness_update_") || code.starts_with("harness_install_") {
         update_copy(code)
     } else {

@@ -30,16 +30,14 @@ test("the TUI Harnesses step uses the desktop step's words", () => {
 });
 
 test("the TUI progress sentences are the desktop's, with the same counts filled in", () => {
-  const filled = (literal, counts) => literal.replace("{done}", String(counts.done)).replace("{total}", String(counts.total)).replace("{failed}", String(counts.failed));
-  const formats = STEP.filter((literal) => literal.includes("{done}"));
-  for (const counts of [{ done: 1, total: 2, failed: 0, running: true }, { done: 2, total: 2, failed: 0, running: false }]) {
-    assert.ok(formats.some((literal) => filled(literal, counts) === model.progressLine(counts)), model.progressLine(counts));
-  }
-  const failed = { done: 2, total: 2, failed: 1, running: false };
   const tail = STEP.find((literal) => literal.includes("{failed}"));
   assert.ok(tail, "the failed tail");
-  const finished = formats.find((literal) => literal.startsWith("Installs finished"));
-  assert.equal(filled(finished, failed).replace("{tail}", filled(tail, failed)), model.progressLine(failed));
+  const filled = (literal, counts) => literal.replace("{done}", String(counts.done)).replace("{total}", String(counts.total))
+    .replace("{tail}", counts.failed ? tail : "").replace("{failed}", String(counts.failed));
+  const formats = STEP.filter((literal) => literal.includes("{done}"));
+  for (const counts of [{ done: 1, total: 2, failed: 0, running: true }, { done: 2, total: 2, failed: 0, running: false }, { done: 2, total: 2, failed: 1, running: false }]) {
+    assert.ok(formats.some((literal) => filled(literal, counts) === model.progressLine(counts)), model.progressLine(counts));
+  }
 });
 
 test("the TUI says needs Node and a bad list in the desktop's words", () => {

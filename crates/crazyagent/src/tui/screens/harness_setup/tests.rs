@@ -107,11 +107,26 @@ fn step(width: u16, height: u16) -> Shell {
     Shell::with(ctx(width, height), Box::new(HarnessSetup::new()))
 }
 
-fn answer(shell: &mut Shell, catalog: &Entries, codex: HarnessVersions, claude: HarnessVersions, queued: &[&str]) {
+fn answer(
+    shell: &mut Shell,
+    catalog: &Entries,
+    codex: HarnessVersions,
+    claude: HarnessVersions,
+    queued: &[&str],
+) {
     shell.arrive(arrival(SettingsEvent::Harnesses(Ok(catalog.all.clone()))));
-    shell.arrive(arrival(SettingsEvent::HarnessQueue(Ok(queued.iter().map(|id| (*id).to_owned()).collect()))));
-    shell.arrive(arrival(SettingsEvent::HarnessVersions("codex".into(), Ok(codex))));
-    shell.arrive(arrival(SettingsEvent::HarnessVersions("claude-code".into(), Ok(claude))));
+    shell.arrive(arrival(SettingsEvent::HarnessQueue(Ok(queued
+        .iter()
+        .map(|id| (*id).to_owned())
+        .collect()))));
+    shell.arrive(arrival(SettingsEvent::HarnessVersions(
+        "codex".into(),
+        Ok(codex),
+    )));
+    shell.arrive(arrival(SettingsEvent::HarnessVersions(
+        "claude-code".into(),
+        Ok(claude),
+    )));
 }
 
 fn read_step(width: u16, height: u16) -> (Shell, Entries) {
@@ -177,41 +192,91 @@ fn each_row_says_what_installing_runs_or_why_it_cannot_in_the_desktop_words() {
     let found = entries(&["codex", "claude"]);
     let codex = || versions("codex", Some(LINE), Some("harness_update_not_installed"));
     assert_eq!(harness_row("rcli", None, None, &[]), Row::Bundled);
-    assert_eq!(harness_row("codex", Some(entry(&none, "codex")), None, &[]), Row::Reading);
+    assert_eq!(
+        harness_row("codex", Some(entry(&none, "codex")), None, &[]),
+        Row::Reading
+    );
     assert_eq!(
         harness_row("codex", Some(entry(&none, "codex")), Some(&codex()), &[]),
         Row::Offer { line: LINE.into() }
     );
     assert_eq!(
-        harness_row("codex", Some(entry(&none, "codex")), Some(&versions("codex", None, Some(NEEDS_NODE))), &[]),
+        harness_row(
+            "codex",
+            Some(entry(&none, "codex")),
+            Some(&versions("codex", None, Some(NEEDS_NODE))),
+            &[]
+        ),
         Row::Refused {
             reason: update_copy(NEEDS_NODE).into(),
             guide: Some("https://example.test/codex".into())
         }
     );
     assert_eq!(
-        harness_row("codex", Some(entry(&none, "codex")), Some(&codex()), &["codex".into()]),
+        harness_row(
+            "codex",
+            Some(entry(&none, "codex")),
+            Some(&codex()),
+            &["codex".into()]
+        ),
         Row::Waiting
     );
-    let running = HarnessVersions { running: true, ..codex() };
-    assert_eq!(harness_row("codex", Some(entry(&none, "codex")), Some(&running), &[]), Row::Installing);
-    let failed = HarnessVersions { last: Some(ended(false, Some("harness_install_failed"), None)), ..codex() };
+    let running = HarnessVersions {
+        running: true,
+        ..codex()
+    };
+    assert_eq!(
+        harness_row("codex", Some(entry(&none, "codex")), Some(&running), &[]),
+        Row::Installing
+    );
+    let failed = HarnessVersions {
+        last: Some(ended(false, Some("harness_install_failed"), None)),
+        ..codex()
+    };
     assert_eq!(
         harness_row("codex", Some(entry(&none, "codex")), Some(&failed), &[]),
-        Row::Failed { reason: update_copy("harness_install_failed").into() }
+        Row::Failed {
+            reason: update_copy("harness_install_failed").into()
+        }
     );
-    let done = HarnessVersions { install: None, refusal: None, last: Some(ended(true, None, Some("0.52.0"))), ..codex() };
+    let done = HarnessVersions {
+        install: None,
+        refusal: None,
+        last: Some(ended(true, None, Some("0.52.0"))),
+        ..codex()
+    };
     assert_eq!(
         harness_row("codex", Some(entry(&found, "codex")), Some(&done), &[]),
-        Row::Done { version: Some("0.52.0".into()) }
+        Row::Done {
+            version: Some("0.52.0".into())
+        }
     );
-    let installed = HarnessVersions { installed: Some("2.1.0".into()), install: None, refusal: None, ..versions("claude-code", None, None) };
+    let installed = HarnessVersions {
+        installed: Some("2.1.0".into()),
+        install: None,
+        refusal: None,
+        ..versions("claude-code", None, None)
+    };
     assert_eq!(
-        harness_row("claude-code", Some(entry(&found, "claude-code")), Some(&installed), &[]),
-        Row::Installed { version: Some("2.1.0".into()) }
+        harness_row(
+            "claude-code",
+            Some(entry(&found, "claude-code")),
+            Some(&installed),
+            &[]
+        ),
+        Row::Installed {
+            version: Some("2.1.0".into())
+        }
     );
     assert!(Row::Offer { line: LINE.into() }.tickable());
-    for row in [Row::Bundled, Row::Reading, Row::Waiting, Row::Installing, Row::Done { version: None }, Row::Failed { reason: "x".into() }] {
+    for row in [
+        Row::Bundled,
+        Row::Reading,
+        Row::Waiting,
+        Row::Installing,
+        Row::Done { version: None },
+        Row::Failed { reason: "x".into() },
+    ] {
         assert!(!row.tickable(), "{row:?}");
     }
 }
@@ -231,15 +296,30 @@ fn needs_node_and_a_bad_list_have_their_own_plain_sentences() {
 #[test]
 fn progress_counts_the_sent_picks_in_the_desktop_words() {
     assert_eq!(
-        progress_line(Progress { done: 1, total: 2, failed: 0, running: true }),
+        progress_line(Progress {
+            done: 1,
+            total: 2,
+            failed: 0,
+            running: true
+        }),
         "Installing: 1 of 2 done. You can continue; the installs keep going."
     );
     assert_eq!(
-        progress_line(Progress { done: 2, total: 2, failed: 1, running: false }),
+        progress_line(Progress {
+            done: 2,
+            total: 2,
+            failed: 1,
+            running: false
+        }),
         "Installs finished: 2 of 2 done, 1 failed. Each failure shows its reason above."
     );
     assert_eq!(
-        progress_line(Progress { done: 2, total: 2, failed: 0, running: false }),
+        progress_line(Progress {
+            done: 2,
+            total: 2,
+            failed: 0,
+            running: false
+        }),
         "Installs finished: 2 of 2 done."
     );
 }
@@ -248,35 +328,76 @@ fn progress_counts_the_sent_picks_in_the_desktop_words() {
 fn space_picks_an_offer_and_enter_installs_the_picks_through_the_engine_queue() {
     let (mut shell, _none) = read_step(120, 36);
     let rows = render(&mut shell, 120, 36);
-    assert!(shows(&rows, &format!("{INSTALLS_WITH} {LINE}")), "{rows:#?}");
-    assert!(shows(&rows, update_copy(NEEDS_NODE)), "{rows:#?}");
+    assert!(
+        shows(&rows, &format!("{INSTALLS_WITH} {LINE}")),
+        "{rows:#?}"
+    );
+    assert!(words(&rows).contains(update_copy(NEEDS_NODE)), "{rows:#?}");
     shell.key(Key::Down);
     shell.key(Key::Char(' '));
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, "[x] Codex"), "{rows:#?}");
-    assert!(shows(&rows, "[> Install picked harnesses ]   [ Skip for now ]"), "{rows:#?}");
+    assert!(
+        shows(&rows, "[> Install picked harnesses ]   [ Skip for now ]"),
+        "{rows:#?}"
+    );
     let help = bar(&rows);
     assert!(help.contains("Enter Install picked harnesses"), "{help}");
     shell.key(Key::Enter);
-    assert_eq!(sent(&mut shell), vec![Sent::InstallMany(vec!["codex".into()])]);
-    shell.arrive(arrival(SettingsEvent::HarnessesQueued(vec!["codex".into()], Ok(()))));
+    assert_eq!(
+        sent(&mut shell),
+        vec![Sent::InstallMany(vec!["codex".into()])]
+    );
+    shell.arrive(arrival(SettingsEvent::HarnessesQueued(
+        vec!["codex".into()],
+        Ok(()),
+    )));
     assert_eq!(sent(&mut shell), reads());
     let none = entries(&[]);
-    let running = HarnessVersions { running: true, ..versions("codex", Some(LINE), None) };
-    answer(&mut shell, &none, running, versions("claude-code", None, Some(NEEDS_NODE)), &[]);
+    let running = HarnessVersions {
+        running: true,
+        ..versions("codex", Some(LINE), None)
+    };
+    answer(
+        &mut shell,
+        &none,
+        running,
+        versions("claude-code", None, Some(NEEDS_NODE)),
+        &[],
+    );
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, INSTALLING), "{rows:#?}");
-    assert!(shows(&rows, "Installing: 0 of 1 done. You can continue; the installs keep going."), "{rows:#?}");
+    assert!(
+        shows(
+            &rows,
+            "Installing: 0 of 1 done. You can continue; the installs keep going."
+        ),
+        "{rows:#?}"
+    );
     assert!(shows(&rows, "[> Continue ]"), "{rows:#?}");
     shell.refresh();
     assert_eq!(sent(&mut shell), reads());
     let found = entries(&["codex"]);
-    let done = HarnessVersions { install: None, refusal: None, last: Some(ended(true, None, Some("0.52.0"))), ..versions("codex", None, None) };
-    answer(&mut shell, &found, done, versions("claude-code", None, Some(NEEDS_NODE)), &[]);
+    let done = HarnessVersions {
+        install: None,
+        refusal: None,
+        last: Some(ended(true, None, Some("0.52.0"))),
+        ..versions("codex", None, None)
+    };
+    answer(
+        &mut shell,
+        &found,
+        done,
+        versions("claude-code", None, Some(NEEDS_NODE)),
+        &[],
+    );
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, "Installs finished: 1 of 1 done."), "{rows:#?}");
     shell.refresh();
-    assert!(sent(&mut shell).is_empty(), "no reads once every pick ended");
+    assert!(
+        sent(&mut shell).is_empty(),
+        "no reads once every pick ended"
+    );
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
 }
@@ -289,7 +410,10 @@ fn a_refused_row_cannot_be_picked_and_r_reads_it_again_with_its_guide_shown() {
     shell.key(Key::Char(' '));
     let rows = render(&mut shell, 120, 36);
     assert!(shows(&rows, "[ ] Claude Code"), "{rows:#?}");
-    assert!(shows(&rows, &format!("{GUIDE}: https://example.test/claude-code")), "{rows:#?}");
+    assert!(
+        shows(&rows, &format!("{GUIDE}: https://example.test/claude-code")),
+        "{rows:#?}"
+    );
     let help = bar(&rows);
     assert!(help.contains("r Try again"), "{help}");
     assert!(!help.contains("Space"), "{help}");
@@ -306,13 +430,25 @@ fn a_failed_install_offers_try_again_which_queues_only_that_harness() {
         last: Some(ended(false, Some("harness_install_failed"), None)),
         ..versions("codex", Some(LINE), Some("harness_update_not_installed"))
     };
-    answer(&mut shell, &none, failed, versions("claude-code", None, Some(NEEDS_NODE)), &[]);
+    answer(
+        &mut shell,
+        &none,
+        failed,
+        versions("claude-code", None, Some(NEEDS_NODE)),
+        &[],
+    );
     shell.key(Key::Down);
     let rows = render(&mut shell, 120, 36);
-    assert!(shows(&rows, update_copy("harness_install_failed")), "{rows:#?}");
+    assert!(
+        shows(&rows, update_copy("harness_install_failed")),
+        "{rows:#?}"
+    );
     assert!(bar(&rows).contains("r Try again"));
     shell.key(Key::Char('r'));
-    assert_eq!(sent(&mut shell), vec![Sent::InstallMany(vec!["codex".into()])]);
+    assert_eq!(
+        sent(&mut shell),
+        vec![Sent::InstallMany(vec!["codex".into()])]
+    );
 }
 
 #[test]
@@ -322,11 +458,19 @@ fn skip_and_continue_go_to_the_accounts_step_without_installing() {
     shell.key(Key::Char(' '));
     shell.key(Key::Char('c'));
     assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
-    assert!(!sent(&mut shell).iter().any(|job| matches!(job, Sent::InstallMany(_))));
+    assert!(
+        !sent(&mut shell)
+            .iter()
+            .any(|job| matches!(job, Sent::InstallMany(_)))
+    );
     let (mut shell, _none) = read_step(80, 24);
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
-    assert!(!sent(&mut shell).iter().any(|job| matches!(job, Sent::InstallMany(_))));
+    assert!(
+        !sent(&mut shell)
+            .iter()
+            .any(|job| matches!(job, Sent::InstallMany(_)))
+    );
 }
 
 #[test]
@@ -345,7 +489,10 @@ fn install_from_the_app_off_leaves_nothing_to_pick_and_enter_continues() {
     shell.key(Key::Char(' '));
     let rows = render(&mut shell, 80, 24);
     assert!(shows(&rows, "[ ] Codex"), "{rows:#?}");
-    assert!(shows(&rows, update_copy("harness_install_off")), "{rows:#?}");
+    assert!(
+        shows(&rows, update_copy("harness_install_off")),
+        "{rows:#?}"
+    );
     shell.key(Key::Enter);
     assert_eq!(shell.place(), Some(Place::FirstRunAccounts));
 }
@@ -399,9 +546,15 @@ fn the_worst_case_rows_keep_the_problem_and_buttons_in_an_80_by_24_frame() {
         Err("harness_update_busy".into()),
     )));
     let rows = render(&mut shell, 80, 24);
-    assert!(shows(&rows, update_copy("harness_update_busy")), "{rows:#?}");
+    assert!(
+        shows(&rows, update_copy("harness_update_busy")),
+        "{rows:#?}"
+    );
     assert!(shows(&rows, "[> Install picked harnesses ]"), "{rows:#?}");
-    assert!(shows(&rows, &format!("{GUIDE}: https://example.test/claude-code")), "{rows:#?}");
+    assert!(
+        shows(&rows, &format!("{GUIDE}: https://example.test/claude-code")),
+        "{rows:#?}"
+    );
     assert!(
         rows.iter().all(|row| row.chars().count() <= 80),
         "{rows:#?}"
