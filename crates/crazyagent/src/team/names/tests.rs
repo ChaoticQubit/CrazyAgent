@@ -851,7 +851,11 @@ fn a_waiting_task_s_role_names_that_task_until_it_starts() {
     let alpha = project("alpha");
     let queued = task(&connection, "alpha");
     give_role(&connection, &alpha, queued, "Classifier storage", 0).unwrap();
-    for name in ["@classifier-storage", "classifier-storage", " @Classifier-Storage "] {
+    for name in [
+        "@classifier-storage",
+        "classifier-storage",
+        " @Classifier-Storage ",
+    ] {
         assert_eq!(
             waiting_task(&connection, &alpha, name).unwrap(),
             Some(queued),
@@ -859,7 +863,11 @@ fn a_waiting_task_s_role_names_that_task_until_it_starts() {
         );
     }
     for name in ["@other", "", "@", &"x".repeat(200)] {
-        assert_eq!(waiting_task(&connection, &alpha, name).unwrap(), None, "{name}");
+        assert_eq!(
+            waiting_task(&connection, &alpha, name).unwrap(),
+            None,
+            "{name}"
+        );
     }
     assert_eq!(
         waiting_task(&connection, &project("beta"), "@classifier-storage").unwrap(),
@@ -897,11 +905,15 @@ fn retired_handles_are_finished_agents_without_a_worktree_that_no_live_agent_hol
         .unwrap();
     stop(&connection, gone);
     let kept = agent(&connection, "alpha", "sub", "working");
-    assign_role(&connection, &alpha, kept, "docs").unwrap().unwrap();
+    assign_role(&connection, &alpha, kept, "docs")
+        .unwrap()
+        .unwrap();
     worktree(kept);
     stop(&connection, kept);
     let running = agent(&connection, "alpha", "sub", "working");
-    assign_role(&connection, &alpha, running, "web").unwrap().unwrap();
+    assign_role(&connection, &alpha, running, "web")
+        .unwrap()
+        .unwrap();
     assert_eq!(
         retired(&connection, &alpha).unwrap(),
         vec![("core-policy".to_owned(), gone)]
@@ -948,6 +960,8 @@ fn the_handle_registry_keeps_its_newest_handles_within_the_bound() {
     connection
         .execute("DELETE FROM team_agents WHERE id=?1", [sub])
         .unwrap();
-    assign_role(&connection, &alpha, other, "fresh").unwrap().unwrap();
+    assign_role(&connection, &alpha, other, "fresh")
+        .unwrap()
+        .unwrap();
     assert_eq!(count(&connection), 1, "rows of a deleted agent are dropped");
 }

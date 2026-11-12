@@ -49,7 +49,8 @@ const SUFFIXES_MAX: usize = PANES_PER_PROJECT_MAX + 2;
 
 const _: () = assert!(PERSONAS.len() > PANES_PER_PROJECT_MAX);
 const _: () = assert!(HANDLE_CHARS_MAX >= 8 && HANDLE_CHARS_MAX < NAME_CHARS_MAX);
-const _: () = assert!(HANDLES_KEPT_MAX >= PANES_PER_PROJECT_MAX && RETIRED_LISTED_MAX <= HANDLES_KEPT_MAX);
+const _: () =
+    assert!(HANDLES_KEPT_MAX >= PANES_PER_PROJECT_MAX && RETIRED_LISTED_MAX <= HANDLES_KEPT_MAX);
 
 /// A team sub-agent's stable persona and the role handle of its current job, without the `@`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,9 +532,10 @@ pub fn retired(
         ))
         .map_err(error)?;
     let found = statement
-        .query_map(params![project.as_str(), RETIRED_LISTED_MAX as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
+        .query_map(
+            params![project.as_str(), RETIRED_LISTED_MAX as i64],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
         .map_err(error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;

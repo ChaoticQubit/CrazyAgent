@@ -319,7 +319,10 @@ pub(super) fn inspect_work(
         if !retired.is_empty() {
             let mut lines = Vec::with_capacity(retired.len());
             for (_, id) in &retired {
-                lines.push(format!("- {}", crate::team::events::label(connection, *id)?));
+                lines.push(format!(
+                    "- {}",
+                    crate::team::events::label(connection, *id)?
+                ));
             }
             sections.push(format!(
                 "Retired handles: these agents finished and their worktrees were cleaned up after their work landed, so a message or wake to one is refused:\n{}",
