@@ -116,20 +116,7 @@ impl OwnerRuntimeHandle {
         let project = prepared.session.project_id.clone();
         tokio::task::spawn_blocking(move || {
             let db = crate::storage::versioned::open(&root)?;
-            let settings = crate::harness_settings::apply::for_launch(
-                &db,
-                harness,
-                &executable,
-                Some(&project),
-            )?;
-            let model = crate::model_choice::store::launch_model(
-                &db,
-                harness,
-                &crate::model_choice::catalog(harness),
-                Some(&project),
-                crate::model_choice::Slot::Master,
-            )?;
-            Ok((settings, model))
+            master_choice(&db, harness, &executable, &project)
         })
         .await
         .map_err(|_| failure("harness_settings_unavailable"))?
@@ -3072,6 +3059,30 @@ mod codex_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/untrusted_tests.rs"]
 mod untrusted_tests;
+
+/// Reads the owner's harness settings and master model (DEC-150) for one Claude Code or
+/// Codex master turn: the master slot for the harness in the project, then the app's.
+/// Inputs: the engine database, the harness id, its registered executable and the project.
+/// Output: the settings and the model, none for the account's own, or a
+/// `HARNESS_SETTINGS_CODES` refusal or `model_choice_unavailable`.
+fn master_choice(
+    db: &rusqlite::Connection,
+    harness: &str,
+    executable: &Path,
+    project: &crate::protocol::ProjectId,
+) -> Result<(crate::harness_settings::apply::Applied, Option<String>), EngineError> {
+    assert!(matches!(harness, "claude-code" | "codex"));
+    let settings =
+        crate::harness_settings::apply::for_launch(db, harness, executable, Some(project))?;
+    let model = crate::model_choice::store::launch_model(
+        db,
+        harness,
+        &crate::model_choice::catalog(harness),
+        Some(project),
+        crate::model_choice::Slot::Master,
+    )?;
+    Ok((settings, model))
+}
 
 #[cfg(all(test, unix))]
 #[path = "master_host_launch/model_tests.rs"]
