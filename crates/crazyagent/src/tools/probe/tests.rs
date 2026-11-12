@@ -182,7 +182,7 @@ fn the_probed_folders_put_the_found_npm_prefix_bin_first_then_the_login_folders(
         (vec![global, tools.clone(), other.clone()], true)
     );
     assert_eq!(
-        probed(&[other.clone()], places(), &home, "owner"),
+        probed(std::slice::from_ref(&other), places(), &home, "owner"),
         (vec![other.clone()], true),
         "no npm found, the login folders alone, and nothing failed"
     );
@@ -248,7 +248,7 @@ fn the_folder_probes_run_again_only_after_a_failure_or_a_miss_backing_off_to_ten
     probes.finish(vec![b.clone()], true, at);
     assert_eq!(
         probes.found,
-        [b.clone()],
+        std::slice::from_ref(&b),
         "a complete run replaces the folders"
     );
     assert!(!probes.start(at + BACKOFF_MAX, false));
@@ -331,9 +331,18 @@ fn a_folder_run_that_panics_is_recorded_as_failed_so_a_later_one_can_start() {
             .join()
     });
     assert!(outcome.is_err());
+    {
+        let probes = lock(&probes);
+        assert!(!probes.running, "the run no longer counts as going");
+        assert_eq!(probes.last.map(|run| run.complete), Some(false));
+    }
+    assert!(lock(&probes).start_now());
+    let found = PathBuf::from("/a/bin");
+    Running::new(&probes).finish(vec![found.clone()], true);
     let probes = lock(&probes);
-    assert!(!probes.running, "the run no longer counts as going");
-    assert_eq!(probes.last.map(|run| run.complete), Some(false));
+    assert!(!probes.running, "a run that finished records its folders");
+    assert_eq!(probes.found, [found]);
+    assert_eq!(probes.last.map(|run| run.complete), Some(true));
 }
 
 #[test]
