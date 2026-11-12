@@ -2066,6 +2066,35 @@ pub(super) fn record(
     bounds: &TreeBounds,
     now: u64,
 ) -> Result<Option<ChangeSetId>, EngineError> {
+    record_as(db, workspace, turn, bounds, now, true)
+}
+
+/// Records what an agent committed while its turn is still open (F15): `record` without
+/// the worktree, so nothing is staged, committed or moved in it and its index stays the
+/// agent's; a set its agent is updating is left as it is. The turn end records the rest.
+/// Inputs: the store, the workspace, the turn so far, the bounds and the time now. Output:
+/// the open change set, None when nothing is committed above the base, or the refusal.
+pub(super) fn record_commits(
+    db: &Connection,
+    workspace: &Workspace,
+    turn: &TurnEnd,
+    bounds: &TreeBounds,
+    now: u64,
+) -> Result<Option<ChangeSetId>, EngineError> {
+    record_as(db, workspace, turn, bounds, now, false)
+}
+
+/// `record`, and with `take_worktree` false `record_commits`. Inputs: as `record`, and
+/// whether the worktree's uncommitted edits are committed and HEAD moved. Output: as
+/// `record`.
+fn record_as(
+    db: &Connection,
+    workspace: &Workspace,
+    turn: &TurnEnd,
+    bounds: &TreeBounds,
+    now: u64,
+    take_worktree: bool,
+) -> Result<Option<ChangeSetId>, EngineError> {
     store::initialize(db)?;
     let layout = check_places(
         &workspace.repository,
@@ -2100,6 +2129,13 @@ pub(super) fn record(
         .is_some_and(|record| record.agent.id != agent_id)
     {
         return Err(failure("changes_agent_has_pending"));
+    }
+    if !take_worktree
+        && let Some(record) = open
+            .as_ref()
+            .filter(|record| record.state == ChangeState::Updating)
+    {
+        return Ok(Some(record.id.clone()));
     }
     let (agent, head) = match fetched {
         Some(tip) => (None, tip),
@@ -2173,7 +2209,7 @@ pub(super) fn record(
         store::outcome_name(turn.outcome)
     );
     let committed = match &agent {
-        Some(_) => commit_worktree(
+        Some(_) if take_worktree => commit_worktree(
             repo,
             &workspace.worktree,
             &workspace.repository,
@@ -2183,8 +2219,9 @@ pub(super) fn record(
             bounds,
             &message,
         )?,
-        None => None,
+        _ => None,
     };
+    assert!(take_worktree || committed.is_none());
     let mut record = match open {
         None if committed.is_none() && (head == base || fast_forwarded) => {
             return Ok(None);

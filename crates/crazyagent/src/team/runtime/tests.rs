@@ -3385,8 +3385,85 @@ fn page_task(fixture: &Fixture, member: i64) -> (i64, String) {
     (task, note)
 }
 
-/// F15: a sub-agent's accepted done report posts its task's change set while the turn is
-/// still open, with the team note, and the task keeps running until its turn ends.
+/// The worktree folder and git folder of an agent, as its worktree row keeps them. Takes the
+/// fixture and the agent. Returns both.
+#[cfg(target_os = "macos")]
+fn agent_places(fixture: &Fixture, member: i64) -> (PathBuf, PathBuf) {
+    let (worktree, git_dir): (String, String) = fixture
+        .connection
+        .query_row(
+            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1",
+            [member],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    (PathBuf::from(worktree), PathBuf::from(git_dir))
+}
+
+/// The commit an agent worktree's HEAD names, read with no owner config. Takes the fixture
+/// and the worktree. Returns the commit id.
+#[cfg(target_os = "macos")]
+fn agent_head(fixture: &Fixture, worktree: &Path) -> String {
+    let output = crate::spawn_gate::spawn(
+        Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &fixture.base)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(worktree)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap()
+    .wait_with_output()
+    .unwrap();
+    assert!(output.status.success(), "git rev-parse HEAD");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// What an agent's own git and work hold (F15 r1): its index, its HEAD file, each named
+/// file of its worktree, none for a missing one, and the commit HEAD names. Takes the
+/// fixture, the agent and the files. Returns them in that order.
+#[cfg(target_os = "macos")]
+fn agent_bytes(fixture: &Fixture, member: i64, files: &[&str]) -> Vec<Option<Vec<u8>>> {
+    let (worktree, git_dir) = agent_places(fixture, member);
+    let head = agent_head(fixture, &worktree);
+    [git_dir.join("index"), git_dir.join("HEAD")]
+        .into_iter()
+        .chain(files.iter().map(|file| worktree.join(file)))
+        .map(|path| std::fs::read(path).ok())
+        .chain([Some(head.into_bytes())])
+        .collect()
+}
+
+/// The head of the project's one change set. Takes the fixture. Returns the commit id.
+#[cfg(target_os = "macos")]
+fn posted_head(fixture: &Fixture) -> String {
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let sets = crate::landing::list(&db, &fixture.setup.project_id).unwrap();
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    sets[0].head.clone()
+}
+
+/// How many team notes tell the owner a task's edits could not be kept for review. Takes
+/// the fixture. Returns the count.
+#[cfg(target_os = "macos")]
+fn refused_notes(fixture: &Fixture) -> usize {
+    fixture
+        .status()
+        .messages
+        .iter()
+        .filter(|message| message.text.contains("could not be kept for review"))
+        .count()
+}
+
+/// F15: a sub-agent's accepted done report posts what it committed while the turn is still
+/// open, with the team note, and the task keeps running until its turn ends. Edits it has
+/// not committed wait for the turn end: the report leaves its index, HEAD and files byte for
+/// byte as they were and tells no refusal, also while its own git holds the index lock
+/// (F15 r1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_done_report_posts_the_change_set_before_the_turn_ends() {
@@ -3394,10 +3471,27 @@ fn a_done_report_posts_the_change_set_before_the_turn_ends() {
     let (mut team, member, _agents) = page_writer(&fixture);
     let project = fixture.setup.project_id.clone();
     let (_, note) = page_task(&fixture, member);
-    assert_eq!(noted(&fixture, &note), 0, "nothing is posted before done");
+    let (worktree, git_dir) = agent_places(&fixture, member);
+    agent_git(&fixture, &worktree, &["add", "page.md"]);
+    let lock = git_dir.join("index.lock");
+    std::fs::write(&lock, b"").unwrap();
+    let kept = agent_bytes(&fixture, member, &["page.md"]);
 
     team.reported_done(member, &project).unwrap();
+    assert_eq!(
+        agent_bytes(&fixture, member, &["page.md"]),
+        kept,
+        "the report touches nothing of the agent's"
+    );
+    assert!(lock.is_file(), "the agent's lock stays its own");
+    assert_eq!(noted(&fixture, &note), 0, "edits not committed wait");
+    assert_eq!(refused_notes(&fixture), 0);
+    std::fs::remove_file(&lock).unwrap();
+
+    agent_git(&fixture, &worktree, &["commit", "-qm", "Write the page"]);
+    team.reported_done(member, &project).unwrap();
     assert_eq!(noted(&fixture, &note), 1);
+    assert_eq!(posted_head(&fixture), agent_head(&fixture, &worktree));
     assert_eq!(task_of(&fixture, "Write page.md").0, "running");
     idle_ticks(&mut team);
     assert_eq!(
@@ -3405,26 +3499,21 @@ fn a_done_report_posts_the_change_set_before_the_turn_ends() {
         1,
         "a look that finds nothing new posts nothing"
     );
+    assert_eq!(refused_notes(&fixture), 0);
     team.shutdown().unwrap();
 }
 
 /// F15: a commit the agent makes in its worktree while its turn is open posts the change set
-/// at the next look, with no done report and no turn end.
+/// at the next look, with no done report and no turn end. The look posts the commit alone:
+/// the agent's other edits, one staged and one not, its index and its HEAD stay byte for
+/// byte as they were (F15 r1).
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_commit_posts_the_change_set_before_the_turn_ends() {
     let fixture = Fixture::new(1);
     let (mut team, member, _agents) = page_writer(&fixture);
     let (_, note) = page_task(&fixture, member);
-    let worktree: String = fixture
-        .connection
-        .query_row(
-            "SELECT worktree FROM team_agents WHERE id=?1",
-            [member],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let worktree = fixture.base.join("project").join(worktree);
+    let (worktree, _) = agent_places(&fixture, member);
     idle_ticks(&mut team);
     assert_eq!(
         noted(&fixture, &note),
@@ -3434,9 +3523,20 @@ fn an_agent_commit_posts_the_change_set_before_the_turn_ends() {
 
     agent_git(&fixture, &worktree, &["add", "page.md"]);
     agent_git(&fixture, &worktree, &["commit", "-qm", "Write the page"]);
+    std::fs::write(worktree.join("staged.md"), "Staged, not committed.\n").unwrap();
+    agent_git(&fixture, &worktree, &["add", "staged.md"]);
+    std::fs::write(worktree.join("draft.md"), "Still being written.\n").unwrap();
+    let files = ["page.md", "staged.md", "draft.md"];
+    let kept = agent_bytes(&fixture, member, &files);
     fixture.until(&mut team, "the commit posts the change set", |f| {
         noted(f, &note) == 1
     });
+    assert_eq!(
+        agent_bytes(&fixture, member, &files),
+        kept,
+        "the look touches nothing of the agent's"
+    );
+    assert_eq!(posted_head(&fixture), agent_head(&fixture, &worktree));
     assert_eq!(task_of(&fixture, "Write page.md").0, "running");
     team.shutdown().unwrap();
 }
@@ -3517,6 +3617,63 @@ fn a_turn_ended_after_done_stops_its_agent_before_the_next_task() {
     assert!(!keeps_session(TurnEnd::Interrupted, 1, false, false));
     assert!(!keeps_session(TurnEnd::Cancelled, 0, false, false));
     assert!(!keeps_session(TurnEnd::Closed, 0, false, false));
+}
+
+/// F15 r1: a turn's end ends its done watch, so when the same agent takes the same task
+/// again, as after a failed turn, the last attempt's done report and quiet time never end
+/// the new attempt before its own done report.
+#[test]
+fn a_retried_task_on_the_same_agent_never_ends_for_the_last_attempt_s_done_report() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_done_quiet(project,secs) VALUES (?1,1)",
+            params![PROJECT],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms) VALUES (?1,'master','codex',0,'Go on.','running',?2,1)",
+            params![PROJECT, agent],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    let mut worker = between_turns(&project, AgentRole::Sub, true, true);
+    let before = Instant::now()
+        .checked_sub(Duration::from_secs(2))
+        .expect("the clock runs past 2 s");
+    watch_task(&mut worker.after_done, task);
+    worker.after_done.done_at = Some(before);
+    worker.after_done.output = Some((1, before));
+    let wrap = worker.after_done.wrap.clone();
+    team.workers.insert(agent, worker);
+    team.apply(
+        agent,
+        Report::Finished {
+            text: String::new(),
+            end: TurnEnd::Failed,
+            cause: None,
+        },
+    )
+    .unwrap();
+    let watch = &team.workers[&agent].after_done;
+    assert_eq!(
+        (watch.task, watch.done_at, watch.output, watch.mark),
+        (None, None, None, None)
+    );
+    team.workers.get_mut(&agent).unwrap().busy = Some(Busy::Task(task));
+    team.watch_done(&project).unwrap();
+    assert!(
+        !wrap.load(Ordering::SeqCst),
+        "the retry waits for its own done report"
+    );
+    assert_eq!(team.workers[&agent].after_done.task, Some(task));
+    team.workers.clear();
 }
 
 /// F15, one row per owner choice of End a turn after done: Off, 2 min, 10 min (default) and

@@ -50,6 +50,28 @@ pub fn record(
     Ok(Landed::Added(id))
 }
 
+/// Records what an agent committed while its turn is still open through
+/// `landing::record_commits` and tells whether that added edits, as `record` does, but
+/// sends nothing back to the agent mid-turn: a clash with main waits for the turn end
+/// (F15). Inputs: the change set store, the workspace and the turn so far. Output:
+/// Nothing, Added or Waiting, or the refusal.
+pub fn record_commits(
+    db: &Connection,
+    workspace: &Workspace,
+    end: &TurnEnd,
+) -> Result<Landed, EngineError> {
+    let before =
+        landing::open_change_set(db, &workspace.worktree)?.map(|set| (set.head, set.state));
+    let Some(id) = landing::record_commits(db, workspace, end)? else {
+        return Ok(Landed::Nothing);
+    };
+    let after = landing::change_set(db, &id)?.map(|(_, set)| (set.head, set.state));
+    if after.is_some() && after == before {
+        return Ok(Landed::Waiting(id));
+    }
+    Ok(Landed::Added(id))
+}
+
 /// Sends a team agent's change set that conflicts with main back to its agent at its turn
 /// end (OS-8): once `landing::conflicts_with_main` finds the clash, the agent must be able
 /// to take its resolve task as the engine starts it, which an agent the owner stopped

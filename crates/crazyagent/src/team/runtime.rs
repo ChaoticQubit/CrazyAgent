@@ -4647,7 +4647,7 @@ impl TeamRuntime {
     }
 
     /// Takes a sub-agent's accepted `finish_work` done report on its task (F15): posts or
-    /// updates the turn's change set now, and starts the quiet time after which the owner's
+    /// updates the turn's change set from its commits now, and starts the quiet time after which the owner's
     /// "End a turn after done" ends the turn. Takes the agent and its project. Returns any
     /// SQLite failure.
     fn reported_done(&mut self, id: i64, project: &ProjectId) -> Result<(), EngineError> {
@@ -4659,7 +4659,7 @@ impl TeamRuntime {
         };
         watch_task(&mut worker.after_done, task);
         worker.after_done.done_at = Some(Instant::now());
-        self.land_now(id, project, task, true)
+        self.land_now(id, project, task)
     }
 
     /// Watches each busy sub-agent task turn of a project after its agent reported done or
@@ -4698,7 +4698,7 @@ impl TeamRuntime {
                 let watch = &mut self.workers.get_mut(&id).expect("listed worker").after_done;
                 let before = std::mem::replace(&mut watch.mark, mark);
                 if before.is_some() && mark.is_some() && before != mark {
-                    self.land_now(id, project, task, false)?;
+                    self.land_now(id, project, task)?;
                 }
             }
             let watch = &self.workers[&id].after_done;
@@ -9010,6 +9010,7 @@ impl TeamRuntime {
             Report::Finished { text, end, cause } => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 let busy = worker.busy.take();
+                end_watch(&mut worker.after_done);
                 worker.background_held = false;
                 let cut =
                     (end == TurnEnd::TimedOut).then(|| limit_note(cause.as_deref(), worker.bound));
@@ -9402,17 +9403,12 @@ impl TeamRuntime {
     }
 
     /// Posts or updates the change set of a sub-agent's task turn that is still open, once
-    /// its agent reported done or committed (F15). The record compares heads, so a look that
-    /// finds nothing new adds nothing, and the turn end lands again whatever came after. A
-    /// commit's look is quiet about a refusal, which the turn end still tells. Inputs: the
-    /// agent, its project, the task and whether a refusal is told. Output: any SQLite failure.
-    fn land_now(
-        &mut self,
-        id: i64,
-        project: &ProjectId,
-        task: i64,
-        loud: bool,
-    ) -> Result<(), EngineError> {
+    /// its agent reported done or committed (F15), from its commits only: its worktree and
+    /// index are not touched while it may still write, and a clash with main is not sent
+    /// back mid-turn. A look that finds nothing new adds nothing; a refusal stays quiet, and
+    /// the turn end records the rest and tells it. Inputs: the agent, its project and the
+    /// task. Output: any SQLite failure.
+    fn land_now(&mut self, id: i64, project: &ProjectId, task: i64) -> Result<(), EngineError> {
         let line: String = self
             .connection
             .query_row("SELECT prompt FROM team_tasks WHERE id=?1", [task], |row| {
@@ -9427,14 +9423,16 @@ impl TeamRuntime {
             (format!("task-{task}"), line),
             &format!("task {task}"),
             TurnEnd::Success,
-            loud,
+            false,
         )?;
         Ok(())
     }
 
-    /// `land_turn` with the choice to stay quiet about a refusal. Inputs: the agent, its
-    /// project, the turn key with its prompt line, what ended for the note, how it ended and
-    /// whether a refusal is told. Output: whether the record was kept, or any SQLite failure.
+    /// `land_turn`, or with `whole` false the open turn's commits only, through
+    /// `landing_turns::record_commits`, with no worker sets settled and a refusal kept quiet
+    /// (F15). Inputs: the agent, its project, the turn key with its prompt line, what ended
+    /// for the note, how it ended and whether the turn ended. Output: whether the record was
+    /// kept, or any SQLite failure.
     fn land_turn_as(
         &mut self,
         id: i64,
@@ -9442,7 +9440,7 @@ impl TeamRuntime {
         (turn, line): (String, String),
         what: &str,
         end: TurnEnd,
-        loud: bool,
+        whole: bool,
     ) -> Result<bool, EngineError> {
         type Row = (String, String, String, String, String, Option<i64>);
         let row: Option<Row> = self
@@ -9512,6 +9510,9 @@ impl TeamRuntime {
             prompt_line: line.lines().next().unwrap_or_default().to_owned(),
         };
         let landed = crate::landing::open(&self.root).and_then(|db| {
+            if !whole {
+                return crate::landing_turns::record_commits(&db, &workspace, &ended);
+            }
             let landed =
                 crate::landing_turns::record(&db, &workspace, &ended, self.settings.as_ref());
             if let Err(problem) = crate::landing::settle_sub_agents(&db, project, id) {
@@ -9552,7 +9553,7 @@ impl TeamRuntime {
                 }
                 note
             }
-            Err(_) if !loud => return Ok(false),
+            Err(_) if !whole => return Ok(false),
             Err(problem) => {
                 if let Some(text) = crate::landing::refusal_for_agent(&problem) {
                     self.note_lead(project, id, text)?;
@@ -11703,7 +11704,15 @@ fn watch_task(watch: &mut AfterDone, task: i64) {
     if watch.task == Some(task) {
         return;
     }
+    end_watch(watch);
     watch.task = Some(task);
+}
+
+/// Ends the watch of a sub-agent's turn when the turn ended, so a retry of the same task on
+/// the same agent never inherits its done report, output time or head mark (F15). Keeps
+/// the wrap flag the agent's thread holds, which its next turn clears. Takes the watch.
+fn end_watch(watch: &mut AfterDone) {
+    watch.task = None;
     watch.done_at = None;
     watch.output = None;
     watch.mark = None;

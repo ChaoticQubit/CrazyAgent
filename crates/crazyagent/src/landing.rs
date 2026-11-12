@@ -1122,6 +1122,28 @@ pub fn record_turn_end(
     }
 }
 
+/// Posts or updates an agent's change set from what it committed while its turn is still
+/// open (F15): nothing in its worktree or index is staged, committed, settled or moved, and
+/// its claims wait for the turn end, which records the rest. Inputs: the store, the
+/// workspace and the turn so far. Output: the change set the commits belong to, None when
+/// nothing is committed above its base, or the refusal.
+pub fn record_commits(
+    db: &Connection,
+    workspace: &Workspace,
+    turn: &TurnEnd,
+) -> Result<Option<ChangeSetId>, EngineError> {
+    #[cfg(unix)]
+    {
+        let now = flow::now_ms()?;
+        flow::record_commits(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, workspace, turn);
+        Err(unavailable())
+    }
+}
+
 /// Settles the claims of a project no turn end will (OS-8 r2): releases those of closed
 /// change sets whose release failed, takes back those of restored sets that did not come
 /// back, and holds a stopped or failed agent's finished claims for its open set, or
