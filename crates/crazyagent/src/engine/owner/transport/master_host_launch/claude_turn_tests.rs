@@ -344,6 +344,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             crate::team::tool::ASK_TOOL,
             crate::team::tool::RECORD_TOOL,
             crate::team::tool::WITHDRAW_TOOL,
+            crate::team::tool::REQUEST_ACCESS_TOOL,
             crate::team::tool::REMEMBER_TOOL
         ],
         "a console master with tools asks the owner and remembers through the engine, less the tools switched off"

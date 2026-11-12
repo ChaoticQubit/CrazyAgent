@@ -143,7 +143,16 @@ fn a_server_told_to_leave_wake_out_neither_lists_nor_records_it() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(listed, [TOOL_NAME, ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL]);
+    assert_eq!(
+        listed,
+        [
+            TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL
+        ]
+    );
     assert_eq!(answers["2"]["error"]["code"], -32602, "{}", answers["2"]);
     assert!(!drop.exists());
     assert!(take_proposals(&drop).is_empty());

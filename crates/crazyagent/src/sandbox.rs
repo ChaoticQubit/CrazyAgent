@@ -137,6 +137,10 @@ pub const OPEN_TOPS_MAX: usize = 512;
 /// and dates stay readable, so a tool that only stats such a path does not fail.
 const KEPT_OUT_DENY: &str =
     "(deny file-read-data file-read-xattr file-write* process-exec file-link file-clone";
+/// The longest quoted string or regex, in raw bytes, Seatbelt's profile reader takes: one
+/// byte more fails the whole profile with `Error reading string`, whatever the bytes are
+/// (probe 2026-11-12: 1023 read, 1024 refused, backslashes and multibyte letters alike).
+pub(crate) const SBPL_STRING_MAX: usize = 1023;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -1788,15 +1792,9 @@ impl ProjectSandbox {
         assert!(clean_absolute(root));
         let pattern = seatbelt_pattern(root);
         let mut text = format!("{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{pattern}/\")");
-        if !open.is_empty() {
-            let names = open
-                .iter()
-                .map(|name| regex_escape(name))
-                .collect::<Vec<_>>()
-                .join("|");
-            text.push_str(&format!(
-                "\n    (require-not (regex #\"^{pattern}/({names})(/.*)?$\"))"
-            ));
+        let names: Vec<String> = open.iter().map(|name| regex_escape(name)).collect();
+        for body in regex_bodies(&format!("^{pattern}/"), &names, "(/.*)?$") {
+            text.push_str(&format!("\n    (require-not (regex #\"{body}\"))"));
         }
         for own in self.writable_roots().filter(|own| {
             own.starts_with(root) && own.as_path() != root.as_path() && clean_absolute(own)
@@ -1825,11 +1823,10 @@ impl ProjectSandbox {
         else {
             return String::new();
         };
-        let names = shared_folders::SECRET_NAMES
+        let names: Vec<String> = shared_folders::SECRET_NAMES
             .iter()
             .map(|name| fold_case(name))
-            .collect::<Vec<_>>()
-            .join("|");
+            .collect();
         let own: String = self
             .writable_roots()
             .filter(|own| {
@@ -1840,11 +1837,14 @@ impl ProjectSandbox {
             })
             .map(|own| format!("\n    (require-not (subpath \"{}\"))", own.display()))
             .collect();
-        let mut text = format!(
-            "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"^{}/(.*/)?({names})(/.*)?$\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
-            seatbelt_pattern(root),
-            root.display()
-        );
+        let prefix = format!("^{}/(.*/)?", seatbelt_pattern(root));
+        let mut text = String::new();
+        for body in regex_bodies(&prefix, &names, "(/.*)?$") {
+            text.push_str(&format!(
+                "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
+                root.display()
+            ));
+        }
         text.push_str("(deny file-clone (vnode-type DIRECTORY))\n");
         for folder in self
             .shared_writes
@@ -2491,7 +2491,7 @@ impl ProjectSandbox {
         text.push_str(&agent_files);
         assert_eq!(
             text.matches("unix-socket").count(),
-            2 * self.sockets.len() + self.served.len() + self.reached.len()
+            2 * self.sockets.len() + self.served.len() + self.reached.len() + self.granted.len()
         );
         let mut last: Vec<String> = self
             .read_only
@@ -2842,6 +2842,12 @@ impl ProjectSandbox {
                 "profile must live outside the sandbox's writable roots",
             ));
         }
+        let profile = self.profile();
+        if !sbpl_overlong(&profile).is_empty() {
+            return Err(invalid(
+                "a path or name in the sandbox profile is longer than Seatbelt reads",
+            ));
+        }
         let staging = parent.join(format!(".{name}.{}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
             .write(true)
@@ -2850,7 +2856,7 @@ impl ProjectSandbox {
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
             .open(&staging)?;
         let written = file
-            .write_all(self.profile().as_bytes())
+            .write_all(profile.as_bytes())
             .and_then(|()| file.sync_all())
             .and_then(|()| fs::rename(&staging, &target));
         if let Err(error) = written {
@@ -3389,6 +3395,50 @@ pub(crate) fn plain_top(name: &str) -> bool {
         && !name
             .chars()
             .any(|c| c.is_control() || matches!(c, '/' | '"' | '\\' | '\''))
+}
+
+/// Seatbelt regex bodies `{prefix}(a|b|...){suffix}` that together match each of
+/// `alternatives`, packed whole, in order, so each body fits [`SBPL_STRING_MAX`] bytes; one
+/// alternative too long beside the prefix keeps a body of its own, which [`sbpl_overlong`]
+/// then names. Inputs: the prefix, the regex fragments and the suffix. Output: the bodies.
+fn regex_bodies(prefix: &str, alternatives: &[String], suffix: &str) -> Vec<String> {
+    let body = |group: &[&str]| format!("{prefix}({}){suffix}", group.join("|"));
+    let mut bodies = Vec::new();
+    let mut group: Vec<&str> = Vec::new();
+    for alternative in alternatives {
+        let mut wider = group.clone();
+        wider.push(alternative);
+        if !group.is_empty() && body(&wider).len() > SBPL_STRING_MAX {
+            bodies.push(body(&group));
+            group.clear();
+        }
+        group.push(alternative);
+    }
+    if !group.is_empty() {
+        bodies.push(body(&group));
+    }
+    assert!(bodies.len() <= alternatives.len());
+    bodies
+}
+
+/// The quoted strings and regexes of a Seatbelt profile longer than its reader takes
+/// ([`SBPL_STRING_MAX`] bytes), every one, so a profile that would not parse is refused
+/// before it is written. Input: the profile text, whose strings hold no quote. Output: the
+/// strings too long, none for a profile that parses; an odd quote count names the rest.
+#[cfg(unix)]
+pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
+    let parts: Vec<&str> = profile.split('"').collect();
+    let mut overlong: Vec<&str> = parts
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .copied()
+        .filter(|part| part.len() > SBPL_STRING_MAX)
+        .collect();
+    if parts.len() % 2 == 0 {
+        overlong.push(parts[parts.len() - 1]);
+    }
+    overlong
 }
 
 fn regex_escape(text: &str) -> String {
@@ -4263,5 +4313,105 @@ mod access_grant_tests {
             .grant_access(&[AccessGrant::Port { port: 47_821 }], None)
             .unwrap();
         assert_eq!(open.network(), &SandboxNetwork::Open);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod profile_string_tests {
+    use super::*;
+
+    /// v2.4.0 gate: the folded secret names, 1300 bytes as one regex, split into bodies each
+    /// Seatbelt reads, every name kept whole and in order; a list that fits stays one body
+    /// in the shape it had, and no names give no body.
+    #[test]
+    fn regex_bodies_pack_whole_names_under_the_reader_limit() {
+        let names: Vec<String> = shared_folders::SECRET_NAMES
+            .iter()
+            .map(|name| fold_case(name))
+            .collect();
+        let prefix = format!("^/private/tmp/{}/(.*/)?", "p".repeat(200));
+        let bodies = regex_bodies(&prefix, &names, "(/.*)?$");
+        assert!(bodies.len() >= 2, "{bodies:#?}");
+        assert!(bodies.iter().all(|body| body.len() <= SBPL_STRING_MAX));
+        let mut at = 0;
+        for body in &bodies {
+            let group = &body[prefix.len() + 1..body.len() - "(/.*)?$".len() - 1];
+            let start = at;
+            while at < names.len() && names[start..=at].join("|").len() <= group.len() {
+                at += 1;
+            }
+            assert_eq!(names[start..at].join("|"), group);
+        }
+        assert_eq!(at, names.len());
+        assert_eq!(
+            regex_bodies("^/r/", &["a".into(), "b".into()], "(/.*)?$"),
+            vec!["^/r/(a|b)(/.*)?$".to_owned()]
+        );
+        assert!(regex_bodies("^/r/", &[], "(/.*)?$").is_empty());
+    }
+
+    /// The guard names every string past the limit, none in a profile that parses, and an
+    /// unclosed quote too.
+    #[test]
+    fn sbpl_overlong_names_every_string_past_the_reader_limit() {
+        let fits = "a".repeat(SBPL_STRING_MAX);
+        let long = "b".repeat(SBPL_STRING_MAX + 1);
+        let longer = "c".repeat(2 * SBPL_STRING_MAX);
+        let text = format!(
+            "(deny file-read* (subpath \"{fits}\") (literal \"{long}\") (regex #\"{longer}\"))"
+        );
+        assert_eq!(sbpl_overlong(&text), vec![long.as_str(), longer.as_str()]);
+        assert!(sbpl_overlong(&format!("(literal \"{fits}\")")).is_empty());
+        assert_eq!(sbpl_overlong("(literal \"/open"), vec!["/open"]);
+    }
+
+    /// The default secret rule and 64 long open top-level names, as a Chosen folders
+    /// launch can keep open, give a profile with no string past the limit; a project folder
+    /// so deep that one secret name no longer fits is refused at install, before a profile
+    /// sandbox-exec cannot read is written.
+    #[test]
+    fn a_profile_keeps_every_string_seatbelt_reads_or_is_refused_at_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (home, tmp, profiles) = (base.join("home"), base.join("tmp"), base.join("sb"));
+        let project = base.join("project");
+        for folder in [&home, &tmp, &profiles, &project] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let open: Vec<String> = (0..64)
+            .map(|at| format!("{at:02}{}", "n".repeat(40)))
+            .collect();
+        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&open)
+            .unwrap();
+        let text = wide.profile();
+        assert!(sbpl_overlong(&text).is_empty());
+        assert!(text.matches("(require-not (regex #\"").count() >= 2);
+        assert!(text.matches(KEPT_OUT_DENY).count() >= 3);
+        wide.install(&profiles.join("wide.sb")).unwrap();
+
+        let mut deep = base.join("deep");
+        while deep.as_os_str().len() < 1000 {
+            let room = 1000 - deep.as_os_str().len();
+            deep = deep.join("d".repeat(room.clamp(1, 200)));
+        }
+        fs::create_dir_all(&deep).unwrap();
+        let narrow = ProjectSandbox::new(&deep, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&deep, &[])
+            .unwrap();
+        assert!(!sbpl_overlong(&narrow.profile()).is_empty());
+        let target = profiles.join("deep.sb");
+        match narrow.install(&target) {
+            Err(SandboxError::Invalid(reason)) => assert_eq!(
+                reason,
+                "a path or name in the sandbox profile is longer than Seatbelt reads"
+            ),
+            other => panic!("{other:?}"),
+        }
+        assert!(!target.exists());
     }
 }

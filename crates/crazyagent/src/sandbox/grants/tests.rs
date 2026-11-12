@@ -695,7 +695,7 @@ fn a_request_the_questions_cap_refuses_leaves_no_row() {
             question: format!("Filler {n}?"),
             kind: QuestionKind::Single,
             options: vec!["Yes".to_owned(), "No".to_owned()],
-            recommended: None,
+            recommended: Some("Yes".to_owned()),
             context: None,
         };
         crate::questions::raise(

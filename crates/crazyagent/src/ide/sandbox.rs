@@ -1,7 +1,9 @@
 use crate::engine::EngineError;
 use crate::sandbox::policy::AgentFilesRule;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, seatbelt_pattern};
+use crate::sandbox::{
+    ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, sbpl_overlong, seatbelt_pattern,
+};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -161,7 +163,7 @@ pub fn profile(
     )));
     assert!(text.ends_with("(global-name \"com.apple.FSEvents\"))\n"));
     assert!(!closed || !text.contains("(remote ip"));
-    if text.len() > PROFILE_BYTES_MAX {
+    if text.len() > PROFILE_BYTES_MAX || !sbpl_overlong(&text).is_empty() {
         return Err(failure("ide_sandbox_invalid"));
     }
     Ok(text)
