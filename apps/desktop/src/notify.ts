@@ -26,6 +26,7 @@ export const BANNER_WINDOW_IDS = 12;
 export const UNAVAILABLE_LINE = "System notifications are unavailable on this system.";
 export const AVAILABLE_LINE = "While CrazyAgent is in the background, macOS shows a notification for each item Settings, Notifications sends there. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications.";
 export const FAILED_LINE = "Couldn't show a macOS notification. Check that CrazyAgent is allowed in System Settings, Notifications.";
+export const FULL_LINE = "macOS notifications are paused until CrazyAgent restarts. The bell still has every item.";
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -119,11 +120,13 @@ export async function openClicked(clicked: Clicked, { go, send }: {
   return anchor;
 }
 
-/** The toast a notification that went wrong earns: only the plugin's refusal points at the
- * system setting; an item settled meanwhile or a full run says nothing. Input: what the app
- * answered. Output: the line, or null. */
+/** The toast a notification that went wrong earns: the plugin's refusal points at the
+ * system setting, a run that showed its most says banners are paused; an item settled
+ * meanwhile says nothing. Input: what the app answered. Output: the line, or null. */
 export function failureLine(result: Result<void>): string | null {
-  return result.kind === "error" && result.code === "notifications_failed" ? FAILED_LINE : null;
+  if (result.kind !== "error") return null;
+  if (result.code === "notifications_failed") return FAILED_LINE;
+  return result.code === "notifications_full" ? FULL_LINE : null;
 }
 
 /** Whether a fresh item also goes to the system: only while the window is in the background
@@ -180,12 +183,12 @@ export function reportNotice(report: NoticeReport): Promise<Result<void>> {
 /** Watches the notification store for banners, one read per look: while the window is in
  * the background each new item the engine marks for a banner goes to macOS once, a few per
  * look. When the window comes to the front after a click it opens that item's page,
- * highlights its part and marks it read. Input: the toast action, used once when the plugin
- * refuses. Output: `look`, awaited once per alerts read, and `stop`, which ends the watch. */
+ * highlights its part and marks it read. Input: the toast action, used once a run for each
+ * failure line. Output: `look`, awaited once per alerts read, and `stop`, which ends it. */
 export function noticeWatch(showToast: (message: string) => void) {
   let live = true;
   let kept: number | null = null;
-  let failed = false;
+  const told = new Set<string>();
   const system = systemNotifications();
   const onFocus = () => {
     void takeNotificationTarget().then(async (result) => {
@@ -202,10 +205,11 @@ export function noticeWatch(showToast: (message: string) => void) {
       kept = picked.kept;
       for (const id of picked.send) {
         const line = failureLine(await notifyNotice(id));
-        if (line && !failed) {
-          failed = true;
+        if (line && !told.has(line)) {
+          told.add(line);
           showToast(line);
         }
+        if (line === FULL_LINE) break;
       }
     },
     stop() {
