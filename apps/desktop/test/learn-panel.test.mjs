@@ -103,3 +103,27 @@ test("opening Process, Metrics or a project's Process or Metrics tab marks those
     assert.deepEqual(marksForRoute(route), [], route.name);
   }
 });
+
+test("a page mark is sent once per app session, and again on the next visit only when it did not stand", async () => {
+  const { markLearned } = await import("../src/screens/dashboard/learn.tsx");
+  const sent = [];
+  let reply = { outcome: "rejected", pending: false, rejection: "owner_not_ready" };
+  const before = globalThis.window;
+  globalThis.window = { __TAURI_INTERNALS__: { async invoke(command, args) {
+    sent.push([command, args.step]);
+    return reply;
+  } } };
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    markLearned("usage");
+    await settle();
+    reply = { outcome: "applied", pending: false, rejection: null };
+    markLearned("usage");
+    await settle();
+    markLearned("usage");
+    await settle();
+    assert.deepEqual(sent, [["desktop_set_learning_mark", "usage"], ["desktop_set_learning_mark", "usage"]]);
+  } finally {
+    globalThis.window = before;
+  }
+});

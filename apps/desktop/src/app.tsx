@@ -7,6 +7,7 @@ import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPending
 import { questionWatch } from "./notify";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
+import { useLearningVisits } from "./screens/dashboard/learn";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
@@ -342,5 +343,6 @@ export function App() {
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
+  useLearningVisits(route, session.engine === "running");
   return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }

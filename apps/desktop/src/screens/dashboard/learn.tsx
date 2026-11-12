@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { setLearningMark, type LearningMark, type LearningProgress, type LearningStepId, type LearningTopic } from "../../api-learning";
 import type { Loaded, ProjectRow } from "../../state";
 import { Button, Icon, Panel, formatRoute, type IconName, type Route } from "../../ui";
@@ -116,6 +117,15 @@ export function markLearned(step: LearningMark): void {
   if (sent.has(step)) return;
   sent.add(step);
   void setLearningMark(step, true).then((result) => { if (result.kind !== "ok") sent.delete(step); });
+}
+
+/** Sets the learning marks for the page the main window shows, once the engine runs.
+ * Inputs: the route and whether the engine runs. */
+export function useLearningVisits(route: Route, running: boolean): void {
+  const key = formatRoute(route);
+  useEffect(() => {
+    if (running) for (const mark of marksForRoute(route)) markLearned(mark);
+  }, [key, running]);
 }
 
 /** Home's side panel: Get set up, or Learn CrazyAgent with its progress, Hide guide and the steps

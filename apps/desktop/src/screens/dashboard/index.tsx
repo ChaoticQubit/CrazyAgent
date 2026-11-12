@@ -291,7 +291,7 @@ export function Home({ alerts }: { alerts?: Map<string, number> } = {}) {
   const [learning, reloadLearning] = useLoad(loadLearningProgress, [], "learning-progress");
   const hideLearning = async () => {
     const hidden = await setLearningMark("skipped", true);
-    if (hidden.kind !== "ok") session.showToast(hidden.message);
+    if (hidden.kind === "error") session.showToast(hidden.message);
     reloadLearning();
   };
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
