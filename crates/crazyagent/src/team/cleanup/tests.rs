@@ -600,7 +600,7 @@ fn a_removed_agent_is_listed_to_the_master_as_retired() {
     let label = crate::team::events::label(&case.db, 1).unwrap();
     assert_eq!(
         crate::team::events::retired_agents(&case.db, &case.project).unwrap(),
-        [label.clone()]
+        std::slice::from_ref(&label)
     );
     let text = crate::team::events::status(&case.db, &case.project)
         .unwrap()
