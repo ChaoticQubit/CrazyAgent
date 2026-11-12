@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::ProjectId;
-use crate::team::cleanup::{FinishedAgent, Removal};
+use crate::team::cleanup::{FinishedAgent, Removal, RemovalPreview};
 
 impl OwnerController {
     fn cleanup_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -17,6 +17,13 @@ impl OwnerController {
         project: ProjectId,
     ) -> Result<Vec<FinishedAgent>, EngineError> {
         self.cleanup_client()?.finished_agents(project).await
+    }
+
+    /// Reads what removing a project would do before the owner picks how: its name, the
+    /// folders Delete everything would move to the Trash and whether it may, and the work
+    /// its agents would lose. Input: the project. Output: the preview, or the refusal.
+    pub async fn removal_preview(&self, project: ProjectId) -> Result<RemovalPreview, EngineError> {
+        self.cleanup_client()?.removal_preview(project).await
     }
 
     /// Removes the worktrees and agent folders of the finished agents the owner confirmed;

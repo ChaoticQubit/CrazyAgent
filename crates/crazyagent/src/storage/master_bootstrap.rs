@@ -319,15 +319,21 @@ fn validate_receipt(
     Ok(actual)
 }
 
-/// Tells whether a turn's proof may use a workspace reserved under another proof: any
-/// native sign-in may, since each turn proves its own pool member in full before it uses
-/// the workspace; an RCLI configured proof must be the reserving one. Inputs: the
-/// receipt's proof and the turn's proof. Output: true when the workspace may be used.
+/// Tells whether a turn's proof may use a workspace reserved under another proof of the
+/// same kind: any native sign-in or RCLI configured proof may, since each turn proves its
+/// own pool member in full before it uses the workspace (PA-6). Inputs: the receipt's
+/// proof and the turn's proof. Output: true when the workspace may be used.
 fn receipt_proof_matches(receipt: &MasterBootstrapAuth, proof: &MasterBootstrapAuth) -> bool {
-    match (receipt, proof) {
-        (MasterBootstrapAuth::NativeSignIn(_), MasterBootstrapAuth::NativeSignIn(_)) => true,
-        _ => receipt == proof,
-    }
+    matches!(
+        (receipt, proof),
+        (
+            MasterBootstrapAuth::NativeSignIn(_),
+            MasterBootstrapAuth::NativeSignIn(_)
+        ) | (
+            MasterBootstrapAuth::RcliConfigured(_),
+            MasterBootstrapAuth::RcliConfigured(_)
+        )
+    )
 }
 
 pub(super) fn reserve(

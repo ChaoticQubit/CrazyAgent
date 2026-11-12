@@ -6,7 +6,9 @@ mod keychain_support;
 
 #[cfg(target_os = "macos")]
 use crazyagent::credentials::Keychain;
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+use crazyagent::credentials::OsKeyring;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crazyagent::credentials::platform_store;
 use crazyagent::credentials::{SecretString, Store, reference};
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResult};
@@ -230,7 +232,12 @@ async fn a_sign_in_kept_for_the_engine_clones_through_the_credential_helper_and_
     let space = namespace(engine.path());
     #[cfg(target_os = "macos")]
     let store: Arc<dyn Store> = Arc::new(Keychain::at(&space, keychain.path()).unwrap());
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    let store: Arc<dyn Store> = Arc::new(
+        OsKeyring::open(&space, Path::new(env!("CARGO_BIN_EXE_crazyagent")))
+            .expect(STORE_PREREQUISITE),
+    );
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let store = platform_store(&space).expect(STORE_PREREQUISITE);
     let kept = Forget {
         store: Arc::clone(&store),

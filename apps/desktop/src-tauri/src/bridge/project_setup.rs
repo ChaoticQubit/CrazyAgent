@@ -1,11 +1,13 @@
 use super::{
-    BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure, native_project_id,
+    BridgeError, BridgeQueue, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
+    native_project_id,
 };
+use crazyagent::activity::ActivityItem;
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
-    ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchJob, ResearchKind,
-    StoredSetup,
+    ContextChunk, KeptFile, ProjectCatalog, ProjectContext, ProjectSetup, ResearchJob,
+    ResearchKind, StoredSetup,
 };
 use crazyagent::protocol::RequestId;
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
@@ -15,6 +17,13 @@ use serde::Serialize;
 pub struct ResearchJobs {
     pub project_id: String,
     pub jobs: Vec<ResearchJob>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectActivity {
+    pub project_id: String,
+    pub items: Vec<ActivityItem>,
+    pub more: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,7 +61,7 @@ impl From<KnowledgeEntry> for MemoryItem {
     }
 }
 
-fn read_failure(code: &str) -> BridgeError {
+pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
         match code {
             "pool_missing" => "pool_missing",
@@ -166,6 +175,26 @@ impl NativeBridge {
         bounded(ResearchJobs {
             project_id: id.into(),
             jobs,
+        })
+    }
+
+    /// Lists what happened in a project, newest first, as the Overview shows it.
+    /// Takes the project id and the most events to return.
+    /// Returns the events and whether older ones were left out.
+    pub async fn project_activity(
+        &self,
+        id: &str,
+        limit: usize,
+    ) -> Result<ProjectActivity, BridgeError> {
+        let listed = self
+            .reader()?
+            .project_activity(project(id)?, limit)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(ProjectActivity {
+            project_id: id.into(),
+            items: listed.items,
+            more: listed.more,
         })
     }
 
@@ -409,19 +438,30 @@ impl NativeBridge {
     }
 
     /// Lists a set-up project's files for the console's `@` completion: tracked and
-    /// untracked, not ignored paths relative to its folder that contain the query.
-    /// Takes the project id and the query. Returns at most 200 paths in git's order.
-    pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
-        let paths = self
-            .reader()?
-            .project_files(
-                project(id)?,
-                query.to_owned(),
-                crazyagent::project_files::FILES_MAX,
-            )
-            .await
-            .map_err(|e| read_failure(&e.0))?;
-        bounded(paths)
+    /// untracked, not ignored paths relative to its folder that contain the query. The
+    /// listing runs on a copy of the controller without the bridge and leaves the bridge
+    /// controller's view as it was. Takes the project id and the query. Returns the
+    /// listing, which gives at most 200 paths in git's order.
+    pub fn project_files(
+        &self,
+        id: &str,
+        query: &str,
+    ) -> Result<Unlocked<Vec<String>>, BridgeError> {
+        let mut controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| failure("not_connected"))?
+            .reader()
+            .map_err(|_| failure("not_connected"))?;
+        let project_id = project(id)?;
+        let query = query.to_owned();
+        Ok(Box::pin(async move {
+            let paths = controller
+                .project_files(project_id, query, crazyagent::project_files::FILES_MAX)
+                .await
+                .map_err(|e| read_failure(&e.0))?;
+            bounded(paths)
+        }))
     }
 
     /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
@@ -539,14 +579,17 @@ impl NativeBridge {
 
     /// Changes a project's name, description, stack, platforms, research, pool and team.
     /// Takes the project id, the new setup, an optional new name, the setup revision the screen
-    /// showed (the current one when absent) and the client generation. Returns the actual
-    /// commit receipt; a change made in between is the plain rejection `stale_revision`.
+    /// showed (the current one when absent), the files the setup mapping found that the owner
+    /// keeps linked, each with its group (none leaves the links alone) and the client
+    /// generation. Returns the actual commit receipt; a change made in between is the plain
+    /// rejection `stale_revision`.
     pub async fn update_project_setup(
         &mut self,
         id: &str,
         setup: ProjectSetup,
         name: Option<String>,
         revision: Option<u64>,
+        kept: Option<Vec<KeptFile>>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
@@ -577,6 +620,7 @@ impl NativeBridge {
                     expected_revision: revision.unwrap_or(stored.revision),
                     name,
                     setup,
+                    kept,
                 },
                 generation,
             )
@@ -584,12 +628,41 @@ impl NativeBridge {
         self.deliver_intent(false).await
     }
 
-    /// Removes a project from CrazyAgent; its research stops and its folder stays on disk.
-    /// Takes the project id and the client generation.
-    /// Returns the actual commit receipt; an open master conversation is a plain rejection.
+    /// Removes a project from CrazyAgent. Without a name its folder stays on disk; with the
+    /// name the owner typed, the engine stops its agents and moves its folders to the Trash,
+    /// only when the name is the project's exact name. Takes the project id, the client
+    /// generation and the typed name, if any. Returns the actual commit receipt.
     pub async fn remove_project(
         &mut self,
         id: &str,
+        generation: u64,
+        delete_name: Option<String>,
+    ) -> Result<IntentReceipt, BridgeError> {
+        self.ready_for_intent(generation)?;
+        let project_id = project(id)?;
+        self.controller()?
+            .project_setup(project_id.clone())
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        let mutation = match delete_name {
+            Some(name) => OwnerMutation::DeleteProject { project_id, name },
+            None => OwnerMutation::RemoveProject { project_id },
+        };
+        self.controller()?
+            .begin_mutation(mutation, generation)
+            .map_err(|error| caused("owner_not_ready", &error.0))?;
+        self.deliver_intent(false).await
+    }
+
+    /// Moves or copies a project kept where it is into the projects home: the engine waits
+    /// for its team to stop, moves the folder and points the project and its agents' copies
+    /// at the new place. Takes the project id, move or copy, the soft refusals the owner
+    /// chose to go past and the client generation. Returns the actual commit receipt.
+    pub async fn move_project_home(
+        &mut self,
+        id: &str,
+        mode: crazyagent::projects_home::AddMode,
+        overrides: Vec<crazyagent::projects_home::AddOverride>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         self.ready_for_intent(generation)?;
@@ -599,7 +672,14 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         self.controller()?
-            .begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)
+            .begin_mutation(
+                OwnerMutation::MoveProjectHome {
+                    project_id,
+                    mode,
+                    overrides,
+                },
+                generation,
+            )
             .map_err(|error| caused("owner_not_ready", &error.0))?;
         self.deliver_intent(false).await
     }
@@ -693,5 +773,18 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(ResearchLog { lines })
+    }
+}
+
+impl BridgeQueue {
+    /// Lists a set-up project's files for the console's `@` completion through the window's
+    /// bridge queue. Takes a listing place, then the shared bridge only to start the listing,
+    /// so a change asked while git runs does not wait for it. Takes the project id and the
+    /// query. Returns at most 200 paths in git's order, or `busy` when no place or bridge
+    /// comes free within the queue's wait.
+    pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
+        let _place = self.listing().await?;
+        let listing = self.read().await?.project_files(id, query)?;
+        listing.await
     }
 }

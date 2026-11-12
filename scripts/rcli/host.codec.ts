@@ -6,6 +6,11 @@ import { validateObservationFrame, type ObservationFrame } from "./host.observat
 
 const FRAME_MAX = 65_536;
 export const FRAME_TEXT_MAX = FRAME_MAX - 1_024;
+/** The provider failures a failed turn can name: the model provider's rate limit, its
+ * spent quota or credit, or its refusal of the key. The engine moves an rcli master to the
+ * next pool account on each, as it does for the other harnesses (PA-6, DEC-091). */
+export const PROVIDER_FAILURES = ["rate_limited", "quota_exhausted", "invalid_authentication"] as const;
+export type ProviderFailure = (typeof PROVIDER_FAILURES)[number];
 const QUEUE_MAX = 64;
 const QUEUE_BYTES_MAX = 1_048_576;
 const U64_MAX = 18_446_744_073_709_551_615n;
@@ -30,7 +35,7 @@ export type EventBody =
   | { kind: "ready" }
   | { kind: "output"; turn_id: string; text: string }
   | { kind: "input"; turn_id: string; prompt_id: string; question: string; choices: string[] }
-  | { kind: "completed"; turn_id: string; status: "succeeded" | "cancelled" | "failed" };
+  | { kind: "completed"; turn_id: string; status: "succeeded" | "cancelled" | "failed"; failure?: ProviderFailure };
 
 function reject(): never {
   throw new Error("host_control_rejected");
@@ -234,6 +239,11 @@ function eventBody(value: unknown): EventBody {
       if (!Array.isArray(body.choices) || body.choices.length > 8) reject();
       return { kind: "input", turn_id: identifier(body.turn_id), prompt_id: identifier(body.prompt_id), question: text(body.question, 4096), choices: Array.from(body.choices, (choice) => text(choice, 1024)) };
     case "completed":
+      if (Object.hasOwn(body, "failure")) {
+        exact(body, ["kind", "turn_id", "status", "failure"]);
+        if (body.status !== "failed" || !PROVIDER_FAILURES.includes(body.failure as ProviderFailure)) reject();
+        return { kind: "completed", turn_id: identifier(body.turn_id), status: body.status, failure: body.failure as ProviderFailure };
+      }
       exact(body, ["kind", "turn_id", "status"]);
       if (body.status !== "succeeded" && body.status !== "cancelled" && body.status !== "failed") reject();
       return { kind: "completed", turn_id: identifier(body.turn_id), status: body.status };

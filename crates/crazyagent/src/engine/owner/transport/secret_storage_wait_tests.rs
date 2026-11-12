@@ -713,3 +713,79 @@ async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
     );
     busy.stop().await;
 }
+
+/// SECAUDIT configured-rcli-home-keeps-provider-key: removing an API key account leaves its
+/// key in no file under the engine root, the generated SDK home included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_an_account_leaves_no_key_in_its_generated_home() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::DirBuilderExt;
+    let busy = Busy::start().await;
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let secret = format!("dummy-key-{}", std::process::id());
+    let added = busy
+        .client
+        .add_account(
+            AccountDraft {
+                provider: Provider::OpenaiCompatible,
+                method: SignInMethod::Url,
+                name: "Lab server".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(AccountSecret::new(secret.as_bytes().to_vec()).unwrap()),
+        )
+        .await
+        .unwrap();
+    let handle = busy.service.owner_runtime().unwrap();
+    let admission = busy.admission();
+    let Ok(crate::storage::accounts::ResultValue::Account(listed)) = handle
+        .engine
+        .native_auth_job(|reply| {
+            crate::storage::Job::Accounts(
+                admission.clone(),
+                crate::storage::accounts::Command::Get(added.id.clone()),
+                reply,
+            )
+        })
+        .await
+    else {
+        panic!("storage lists the added account");
+    };
+    let crate::config::ModelAuthentication::ApiKey { credential_ref } =
+        listed.connection.auth.clone()
+    else {
+        panic!("the added account keeps an API key");
+    };
+    let home = busy
+        .engine_root()
+        .join("configured-sdk-homes")
+        .join(format!(
+            "{:x}",
+            Sha256::digest(credential_ref.as_str().as_bytes())
+        ));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(home.join(".backboard"))
+        .unwrap();
+    std::fs::write(home.join(".backboard/keys.json"), secret.as_bytes()).unwrap();
+    std::fs::set_permissions(
+        home.join(".backboard/keys.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 2);
+
+    busy.client.remove_account(added.id.clone()).await.unwrap();
+    assert!(
+        none_hold(&busy.engine_root(), secret.as_bytes()).await,
+        "the generated home keeps the removed account's key"
+    );
+    assert!(!home.exists(), "the generated home goes whole");
+    busy.stop().await;
+}

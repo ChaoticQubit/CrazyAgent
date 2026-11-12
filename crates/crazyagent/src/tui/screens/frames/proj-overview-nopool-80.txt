@@ -15,10 +15,10 @@
     Design research         ! Needs a pool
     Front-end design        ! Needs a pool
 
+  [Quick info]  Features  Competitors  Install & use  README
+  Not written yet. It is written after the next landed change set, or when you
+  refresh the tabs.
 
 
 
-
-
-
- Enter Pick a pool  Shift-←→ Tabs  Esc Home                              ? Help
+ Enter Pick a pool  ←→ Overview tab  PgUp/PgDn Scroll                    ? Help

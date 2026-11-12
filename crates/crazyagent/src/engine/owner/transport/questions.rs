@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::encode_frame;
-use crate::questions::{self, Answer, Page, Settlement};
+use crate::questions::{self, Answer, BulkDismissal, Page, Settlement};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 16 * 1024;
@@ -8,6 +8,8 @@ pub(super) const QUESTIONS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const _: () = assert!(2 * questions::ANSWER_BYTES_MAX + 1024 <= REQUEST_BYTES_MAX);
 const _: () = assert!(REQUEST_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX);
+const _: () = assert!(questions::LISTED_MAX * 48 + 64 <= REQUEST_BYTES_MAX);
+const _: () = assert!(questions::LISTED_MAX * 96 + 128 <= crate::protocol::FRAME_BYTES_MAX);
 const _: () = assert!(
     questions::COUNTED_PROJECTS_MAX as usize * 160 + 64 <= crate::protocol::FRAME_BYTES_MAX
 );
@@ -29,6 +31,7 @@ pub const QUESTIONS_CODES: &[&str] = &[
     "questions_answer_invalid",
     "questions_ask_invalid",
     "questions_asker_full",
+    "questions_bulk_invalid",
     "questions_delivery_full",
     "questions_full",
     "questions_in_terminal",
@@ -37,9 +40,12 @@ pub const QUESTIONS_CODES: &[&str] = &[
     "questions_notes_invalid",
     "questions_option_invalid",
     "questions_outcome_unknown",
+    "questions_owner_not_typed",
     "questions_owner_turn_invalid",
+    "questions_owner_turn_used",
     "questions_page_unavailable",
     "questions_project_missing",
+    "questions_replace_invalid",
     "questions_reply_bounds",
     "questions_request_bounds",
     "questions_request_invalid",
@@ -59,14 +65,17 @@ enum Action {
     Answer {
         id: u64,
         version: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        picks: Vec<u8>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        option: Option<u8>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        text: Option<String>,
+        comment: Option<String>,
     },
     Dismiss {
         id: u64,
         version: u64,
+    },
+    DismissMany {
+        items: Vec<(u64, u64)>,
     },
     Counts {},
 }
@@ -82,8 +91,19 @@ struct Envelope {
 enum Reply {
     Page { page: Page },
     Settled { settlement: Settlement },
+    Dismissed { outcome: BulkDismissal },
     Counts { counts: Vec<(ProjectId, u32)> },
     Rejected { code: String },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::List { .. } => Some("questions.list"),
+        Action::Counts { .. } => Some("questions.counts"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -108,9 +128,9 @@ impl OwnerClient {
         }
     }
 
-    /// Answers one owner question with an option or typed text, naming the version the
-    /// owner read; the engine tells the asker once. Inputs: the question id, the version and
-    /// the answer. Output: Settled once recorded, or Stale when it was settled or changed
+    /// Answers one owner question with picked options, a comment or both, naming the version
+    /// the owner read; the engine tells the asker once. Inputs: the question id, the version
+    /// and the answer. Output: Settled once recorded, or Stale when it was settled or changed
     /// since it was read.
     pub async fn questions_answer(
         &self,
@@ -118,15 +138,11 @@ impl OwnerClient {
         version: u64,
         answer: Answer,
     ) -> Result<Settlement, EngineError> {
-        let (option, text) = match answer {
-            Answer::Option(index) => (Some(index), None),
-            Answer::Text(text) => (None, Some(text)),
-        };
         let action = Action::Answer {
             id,
             version,
-            option,
-            text,
+            picks: answer.picks,
+            comment: answer.comment,
         };
         match self.questions_exchange(action).await? {
             Reply::Settled { settlement } => Ok(settlement),
@@ -150,6 +166,22 @@ impl OwnerClient {
         }
     }
 
+    /// Dismisses up to `LISTED_MAX` owner questions at once (F12), each naming the version the
+    /// owner read and each in its own step, so one that cannot be dismissed stops only itself.
+    /// Input: each question's id and version. Output: what happened to each.
+    pub async fn questions_dismiss_many(
+        &self,
+        items: Vec<(u64, u64)>,
+    ) -> Result<BulkDismissal, EngineError> {
+        match self
+            .questions_exchange(Action::DismissMany { items })
+            .await?
+        {
+            Reply::Dismissed { outcome } => Ok(outcome),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Counts the questions waiting for the owner in each project that has any. Output: the
     /// projects and their counts.
     pub async fn questions_counts(&self) -> Result<Vec<(ProjectId, u32)>, EngineError> {
@@ -161,6 +193,7 @@ impl OwnerClient {
 
     async fn questions_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(QUESTIONS_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { questions: action })
                 .map_err(|_| failure("questions_request_bounds"))?;
             self.root.verify()?;
@@ -187,7 +220,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("questions_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -258,8 +293,9 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
 }
 
 /// Runs one authenticated Questions action against the engine database in the engine root.
-/// An answer names exactly one of an option position or typed text. Inputs: the engine root
-/// and the action. Output: the reply, or the log's refusal.
+/// An answer names option positions, a comment or both, never neither; the log checks them
+/// against the question. Inputs: the engine root and the action. Output: the reply, or the
+/// log's refusal.
 fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = questions::open(root)?;
     let settlement = |settlement| Ok(Reply::Settled { settlement });
@@ -270,17 +306,19 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
         Action::Answer {
             id,
             version,
-            option,
-            text,
+            picks,
+            comment,
         } => {
-            let answer = match (option, text) {
-                (Some(index), None) => Answer::Option(index),
-                (None, Some(text)) => Answer::Text(text),
-                _ => return Err(failure("questions_answer_invalid")),
-            };
+            if picks.is_empty() && comment.is_none() {
+                return Err(failure("questions_answer_invalid"));
+            }
+            let answer = Answer { picks, comment };
             settlement(questions::answer(&db, id, version, &answer)?)
         }
         Action::Dismiss { id, version } => settlement(questions::dismiss(&db, id, version)?),
+        Action::DismissMany { items } => Ok(Reply::Dismissed {
+            outcome: questions::dismiss_many(&db, &items)?,
+        }),
         Action::Counts {} => Ok(Reply::Counts {
             counts: questions::count_pending(&db)?,
         }),

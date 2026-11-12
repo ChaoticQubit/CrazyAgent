@@ -58,7 +58,7 @@ impl Reveals {
     /// Registers a reveal before its event goes out, dropping waits that already ended.
     /// Inputs: the project and the reveal. Output: the receiver its acknowledgement
     /// completes, or `ide_reveal_busy` while `WAITING_MAX` reveals wait.
-    fn wait(
+    pub(super) fn wait(
         &self,
         project: &ProjectId,
         request: &RequestId,
@@ -83,7 +83,7 @@ impl Reveals {
     /// Completes the reveal a project's IDE acknowledged. Inputs: the project whose
     /// capability sent the acknowledgement and the reveal. Output: Ok, or
     /// `ide_reveal_unknown` for a reveal this project is not waiting on.
-    fn ack(&self, project: &ProjectId, request: &RequestId) -> Result<(), EngineError> {
+    pub(super) fn ack(&self, project: &ProjectId, request: &RequestId) -> Result<(), EngineError> {
         let mut waiting = self
             .waiting
             .lock()
@@ -98,7 +98,7 @@ impl Reveals {
     }
 
     /// Stops waiting on a reveal that was answered or timed out. Input: the reveal.
-    fn forget(&self, request: &RequestId) {
+    pub(super) fn forget(&self, request: &RequestId) {
         if let Ok(mut waiting) = self.waiting.lock() {
             waiting.retain(|wait| &wait.request != request);
         }
@@ -106,7 +106,7 @@ impl Reveals {
 
     /// Marks the project's IDE tab for the desktop to bring forward, replacing an older
     /// mark. Inputs: the project, the reveal and the time in milliseconds.
-    fn mark(&self, project: &ProjectId, request: &RequestId, now_ms: u64) {
+    pub(super) fn mark(&self, project: &ProjectId, request: &RequestId, now_ms: u64) {
         if let Ok(mut focus) = self.focus.lock() {
             *focus = Some((
                 RevealFocus {
@@ -262,4 +262,4 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(super) mod tests;

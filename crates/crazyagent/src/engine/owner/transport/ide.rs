@@ -1,14 +1,16 @@
 use super::*;
 use crate::ide::bridge::reveal::{self, RevealFocus, RevealTarget};
+use crate::ide::bridge::run_command::{self, COMMAND_BYTES_MAX, RunMode};
 use crate::protocol::{ProjectId, RequestId, encode_frame};
 use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 8192;
 const DESKTOP_SLOT: u8 = 1;
 pub(super) const IDE_TIMEOUT: Duration = Duration::from_secs(reveal::REVEAL_WAIT.as_secs() + 5);
+const _: () = assert!(COMMAND_BYTES_MAX * 2 <= REQUEST_BYTES_MAX);
 
-/// Every code an IDE request can answer an owner client with: the reveal's refusals, this
-/// protocol's own, and the owner connection's it travels on.
+/// Every code an IDE request can answer an owner client with: the reveal's and the run's
+/// refusals, this protocol's own, and the owner connection's it travels on.
 pub const IDE_CODES: &[&str] = &[
     "changes_not_found",
     "ide_focus_desktop_only",
@@ -27,6 +29,14 @@ pub const IDE_CODES: &[&str] = &[
     "ide_reveal_outside",
     "ide_reveal_unanswered",
     "ide_reveal_unavailable",
+    "ide_run_chained",
+    "ide_run_control_character",
+    "ide_run_desktop_only",
+    "ide_run_empty",
+    "ide_run_not_one_line",
+    "ide_run_off",
+    "ide_run_too_long",
+    "ide_run_unanswered",
     "ide_unavailable",
     "ide_workspace_unavailable",
     "owner_authentication_failed",
@@ -49,6 +59,17 @@ enum Action {
         target: RevealTarget,
     },
     Focus,
+    Run {
+        project: ProjectId,
+        command: String,
+    },
+    RunMode {
+        project: ProjectId,
+    },
+    SetRunMode {
+        project: ProjectId,
+        mode: RunMode,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -62,6 +83,8 @@ struct Envelope {
 enum Reply {
     Revealed { request: RequestId },
     Focus { focus: Option<RevealFocus> },
+    Ran { request: RequestId },
+    RunMode { mode: RunMode },
     Rejected { code: String },
 }
 
@@ -92,6 +115,47 @@ impl OwnerClient {
     pub async fn ide_focus(&self) -> Result<Option<RevealFocus>, EngineError> {
         match self.ide_exchange(Action::Focus).await? {
             Reply::Focus { focus } => Ok(focus),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Types one command the owner confirmed into a new terminal of the project's open
+    /// desktop IDE and waits until the IDE says it typed it. Only the desktop client, where
+    /// the owner confirms the command, may ask. Inputs: the project and the command.
+    /// Output: the run's id, or a refusal such as `ide_run_off`, `ide_run_chained`,
+    /// `ide_not_running` or `ide_run_desktop_only`.
+    pub async fn ide_run(
+        &self,
+        project: ProjectId,
+        command: String,
+    ) -> Result<RequestId, EngineError> {
+        match self.ide_exchange(Action::Run { project, command }).await? {
+            Reply::Ran { request } => Ok(request),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads a project's "Run in project terminal" setting. Input: the project.
+    /// Output: the mode, Type and run when the owner saved none.
+    pub async fn ide_run_mode(&self, project: ProjectId) -> Result<RunMode, EngineError> {
+        match self.ide_exchange(Action::RunMode { project }).await? {
+            Reply::RunMode { mode } => Ok(mode),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Saves a project's "Run in project terminal" setting. Inputs: the project and the
+    /// mode. Output: the mode as saved.
+    pub async fn ide_set_run_mode(
+        &self,
+        project: ProjectId,
+        mode: RunMode,
+    ) -> Result<RunMode, EngineError> {
+        match self
+            .ide_exchange(Action::SetRunMode { project, mode })
+            .await?
+        {
+            Reply::RunMode { mode: saved } if saved == mode => Ok(saved),
             _ => Err(unknown()),
         }
     }
@@ -134,14 +198,18 @@ impl OwnerClient {
     }
 }
 
-/// Whether a request body is a reveal, which waits on the IDE and so is served past the
-/// owner exchange; a focus read is answered at once. Input: the body. Output: the answer,
-/// false for a body that does not parse.
+/// Whether a request body is a reveal or a run, which wait on the IDE, or a Run setting
+/// call, which waits on the engine database, and so is served past the owner exchange; a
+/// focus read is answered at once. Input: the body. Output: the answer, false for a body
+/// that does not parse.
 pub(super) fn deferred(bytes: &[u8]) -> bool {
     matches!(
         serde_json::from_slice::<Envelope>(bytes),
         Ok(Envelope {
             ide: Action::Reveal { .. }
+                | Action::Run { .. }
+                | Action::RunMode { .. }
+                | Action::SetRunMode { .. }
         })
     )
 }
@@ -207,5 +275,16 @@ async fn handle(
             focus: reveal::focus(&runtime),
         }),
         Action::Focus => Err(failure("ide_focus_desktop_only")),
+        Action::Run { project, command } if packet[4] == DESKTOP_SLOT => Ok(Reply::Ran {
+            request: run_command::run(&runtime, &project, &command).await?,
+        }),
+        Action::Run { .. } => Err(failure("ide_run_desktop_only")),
+        Action::RunMode { project } => Ok(Reply::RunMode {
+            mode: run_command::saved_mode(&runtime, &project).await?,
+        }),
+        Action::SetRunMode { project, mode } => {
+            run_command::save_mode(&runtime, &project, mode).await?;
+            Ok(Reply::RunMode { mode })
+        }
     }
 }

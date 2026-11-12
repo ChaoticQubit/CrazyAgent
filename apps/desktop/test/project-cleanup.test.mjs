@@ -8,8 +8,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 const view = await import("../src/screens/project/cleanup.tsx");
 const api = await import("../src/api-cleanup.ts");
 
-const agent = (id, label, bytes, countedAll = true) => ({
-  id, role: id === 1 ? "master" : "sub", label, harness: id === 1 ? "claude" : "codex", stopped_ms: 1_000, bytes, counted_all: countedAll,
+const agent = (id, label, bytes, countedAll = true, kept = null) => ({
+  id, role: id === 1 ? "master" : "sub", label, harness: id === 1 ? "claude" : "codex", stopped_ms: 1_000, bytes, counted_all: countedAll, kept,
 });
 const finished = [agent(3, "Ada (@login-page)", 1024 * 1024 * 1024), agent(2, "Grace (@signup)", 512 * 1024 * 1024)];
 const text = (markup) => markup.replace(/<[^>]*>/gu, " ").replace(/&#x27;/gu, "'").replace(/&amp;/gu, "&").replace(/\s+/gu, " ");
@@ -18,22 +18,36 @@ const render = (props) => renderToStaticMarkup(createElement(view.CleanupView, {
   onOpen() {}, onCancel() {}, onConfirm() {}, onReview() {}, ...props,
 }));
 
-test("the button names how many finished agents there are and the space they hold", () => {
-  assert.equal(view.cleanupLabel(finished), "Clean up 2 finished agents (1.5 GB)");
-  assert.equal(view.cleanupLabel([finished[1]]), "Clean up 1 finished agent (512 MB)");
-  assert.equal(view.cleanupLabel([agent(4, "Lin", 2048, false), finished[1]]), "Clean up 2 finished agents (at least 512 MB)");
+test("the button names whose worktrees go and the space they hold, and says what stays", () => {
+  assert.equal(view.cleanupLabel(finished), "Remove worktrees of 2 finished agents (1.5 GB)");
+  assert.equal(view.cleanupLabel([finished[1]]), "Remove worktrees of 1 finished agent (512 MB)");
+  assert.equal(view.cleanupLabel([agent(4, "Lin", 2048, false), finished[1]]), "Remove worktrees of 2 finished agents (at least 512 MB)");
   const row = text(render({ list: { kind: "ok", value: finished } }));
-  assert.match(row, /Finished agents keep their working copy until you remove it\. Clean up 2 finished agents \(1\.5 GB\)/);
-  assert.doesNotMatch(row, /Remove 2 finished agents\?/);
+  assert.match(row, /Their conversations, history and logs stay\. Remove worktrees of 2 finished agents \(1\.5 GB\)/);
+  assert.doesNotMatch(row, /Remove the worktrees of 2 finished agents\?/);
+});
+
+test("an agent a check keeps is listed with its reason and never counted or offered", () => {
+  const held = [agent(7, "Lin (@docs)", 0, true, "cleanup_commits_unlanded"), agent(6, "Mo", 0, true, "cleanup_worktree_dirty")];
+  const row = text(render({ list: { kind: "ok", value: [...held, ...finished] } }));
+  assert.match(row, /Remove worktrees of 2 finished agents \(1\.5 GB\)/);
+  assert.match(row, /Lin \(@docs\) stays: it has commits that haven't landed/);
+  assert.match(row, /Mo stays: its worktree has changes that aren't saved anywhere else/);
+  assert.deepEqual(view.removable([...held, ...finished]).map((one) => one.id), [3, 2]);
+  const only = text(render({ list: { kind: "ok", value: held } }));
+  assert.doesNotMatch(only, /Remove worktrees of/);
+  assert.match(only, /Lin \(@docs\) stays: it has commits that haven't landed/);
+  assert.deepEqual(view.cleanupRequest(finished, { kind: "ok", value: [...held, ...finished] }), [3, 2], "kept agents never change the list the dialog asked about");
+  assert.match(api.keptReason("cleanup_new_check"), /cleanup_new_check/);
 });
 
 test("the confirm dialog lists every agent with its harness and size before anything is removed", () => {
   const dialog = text(render({ list: { kind: "ok", value: finished }, asked: finished }));
-  assert.match(dialog, /Remove 2 finished agents\?/);
-  assert.match(dialog, /Each agent's working copy and folder are deleted\. Their landed work stays in your project\./);
+  assert.match(dialog, /Remove the worktrees of 2 finished agents\?/);
+  assert.match(dialog, /Each agent's worktree, its code checkout and build files, is deleted\. Their conversations, history and logs stay, and their landed work stays in your project\./);
   assert.match(dialog, /Ada \(@login-page\) Codex 1 GB/);
   assert.match(dialog, /Grace \(@signup\) Codex 512 MB/);
-  assert.match(dialog, /Keep them Remove and free 1\.5 GB/);
+  assert.match(dialog, /Keep them Remove worktrees and free 1\.5 GB/);
 });
 
 test("nothing shows with no finished agent, while loading or without cleanup; a failed read says why", () => {
@@ -43,7 +57,7 @@ test("nothing shows with no finished agent, while loading or without cleanup; a 
   assert.equal(render({ list: { kind: "error", code: "cleanup_unavailable", message: "" } }), "");
   const failed = text(render({ list: { kind: "error", code: "cleanup_worktree_dirty", message: "" } }));
   assert.match(failed, /Couldn't read finished agents\. An agent's working copy has changes that aren't saved anywhere else\./);
-  assert.match(text(render({ list: { kind: "ok", value: [] }, note: "Removed 2 finished agents and freed 1.5 GB." })), /Removed 2 finished agents and freed 1\.5 GB\./);
+  assert.match(text(render({ list: { kind: "ok", value: [] }, note: "Removed the worktrees of 2 finished agents and freed 1.5 GB." })), /Removed the worktrees of 2 finished agents and freed 1\.5 GB\./);
 });
 
 test("every cleanup code the engine can answer with has its own sentence or the shared copy", () => {
@@ -52,6 +66,11 @@ test("every cleanup code the engine can answer with has its own sentence or the 
   const own = listed.filter((code) => code.startsWith("cleanup_") && !["cleanup_reply_bounds", "cleanup_request_bounds"].includes(code));
   assert.ok(own.length >= 12);
   for (const code of own) assert.ok(api.CLEANUP_REFUSALS.includes(code), code);
+  const keeps = (source.match(/"cleanup_[a-z_]+"/gu) ?? []).map((code) => code.slice(1, -1));
+  for (const code of ["cleanup_agent_has_task", "cleanup_agent_running", "cleanup_changes_open", "cleanup_changes_restorable", "cleanup_commits_unlanded", "cleanup_refs_unlanded", "cleanup_worktree_dirty", "cleanup_worktree_invalid", "cleanup_worktree_leftover", "cleanup_worktree_unreadable"]) {
+    assert.ok(keeps.includes(code), code);
+    assert.ok(api.KEPT_CODES.includes(code), code);
+  }
   assert.match(api.cleanupRefusal({ code: "cleanup_reply_bounds" }), /cleanup_reply_bounds/);
 });
 
@@ -65,21 +84,21 @@ test("the dialog keeps the list it opened with and a changed read asks again bef
   assert.equal(view.cleanupRequest(null, { kind: "ok", value: finished }), null);
 
   const changed = text(render({ list: { kind: "ok", value: late }, asked: finished }));
-  assert.match(changed, /Remove 2 finished agents\?/);
+  assert.match(changed, /Remove the worktrees of 2 finished agents\?/);
   assert.match(changed, /Ada \(@login-page\) Codex 1 GB/);
   assert.doesNotMatch(changed, /Lin \(@docs\)/);
   assert.match(changed, /The list changed\. Review it again before anything is removed\./);
   assert.match(changed, /Keep them Review the new list/);
-  assert.doesNotMatch(changed, /Remove and free/);
+  assert.doesNotMatch(changed, /Remove worktrees and free/);
 
   const same = text(render({ list: { kind: "ok", value: finished }, asked: finished }));
   assert.doesNotMatch(same, /The list changed/);
-  assert.match(same, /Keep them Remove and free 1\.5 GB/);
+  assert.match(same, /Keep them Remove worktrees and free 1\.5 GB/);
 });
 
-test("the outcome says what went, and how many stayed and why when the removal stopped part way", () => {
-  assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [3, 2], kept: null } }), "Removed 2 finished agents and freed 1.5 GB.");
+test("the outcome says whose worktrees went, and how many stayed and why when the removal stopped part way", () => {
+  assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [3, 2], kept: null } }), "Removed the worktrees of 2 finished agents and freed 1.5 GB.");
   assert.equal(view.removalNote(finished, { kind: "ok", value: { agents: [3], kept: "cleanup_worktree_dirty" } }),
-    "Removed 1, kept 1: An agent's working copy has changes that aren't saved anywhere else. CrazyAgent kept it and stopped there.");
-  assert.match(view.removalNote(finished, { kind: "error", code: "cleanup_agent_running", message: "" }), /^Couldn't remove every finished agent\. An agent started again\./);
+    "Removed 1 worktree, kept 1: An agent's working copy has changes that aren't saved anywhere else. CrazyAgent kept it and stopped there.");
+  assert.match(view.removalNote(finished, { kind: "error", code: "cleanup_agent_running", message: "" }), /^Couldn't remove every worktree\. An agent started again\./);
 });

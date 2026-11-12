@@ -7,7 +7,7 @@ pub const BUNDLE: &str = "out/vs/code/browser/workbench/workbench.js";
 
 /// Names the set of [`EDITS`] a build was installed with, so a build installed under another
 /// revision is fetched again. Change it whenever [`EDITS`] change.
-pub const REVISION: &str = "h2";
+pub const REVISION: &str = "h4";
 
 const BUNDLE_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const WINDOW: usize = 32;
@@ -20,12 +20,14 @@ struct Edit {
     to: &'static str,
 }
 
-/// The removed parts that no setting or extension can hide in the pinned build: the palette
+/// The removed parts no setting or extension can hide in the pinned build: the palette
 /// entries of the Remote menu, remote extension install, the Accounts commands, account
 /// policy sync and diagnostics, inline suggestion snoozing, dynamic authentication providers
-/// and every Copilot command, the Remote menu's shortcut, and the Remote indicator
-/// (`status.host`), which stops rendering. The Remote connection commands stay.
-const EDITS: [Edit; 16] = [
+/// and Copilot; the Remote menu's shortcut; the Remote indicator (`status.host`); the Accounts
+/// entry, read from a stored choice; the Settings Chat section; and the terminal's Select
+/// Default Profile entries and profile gear, whose writes the read-only Remote settings refuse
+/// with a raw EPERM toast. Remote connections stay.
+const EDITS: [Edit; 21] = [
     Edit {
         anchor: "\"Show Remote Menu\")",
         from: "f1:!0,keybinding:{weight:200,primary:2605}",
@@ -105,6 +107,31 @@ const EDITS: [Edit; 16] = [
         anchor: "\"Manage GitHub Copilot Budget\")",
         from: "f1:!0",
         to: "f1:!1",
+    },
+    Edit {
+        anchor: "\"Manage\" can not be hidden')}})]}",
+        from: "{return ",
+        to: "{return!1&&",
+    },
+    Edit {
+        anchor: "{id:\"chat\",label:",
+        from: "children:[",
+        to: "hide:!0,children:[",
+    },
+    Edit {
+        anchor: "H(19950,\"Select Default Profile\")",
+        from: "run:o=>",
+        to: "f1:!1,run:o=>",
+    },
+    Edit {
+        anchor: "H(20028,\"Select Default Profile\")",
+        from: "group:\"3_configure\"",
+        to: "when:D.false(),group:\"3_configure\"",
+    },
+    Edit {
+        anchor: "_createProfileQuickPickItem(o){",
+        from: "let e=[{iconClass:J.asClassName(KMn),tooltip:d(20038,null)}],",
+        to: "let e=[],",
     },
 ];
 

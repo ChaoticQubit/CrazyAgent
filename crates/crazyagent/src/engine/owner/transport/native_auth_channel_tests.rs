@@ -256,6 +256,34 @@ impl ChannelCase {
         (begun.reply.fact, begun.work.unwrap())
     }
 
+    /// Changes what a sign-in was admitted under: `owner` revokes the TUI owner, `entry`
+    /// edits the sign-in's own connection, and `bytes` rewrites the same settings with other
+    /// bytes, which a sign-in outlives because it is bound to its own entry (NS-3). This
+    /// engine keeps the settings it started with, so any real edit refuses here.
+    /// Inputs: the change and the revocation's operation id. Output: nothing.
+    async fn change(&self, change: &str, revocation: &str) {
+        match change {
+            "owner" => {
+                self.host
+                    .control(OwnerControl {
+                        operation_id: request(revocation),
+                        target: OwnerClientKind::Tui,
+                        expected_epoch: self.admission().owner_epoch,
+                        decision: OwnerDecision::Revoke,
+                    })
+                    .await
+                    .unwrap();
+            }
+            "entry" => {
+                assert_eq!(CATALOG.matches(r#"id = "model-a""#).count(), 1);
+                let edited = CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#);
+                std::fs::write(&self.global, edited).unwrap();
+            }
+            "bytes" => std::fs::write(&self.global, format!("{CATALOG}\n")).unwrap(),
+            _ => unreachable!(),
+        }
+    }
+
     async fn launch(&self, id: &str) -> (NativeAuthFact, NativeAuthCustodyLaunch) {
         let (fact, work) = self.work(id).await;
         let launch = self.host.prepare_native_auth_custody(work).await.unwrap();
@@ -604,29 +632,55 @@ async fn native_auth_channel_consumes_capability_once_and_rejects_second_attach(
 
 #[tokio::test]
 async fn native_auth_channel_rejects_stale_owner_and_source_before_token_grant() {
-    for change in ["owner", "source"] {
+    for change in ["owner", "entry", "bytes"] {
         channel_case(move |case| async move {
             let (_, work) = case.work("stale-before-token").await;
-            if change == "owner" {
-                case.host
-                    .control(OwnerControl {
-                        operation_id: request("revoke-before-token"),
-                        target: OwnerClientKind::Tui,
-                        expected_epoch: case.admission().owner_epoch,
-                        decision: OwnerDecision::Revoke,
-                    })
-                    .await
-                    .unwrap();
-            } else {
-                std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
+            case.change(change, "revoke-before-token").await;
+            if change == "bytes" {
+                let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
+                assert!(case.host.authority.native_auth.lock().unwrap().is_some());
+                drop(launch);
+                return;
             }
             let before = case.snapshot();
-            assert!(case.host.prepare_native_auth_custody(work).await.is_err());
+            let refused = case
+                .host
+                .prepare_native_auth_custody(work)
+                .await
+                .err()
+                .unwrap();
+            if change == "entry" {
+                assert_eq!(refused.0, "native_profile_source_conflict");
+            }
             assert!(case.host.authority.native_auth.lock().unwrap().is_none());
             assert_eq!(case.snapshot(), before);
         })
         .await;
     }
+}
+
+/// Pin for the dispatch check: a revoked owner's sign-in stays refused after a byte change
+/// to the settings, the one change this engine lets a sign-in outlive (NS-3).
+/// It passes before and after the dispatch check stopped rescuing every refusal, because
+/// the continuation check refuses the revoked owner again with the same code.
+#[tokio::test]
+async fn native_auth_channel_refuses_a_revoked_owner_after_a_byte_change() {
+    channel_case(|case| async move {
+        let (_, work) = case.work("revoked-after-byte-change").await;
+        case.change("owner", "revoke-after-byte-change").await;
+        case.change("bytes", "").await;
+        let before = case.snapshot();
+        let refused = case
+            .host
+            .prepare_native_auth_custody(work)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.0, "owner_grant_stale_or_revoked");
+        assert!(case.host.authority.native_auth.lock().unwrap().is_none());
+        assert_eq!(case.snapshot(), before);
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -912,29 +966,31 @@ async fn native_auth_channel_cancellation_uses_committed_actor_state_and_keeps_g
     .await;
 }
 
+/// A held custody whose own entry changed or whose owner was revoked cannot go on or retire.
+/// The engine ends the custody session on a refused own-entry check, so the custodian reads
+/// the channel's end; the engine's refusal code itself is pinned by `native_auth_custody_tests`.
 #[tokio::test]
 async fn native_auth_channel_source_change_or_owner_revoke_cannot_continue_or_retire() {
-    for change in ["source", "owner"] {
+    for change in ["entry", "owner", "bytes"] {
         channel_case(move |case| async move {
             let (fact, launch) = case.launch("stale-live-custody").await;
             let mut channel = case.channel().await;
             let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
             assert!(channel.revalidate(&guard).await.is_ok());
-            if change == "source" {
-                std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
-            } else {
-                case.host
-                    .control(OwnerControl {
-                        operation_id: request("revoke-live-custody"),
-                        target: OwnerClientKind::Tui,
-                        expected_epoch: case.admission().owner_epoch,
-                        decision: OwnerDecision::Revoke,
-                    })
-                    .await
-                    .unwrap();
+            case.change(change, "revoke-live-custody").await;
+            if change == "bytes" {
+                assert!(matches!(
+                    channel.revalidate(&guard).await.unwrap(),
+                    NativeAuthCustodyControl::Continue
+                ));
+                drop((guard, channel, launch));
+                return;
             }
             let before = case.snapshot();
-            assert!(channel.revalidate(&guard).await.is_err());
+            let refused = channel.revalidate(&guard).await.err().unwrap();
+            if change == "entry" {
+                assert_eq!(refused.0, "unexpected end of file");
+            }
             let retirement = CustodySession::new(guard).seal_without_effect().unwrap();
             assert!(channel.retire(retirement).await.is_err());
             assert_eq!(case.snapshot().fences, before.fences);
@@ -998,6 +1054,7 @@ async fn native_auth_channel_no_child_retirement_is_atomic_under_retained_physic
         assert_eq!(after.facts, vec![fact.clone()]);
         assert!(after.fences.is_empty());
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let replay = case
             .client(OwnerClientKind::Tui)
@@ -1088,6 +1145,7 @@ async fn native_auth_channel_lost_committed_retirement_ack_reconciles_without_se
         drop(future);
         drop(channel);
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let replay = case
             .client(OwnerClientKind::Tui)
@@ -1143,6 +1201,7 @@ async fn native_auth_channel_any_real_child_effect_forbids_no_effect_retirement(
         assert_eq!(case.snapshot().fences, before.fences);
         let probe = case.probe();
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+        rustix::fs::flock(&probe, rustix::fs::FlockOperation::Unlock).unwrap();
         drop(probe);
         let mut alias = case.start("effect-still-fences-alias");
         alias.scope.connection = CredentialRef::new("connection-alias").unwrap();

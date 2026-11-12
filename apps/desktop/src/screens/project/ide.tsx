@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Failure } from "../../api";
-import { HEARTBEAT_MS, bounds, desktopPlatform, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, openFailure, openIde, placeIde, sameBounds, touchIde } from "../../api-ide";
+import { HEARTBEAT_MS, IDE_NOT_CLOSED, IDE_NOT_FORWARD, IDE_NOT_HIDDEN, IDE_NOT_MOVED, IDE_NOT_PLACED, bounds, closeIde, desktopPlatform, focusIdeWindow, hideIde, ideReadFailed, ideStatus, ideUnavailable, ideView, ideWindowOut, openFailure, openIde, openIdeWindow, placeIde, sameBounds, touchIde } from "../../api-ide";
 import type { IdeBounds, IdeTabState, IdeView } from "../../api-ide";
 import { Button, useOverlayShown } from "../../ui";
 import "./ide.css";
@@ -37,17 +37,37 @@ export function IdeUnavailable({ view, failure, busy = false, onAction }: { view
   </div>;
 }
 
+/** Closes the project's IDE when its page closes, and tells the owner when that failed. A build
+ * with no IDE has nothing to close and says nothing. Inputs: the project and the toast the page
+ * tells the owner through. Output: none. */
+export function useCloseIde(projectId: string, notify: (line: string) => void) {
+  useEffect(() => () => {
+    void closeIde(projectId).then((result) => {
+      if (result.kind === "error") notify(IDE_NOT_CLOSED);
+    });
+  }, [projectId]);
+}
+
 /** The project's IDE tab: the build state until the IDE is ready, then the IDE itself in a
  * native webview over the panel. The webview follows the panel's bounds, hides when the tab
  * is left or a dialog, drawer or menu opens over the page, and the engine hears every minute
  * that the owner still uses it. Every state it reads goes to `onView`, so the page swaps
- * Context and Changes back when the build fails.
- * Inputs: the project id and the view handler. Output: the tab. */
-export function IdeTab({ projectId, onView }: { projectId: string; onView: (view: IdeView) => void }) {
+ * Context and Changes back when the build fails. A failed move shows on the tab; a failed hide
+ * goes to the page, whose line stays outside the box the IDE webview may still cover. The IDE can
+ * also move to a window of its own: the tab then says so and offers to bring it forward until
+ * that window closes.
+ * Inputs: the project id, the view handler and the hide's problem, null once it worked. Output:
+ * the tab. */
+export function IdeTab({ projectId, onView, onHideProblem }: { projectId: string; onView: (view: IdeView) => void; onHideProblem: (line: string | null) => void }) {
   const panel = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<IdeTabState | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const [left, setLeft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [outProject, setOutProject] = useState<string | null>(null);
+  const [moving, setMoving] = useState(false);
+  const acting = useRef(false);
+  const out = outProject === projectId;
   const ready = state !== null && ideStatus(state).ready;
   const covered = useOverlayShown();
   const waiting = state === null
@@ -72,18 +92,51 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
   }, [projectId, waiting]);
 
   useEffect(() => {
+    if (!out) return;
+    let live = true;
+    const timer = window.setInterval(() => {
+      void ideWindowOut(projectId).then((result) => {
+        if (live && result.kind === "ok" && !result.value) setOutProject(null);
+      });
+    }, IDE_POLL_MS);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [projectId, out]);
+
+  useEffect(() => {
     const element = panel.current;
-    if (!ready || !element || covered) return;
+    if (!ready || !element || covered || out) return;
     let live = true;
     let shown = false;
     let last: IdeBounds | null = null;
     let frame = 0;
+    let misplaced = false;
+    let sending = false;
+    let waiting: IdeBounds | null = null;
+    const hide = () => void hideIde(projectId).then((result) => onHideProblem(result.kind === "ok" ? null : IDE_NOT_HIDDEN));
+    const send = (box: IdeBounds) => {
+      sending = true;
+      void placeIde(projectId, box).then((result) => {
+        sending = false;
+        if (!live) return;
+        if (result.kind !== "ok") {
+          misplaced = true;
+          setProblem(IDE_NOT_PLACED);
+        } else if (misplaced) {
+          misplaced = false;
+          setProblem(null);
+        }
+        const next = waiting;
+        waiting = null;
+        if (next) send(next);
+      });
+    };
     const place = () => {
       if (!shown) return;
-      const box = bounds(element.getBoundingClientRect());
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box || sameBounds(box, last)) return;
       last = box;
-      void placeIde(projectId, box);
+      if (sending) waiting = box;
+      else send(box);
     };
     const follow = () => {
       if (!live || !shown) {
@@ -94,11 +147,11 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
       frame = window.requestAnimationFrame(follow);
     };
     const open = async () => {
-      const box = bounds(element.getBoundingClientRect());
+      const box = bounds(element.getBoundingClientRect(), window.innerHeight);
       if (!box) return;
       const result = await openIde(projectId, box);
       if (!live) {
-        if (result.kind === "ok") void hideIde(projectId);
+        if (result.kind === "ok") hide();
         return;
       }
       if (result.kind === "error" && result.code === "ide_open_cancelled") return;
@@ -106,9 +159,15 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
         setProblem(failureLine(result, openFailure));
         return;
       }
+      setLeft(result.value?.left ?? null);
+      if (result.value?.ownWindow === true) {
+        setOutProject(projectId);
+        return;
+      }
       shown = true;
       last = null;
       setProblem(null);
+      onHideProblem(null);
       if (frame === 0) follow();
     };
     void open();
@@ -121,9 +180,9 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
       live = false;
       window.cancelAnimationFrame(frame);
       window.clearInterval(beat);
-      void hideIde(projectId);
+      hide();
     };
-  }, [projectId, ready, covered]);
+  }, [projectId, ready, covered, out]);
 
   const act = async () => {
     setBusy(true);
@@ -137,10 +196,36 @@ export function IdeTab({ projectId, onView }: { projectId: string; onView: (view
     }
   };
 
+  const once = async (work: () => Promise<void>) => {
+    if (acting.current) return;
+    acting.current = true;
+    setMoving(true);
+    await work();
+    acting.current = false;
+    setMoving(false);
+  };
+
+  const moveOut = () => once(async () => {
+    const result = await openIdeWindow(projectId);
+    setProblem(result.kind === "ok" ? null : IDE_NOT_MOVED);
+    if (result.kind === "ok") setOutProject(projectId);
+  });
+
+  const bringForward = () => once(async () => {
+    const result = await focusIdeWindow(projectId);
+    setProblem(result.kind === "ok" ? null : IDE_NOT_FORWARD);
+  });
+
   return <div className="ide-tab">
     {problem && <p className="ide-problem" role="alert">{problem}</p>}
+    {left && <p className="ide-left" role="status">Still running after this IDE stopped: {left}</p>}
     {state && !ready && <IdeStatus state={state} busy={busy} onAction={() => void act()} />}
     {!state && !problem && <p className="ide-status" role="status">Checking the IDE.</p>}
-    <div ref={panel} className="ide-panel" aria-label="IDE" hidden={!ready} />
+    {ready && !out && <div className="ide-bar"><Button size="small" disabled={moving} onClick={() => void moveOut()}>Open in its own window</Button></div>}
+    {out && <div className="ide-status" role="status">
+      <p>This IDE is in its own window</p>
+      <Button size="small" disabled={moving} onClick={() => void bringForward()}>Bring it forward</Button>
+    </div>}
+    <div ref={panel} className="ide-panel" aria-label="IDE" hidden={!ready || out} />
   </div>;
 }

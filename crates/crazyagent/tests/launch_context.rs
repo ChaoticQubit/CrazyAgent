@@ -108,8 +108,8 @@ impl Case {
         .unwrap();
         let tx = connection.unchecked_transaction().unwrap();
         let switch = launch_context::master_tools(&tx, project).map_err(|problem| problem.0)?;
-        let text =
-            launch_context::for_master(&tx, project, tools, None).map_err(|problem| problem.0)?;
+        let text = launch_context::for_master(&tx, project, tools.then_some(&[][..]), None)
+            .map_err(|problem| problem.0)?;
         drop(tx);
         Ok((switch, text))
     }
@@ -806,11 +806,11 @@ async fn a_codex_agent_with_tools_on_gets_the_skill_index_with_each_description_
     assert_eq!(
         developer,
         format!(
-            "{}\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- release-notes: Teaches release-notes. ({})\n",
+            "{}\n## Tools to use\n\nThe owner's instructions and the sections above come first. These rules apply to every task; this section names the tools this launch has as you call them, and where other instructions name one another way, use the name here.\n\n- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n- Skills: before each task, check the Skills section below, then read the SKILL.md of every skill there that applies and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n\n## Skills\n\nThe owner approved these skills for this project. Check this list before every task and use every skill here that applies to it. To use one, read its SKILL.md at the path shown and follow it.\n\n- release-notes: Teaches release-notes. ({})\n",
             context.instructions(),
             skill.display()
         ),
-        "the project context, then the index of the one skill on for the project, told to read the file since Codex has no Skill tool"
+        "the project context, the Tools to use section of a tools-on launch with no context-mode server (graphify and the Codex skill line), then the index of the one skill on for the project, told to read the file since Codex has no Skill tool"
     );
     drop(files);
 
@@ -1244,6 +1244,124 @@ async fn every_master_and_agent_launch_states_how_work_lands() {
         }
         drop(codex_files);
         drop(claude_files);
+    }
+    drop(owner);
+    case.close().await;
+}
+
+/// L4 (DEC-147.9, DEC-141): every master and sub-agent launch, in a linked worktree or its own
+/// clone, names the project folder and what each shared folders choice gives, keeps secret
+/// files closed and says toolchains are never installed, for every scope and access option
+/// the owner saves.
+#[tokio::test]
+async fn every_launch_names_the_shared_folders_for_each_choice() {
+    use crazyagent::sandbox::policy::AgentPolicy;
+    use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let project = ProjectId::new("shared").unwrap();
+    applied(
+        owner
+            .setup_project(
+                project.clone(),
+                ProjectSpec {
+                    name: "Shared".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Shares local folders.".into(),
+                    tech_stack: vec![],
+                    platforms: vec![],
+                    research: vec![],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                1,
+            )
+            .await
+            .unwrap(),
+    );
+    let options = [
+        (
+            SharedScope::All,
+            SharedAccess::ReadOnly,
+            "holds folders your worktree does not have",
+            Some("They are read-only to you."),
+        ),
+        (
+            SharedScope::All,
+            SharedAccess::ReadWrite,
+            "holds folders your worktree does not have",
+            Some("You may change files in the shared top-level folders"),
+        ),
+        (
+            SharedScope::Chosen,
+            SharedAccess::ReadOnly,
+            "only these are shared with you: `program`",
+            Some("They are read-only to you."),
+        ),
+        (
+            SharedScope::None,
+            SharedAccess::ReadOnly,
+            "are not shared with you. Work in your worktree.",
+            None,
+        ),
+    ];
+    for (generation, (scope, access, told, how)) in (2u64..).zip(options) {
+        let view = owner.project_agent_policy(project.clone()).await.unwrap();
+        let policy = AgentPolicy {
+            access: view.access,
+            network: view.network,
+            shared_folders: SharedFolders {
+                scope,
+                access,
+                chosen: vec!["program".into()],
+                secrets: Vec::new(),
+            },
+            ..AgentPolicy::default()
+        };
+        applied(
+            owner
+                .set_project_agent_policy(project.clone(), view.version, policy, generation)
+                .await
+                .unwrap(),
+        );
+        let saved = owner.project_agent_policy(project.clone()).await.unwrap();
+        assert_eq!(
+            (saved.shared_folders.scope, saved.shared_folders.access),
+            (scope, access)
+        );
+        let mut texts = Vec::new();
+        for tools in [false, true] {
+            texts.push(case.master(&project, tools).unwrap().1);
+        }
+        for layout in [Layout::Linked, Layout::Clone] {
+            texts.push(
+                case.context(&project, layout)
+                    .unwrap()
+                    .instructions()
+                    .to_owned(),
+            );
+        }
+        for text in &texts {
+            assert!(
+                text.contains("## Shared project folders"),
+                "{scope:?} {access:?}: {text}"
+            );
+            assert!(
+                text.contains(told),
+                "{scope:?} {access:?} misses {told}: {text}"
+            );
+            if let Some(how) = how {
+                assert!(text.contains(how), "{scope:?} {access:?} misses {how}");
+            }
+            assert!(text.contains("Secret files there"), "{scope:?} {access:?}");
+            assert!(
+                text.contains("Never install or download a toolchain"),
+                "{scope:?} {access:?}"
+            );
+        }
     }
     drop(owner);
     case.close().await;

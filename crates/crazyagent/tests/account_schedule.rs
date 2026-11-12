@@ -7,14 +7,14 @@ use crazyagent::engine::owner::{
     ModelAccessCollection, OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse,
     OwnerResult,
 };
-use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, StoredProject};
 use crazyagent::scheduling::{
-    AccountEntry, AccountPlan, Pin, PoolRanking, RankedAccount, Schedule, ScheduleChange,
-    ScopedStrategy, Standing, Strategy,
+    AccountEntry, AccountPlan, LiveMasterAccount, Pin, PoolRanking, RankedAccount, Schedule,
+    ScheduleChange, ScopedStrategy, Standing, Strategy,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::watch;
 
@@ -179,6 +179,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
         reserve_percent: 10,
         pin: Some(Pin::UseLast),
     };
+    create_project(&mut controller, "project-a").await;
     for change in [
         ScheduleChange::AppStrategy {
             strategy: Strategy::ManualRank,
@@ -229,6 +230,7 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     );
     let expected = Schedule {
         strategy: Strategy::ManualRank,
+        live_master: LiveMasterAccount::Keep,
         pools: vec![ScopedStrategy {
             id: reference("pool-claude"),
             strategy: Strategy::Balanced,
@@ -244,20 +246,18 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
         version: 4,
     };
     assert_eq!(controller.account_schedule().await.unwrap(), expected);
-    let next = |connection: &str, use_last: bool| RankedAccount {
+    let not_signed_in = |connection: &str| RankedAccount {
         connection: reference(connection),
-        standing: Standing::Next {
-            weekly_resets_ms: None,
-            weekly_left_percent: None,
-            use_last,
-        },
+        standing: Standing::NotSignedIn,
+        held_for: Vec::new(),
     };
     assert_eq!(
         controller.account_ranking().await.unwrap(),
         [PoolRanking {
             pool: reference("pool-claude"),
             strategy: Strategy::Balanced,
-            accounts: vec![next("claude-a", false), next("claude-b", true)],
+            accounts: vec![not_signed_in("claude-a"), not_signed_in("claude-b")],
+            own_order_projects: 0,
         }]
     );
     drop(controller);
@@ -266,6 +266,83 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     assert_eq!(controller.account_schedule().await.unwrap(), expected);
     drop(controller);
     case.close().await;
+}
+
+/// The live master account setting (DEC-139) reads Keep start account until the owner
+/// changes it, takes each option through the engine with the schedule's version, refuses a
+/// change made on a stale version and keeps the choice over an engine restart.
+#[tokio::test]
+async fn the_live_master_account_setting_defaults_to_keep_and_stores_each_option() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    let first = controller.account_schedule().await.unwrap();
+    assert_eq!(first.live_master, LiveMasterAccount::Keep);
+    let set = |choice| ScheduleChange::LiveMaster { choice };
+    assert_eq!(
+        send(&mut controller, set(LiveMasterAccount::MoveWhenIdle)).await,
+        OwnerResult::Applied
+    );
+    let moved = controller.account_schedule().await.unwrap();
+    assert_eq!(moved.live_master, LiveMasterAccount::MoveWhenIdle);
+    assert_eq!(moved.version, first.version + 1);
+    assert_eq!(
+        applied(
+            controller
+                .set_account_schedule(set(LiveMasterAccount::Keep), first.version, 1)
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Rejected {
+            code: "stale_revision".into()
+        },
+        "a change built on the schedule before the last change is refused"
+    );
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.account_schedule().await.unwrap(),
+        Schedule {
+            live_master: LiveMasterAccount::MoveWhenIdle,
+            version: first.version + 1,
+            ..Schedule::default()
+        },
+        "the choice outlives the engine and the refused change stored nothing"
+    );
+    assert_eq!(
+        send(&mut controller, set(LiveMasterAccount::Keep)).await,
+        OwnerResult::Applied
+    );
+    assert_eq!(
+        controller.account_schedule().await.unwrap().live_master,
+        LiveMasterAccount::Keep
+    );
+    drop(controller);
+    case.close().await;
+}
+
+/// Registers projects in the engine's store, past the count `CreateProject` admits, because
+/// a schedule over one reply needs more project rows than one snapshot may hold. Inputs: the
+/// engine root and the ids. Output: none.
+fn register_projects(root: &Path, ids: impl Iterator<Item = String>) {
+    let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    let tx = connection.transaction().unwrap();
+    for id in ids {
+        let stored = StoredProject {
+            project_id: ProjectId::new(id.clone()).unwrap(),
+            spec: ProjectSpec {
+                name: "Registered".into(),
+                repositories: vec![],
+            },
+        };
+        tx.execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            [id, serde_json::to_string(&stored).unwrap()],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
 }
 
 /// A schedule larger than one owner reply still takes changes and can be shrunk: a change
@@ -287,6 +364,10 @@ async fn a_schedule_larger_than_one_reply_takes_changes_and_is_read_whole() {
         ..Schedule::default()
     };
     assert!(serde_json::to_vec(&stored).unwrap().len() > crazyagent::protocol::FRAME_BYTES_MAX);
+    register_projects(
+        case.root.path(),
+        (0..overrides).map(|n| project(n).as_str().to_owned()),
+    );
     for n in 0..overrides {
         let change = ScheduleChange::ProjectStrategy {
             project: project(n),
@@ -311,9 +392,10 @@ async fn a_schedule_larger_than_one_reply_takes_changes_and_is_read_whole() {
         controller.account_schedule().await.unwrap(),
         Schedule {
             projects: stored.projects[1..].to_vec(),
+            version: overrides as u64 + 1,
             ..Schedule::default()
         },
-        "a schedule past one reply is read whole"
+        "a schedule past one reply is read whole, at the version of its last change"
     );
     drop(controller);
     case.close().await;
@@ -371,9 +453,10 @@ async fn a_removed_pool_connection_or_project_takes_its_schedule_row_with_it() {
                 connection: reference("claude-a"),
                 plan,
             }],
+            version: 7,
             ..Schedule::default()
         },
-        "only the connection that stays keeps its plan"
+        "only the connection that stays keeps its plan, at the version of the four changes and the three removals"
     );
     drop(controller);
     case.close().await;
@@ -445,7 +528,11 @@ async fn a_row_whose_pool_or_connection_was_edited_out_by_hand_can_still_be_dele
     );
     assert_eq!(
         controller.account_schedule().await.unwrap(),
-        Schedule::default()
+        Schedule {
+            version: 4,
+            ..Schedule::default()
+        },
+        "both rows are gone, at the version of the four applied changes"
     );
     drop(controller);
     case.close().await;

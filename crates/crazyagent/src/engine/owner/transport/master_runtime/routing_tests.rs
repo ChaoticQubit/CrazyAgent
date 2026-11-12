@@ -11,6 +11,8 @@ use crate::master_session::{
     MasterAccountState, MasterBootstrapAuth, MasterOwnerAction, MasterSelection, MasterSessionView,
     RcliConfiguredProfileProof,
 };
+use crate::master_step_limit::{MasterStepSettings, StepLimit};
+use crate::master_time_limit::{MasterTimeSettings, TimeLimit};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, PROTOCOL_VERSION, ProjectSpec};
 use crate::routing::{ResourceBudget, RouteRequest};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params, types::Value};
@@ -19,6 +21,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::watch;
 
@@ -271,7 +274,21 @@ fn git(repository: &Path, home: &Path, arguments: &[&str]) {
     }
 }
 
-fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<fs::File> {
+/// An exclusive lock on a native profile's manifest, as an account change holds it. Holds
+/// the open manifest. Dropping it unlocks the open file description, as the engine's own
+/// locks do, so a child another thread is starting, which briefly shares the description,
+/// cannot keep the profile held after the hold ends.
+struct ProfileHold(fs::File);
+
+impl Drop for ProfileHold {
+    /// Unlocks the manifest for every descriptor that shares its open file description.
+    /// Input: the hold being dropped. Output: none.
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<ProfileHold> {
     let manifest = root
         .join("native-profiles")
         .join(format!(
@@ -282,7 +299,7 @@ fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<fs
     let file = fs::File::open(manifest).unwrap();
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .ok()
-        .map(|()| file)
+        .map(|()| ProfileHold(file))
 }
 
 fn rows(tx: &Transaction<'_>, table: &str) -> Vec<Vec<Value>> {
@@ -695,6 +712,57 @@ impl Fixture {
                 "UPDATE native_auth_operations SET fact=?1 WHERE id=?2 AND generation=?3",
                 params![
                     crate::engine::owner::native_auth::encode_fact(&fact).unwrap(),
+                    fact.operation_id.as_str(),
+                    i64::try_from(fact.generation).unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    /// Settles a connection's newest operation as an engine restart or its own bound settles
+    /// a check that got no answer: Failed with `code`, or UnauthenticatedObserved for none.
+    /// Inputs: the connection and the code. Output: none; the stored fact and phase change.
+    fn end_newest_check(&self, connection: &str, code: Option<&str>) {
+        let db = Connection::open_with_flags(
+            self.root.path().join("engine.db"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        db.busy_timeout(Duration::from_secs(1)).unwrap();
+        let mut statement = db
+            .prepare("SELECT fact FROM native_auth_operations ORDER BY generation DESC")
+            .unwrap();
+        let mut fact = statement
+            .query_map([], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|bytes| crate::engine::owner::native_auth::decode_fact(&bytes.unwrap()).unwrap())
+            .find(|fact| fact.binding.connection.id == reference(connection))
+            .unwrap();
+        drop(statement);
+        assert_eq!(
+            fact.action,
+            NativeAuthAction::SignIn {
+                method: NativeAuthMethod::ClaudeExisting
+            }
+        );
+        let stored = match code {
+            Some(_) => {
+                fact.phase = NativeAuthPhase::Failed;
+                "unavailable"
+            }
+            None => {
+                fact.phase = NativeAuthPhase::UnauthenticatedObserved;
+                "unauthenticated_observed"
+            }
+        };
+        fact.code = code.map(str::to_owned);
+        let changed = db
+            .execute(
+                "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3 AND generation=?4",
+                params![
+                    crate::engine::owner::native_auth::encode_fact(&fact).unwrap(),
+                    stored,
                     fact.operation_id.as_str(),
                     i64::try_from(fact.generation).unwrap()
                 ],
@@ -1315,17 +1383,128 @@ async fn a_turn_whose_write_waits_on_another_engine_connection_still_ends_with_i
     case.finish().await;
 }
 
+/// How many times the storage connection's busy handler waited in the preparation row, so
+/// the row sees the preparation waiting on the other connection's write lock.
+static PREPARATION_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+/// The most 1 ms busy waits the preparation row's handler allows for one lock: the 250 ms
+/// the storage connection's own busy wait allows.
+const PREPARATION_WAITS_MAX: i32 = 250;
+
+/// The preparation row's busy handler: counts the wait, waits 1 ms and tries the lock again
+/// up to `PREPARATION_WAITS_MAX` times, as the storage busy timeout does. Input: the earlier
+/// waits for this lock. Output: whether SQLite tries the lock again.
+fn counted_wait(count: i32) -> bool {
+    assert!(count >= 0);
+    PREPARATION_WAITS.fetch_add(1, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(1));
+    count < PREPARATION_WAITS_MAX
+}
+
+/// A preparation that meets another engine connection's write lock, as the research loop's
+/// stale-job update or a team runtime commit holds it, waits the lock out and prepares the
+/// turn (BL-DBLOCK). Preparation reads before it writes, and SQLite refuses a read
+/// transaction's first write at once, with no busy wait, while another connection holds the
+/// lock. The lock is kept until the preparation either waits on it in the storage
+/// connection's busy handler or has returned, so it spans the preparation's first write
+/// however slow the machine is, with no time window to outlast.
+#[tokio::test]
+async fn a_preparation_that_meets_a_short_write_lock_waits_it_out_and_prepares_the_turn() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let (host, project, turn) = (
+        case.runtime().identity(),
+        case.session.project_id.clone(),
+        case.turn.id.clone(),
+    );
+    let routed = case
+        .command(case.route(host.clone(), project.clone(), turn.clone()))
+        .await;
+    assert!(
+        matches!(routed, Ok(MasterRuntimeResult::Turn(_))),
+        "a route reads the turn first, so the preparation's reads run warm"
+    );
+    let storage = case.runtime().engine.storage.sender.clone();
+    let (set, handler) = tokio::sync::oneshot::channel();
+    storage
+        .send(crate::storage::Job::BusyHandler(counted_wait, set))
+        .await
+        .unwrap();
+    handler.await.unwrap().unwrap();
+    let lock = Connection::open_with_flags(
+        case.root.path().join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let (release, held) = tokio::sync::oneshot::channel();
+    storage.try_send(crate::storage::Job::Hold(held)).unwrap();
+    let deadline = Instant::now() + TEST_BOUND;
+    while storage.capacity() < storage.max_capacity() {
+        assert!(Instant::now() < deadline, "storage never took the hold");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    PREPARATION_WAITS.store(0, Ordering::SeqCst);
+    let returned = AtomicBool::new(false);
+    let preparing = async {
+        let prepared = case
+            .command(MasterRuntimeCommand::Prepare {
+                host,
+                project_id: project,
+                session_id: case.session.session_id.clone(),
+                turn_id: turn,
+            })
+            .await;
+        returned.store(true, Ordering::SeqCst);
+        prepared
+    };
+    let releasing = async {
+        while storage.capacity() == storage.max_capacity() {
+            assert!(
+                Instant::now() < deadline,
+                "the preparation was never queued"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        release.send(()).unwrap();
+        while PREPARATION_WAITS.load(Ordering::SeqCst) == 0 && !returned.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "the preparation neither waited on the lock nor returned"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        lock.execute_batch("COMMIT").unwrap();
+    };
+    let (prepared, ()) = tokio::join!(preparing, releasing);
+    let prepared = match prepared {
+        Ok(MasterRuntimeResult::Prepared(prepared)) => prepared,
+        Ok(_) => panic!("the preparation returned no prepared turn"),
+        Err(error) => panic!("the turn was not prepared: {}", error.0),
+    };
+    assert!(
+        PREPARATION_WAITS.load(Ordering::SeqCst) > 0,
+        "the preparation met the other connection's lock and waited it out"
+    );
+    assert_eq!(prepared.session.session_id, case.session.session_id);
+    assert_eq!(
+        case.persisted_turn().await.phase,
+        MasterTurnPhase::Prepared,
+        "the prepared turn is stored"
+    );
+    drop(prepared);
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn an_unregistered_rcli_profile_stops_the_turn_with_its_own_cause() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
-    let returned = case.drive().await;
-    assert_eq!(
-        returned
-            .expect_err("an RCLI master without a registered profile cannot start")
-            .0,
-        "rcli_profile_configuration_required"
-    );
+    let returned = case
+        .drive()
+        .await
+        .expect("an RCLI master without a registered key blocks its turn as every master does");
     let stopped = case.persisted_turn().await;
+    assert_eq!(returned.phase, MasterTurnPhase::Blocked);
     assert_eq!(stopped.id, case.turn.id);
     assert_eq!(stopped.phase, MasterTurnPhase::Blocked);
     assert_eq!(stopped.reason, Some(MasterReason::RuntimeUnavailable));
@@ -1370,6 +1549,71 @@ async fn an_unclassified_cause_is_kept_as_a_code_and_private_text_is_redacted() 
         assert_eq!(stopped.cause.as_deref(), Some(stored), "{cause}");
         case.finish().await;
     }
+}
+
+/// A running master turn reads the agent policy the owner saved now through the storage
+/// actor, with the same scope check as its inspect; a toolchain turned off stops it as a
+/// settings change, and an unreadable policy reads as none.
+#[tokio::test]
+async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_none() {
+    use crate::sandbox::policy::{
+        AgentAccess, AgentPolicy, Narrowing, ToolchainChoice, narrowing, save,
+    };
+    use crate::sandbox::toolchains::Toolchain;
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    let read = || {
+        case.command(MasterRuntimeCommand::Policy {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+    };
+    let saved = |result: MasterRuntimeResult| match result {
+        MasterRuntimeResult::Policy(policy) => *policy,
+        _ => panic!("the policy read returns the saved policy"),
+    };
+    assert_eq!(saved(read().await.unwrap()), Some(AgentPolicy::default()));
+    let off = AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed: false,
+        }],
+        ide_git_hooks: false,
+        tool_cache: Default::default(),
+        ide_agent_files: Default::default(),
+        shared_folders: Default::default(),
+        network: crate::sandbox::policy::AgentNetwork::default(),
+        ..Default::default()
+    };
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer.busy_timeout(Duration::from_secs(5)).unwrap();
+    save(&writer, case.session.project_id.as_str(), &off).unwrap();
+    let read_off = saved(read().await.unwrap());
+    assert_eq!(read_off, Some(off));
+    let stopped = narrowing(
+        read_off.as_ref(),
+        None,
+        Some(AgentAccess::Sandboxed),
+        None,
+        &[Toolchain::Rust],
+    )
+    .map(Narrowing::code)
+    .unwrap();
+    assert_eq!(stopped, "agent_toolchain_lowered");
+    assert_eq!(
+        reason_for_error(&EngineError(stopped.into())),
+        MasterReason::ConnectionChanged
+    );
+    writer
+        .execute(
+            "UPDATE project_agent_policy SET body='{' WHERE project=?1",
+            [case.session.project_id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(saved(read().await.unwrap()), None);
+    case.finish().await;
 }
 
 #[tokio::test]
@@ -1547,6 +1791,31 @@ async fn rcli_turn_after_a_first_turn_that_never_ran_uses_the_initial_admission(
         _ => panic!("actual RCLI preparation returned an unexpected result"),
     }
     case.finish().await;
+}
+
+/// An rcli master turn is prepared with the saved master time limit, as a Claude or Codex
+/// one is (OB-5d): one setting for every master harness. With No limit it names no run
+/// time, so its host gets no clock; with 30 min it names 30 minutes.
+#[tokio::test]
+async fn an_rcli_master_turn_is_prepared_with_the_saved_time_limit() {
+    for limit in [TimeLimit::NoLimit, TimeLimit::Minutes30] {
+        let case = Fixture::new(MasterBackend::Rcli, true).await;
+        case.register().await;
+        store_time_limit(&case, limit);
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(prepared.session.selection.backend, MasterBackend::Rcli);
+        assert_eq!(
+            prepared.time, limit,
+            "the turn carries the saved time limit"
+        );
+        assert_eq!(prepared.time.run_time(), limit.run_time());
+        assert_eq!(
+            prepared.time.run_time().is_none(),
+            limit == TimeLimit::NoLimit
+        );
+        drop(prepared);
+        case.finish().await;
+    }
 }
 
 #[tokio::test]
@@ -1861,12 +2130,25 @@ async fn a_rejected_sign_in_is_not_paused_and_hands_the_next_turn_to_the_next_ac
 
 #[tokio::test]
 async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_next_turn_on() {
+    for code in [
+        "native_profile_credential_unavailable",
+        "native_profile_codex_api_key",
+        "native_profile_codex_token_unreadable",
+    ] {
+        credential_copy_fails(code).await;
+    }
+}
+
+/// A prepared turn whose credential copy fails with `code`: the turn fails as readiness
+/// unknown with that cause, the account is checked again, not paused or rejected, and the
+/// next turn goes to the next account. Input: the refusal code.
+async fn credential_copy_fails(code: &str) {
     let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
     case.sign_in("claude-a", true).await;
     case.sign_in("claude-b", true).await;
     let first = case.prepared(&case.turn.id).await;
     assert_eq!(first.attempt.connection.id, reference("claude-a"));
-    let unavailable = EngineError("native_profile_credential_unavailable".into());
+    let unavailable = EngineError(code.into());
     let result = case
         .command(MasterRuntimeCommand::Fail {
             host: case.runtime().identity(),
@@ -1881,16 +2163,17 @@ async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_nex
     let MasterRuntimeResult::Turn(failed) = result else {
         panic!("the turn whose credential copy failed did not settle");
     };
-    assert_eq!(failed.phase, MasterTurnPhase::Failed);
-    assert_eq!(failed.reason, Some(MasterReason::ReadinessUnknown));
+    assert_eq!(failed.phase, MasterTurnPhase::Failed, "{code}");
     assert_eq!(
-        failed.cause.as_deref(),
-        Some("native_profile_credential_unavailable")
+        failed.reason,
+        Some(MasterReason::ReadinessUnknown),
+        "{code}"
     );
+    assert_eq!(failed.cause.as_deref(), Some(code));
     drop(first);
-    assert_eq!(case.paused_until("claude-a"), None);
-    assert!(!case.rejected("claude-a"));
-    assert_eq!(case.stale().await, vec![reference("claude-a")]);
+    assert_eq!(case.paused_until("claude-a"), None, "{code}");
+    assert!(!case.rejected("claude-a"), "{code}");
+    assert_eq!(case.stale().await, vec![reference("claude-a")], "{code}");
     let second = case.submit("Summarize what we discussed so far.").await;
     let next = case.prepared(&second).await;
     assert_eq!(next.attempt.connection.id, reference("claude-b"));
@@ -2107,6 +2390,40 @@ async fn a_sign_in_check_the_host_could_not_run_leaves_the_earlier_sign_in_to_be
     case.finish().await;
 }
 
+/// v2.4.0 owner update bug: four engine starts in five minutes cut every re-proof check, an
+/// engine stop settled them `native_auth_interrupted`, a lost custody session
+/// `native_auth_recovery_required` and a slow status `native_auth_claude_deadline`, and no
+/// later start re-proved the accounts. Each such check of an earlier run is looked past; one
+/// cut in the running engine stays, so it is not re-run before every turn, and a provider's
+/// signed-out answer still ends the re-proof.
+#[tokio::test]
+async fn a_sign_in_check_cut_before_the_provider_answered_leaves_the_earlier_sign_in_to_be_re_proved()
+ {
+    for code in [
+        "native_auth_interrupted",
+        "native_auth_recovery_required",
+        "native_auth_claude_deadline",
+    ] {
+        let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+        case.sign_in("claude-a", true).await;
+        case.move_to_earlier_run("claude-a");
+        case.check("claude-a").await;
+        case.end_newest_check("claude-a", Some(code));
+        assert!(case.stale().await.is_empty(), "{code} in this run");
+        case.move_to_earlier_run("claude-a");
+        assert_eq!(case.stale().await, vec![reference("claude-a")], "{code}");
+        case.finish().await;
+    }
+    let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
+    case.sign_in("claude-a", true).await;
+    case.move_to_earlier_run("claude-a");
+    case.check("claude-a").await;
+    case.end_newest_check("claude-a", None);
+    case.move_to_earlier_run("claude-a");
+    assert!(case.stale().await.is_empty());
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn the_conversation_so_far_keeps_the_newest_turns_that_fit_the_prompt() {
     let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
@@ -2229,6 +2546,982 @@ async fn a_codex_master_turn_is_prepared_with_the_project_s_master_tools_switch(
     );
     drop(prepared);
     case.finish().await;
+}
+
+/// Switches one of the engine's team tools off for the routing fixture's project, through
+/// a second connection to its real engine database, as the owner's Tools page does. Input:
+/// the fixture and the tool. Output: none; a panic if the switch cannot be stored.
+fn switch_off(case: &Fixture, tool: &str) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    crate::coord::tool_switches::set(
+        &writer,
+        Some(&case.session.project_id),
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+        tool,
+        crate::coord::tool_switches::Switch::Off,
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_console_master_turn_with_tools_is_told_its_memory_tools() {
+    let memory_line = |name: &str| {
+        let (_, line) = crate::coord::tool_switches::BUILTIN_TOOLS
+            .into_iter()
+            .find(|(tool, _)| *tool == name)
+            .unwrap();
+        format!("- {name}: {line}\n")
+    };
+    let remember = memory_line(crate::team::tool::REMEMBER_TOOL);
+    let recall = memory_line(crate::team::tool::RECALL_TOOL);
+    for (selection, account, off) in [
+        (codex_pool_selection(), "codex-c", None),
+        (pool_selection(), "claude-a", None),
+        (
+            codex_pool_selection(),
+            "codex-c",
+            Some(crate::team::tool::RECALL_TOOL),
+        ),
+    ] {
+        let case = Fixture::open(POOL_CATALOG, selection, true).await;
+        store_master_tools(&case, true);
+        if let Some(tool) = off {
+            switch_off(&case, tool);
+        }
+        case.sign_in(account, true).await;
+        let prepared = case.prepared(&case.turn.id).await;
+        let instructions = prepared.instructions.clone();
+        let tools_off = prepared.tools_off.clone();
+        drop(prepared);
+        case.finish().await;
+        assert!(
+            instructions.contains("\n## Memory tools\n"),
+            "{account} {off:?}: {instructions}"
+        );
+        assert!(instructions.contains(&remember), "{account} {off:?}");
+        assert_eq!(
+            instructions.contains(&recall),
+            off.is_none(),
+            "{account} {off:?}"
+        );
+        assert_eq!(
+            tools_off,
+            off.map(str::to_owned).into_iter().collect::<Vec<_>>(),
+            "{account}"
+        );
+    }
+}
+
+/// A stand-in Claude Code for a console master turn that keeps the turn running until the
+/// test writes memory-answered into its working folder, then replies DONE.
+const MEMORY_TURN_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ ! -f memory-answered ] && [ "$i" -lt 1800 ]; do /bin/sleep 0.05; i=$((i+1)); done
+printf '%s\n' '{"type":"assistant","uuid":"step-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// The team server's stdin for one remember call of the given text for this project.
+fn remember_input(text: &str) -> Vec<u8> {
+    let mut input = serde_json::to_vec(&serde_json::json!({"jsonrpc": "2.0", "id": 1,
+    "method": "tools/call", "params": {
+        "name": crate::team::tool::REMEMBER_TOOL,
+        "arguments": {"text": text, "scope": "project"},
+    }}))
+    .unwrap();
+    input.push(b'\n');
+    input
+}
+
+/// Runs the real team server over one remember call on a thread, as the console master's
+/// harness runs `team-mcp`, then writes `done` when given. Returns the server's answer.
+fn remember_server(
+    record: &Path,
+    mailbox: &Path,
+    text: &str,
+    done: Option<PathBuf>,
+) -> std::thread::JoinHandle<serde_json::Value> {
+    let (record, mailbox, input) = (record.to_owned(), mailbox.to_owned(), remember_input(text));
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        crate::team::tool::serve(
+            std::io::Cursor::new(input),
+            &mut output,
+            &record,
+            Some(&mailbox),
+            &[],
+        )
+        .unwrap();
+        if let Some(done) = done {
+            fs::write(done, b"").unwrap();
+        }
+        let line = output.split(|byte| *byte == b'\n').next().unwrap();
+        serde_json::from_slice(line).unwrap()
+    })
+}
+
+/// The text and error flag of one team server answer.
+fn answer_text(answer: &serde_json::Value) -> (String, bool) {
+    (
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        answer["result"]["isError"].as_bool().unwrap_or(true),
+    )
+}
+
+/// Waits until the team server's call is in the mailbox, waiting for the engine.
+async fn call_waits(mailbox: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !crate::team::tool::calls_waiting(mailbox) {
+        assert!(
+            Instant::now() < deadline,
+            "the call never reached the mailbox"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The wall clock the stand-in hosts of rows about something other than time run under.
+const TEST_CLOCK: Option<Duration> = Some(Duration::from_secs(150));
+
+/// A real Claude host on a stand-in harness for a case's prepared console turn, with the
+/// team server's drop record and mailbox in the stand-in's private tmp (OP-22). Inputs: the
+/// case, its prepared turn, the host's wall clock, none for no clock, and the stand-in's
+/// script. Outputs: the stand-in fixture, which owns the folders, the active master, the
+/// record and mailbox.
+async fn console_claude_master(
+    case: &Fixture,
+    prepared: &PreparedMasterTurn,
+    clock: Option<Duration>,
+    script: &str,
+) -> (
+    crate::engine::master_host_fixture::MasterFixture,
+    ActiveMaster,
+    PathBuf,
+    PathBuf,
+) {
+    let mut fixture = crate::engine::master_host_fixture::MasterFixture::new("claude");
+    let lease = fixture.lease("console-memory-turn", 1).unwrap();
+    let home = lease.profile_path().unwrap();
+    let harness = fixture.stand_in("claude", script);
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let tmp = fixture.root.path().join("agent-tmp");
+    let record = tmp.join(crate::team::tool::DROP_FILE);
+    let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
+    private_directory(&mailbox);
+    let engine = fixture.root.path().join("crazyagent");
+    let mut command = crate::engine::claude_host::tools_launch_command(
+        &harness,
+        &fixture.project,
+        &home,
+        "native-default",
+        None,
+        crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &record,
+            mailbox: &mailbox,
+            off: &[],
+        },
+    )
+    .unwrap();
+    crate::engine::claude_host::limit_steps(&mut command, prepared.steps);
+    let profile_ref = CredentialRef::new("console-memory-profile").unwrap();
+    let account_ref = fixture.connection.account_ref.clone();
+    let claude = ClaudeHost::spawn(
+        command,
+        sandbox,
+        lease,
+        home,
+        NativeAction::Launch {
+            session_id: prepared.session.session_id.clone(),
+            harness: NativeHarness::Claude,
+            profile_ref: profile_ref.clone(),
+            worktree_lease: prepared.worktree_lease.clone(),
+        },
+        account_ref.clone(),
+        prepared.session.project_id.clone(),
+        clock,
+        ResourceBudget::unit(),
+        crate::master_frame_limit::FrameSize::default(),
+    )
+    .await
+    .unwrap();
+    let (runtime_ref, capture_ref, capture) = case.runtime().allocate_master_capture().unwrap();
+    let active = ActiveMaster {
+        host: MasterHost::Claude(Box::new(claude)),
+        capture: Capture::new(
+            capture,
+            prepared.attempt.request.route.resources.output_bytes,
+        )
+        .unwrap(),
+        runtime: MasterRuntimeView {
+            runtime_ref,
+            artifact_sha256: "a".repeat(64),
+            native_session_id: None,
+        },
+        capture_ref,
+        provenance: Provenance {
+            session_id: prepared.session.session_id.clone(),
+            harness: NativeHarness::Claude,
+            account_ref,
+            profile_ref,
+            worktree_lease: prepared.worktree_lease.clone(),
+        },
+        reported: Tokens::default(),
+        access: crate::sandbox::policy::AgentAccess::Sandboxed,
+        toolchains: Vec::new(),
+    };
+    (fixture, active, record, mailbox)
+}
+
+/// How a collected console turn ended, as one line a test compares: its reply text, its
+/// failure cause, its engine error, or no end within the test's bound. Input: the bounded
+/// collect outcome. Output: the line.
+fn turn_end(
+    observed: &Result<Result<MasterRuntimeObservation, EngineError>, tokio::time::error::Elapsed>,
+) -> String {
+    match observed {
+        Ok(Ok(MasterRuntimeObservation::Response { reply, .. })) => format!("reply {}", reply.text),
+        Ok(Ok(MasterRuntimeObservation::Failed { cause, .. })) => format!("failed {cause}"),
+        Ok(Ok(_)) => "another observation".to_owned(),
+        Ok(Err(error)) => format!("error {}", error.0),
+        Err(_) => "no end in time".to_owned(),
+    }
+}
+
+/// A console master turn reads its harness and replies while every inspection of the turn
+/// outlasts the inspect interval, here behind an owner request holding the engine's owner
+/// barrier 250 ms at a time: the next inspection waits one interval after the last one
+/// ends, so the host's events and deadline are read between inspections (OP-22 r1).
+#[tokio::test]
+async fn a_console_master_turn_reads_its_harness_while_each_inspection_outlasts_the_interval() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (fixture, mut active, _, mailbox) =
+        console_claude_master(&case, &prepared, TEST_CLOCK, MEMORY_TURN_HARNESS).await;
+    fs::write(fixture.project.join("memory-answered"), b"").unwrap();
+    let engine = Arc::clone(&case.runtime().engine);
+    let barrier = tokio::spawn(async move {
+        loop {
+            let held = engine.owner_egress.read().await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            drop(held);
+        }
+    });
+    let observed = tokio::time::timeout(
+        Duration::from_secs(30),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
+    )
+    .await;
+    barrier.abort();
+    let _ = active.host.close().await;
+    assert_eq!(
+        turn_end(&observed),
+        "reply DONE",
+        "the turn read its harness while each inspection outlasted the interval"
+    );
+    let Ok(Ok(observed)) = observed else {
+        unreachable!("the turn's reply was asserted");
+    };
+    let settled = case
+        .runtime()
+        .observe_master_turn(&prepared, &case.turn.id, observed)
+        .await
+        .unwrap();
+    assert!(!settled.phase.outstanding(), "{:?}", settled.phase);
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+}
+
+/// A console master's remember is answered by its own turn's tick (OP22-L1, F2): a real
+/// Claude host on a stand-in harness holds the turn open, the team server writes the call
+/// into the turn's mailbox, and collect_master_turn's inspect tick finds it waiting and sends
+/// ServeMemory, so the answer reaches the server while the turn runs. Once the turn has
+/// settled, ServeMemory refuses with master_memory_turn_not_running and a new call stays
+/// untaken until the server gives up on it.
+#[tokio::test]
+async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_the_turn() {
+    use crate::memory::library::{MemoryOrigin, MemoryScope, PAGE_ITEMS_MAX};
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (fixture, mut active, record, mailbox) =
+        console_claude_master(&case, &prepared, TEST_CLOCK, MEMORY_TURN_HARNESS).await;
+    let server = remember_server(
+        &record,
+        &mailbox,
+        "Use cargo nextest.",
+        Some(fixture.project.join("memory-answered")),
+    );
+    let observed = tokio::time::timeout(
+        Duration::from_secs(120),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
+    )
+    .await;
+    let _ = active.host.close().await;
+    let answered = server.join().unwrap();
+    assert_eq!(
+        turn_end(&observed),
+        "reply DONE",
+        "the turn replied after its memory call was answered"
+    );
+    let Ok(Ok(observed)) = observed else {
+        unreachable!("the turn's reply was asserted");
+    };
+    let settled = case
+        .runtime()
+        .observe_master_turn(&prepared, &case.turn.id, observed)
+        .await
+        .unwrap();
+    assert!(!settled.phase.outstanding(), "{:?}", settled.phase);
+    let late = remember_server(&record, &mailbox, "Use rustfmt.", None);
+    call_waits(&mailbox).await;
+    let refused = case
+        .runtime()
+        .serve_master_memory(&prepared, &case.turn.id, &mailbox)
+        .await
+        .map_err(|error| error.0);
+    let untaken = crate::team::tool::calls_waiting(&mailbox);
+    let late = late.join().unwrap();
+    let page = Fixture::read_owner(
+        &case.owner,
+        OwnerRead::Memories {
+            scope: MemoryScope::Project {
+                project_id: case.session.project_id.clone(),
+            },
+            search: None,
+            before: None,
+            limit: PAGE_ITEMS_MAX,
+        },
+    )
+    .await;
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+    assert_eq!(
+        answer_text(&answered),
+        (
+            "Saved to memory. recall finds it now, and agents started from now on get it."
+                .to_owned(),
+            false
+        )
+    );
+    assert_eq!(refused, Err("master_memory_turn_not_running".to_owned()));
+    assert!(untaken, "the call after the turn stays untaken");
+    assert_eq!(
+        answer_text(&late),
+        (
+            "Not sent: the engine did not take the call within a minute, so nothing was done."
+                .to_owned(),
+            true
+        )
+    );
+    let OwnerData::Memories { page } = page.data else {
+        panic!("the project memory page is a page of memories");
+    };
+    let shown: Vec<(&str, &MemoryOrigin)> = page
+        .items
+        .iter()
+        .map(|memory| (memory.text.as_str(), &memory.origin))
+        .collect();
+    assert_eq!(
+        shown,
+        [(
+            "Use cargo nextest.",
+            &MemoryOrigin::Agent {
+                agent: "Master".into()
+            }
+        )]
+    );
+}
+
+/// A stand-in Claude Code for a tools-on console master turn that takes 30 tool steps and
+/// then replies DONE. Like Claude Code, it ends the turn with `error_max_turns` once it has
+/// taken as many steps as a `--max-turns` argument allows.
+const THIRTY_STEP_HARNESS: &str = r#"#!/bin/sh
+cap=0
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--max-turns" ]; then cap=$2; fi
+  shift
+done
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i+1))
+  if [ "$cap" -gt 0 ] && [ "$i" -gt "$cap" ]; then
+    printf '%s\n' '{"type":"result","subtype":"error_max_turns","uuid":"result-1","session_id":"native-session","is_error":true}'
+    /bin/cat > /dev/null
+    exit 1
+  fi
+  printf '{"type":"assistant","uuid":"call-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-%s","name":"Read","input":{"file_path":"note.txt"}}]}}\n' "$i" "$i" "$i"
+  printf '{"type":"user","uuid":"answer-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-%s","content":"read"}]}}\n' "$i" "$i"
+done
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// A stand-in Claude Code for a tools-on console master turn that says what it will do,
+/// takes one tool step and ends the turn as a success without writing anything after it.
+const SILENT_END_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-1","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"I will write the note."}]}}'
+printf '%s\n' '{"type":"assistant","uuid":"call-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-2","type":"message","role":"assistant","model":"observed-model","content":[{"type":"tool_use","id":"tool-1","name":"Write","input":{"file_path":"note.txt"}}]}}'
+printf '%s\n' '{"type":"user","uuid":"answer-1","session_id":"native-session","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"written"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":""}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Saves the owner's master step limit in a fixture's engine store, as the owner's Save in
+/// Settings does. Inputs: the fixture and the limit. Output: none.
+fn store_step_limit(case: &Fixture, limit: StepLimit) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let saved = crate::master_step_limit::save(&writer, &MasterStepSettings { limit }).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(
+        crate::master_step_limit::load(&writer).unwrap().limit,
+        limit
+    );
+}
+
+/// Saves the owner's master frame size limit in a fixture's engine store, as the owner's
+/// Save in Settings does. Inputs: the fixture and the size. Output: none.
+fn store_frame_limit(case: &Fixture, limit: crate::master_frame_limit::FrameSize) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let settings = crate::master_frame_limit::MasterFrameSettings { limit };
+    let saved = crate::master_frame_limit::save(&writer, &settings).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(crate::master_frame_limit::load(&writer).unwrap(), settings);
+}
+
+/// A master turn carries the owner's saved master frame size limit to its host (F39): 64
+/// KiB before any save, and each option once the owner saved it.
+#[tokio::test]
+async fn a_prepared_master_turn_carries_the_saved_frame_size_limit() {
+    use crate::master_frame_limit::FrameSize;
+
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert_eq!(prepared.frames, FrameSize::Kib64);
+    for limit in FrameSize::ALL {
+        let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+        store_frame_limit(&case, limit);
+        case.sign_in("codex-c", true).await;
+        let prepared = case.prepared(&case.turn.id).await;
+        assert_eq!(
+            prepared.frames, limit,
+            "the turn carries the saved frame size"
+        );
+    }
+}
+
+/// The stand-in of `THIRTY_STEP_HARNESS` taking another number of tool steps before DONE.
+/// Input: the number of steps. Output: the script.
+fn stepping_harness(steps: u16) -> String {
+    assert!((1..=400).contains(&steps));
+    let script = THIRTY_STEP_HARNESS.replace("-lt 30 ]", &format!("-lt {steps} ]"));
+    assert!(script.contains(&format!("\"$i\" -lt {steps} ]")));
+    script
+}
+
+/// Saves the owner's master time limit in a fixture's engine store, as the owner's Save in
+/// Settings does. Inputs: the fixture and the limit. Output: none.
+fn store_time_limit(case: &Fixture, limit: TimeLimit) {
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let saved = crate::master_time_limit::save(&writer, &MasterTimeSettings { limit }).unwrap();
+    assert_eq!(saved, crate::protocol::Outcome::Applied);
+    assert_eq!(
+        crate::master_time_limit::load(&writer).unwrap().limit,
+        limit
+    );
+}
+
+/// Collects one tools-on console master turn on a real Claude host running a stand-in
+/// script, built by the engine's own tools-on command under the saved master step limit.
+/// Inputs: the stand-in's script and the limit to save first. Outputs: how the turn ended,
+/// as `turn_end` names it, and the turn as stored after a failed end was observed with the
+/// reason its error maps to.
+async fn tools_turn_on(script: &str, limit: StepLimit) -> (String, Option<MasterTurnView>) {
+    limited_turn_on(script, limit, TimeLimit::NoLimit, TEST_CLOCK).await
+}
+
+/// Collects one tools-on console master turn on a real Claude host running a stand-in
+/// script under the saved master step and time limits. `clock` is the wall clock the
+/// stand-in host gets, so a row about a time limit of minutes ends in seconds. Inputs: the
+/// script, both limits to save first and the clock. Outputs: those of `tools_turn_on`.
+async fn limited_turn_on(
+    script: &str,
+    limit: StepLimit,
+    time: TimeLimit,
+    clock: Option<Duration>,
+) -> (String, Option<MasterTurnView>) {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    store_step_limit(&case, limit);
+    store_time_limit(&case, time);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    assert_eq!(
+        prepared.steps, limit,
+        "the turn carries the saved step limit"
+    );
+    assert_eq!(prepared.time, time, "the turn carries the saved time limit");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (_fixture, mut active, _, mailbox) =
+        console_claude_master(&case, &prepared, clock, script).await;
+    let observed = tokio::time::timeout(
+        Duration::from_secs(60),
+        case.runtime().collect_master_turn(
+            &prepared,
+            &case.turn.id,
+            &prepared.text,
+            &mut active,
+            Some(&mailbox),
+        ),
+    )
+    .await;
+    let _ = active.host.close().await;
+    let ended = turn_end(&observed);
+    let stored = match &observed {
+        Ok(Err(error)) => Some(
+            case.runtime()
+                .observe_master_turn(
+                    &prepared,
+                    &case.turn.id,
+                    MasterRuntimeObservation::Failed {
+                        reason: reason_for_error(error),
+                        cause: error.0.clone(),
+                    },
+                )
+                .await
+                .unwrap(),
+        ),
+        _ => None,
+    };
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+    (ended, stored)
+}
+
+/// A tools-on Claude master turn that needs 30 tool steps ends with its reply (OB-5): the
+/// engine's command names no step count, so a harness that honours `--max-turns` as Claude
+/// Code does is not stopped at step 24 with `error_max_turns`, which the owner saw as "its
+/// reply was cut off" 92 s into a working turn.
+#[tokio::test]
+async fn a_tools_on_master_turn_of_thirty_tool_steps_ends_with_its_reply() {
+    let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS, StepLimit::NoLimit).await;
+    assert_eq!(ended, "reply DONE", "the turn ran past 24 tool steps");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// With the master step limit at No limit, the default, a tools-on Claude master turn of
+/// 210 tool steps ends with its reply (OB-5b): past every limit the owner could pick, only
+/// the host's run time and output limits bound it.
+#[tokio::test]
+async fn a_master_turn_with_no_step_limit_runs_past_two_hundred_steps_to_its_reply() {
+    let (ended, stored) = tools_turn_on(&stepping_harness(210), StepLimit::NoLimit).await;
+    assert_eq!(ended, "reply DONE", "no step count stopped the turn");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// Under each master step limit the owner can pick, a tools-on Claude master turn that
+/// needs more steps stops at the limit with the cause `master_step_limit_<steps>` and the
+/// reason step_limit, not as a cut-off capture, and a turn of 30 steps still ends with its
+/// reply (OB-5b).
+#[tokio::test]
+async fn a_master_turn_past_each_step_limit_stops_with_that_limit_named() {
+    let limits = [
+        (StepLimit::Steps50, 50_u16),
+        (StepLimit::Steps100, 100),
+        (StepLimit::Steps200, 200),
+    ];
+    for (limit, steps) in limits {
+        let cause = format!("master_step_limit_{steps}");
+        let (ended, stored) = tools_turn_on(&stepping_harness(steps + 5), limit).await;
+        assert_eq!(ended, format!("error {cause}"));
+        let stored = stored.expect("the stopped turn was stored");
+        assert_eq!(stored.phase, MasterTurnPhase::Failed);
+        assert_eq!(stored.reason, Some(MasterReason::StepLimit));
+        assert_eq!(stored.cause.as_deref(), Some(cause.as_str()));
+        assert!(stored.reply.is_none());
+        let (ended, stored) = tools_turn_on(THIRTY_STEP_HARNESS, limit).await;
+        assert_eq!(ended, "reply DONE", "30 steps fit under {steps}");
+        assert!(stored.is_none(), "a replied turn is not stored as failed");
+    }
+}
+
+/// A stand-in Claude Code for a console master turn that works three seconds without a
+/// word and then replies DONE.
+const SLOW_REPLY_HARNESS: &str = r#"#!/bin/sh
+IFS= read -r turn
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+/bin/sleep 3
+printf '%s\n' '{"type":"assistant","uuid":"said-1","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-said","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"DONE"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"DONE"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// The stand-in of `SLOW_REPLY_HARNESS` working another number of seconds before DONE.
+/// Input: the seconds. Output: the script.
+fn slow_reply_harness(seconds: u16) -> String {
+    assert!((1..=120).contains(&seconds));
+    let script = SLOW_REPLY_HARNESS.replace("/bin/sleep 3\n", &format!("/bin/sleep {seconds}\n"));
+    assert!(script.contains(&format!("\n/bin/sleep {seconds}\n")));
+    script
+}
+
+/// With the master time limit at No limit, the default, the turn's host gets no wall clock
+/// (OB-5c): the prepared turn names no run time, the host is started with none, and a turn
+/// that works three seconds without a word ends with its reply.
+#[tokio::test]
+async fn a_master_turn_with_no_time_limit_runs_under_no_clock_to_its_reply() {
+    let limit = TimeLimit::NoLimit;
+    assert_eq!(limit.run_time(), None, "no limit gives the host no clock");
+    let (ended, stored) = limited_turn_on(
+        SLOW_REPLY_HARNESS,
+        StepLimit::NoLimit,
+        limit,
+        limit.run_time(),
+    )
+    .await;
+    assert_eq!(ended, "reply DONE", "no clock stopped the turn");
+    assert!(stored.is_none(), "a replied turn is not stored as failed");
+}
+
+/// Under each master time limit the owner can pick, a turn its host's wall clock ends
+/// stops with the cause `master_time_limit_<minutes>` and the reason time_limit, not
+/// `claude_host_deadline` (OB-5c), and a turn of three seconds still ends with its reply.
+/// The stopped stand-in works 90 s under a host clock of 8 s, so each row ends in seconds;
+/// the clock the engine gives a real host is the limit's own minutes.
+#[tokio::test]
+async fn a_master_turn_its_clock_ends_under_each_time_limit_stops_with_that_limit_named() {
+    let limits = [
+        (TimeLimit::Minutes10, 10_u64),
+        (TimeLimit::Minutes30, 30),
+        (TimeLimit::Minutes60, 60),
+    ];
+    let long = slow_reply_harness(90);
+    for (limit, minutes) in limits {
+        assert_eq!(limit.run_time(), Some(Duration::from_secs(minutes * 60)));
+        let cause = format!("master_time_limit_{minutes}");
+        let clock = Some(Duration::from_secs(8));
+        let (ended, stored) = limited_turn_on(&long, StepLimit::NoLimit, limit, clock).await;
+        assert_eq!(ended, format!("error {cause}"));
+        let stored = stored.expect("the stopped turn was stored");
+        assert_eq!(stored.phase, MasterTurnPhase::Failed);
+        assert_eq!(stored.reason, Some(MasterReason::TimeLimit));
+        assert_eq!(stored.cause.as_deref(), Some(cause.as_str()));
+        assert!(stored.reply.is_none());
+        let (ended, stored) =
+            limited_turn_on(SLOW_REPLY_HARNESS, StepLimit::NoLimit, limit, TEST_CLOCK).await;
+        assert_eq!(
+            ended, "reply DONE",
+            "a three second turn fits in {minutes} minutes"
+        );
+        assert!(stored.is_none(), "a replied turn is not stored as failed");
+    }
+}
+
+/// A tools-on master turn its harness ends as a success with no text after its last tool
+/// step fails as a turn without a reply, not as a cut-off capture (OB-5): the cause is
+/// master_empty_reply and the stored reason is no_reply.
+#[tokio::test]
+async fn a_tools_on_master_turn_that_ends_without_reply_text_says_so_and_is_not_cut_off() {
+    let (ended, stored) = tools_turn_on(SILENT_END_HARNESS, StepLimit::NoLimit).await;
+    assert_eq!(ended, "error master_empty_reply");
+    let stored = stored.expect("the failed end was stored");
+    assert_eq!(stored.phase, MasterTurnPhase::Failed);
+    assert_eq!(stored.reason, Some(MasterReason::NoReply));
+    assert_eq!(stored.cause.as_deref(), Some("master_empty_reply"));
+    assert!(stored.reply.is_none());
+}
+
+/// ServeMemory answers a console master's mailbox only while its own turn runs with tools on
+/// (OP22-L1): once the owner switches the project's master tools off, and once the turn has
+/// failed, it refuses with master_memory_turn_not_running and the call stays untaken until
+/// the server gives up on it.
+#[tokio::test]
+async fn a_console_master_s_memory_call_is_refused_with_tools_off_and_after_a_failed_turn() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Running {
+                runtime: MasterRuntimeView {
+                    runtime_ref: RequestId::new("memory-runtime").unwrap(),
+                    artifact_sha256: "a".repeat(64),
+                    native_session_id: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    let tmp = case.root.path().join("console-turn-tmp");
+    private_directory(&tmp);
+    let record = tmp.join(crate::team::tool::DROP_FILE);
+    let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
+    private_directory(&mailbox);
+    let server = remember_server(&record, &mailbox, "Use cargo nextest.", None);
+    call_waits(&mailbox).await;
+    store_master_tools(&case, false);
+    let tools_off = case
+        .runtime()
+        .serve_master_memory(&prepared, &case.turn.id, &mailbox)
+        .await
+        .map_err(|error| error.0);
+    let untaken_off = crate::team::tool::calls_waiting(&mailbox);
+    store_master_tools(&case, true);
+    let failed = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Failed {
+                reason: MasterReason::CaptureIncomplete,
+                cause: "master_capture_incomplete".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let ended = case
+        .runtime()
+        .serve_master_memory(&prepared, &case.turn.id, &mailbox)
+        .await
+        .map_err(|error| error.0);
+    let untaken_ended = crate::team::tool::calls_waiting(&mailbox);
+    let answer = server.join().unwrap();
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+    let not_running = Err("master_memory_turn_not_running".to_owned());
+    assert_eq!(tools_off, not_running, "master tools switched off");
+    assert!(untaken_off, "the call stays untaken with master tools off");
+    assert_eq!(failed.phase, MasterTurnPhase::Failed);
+    assert_eq!(ended, not_running, "the turn failed");
+    assert!(untaken_ended, "the call stays untaken after the turn");
+    assert_eq!(
+        answer_text(&answer),
+        (
+            "Not sent: the engine did not take the call within a minute, so nothing was done."
+                .to_owned(),
+            true
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_console_master_turn_s_remember_lands_on_the_project_memory_page() {
+    use crate::memory::library::{MemoryOrigin, MemoryScope, PAGE_ITEMS_MAX};
+    use crate::team::tool;
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let running = case
+        .runtime()
+        .observe_master_turn(
+            &prepared,
+            &case.turn.id,
+            MasterRuntimeObservation::Running {
+                runtime: MasterRuntimeView {
+                    runtime_ref: RequestId::new("memory-runtime").unwrap(),
+                    artifact_sha256: "a".repeat(64),
+                    native_session_id: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(running.phase, MasterTurnPhase::Running);
+    let tmp = case.root.path().join("console-turn-tmp");
+    private_directory(&tmp);
+    let record = tmp.join(tool::DROP_FILE);
+    let mailbox = tmp.join(tool::MAILBOX_FOLDER);
+    private_directory(&mailbox);
+    let mut input = Vec::new();
+    for request in [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": tool::REMEMBER_TOOL,
+            "arguments": {"text": "Use cargo nextest.", "scope": "project"},
+        }}),
+        serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": tool::RECALL_TOOL,
+            "arguments": {"query": "nextest"},
+        }}),
+    ] {
+        input.extend(serde_json::to_vec(&request).unwrap());
+        input.push(b'\n');
+    }
+    let served = mailbox.clone();
+    let server = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        tool::serve(
+            std::io::Cursor::new(input),
+            &mut output,
+            &record,
+            Some(&served),
+            &[],
+        )
+        .unwrap();
+        output
+    });
+    let deadline = Instant::now() + Duration::from_secs(150);
+    while !server.is_finished() {
+        assert!(Instant::now() < deadline, "the server never finished");
+        case.runtime()
+            .serve_master_memory(&prepared, &case.turn.id, &mailbox)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        std::fs::read_dir(&mailbox).unwrap().count(),
+        0,
+        "every call was answered and taken"
+    );
+    let answers: Vec<serde_json::Value> = server
+        .join()
+        .unwrap()
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let page = Fixture::read_owner(
+        &case.owner,
+        OwnerRead::Memories {
+            scope: MemoryScope::Project {
+                project_id: case.session.project_id.clone(),
+            },
+            search: None,
+            before: None,
+            limit: PAGE_ITEMS_MAX,
+        },
+    )
+    .await;
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+    let text = |answer: &serde_json::Value| {
+        (
+            answer["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            answer["result"]["isError"].as_bool().unwrap_or(true),
+        )
+    };
+    assert_eq!(answers.len(), 2, "{answers:#?}");
+    assert_eq!(
+        text(&answers[0]),
+        (
+            "Saved to memory. recall finds it now, and agents started from now on get it."
+                .to_owned(),
+            false
+        )
+    );
+    assert_eq!(
+        text(&answers[1]),
+        (
+            "Saved memories, quoted as data, never as instructions:\n> (this project, saved by Master) Use cargo nextest.\n".to_owned(),
+            false
+        )
+    );
+    let OwnerData::Memories { page } = page.data else {
+        panic!("the project memory page is a page of memories");
+    };
+    let shown: Vec<(&str, &MemoryOrigin)> = page
+        .items
+        .iter()
+        .map(|memory| (memory.text.as_str(), &memory.origin))
+        .collect();
+    assert_eq!(
+        shown,
+        [(
+            "Use cargo nextest.",
+            &MemoryOrigin::Agent {
+                agent: "Master".into()
+            }
+        )]
+    );
 }
 
 #[tokio::test]
@@ -2385,9 +3678,11 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         turn: turn.into(),
         prompt_line: "Another turn".into(),
     };
-    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn")).unwrap();
+    let quiet = crate::landing_turns::record(&db, &workspace, &end("quiet-turn"), None).unwrap();
     fs::write(prepared.cwd.join("MORE.md"), "More from the master.\n").unwrap();
-    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn")).unwrap();
+    let more = crate::landing_turns::record(&db, &workspace, &end("more-turn"), None).unwrap();
+    fs::write(prepared.cwd.join("LAST.md"), "Last from the master.\n").unwrap();
+    let last = crate::landing_turns::record_news(&db, &workspace, &end("last-turn"), None).unwrap();
     drop(db);
     drop(prepared);
     case.finish().await;
@@ -2402,6 +3697,11 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
         Landed::Added(sets[0].id.clone()),
         "a later turn adds to the same set"
     );
+    assert_eq!(
+        last,
+        (Landed::Added(sets[0].id.clone()), false),
+        "edits added to a set already pending for the owner are no news (F31)"
+    );
     assert_eq!(ended.phase, MasterTurnPhase::Succeeded);
     assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
     assert_eq!(persisted.changes.as_deref(), Some(CHANGES_WAITING));
@@ -2411,6 +3711,38 @@ async fn a_tools_on_master_turn_that_edits_a_file_ends_with_a_pending_change_set
     assert_eq!(sets[0].agent.id, session.as_str());
     assert_eq!(sets[0].files, 1);
     assert_eq!(sets[0].last_outcome, crate::landing::TurnOutcome::Succeeded);
+}
+
+/// F31, S2R1-L1: a conversation master's second editing turn that only grows the change set
+/// already pending for the owner is no news. Its turn ends through the master runtime with
+/// no changes note, while the first turn keeps its note and the one set holds both files.
+#[tokio::test]
+async fn a_master_s_second_editing_turn_on_a_pending_set_ends_with_no_changes_note() {
+    let (case, prepared) = tools_case(true).await;
+    let reply = landing_reply(&prepared);
+    let write = |cwd: &Path| fs::write(cwd.join("NOTES.md"), "Written by the master.\n").unwrap();
+    let first = end_tools_turn(&case, &prepared, &case.turn.id, write, reply).await;
+    drop(prepared);
+    let second = case.submit("Write more notes.").await;
+    let next = case.prepared(&second).await;
+    let more = |cwd: &Path| fs::write(cwd.join("MORE.md"), "More from the master.\n").unwrap();
+    let grown = end_tools_turn(&case, &next, &second, more, landing_reply(&next)).await;
+    drop(next);
+    let sets = case.change_sets().await;
+    let settled = case.settled_turns(2).await;
+    case.finish().await;
+    assert_eq!(first.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(grown.phase, MasterTurnPhase::Succeeded);
+    assert_eq!(
+        grown.changes, None,
+        "a turn that only grew the pending set posts no note (F31)"
+    );
+    assert_eq!(settled[1].id, second);
+    assert_eq!(settled[1].changes, None);
+    assert_eq!(settled[0].changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(sets.len(), 1, "{sets:?}");
+    assert_eq!(sets[0].state, crate::landing::ChangeState::Pending);
+    assert_eq!(sets[0].files, 2);
 }
 
 #[tokio::test]
@@ -2466,7 +3798,7 @@ async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_n
         turn: "away-turn".into(),
         prompt_line: "Write past the lease".into(),
     };
-    let refused = crate::landing_turns::record(&db, &workspace, &end).unwrap_err();
+    let refused = crate::landing_turns::record(&db, &workspace, &end, None).unwrap_err();
     assert_eq!(refused.0, "changes_workspace_invalid");
     assert_eq!(branches(), before);
     assert!(
@@ -2770,7 +4102,10 @@ async fn the_master_gets_the_resolve_prompt_and_later_turns_show_the_engine_line
             .ends_with("Do not run git commit; CrazyAgent records your changes when you finish."),
         "{text}"
     );
-    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(
+        ended.changes, None,
+        "the turn before it took the updating set back to pending, so the resolve turn only grows it (F31)"
+    );
     assert_eq!(reviewed.len(), 1, "{reviewed:?}");
     assert_eq!(reviewed[0].id, pending.id);
     assert_eq!(reviewed[0].state, crate::landing::ChangeState::Pending);
@@ -2886,6 +4221,7 @@ fn schedule_rows(case: &Fixture, limits: &[(&str, f64, i64)], plans: &[(&str, u8
                     used_percent: *weekly,
                     resets_at_ms: Some(*resets),
                 }),
+                provider: Some(crate::usage::poll::Provider::Claude),
             },
             crate::usage::LimitSource::Poll,
             clock_ms(),
@@ -2991,7 +4327,7 @@ fn served_questions(record: &Path, calls: &[serde_json::Value]) -> String {
         input.push(b'\n');
     }
     let mut output = Vec::new();
-    crate::team::tool::serve(std::io::Cursor::new(input), &mut output, record).unwrap();
+    crate::team::tool::serve(std::io::Cursor::new(input), &mut output, record, None, &[]).unwrap();
     String::from_utf8(output).unwrap()
 }
 
@@ -3108,5 +4444,133 @@ async fn a_conversation_master_s_questions_are_logged_and_recorded_when_its_turn
     );
     drop(next);
     drop(db);
+    case.finish().await;
+}
+
+/// Reads the commit a worktree's HEAD names. Inputs: the worktree and the git home. Output:
+/// the commit id.
+fn head_of(worktree: &Path, home: &Path) -> String {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(worktree)
+            .args(["rev-parse", "HEAD"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success());
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A master whose first turn on its new worktree ends with only its own commits keeps them
+/// as its change set: the engine records the commit the leased worktree starts from before
+/// the turn runs, as it does for a team agent's new worktree (T3 r2).
+#[tokio::test]
+async fn a_master_turn_records_where_its_leased_worktree_starts_before_it_runs() {
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    let proof = case.register().await;
+    let held = exclusive_profile_hold(case.root.path(), &proof.profile_ref)
+        .expect("no agent holds the configured profile yet");
+    assert_eq!(
+        case.drive()
+            .await
+            .expect_err("the held profile stops the prepared turn before it runs")
+            .0,
+        "native_profile_in_use"
+    );
+    drop(held);
+    let db = crate::landing::open(case.root.path()).unwrap();
+    let crate::protocol::Outcome::Worktrees { leases } =
+        crate::worktrees::leases(&db, &case.session.bootstrap_task_id).unwrap()
+    else {
+        panic!("the master holds its worktree lease");
+    };
+    let worktree = PathBuf::from(&leases[0].path);
+    let start = head_of(&worktree, case.root.path());
+    fs::write(worktree.join("NOTES"), "master notes\n").unwrap();
+    git(&worktree, case.root.path(), &["add", "NOTES"]);
+    git(
+        &worktree,
+        case.root.path(),
+        &["commit", "-q", "-m", "Add notes"],
+    );
+    let workspace = crate::landing::Workspace {
+        project: case.session.project_id.clone(),
+        agent: crate::landing::ChangeAgent {
+            kind: crate::landing::AgentKind::Master,
+            id: case.session.session_id.as_str().to_owned(),
+            label: "Master".into(),
+        },
+        repository: case.repository.clone(),
+        worktree,
+        git_dir: crate::worktrees::lease_git_dir(&db, &leases[0]).unwrap(),
+    };
+    let end = crate::landing::TurnEnd {
+        outcome: crate::landing::TurnOutcome::Succeeded,
+        turn: case.turn.id.as_str().to_owned(),
+        prompt_line: "Add notes".into(),
+    };
+    let id = crate::landing::record_turn_end(&db, &workspace, &end)
+        .unwrap()
+        .expect("the master's own commit makes its change set");
+    let set = crate::landing::list(&db, &case.session.project_id)
+        .unwrap()
+        .into_iter()
+        .find(|set| set.id == id)
+        .unwrap();
+    assert_eq!((set.base.as_str(), set.files), (start.as_str(), 1));
+    drop(db);
+    case.finish().await;
+}
+
+/// Each console master turn counts one turn on its project's master row, the key its tokens
+/// count against, so the master's Turns covers its console turns as well as its
+/// live-terminal ones (AL4 r2, rv-code M1).
+#[tokio::test]
+async fn each_console_master_turn_counts_one_turn_on_its_project_s_master_row() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    let project = prepared.session.project_id.clone();
+    let reported = Tokens {
+        input: 100,
+        output: 10,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    let started = crate::team::now_ms();
+    for _ in 0..2 {
+        case.runtime()
+            .count_master_usage(&prepared, None, reported)
+            .await;
+    }
+    let db = crate::usage::open(case.root.path()).unwrap();
+    let counted: Vec<(String, i64)> = db
+        .prepare("SELECT agent,SUM(turns) FROM usage_turns WHERE project=?1 GROUP BY agent")
+        .unwrap()
+        .query_map([project.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let master = crate::usage::service::master_agent(Some(&project));
+    assert_eq!(counted, [(master.clone(), 2)]);
+    let since = started - started.rem_euclid(3_600_000);
+    let shown: Vec<(String, Option<u64>)> =
+        crate::usage::metrics::read(&db, Some(&project), since, crate::team::now_ms())
+            .unwrap()
+            .agents
+            .into_iter()
+            .map(|row| (row.agent, row.turns))
+            .collect();
+    assert_eq!(shown, [(master, Some(2))]);
+    drop(db);
+    drop(prepared);
     case.finish().await;
 }

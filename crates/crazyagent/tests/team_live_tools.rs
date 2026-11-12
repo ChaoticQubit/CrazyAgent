@@ -88,6 +88,12 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     crazyagent::team::initialize(&connection).unwrap();
     crazyagent::coord::ensure(&connection).unwrap();
     crazyagent::project_setup::initialize(&connection).unwrap();
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+             INSERT INTO projects VALUES ('{PROJECT}','{{}}');"
+        ))
+        .unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     let folder = base.join("project");
     std::fs::create_dir(&folder).unwrap();
@@ -330,7 +336,15 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
         "the agent is named once: {status}"
     );
     assert!(!writer_line.contains(" / "), "{status}");
-    assert!(!status.contains("old-job"), "{status}");
+    let old_job_lines: Vec<&str> = status
+        .lines()
+        .filter(|line| line.contains("old-job"))
+        .collect();
+    assert_eq!(old_job_lines.len(), 1, "{status}");
+    assert!(
+        old_job_lines[0].starts_with("Retired sub-agents, whose worktrees are gone"),
+        "{status}"
+    );
     assert!(
         status.contains("asks: Proceed? (owner) Approved: push --force"),
         "{status}"

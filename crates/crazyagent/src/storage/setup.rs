@@ -617,12 +617,15 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         dependencies: progress::dependency_rows(&progress),
         pack: progress::pack_rows(&manifest, &installed, &progress),
         running: progress.running,
+        notes: Vec::new(),
         version: versioned::current(tx, &versioned::default_pack_item())?.version,
     })
 }
 
 fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     let folder = root.join(plugins::STORE).join(SKILLS[0]).join(SKILLS[1]);
     if let Ok(entries) = std::fs::read_dir(&folder) {
         for entry in entries.flatten() {
@@ -686,7 +689,9 @@ fn seed_hooks(
     id: &str,
     plugin: &Path,
 ) -> Result<(), EngineError> {
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     let Some(record) = load_pack(&tx, id)? else {
         return Ok(());
     };
@@ -774,7 +779,9 @@ pub(crate) fn execute(
     };
     let mut added = Vec::new();
     let mut moved = Vec::new();
-    let tx = connection.transaction().map_err(error)?;
+    let tx = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     let outcome = install(&tx, root, record, skills, server, &mut added, &mut moved)
         .and_then(|()| tx.commit().map_err(error));
     match outcome {

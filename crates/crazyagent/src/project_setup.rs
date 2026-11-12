@@ -1,6 +1,7 @@
 use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
+use crate::sandbox::policy::LevelView;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
@@ -30,6 +31,11 @@ pub const CONTEXT_ITEMS_MAX: usize = 64;
 pub const CONTEXT_CHUNK_BYTES: usize = 8192;
 pub const REPORT_BYTES_MAX: u64 = 1024 * 1024;
 pub const CONTEXT_DIRECTORY: &str = "context";
+/// The start of the context path of a repository file linked into the project's context:
+/// `repo/` and the file's path below the project folder.
+pub const LINKED_PREFIX: &str = "repo/";
+/// The most bytes of a context item path an owner read carries.
+pub const CONTEXT_PATH_BYTES_MAX: usize = 512;
 pub const PROJECTS_DIRECTORY: &str = "projects";
 #[cfg(unix)]
 const BRIEF_PARTIAL: &str = ".brief.partial";
@@ -42,21 +48,55 @@ const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
 #[cfg(unix)]
 const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
-#[cfg(unix)]
-const SECRET_MARKERS: [&str; 10] = [
+const SECRET_MARKERS: [&str; 13] = [
     "api_key",
     "api-key",
     "apikey",
     "secret",
     "password",
+    "passwd",
     "authorization",
     "bearer ",
     "access_token",
     "refresh_token",
     "id_token",
+    "cookie",
+    "private key",
 ];
-#[cfg(unix)]
-const SECRET_PREFIXES: [&str; 13] = [
+const SECRET_KEY_ENDS: [&str; 10] = [
+    "token",
+    "auth",
+    "pass",
+    "passwd",
+    "_pwd",
+    "credential",
+    "credentials",
+    "sessionid",
+    "session_id",
+    "_key",
+];
+const KEY_SEPARATORS: [&str; 4] = ["=", ":", "=>", ":="];
+const PLAIN_P_FLAGS: [&str; 13] = [
+    "-pthread",
+    "-pedantic",
+    "-pedantic-errors",
+    "-pie",
+    "-pipe",
+    "-pg",
+    "-print",
+    "-print0",
+    "-printf",
+    "-prune",
+    "-path",
+    "-perm",
+    "-pretty",
+];
+const KEY_BLOCK_BEGIN: &str = "-----begin";
+const KEY_BLOCK_END: &str = "-----end";
+const BASE64_RUN_MIN: usize = 20;
+const WRAPPED_TAIL_MIN: usize = 8;
+const PGPASS_FIELDS_MIN: usize = 5;
+const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
@@ -69,11 +109,10 @@ const SECRET_PREFIXES: [&str; 13] = [
     "xoxp-",
     "glpat-",
     "AKIA",
+    "ASIA",
     "eyJ",
 ];
-#[cfg(unix)]
 const HIDDEN_LINE: &str = "[hidden: this line may contain a secret]";
-#[cfg(unix)]
 const HIDDEN_WORD: &str = "[hidden]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -260,23 +299,27 @@ impl TeamPlan {
         Ok(())
     }
 
-    /// Refuses a plan the owner writes when it adds a harness that cannot run team agents.
-    /// Takes the written plan and the saved plan it replaces; a harness the saved plan already
-    /// names is kept, so an old plan still saves unchanged. Returns `team_harness_unavailable`.
+    /// Refuses a plan the owner writes when its master cannot run the project master or an
+    /// agent row cannot run team agents. Takes the written plan and the saved plan it
+    /// replaces; the saved master and saved rows are kept in their own place, so an old plan
+    /// still saves unchanged but a master-only harness never becomes an agent row. Returns
+    /// `team_harness_unavailable`.
     fn check_writable(&self, saved: Option<&TeamPlan>) -> Result<(), &'static str> {
-        let added = self.harnesses().any(|id| {
-            crate::team::launch_harness(id).is_none()
-                && !saved.is_some_and(|saved| saved.harnesses().any(|known| known == id))
+        let master = crate::team::master_backend(&self.master).is_some()
+            || saved.is_some_and(|saved| saved.master == self.master);
+        let rows = self.sub_harnesses.iter().all(|slot| {
+            crate::team::launch_harness(&slot.harness).is_some()
+                || saved.is_some_and(|saved| {
+                    saved
+                        .sub_harnesses
+                        .iter()
+                        .any(|known| known.harness == slot.harness)
+                })
         });
-        if added {
+        if !(master && rows) {
             return Err("team_harness_unavailable");
         }
         Ok(())
-    }
-
-    fn harnesses(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.master.as_str())
-            .chain(self.sub_harnesses.iter().map(|slot| slot.harness.as_str()))
     }
 
     /// Counts the master and every sub-harness agent.
@@ -467,6 +510,8 @@ pub struct ProjectCatalog {
     pub default_team: TeamPlan,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_team_status: Option<String>,
+    #[serde(default)]
+    pub agent_access: Vec<LevelView>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -602,12 +647,18 @@ pub enum ContextKind {
     Plan,
 }
 
+/// One file of a project's context: its context path, what it is and its size. `linked` is
+/// set for a repository file linked into the context, whose path starts with
+/// [`LINKED_PREFIX`]; it is left off the wire when false, so a list with no linked file
+/// reads as it did before, while a reader from before linked files refuses a list with one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextItem {
     pub path: String,
     pub kind: ContextKind,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,6 +689,10 @@ pub enum SetupQuery {
         project: ProjectId,
     },
     Jobs {
+        project: ProjectId,
+    },
+    /// Reads what removing the project would do before the owner picks how (DEC-118).
+    Removal {
         project: ProjectId,
     },
     Context {
@@ -689,7 +744,30 @@ pub enum SetupQuery {
     CoordQuestions {
         project: ProjectId,
     },
+    TeamMessages {
+        project: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+    },
+    /// Sends the owner's default master Open for a project whose live master switch is
+    /// already on when no live session holds the master, so an existing project's master
+    /// gets its session and restarts on it (LMS-1).
+    OpenLiveSession {
+        project: ProjectId,
+        generation: u64,
+    },
+    MoveHome {
+        project: ProjectId,
+        mode: crate::projects_home::AddMode,
+        generation: u64,
+    },
     Library(crate::memory::library::LibraryQuery),
+    Overview {
+        project: ProjectId,
+    },
+    RefreshOverview {
+        project: ProjectId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -697,6 +775,7 @@ pub enum SetupView {
     Catalog(Box<ProjectCatalog>),
     Setup(Option<Box<StoredSetup>>),
     Jobs(Vec<ResearchJob>),
+    Removal(Box<crate::team::cleanup::RemovalPreview>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
     HiddenPaths(Vec<String>),
@@ -708,7 +787,24 @@ pub enum SetupView {
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
     CoordQuestions(Box<crate::team::questions::Inbox>),
+    TeamMessages(Box<crate::team::agent_messages::AgentMessages>),
     Library(crate::memory::library::LibraryView),
+    /// A live master switch that is on although the owner's default Open opened no session
+    /// for it, with the engine's code or the plain reason, so the owner sees why (LMS-M1).
+    LiveWithoutSession(String),
+    Overview(Box<crate::project_overview::Overview>),
+    /// The engine took the ask for one writing run of the Overview tabs.
+    OverviewAsked,
+}
+
+/// One file the setup mapping found that the owner kept linked, with the group it was found
+/// under: `research` is the research kind, none for a file found as the roadmap. A file
+/// found under two groups is kept once per group the owner left on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeptFile {
+    pub path: String,
+    pub research: Option<ResearchKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -737,9 +833,15 @@ pub enum SetupAction {
         expected_revision: u64,
         name: Option<String>,
         setup: ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<KeptFile>>,
     },
     Remove {
         project_id: ProjectId,
+    },
+    Delete {
+        project_id: ProjectId,
+        name: String,
     },
     CancelResearch {
         project_id: ProjectId,
@@ -835,7 +937,9 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetAgentPolicy { policy, .. } => policy.validate().map_err(failure),
-            Self::Update { name, setup, .. } => {
+            Self::Update {
+                name, setup, kept, ..
+            } => {
                 let renamed = name.as_ref().map(|name| ProjectSpec {
                     name: name.clone(),
                     repositories: Vec::new(),
@@ -846,9 +950,23 @@ impl SetupAction {
                 if !setup.documents.is_empty() {
                     return Err(failure("project_setup_bounds"));
                 }
+                if kept.as_ref().is_some_and(|kept| {
+                    kept.len() > links::LINKS_MAX
+                        || kept
+                            .iter()
+                            .any(|file| file.path.len() > DOCUMENT_PATH_BYTES_MAX)
+                }) {
+                    return Err(failure("project_setup_bounds"));
+                }
                 setup.validate()
             }
             Self::Remove { .. } | Self::PlanRoadmap { .. } | Self::SetRepositoryTrust { .. } => {
+                Ok(())
+            }
+            Self::Delete { name, .. } => {
+                if name.len() > DELETE_NAME_BYTES_MAX {
+                    return Err(failure("project_spec_bounds"));
+                }
                 Ok(())
             }
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
@@ -964,8 +1082,9 @@ pub fn catalog(
         documents_max: DOCUMENTS_MAX,
         document_bytes_max: DOCUMENT_BYTES_MAX,
         project_document_bytes_max: PROJECT_DOCUMENT_BYTES_MAX,
-        default_team: default_team(config, pool, research, signed_in),
+        default_team: default_team(config, pool, signed_in),
         default_team_status: default_team_status(config, pool, signed_in).map(str::to_owned),
+        agent_access: LevelView::all(),
     };
     assert!(catalog.default_team.validate().is_ok());
     Ok(catalog)
@@ -1032,43 +1151,29 @@ pub fn project_has_pool(config: &EffectiveConfig, project: &ProjectId) -> bool {
     })
 }
 
-/// Builds the smart team defaults for the New Project Team step.
-/// Takes the configuration, the chosen pool, the research toggles and the signed-in connections.
-/// Returns the pool's best signed-in harness, Codex before Claude Code, as master and as one
-/// research agent per toggle, tools on; Codex when the pool has no signed-in harness, never RCLI.
-/// Without research no harness is chosen, which means any harness up to `TEAM_AGENTS_MAX`.
+/// Builds the smart team defaults for the New Project Team step (DEC-147.1).
+/// Takes the configuration, the chosen pool and the signed-in connections.
+/// Returns the pool's best signed-in harness, Codex before Claude Code, as master with tools
+/// on; Codex when the pool has no signed-in harness, never RCLI. No sub-agent harness is
+/// named and the team maximum is `TEAM_AGENTS_MAX`, so any harness runs with no limit.
 pub fn default_team(
     config: &EffectiveConfig,
     pool: Option<&CredentialRef>,
-    research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
 ) -> TeamPlan {
     let master = best_signed_in_harness(config, pool, signed_in)
         .unwrap_or(DEFAULT_TEAM_HARNESS)
         .to_owned();
     assert!(master != "rcli" && harness_valid(&master));
-    let agents = u8::try_from(research.len().min(usize::from(HARNESS_AGENTS_MAX))).unwrap_or(1);
-    let sub_harnesses = if agents == 0 {
-        Vec::new()
-    } else {
-        vec![HarnessSlot {
-            harness: master.clone(),
-            agents,
-            tools: true,
-        }]
-    };
     let team = TeamPlan {
         master,
         master_tools: true,
-        max_agents: if sub_harnesses.is_empty() {
-            TEAM_AGENTS_MAX
-        } else {
-            1 + agents
-        },
-        sub_harnesses,
+        sub_harnesses: Vec::new(),
         min_agents: 1,
+        max_agents: TEAM_AGENTS_MAX,
     };
     assert!(team.validate().is_ok());
+    assert!(team.sub_harnesses.is_empty() && team.max_agents == TEAM_AGENTS_MAX);
     team
 }
 
@@ -1324,8 +1429,8 @@ fn copy_each(
     Ok(())
 }
 
-/// Creates the setup and research job tables when the engine database opens.
-/// Takes the engine connection; the job columns match the research runner's queue.
+/// Creates the setup, research job and repository doc link tables when the engine database
+/// opens. Takes the engine connection; the job columns match the research runner's queue.
 /// Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
@@ -1352,7 +1457,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE INDEX IF NOT EXISTS research_jobs_project_status
                 ON research_jobs(project, status, id);",
         )
-        .map_err(error)
+        .map_err(error)?;
+    links::initialize(connection)
 }
 
 /// Queues one research job per toggle for a project.
@@ -1830,6 +1936,7 @@ pub(crate) fn execute(
             expected_revision,
             name,
             setup,
+            kept,
         } => update(
             tx,
             config,
@@ -1837,8 +1944,10 @@ pub(crate) fn execute(
             *expected_revision,
             name.as_deref(),
             setup,
+            kept.as_deref(),
         ),
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
+        SetupAction::Delete { .. } => Ok(rejected("project_delete_requires_transport")),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths {
             project_id,
@@ -2014,9 +2123,14 @@ fn rejected(code: &str) -> Outcome {
 }
 
 /// Changes an existing project's name, description, stack, platforms, research, pool and team.
+/// With `kept` on the first confirm, the files the setup mapping found that the owner kept
+/// become the project's links, each under the group it was kept in, and no research job is
+/// queued for a kind they cover. Once the owner saved the setup, `kept` is left unread, so
+/// no later update from any client replaces or clears the links.
 /// Takes the transaction, configuration, project, the setup revision the owner edited, an
-/// optional new name and the new setup; documents keep their own add and delete actions.
-/// Returns Applied, or a plain rejection such as `stale_revision` after a concurrent change.
+/// optional new name, the new setup and the kept files, none to leave the links alone;
+/// documents keep their own add and delete actions. Returns Applied, or a plain rejection
+/// such as `stale_revision` after a concurrent change.
 fn update(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -2024,6 +2138,7 @@ fn update(
     expected_revision: u64,
     name: Option<&str>,
     setup: &ProjectSetup,
+    kept: Option<&[KeptFile]>,
 ) -> Result<Outcome, EngineError> {
     let Some(mut stored) = load_setup(tx, project_id)? else {
         return Ok(rejected("project_setup_missing"));
@@ -2031,6 +2146,7 @@ fn update(
     if stored.revision != expected_revision {
         return Ok(rejected("stale_revision"));
     }
+    let first_confirm = !stored.saved();
     if setup.pool != stored.pool
         && setup
             .pool
@@ -2060,6 +2176,18 @@ fn update(
         .collect();
     stored.platforms = setup.platforms.clone();
     stored.research = setup.research.clone();
+    if let Some(kept) = kept
+        && first_confirm
+    {
+        let linked = crate::onboarding::found_links(tx, project_id, kept)?;
+        links::set(tx, project_id, &linked)?;
+        stored.research.retain(|kind| {
+            !linked.iter().any(|link| match link.kind {
+                links::LinkKind::Roadmap => *kind == ResearchKind::RoadmapPlanning,
+                links::LinkKind::Research(found) => found == *kind,
+            })
+        });
+    }
     stored.pool = setup.pool.clone();
     if let Some(team) = &setup.team {
         stored.team = team.clone();
@@ -2350,12 +2478,18 @@ fn plan_roadmap(
     Ok(Outcome::Applied)
 }
 
+/// The longest project name a Delete everything may carry as the owner typed it.
+const DELETE_NAME_BYTES_MAX: usize = 1024;
+
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 32] = [
+const REMOVED_WITH_PROJECT: [&str; 54] = [
     "research_jobs",
     "onboarding",
     "team_messages",
+    "team_events",
+    "team_agent_messages",
+    "team_message_settings",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
@@ -2364,20 +2498,36 @@ const REMOVED_WITH_PROJECT: [&str; 32] = [
     "team_new_folder_limit",
     "team_time_limits",
     "team_master_switch",
+    "team_master_apply",
     "team_session_switches",
     "team_finished_view",
     "team_agent_branches",
     "team_master_branch",
     "team_land_on",
     "team_background",
+    "team_leftovers",
+    "team_agent_ends",
     "team_merge_ask",
+    "team_master_lands",
+    "team_reask_empty",
+    "team_master_idle_stop",
+    "team_master_live_terminal",
+    "team_wall",
+    "team_catch_up_main",
+    "team_reuse_idle",
+    "team_landing_mode",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
+    "team_task_roles",
+    "team_handles",
     "team_wake_requests",
     "team_owner_stops",
+    "team_status_log",
     "team_owner_turns",
     "team_caps",
+    "team_master_limits",
+    "team_master_clocks",
     "team_token_budgets",
     "team_teammates",
     "team_account_spread",
@@ -2385,6 +2535,9 @@ const REMOVED_WITH_PROJECT: [&str; 32] = [
     "agent_instruction_settings",
     "instruction_imports",
     "project_setups",
+    "project_doc_links",
+    "roadmap_status",
+    "roadmap_status_settings",
 ];
 
 /// Saves a project's extra read-only folders once each passes
@@ -2447,12 +2600,13 @@ fn set_hidden_paths(
     Ok(Outcome::Applied)
 }
 
-/// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
-/// choices, when the owner's screen showed the current version. Takes the transaction,
-/// project, the version the screen read and the policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy, a level this computer cannot run, a
-/// level wider than the project's repository trust allows (`agent_access_untrusted`) or a
-/// policy that changed since it was read (`stale_revision`).
+/// Saves a project's agent policy (DEC-101, DEC-102): its access level, toolchain choices
+/// and allowed extras (F08), when the owner's screen showed the current version. Each extra
+/// the save adds is checked and kept in canonical form, and each one added or removed is
+/// logged as the owner's. Takes the transaction, project, the version the screen read and
+/// the policy. Returns Applied, or a plain rejection for an unknown project, an invalid
+/// policy or extra, a level this computer cannot run, a level wider than the project's
+/// repository trust allows (`agent_access_untrusted`) or a stale screen (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2480,11 +2634,42 @@ fn set_agent_policy(
     if !crate::trust::Enforcement::for_level(trust).allows(policy.access) {
         return Ok(rejected(crate::trust::ACCESS_CODE));
     }
+    let before = crate::sandbox::policy::load(tx, project_id.as_str())
+        .map(|saved| saved.grants)
+        .unwrap_or_default();
+    let data = crate::sandbox::grants::data_root(tx).unwrap_or_default();
+    let mut kept = Vec::with_capacity(policy.grants.len());
+    for grant in &policy.grants {
+        if before.contains(grant) {
+            kept.push(grant.clone());
+            continue;
+        }
+        match crate::sandbox::grants::checked(grant, &data) {
+            Ok(grant) => kept.push(grant),
+            Err(code) => return Ok(rejected(code)),
+        }
+    }
+    let policy = crate::sandbox::policy::AgentPolicy {
+        grants: kept,
+        ..policy.clone()
+    };
+    if let Err(code) = policy.validate() {
+        return Ok(rejected(code));
+    }
     let item = crate::storage::versioned::agent_policy_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
+    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+    crate::sandbox::grants::log_changes(
+        tx,
+        project_id.as_str(),
+        &before,
+        &policy.grants,
+        "owner",
+        crate::team::now_ms(),
+    )
+    .map_err(error)?;
     Ok(Outcome::Applied)
 }
 
@@ -2495,12 +2680,13 @@ fn set_agent_policy(
 /// ended agents are deleted, so a waiting step is never claimed and a running one stops; its
 /// read folders, agent access, agent settings and its agents' own instructions go too, and
 /// its repository trust. Its project-scoped MCP servers, skills, secrets and per-project
-/// switches are cleared too, so a new project reusing the id never inherits them. The
-/// versions of its read folders, agent access, agent settings, project instructions, team
-/// settings, trust and project wake rule move on once more, so a project added again under
-/// the same id refuses a save from a screen read before the removal (V2V-1, V2SYNC-2); agent
-/// ids are never reused, so its agents' instruction versions are dropped and their wake rule
-/// versions need no move. Returns `invalid_project` for an unknown project.
+/// switches are cleared too, and so are the memories its agents saved, so a new project
+/// reusing the id never inherits them. The versions of its read folders, agent access, agent
+/// settings, project instructions, team settings, trust and project wake rule move on once
+/// more, so a project added again under the same id refuses a save from a screen read before
+/// the removal (V2V-1, V2SYNC-2); agent ids are never reused, so its agents' instruction
+/// versions are dropped and their wake rule versions need no move. Returns `invalid_project`
+/// for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2530,6 +2716,7 @@ fn remove(
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::trust::remove(tx, project_id.as_str()).map_err(error)?;
+    crate::sandbox::grants::forget_project(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::agent_policy_item(project_id),
@@ -2543,6 +2730,9 @@ fn remove(
     }
     crate::scheduling::forget_project(tx, project_id.as_str())?;
     crate::coord::forget_project(tx, project_id)?;
+    crate::activity::forget_project(tx, project_id)?;
+    crate::usage::forget_project(tx, project_id.as_str())?;
+    crate::ide::bridge::run_command::forget_project(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2563,8 +2753,40 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
+    crate::memory::library::forget_orphan_agent_memories(tx)?;
     crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
+}
+
+/// Records a Delete everything once the owner transport finished its disk work: the
+/// project's records go as in Remove from dashboard when every folder reached the Trash, the
+/// exact names and folder identities of its engine files recorded in the same write, and
+/// otherwise the refusal is kept with nothing removed. Inputs: the transaction, the action,
+/// the transport's outcome and the revision. Output: the outcome to record.
+pub(crate) fn record_delete(
+    tx: &Transaction<'_>,
+    action: &SetupAction,
+    outcome: &Result<Vec<crate::projects_home::RecordedFile>, String>,
+    revision: u64,
+) -> Result<Outcome, EngineError> {
+    let SetupAction::Delete { project_id, .. } = action else {
+        return Err(failure("delete_record_invalid"));
+    };
+    let files = match outcome {
+        Ok(files) => files,
+        Err(code) => return Ok(rejected(code)),
+    };
+    let recorded = remove(tx, project_id, revision)?;
+    if matches!(recorded, Outcome::Applied) {
+        for (name, inode) in files {
+            tx.execute(
+                "INSERT OR IGNORE INTO projects_delete_files(name,inode) VALUES (?1,?2)",
+                params![name, inode],
+            )
+            .map_err(error)?;
+        }
+    }
+    Ok(recorded)
 }
 
 /// The team a New Project gets and the folder it lands in, after the checks
@@ -2603,7 +2825,7 @@ fn check_new(
         Some(team) => team,
         None => {
             let signed = signed_in_connections(tx, config, setup.pool.as_ref())?;
-            default_team(config, setup.pool.as_ref(), &setup.research, &signed)
+            default_team(config, setup.pool.as_ref(), &signed)
         }
     };
     team.validate()?;
@@ -2705,7 +2927,8 @@ impl NewProjectPlan {
     }
 }
 
-/// Records a New Project whose folder the owner transport built.
+/// Records a New Project whose folder the owner transport built, with a first agent
+/// policy that records the toolchains the owner has installed (F26).
 /// Takes the transaction, configuration, the Create action and the staged
 /// result. Returns Applied once the rows are written, the brief is in place
 /// and the folder is moved into the home, else the refusal; the checks run
@@ -2747,6 +2970,17 @@ pub(crate) fn record_new(
     )?;
     if outcome == Outcome::Applied {
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
+        if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
+            let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
+            let policy = crate::sandbox::policy::AgentPolicy {
+                toolchains: crate::sandbox::policy::recorded_toolchains(
+                    &staged.staging,
+                    homes.as_ref(),
+                ),
+                ..Default::default()
+            };
+            crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+        }
         let state = crate::projects_home::state_folder(&staged.staging);
         assert_ne!(state, staged.staging);
         let context = open_beneath(&state, &[CONTEXT_DIRECTORY]).map_err(error)?;
@@ -2878,10 +3112,10 @@ pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineE
 }
 
 /// Loads the stored setup of one project.
-/// Takes a transaction and the project.
+/// Takes a connection or a transaction and the project.
 /// Returns the setup, or none for a project created without one.
 pub fn load_setup(
-    tx: &Transaction<'_>,
+    tx: &Connection,
     project: &ProjectId,
 ) -> Result<Option<StoredSetup>, EngineError> {
     let body: Option<String> = tx
@@ -3016,6 +3250,7 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
                 path,
                 kind,
                 bytes: metadata.len(),
+                linked: false,
             });
         }
         Ok(())
@@ -3053,6 +3288,108 @@ pub fn list_context(stored: &StoredSetup) -> Result<ProjectContext, EngineError>
     })
 }
 
+/// Lists a project's context as [`list_context`] does, then the repository files linked into
+/// it: each link that [`links::read_linked`] reads becomes a `repo/<path>` item with `linked`
+/// set, a roadmap as a plan and a research file as research. A link that does not read, or
+/// whose context path is over [`CONTEXT_PATH_BYTES_MAX`], is left out. Inputs: the stored
+/// setup and its links. Output: at most [`CONTEXT_ITEMS_MAX`] items.
+pub fn list_context_with_links(
+    stored: &StoredSetup,
+    links: &[links::DocLink],
+) -> Result<ProjectContext, EngineError> {
+    assert!(links.len() <= links::LINKS_MAX);
+    let mut context = list_context(stored)?;
+    let folder = stored.project_folder();
+    let shared = stored.state_folder() == folder;
+    for link in links {
+        if context.items.len() >= CONTEXT_ITEMS_MAX {
+            break;
+        }
+        let path = format!("{LINKED_PREFIX}{}", link.path);
+        let listed = shared && context.items.iter().any(|item| item.path == link.path);
+        if listed || path.len() > CONTEXT_PATH_BYTES_MAX {
+            continue;
+        }
+        let Some(text) = links::read_linked(&folder, &link.path) else {
+            continue;
+        };
+        assert!(text.len() as u64 <= links::LINK_BYTES_MAX);
+        context.items.push(ContextItem {
+            path,
+            kind: match link.kind {
+                links::LinkKind::Roadmap => ContextKind::Plan,
+                links::LinkKind::Research(_) => ContextKind::Research,
+            },
+            bytes: text.len() as u64,
+            linked: true,
+        });
+    }
+    assert!(context.items.len() <= CONTEXT_ITEMS_MAX);
+    Ok(context)
+}
+
+/// Reads one bounded chunk of a context item as [`read_context`] does, or of a linked
+/// repository file asked for as `repo/<path>`: only a path that is a stored link is read,
+/// below the project folder through [`links::read_linked`], so no link is followed and no
+/// other file of the repository can be asked for. Inputs: the stored setup, its links, the
+/// item path and a byte offset. Output: the chunk, `context_path_invalid` for a `repo/` path
+/// that is no stored link, or `context_item_missing` when the linked file does not read.
+pub fn read_context_with_links(
+    stored: &StoredSetup,
+    links: &[links::DocLink],
+    path: &str,
+    offset: u64,
+) -> Result<ContextChunk, EngineError> {
+    let Some(linked) = path.strip_prefix(LINKED_PREFIX) else {
+        return read_context(stored, path, offset);
+    };
+    assert!(links.len() <= links::LINKS_MAX);
+    if !links.iter().any(|link| link.path == linked) {
+        return Err(failure("context_path_invalid"));
+    }
+    let text = links::read_linked(&stored.project_folder(), linked)
+        .ok_or_else(|| failure("context_item_missing"))?;
+    let size = text.len() as u64;
+    assert!(size <= links::LINK_BYTES_MAX);
+    if offset > size {
+        return Err(failure("context_offset_invalid"));
+    }
+    let start = offset as usize;
+    let end = text.len().min(start + CONTEXT_CHUNK_BYTES);
+    Ok(text_chunk(
+        path,
+        size,
+        offset,
+        text.as_bytes()[start..end].to_vec(),
+    ))
+}
+
+/// Makes the chunk for the bytes read at one offset of a text item: bytes that stop inside
+/// a character are cut back to the last whole one unless they end the item, and the next
+/// offset is named while more remains. Inputs: the item path, its size, the offset and at
+/// most [`CONTEXT_CHUNK_BYTES`] bytes read there. Output: the chunk.
+fn text_chunk(path: &str, size: u64, offset: u64, mut bytes: Vec<u8>) -> ContextChunk {
+    assert!(bytes.len() <= CONTEXT_CHUNK_BYTES);
+    let complete = offset + bytes.len() as u64 >= size;
+    if !complete {
+        let valid = match std::str::from_utf8(&bytes) {
+            Ok(_) => bytes.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => bytes.len(),
+        };
+        bytes.truncate(valid.max(1));
+    }
+    let consumed = bytes.len() as u64;
+    assert!(consumed <= CONTEXT_CHUNK_BYTES as u64);
+    ContextChunk {
+        path: path.into(),
+        bytes: size,
+        offset,
+        text: Some(String::from_utf8_lossy(&bytes).into_owned()),
+        next_offset: (offset + consumed < size).then_some(offset + consumed),
+    }
+}
+
 /// Reads one bounded chunk of a context item without following links.
 /// Takes the stored setup, the relative item path and a byte offset.
 /// Returns text for markdown, text and csv files; other kinds return only their size.
@@ -3070,7 +3407,7 @@ pub fn read_context(
     } else {
         0
     };
-    let (mut bytes, size) =
+    let (bytes, size) =
         read_beneath(&stored.state_folder(), path, offset, limit).map_err(failure)?;
     if !textual {
         return Ok(ContextChunk {
@@ -3081,25 +3418,7 @@ pub fn read_context(
             next_offset: None,
         });
     }
-    let complete = offset + bytes.len() as u64 >= size;
-    if !complete {
-        let valid = match std::str::from_utf8(&bytes) {
-            Ok(_) => bytes.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => bytes.len(),
-        };
-        bytes.truncate(valid.max(1));
-    }
-    let consumed = bytes.len() as u64;
-    let chunk = ContextChunk {
-        path: path.into(),
-        bytes: size,
-        offset,
-        text: Some(String::from_utf8_lossy(&bytes).into_owned()),
-        next_offset: (offset + consumed < size).then_some(offset + consumed),
-    };
-    assert!(consumed <= CONTEXT_CHUNK_BYTES as u64);
-    Ok(chunk)
+    Ok(text_chunk(path, size, offset, bytes))
 }
 
 /// Reads the last plain lines of one research job's agent output, with secrets hidden.
@@ -3244,37 +3563,260 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
         })
 }
 
-/// Hides words and lines that look like credentials before a log line leaves the engine.
-/// Takes one plain line. Returns it with token-like words replaced, or a fixed notice for a
-/// line that names a credential field.
-#[cfg(unix)]
-fn redact(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        return HIDDEN_LINE.into();
-    }
-    line.split(' ')
-        .map(|word| if secret_like(word) { HIDDEN_WORD } else { word })
+/// Hides words and lines that look like credentials before text leaves the engine: a
+/// research log line, or a past conversation's message, tool input or tool output. Takes
+/// the text, one line or many. Returns it with the same line breaks and white space: each
+/// line naming a credential field, and each line of a private key block from its BEGIN line
+/// to its END line, a fixed notice; each credential-like word, the value after a key named
+/// like a credential, a URL's user part and a wrapped token's tail replaced. This masks
+/// known shapes, not every secret: one in another shape, a short value under a key not
+/// named like a credential or one split across messages stays.
+pub(crate) fn redact(text: &str) -> String {
+    let mut key_block = false;
+    let mut wrapped = false;
+    text.split('\n')
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            key_block |= lower.contains(KEY_BLOCK_BEGIN);
+            let hidden = key_block || SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
+            if key_block && lower.contains(KEY_BLOCK_END) {
+                key_block = false;
+            }
+            if hidden {
+                wrapped = false;
+                return HIDDEN_LINE.to_owned();
+            }
+            let (kept, ends_hidden) = redact_words(line, wrapped);
+            wrapped = ends_hidden;
+            kept
+        })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
 }
 
-#[cfg(unix)]
-fn secret_like(word: &str) -> bool {
-    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
-    let prefixed = SECRET_PREFIXES
-        .iter()
-        .any(|prefix| core.starts_with(*prefix) && core.len() >= 16);
-    let opaque = core.len() >= 32
-        && core
+/// Where the value of a key named like a credential sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyValue {
+    /// In the key's own word: `KEY=value`, `"key":"value"`, `--key=value`.
+    Inline,
+    /// In the next word: `key: value`, `"key": "value"`, `--key value`.
+    Next,
+    /// In the word after a lone separator word: `key = value`, `"key" : "value"`.
+    Apart,
+}
+
+/// Masks the credential-like words of one line that names no credential field: a word
+/// [`secret_like`] finds, a key's value [`secret_key`] finds, also after a lone
+/// `KEY_SEPARATORS` word, the `user:password` after `-u` or `--user`, a URL's user part
+/// and, when the line before ended in a masked word, a token tail as the line's first
+/// word. Takes the line and whether the line before ended in a masked word. Returns the
+/// line and whether it ends in one.
+fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
+    let mut kept = String::with_capacity(line.len());
+    let mut value_next = false;
+    let mut separator_next = false;
+    let mut user_next = false;
+    let mut first = true;
+    let mut ends_hidden = false;
+    for piece in line.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_end_matches(char::is_whitespace);
+        if word.is_empty() {
+            kept.push_str(piece);
+            continue;
+        }
+        let key = secret_key(word);
+        let hide = value_next
+            || (user_next && word.contains(':'))
+            || (wrapped && first && wrapped_tail(word))
+            || key == Some(KeyValue::Inline)
+            || secret_like(word);
+        value_next =
+            key == Some(KeyValue::Next) || (separator_next && KEY_SEPARATORS.contains(&word));
+        separator_next = key == Some(KeyValue::Apart);
+        user_next = matches!(word, "-u" | "--user");
+        first = false;
+        if hide {
+            kept.push_str(HIDDEN_WORD);
+        } else {
+            push_without_user_part(&mut kept, word);
+        }
+        kept.push_str(&piece[word.len()..]);
+        ends_hidden = hide && word.len() == piece.len();
+    }
+    (kept, ends_hidden)
+}
+
+/// Finds a key named like a credential in a word: a run of letters, digits, `-` and `_`
+/// whose name, in any ASCII case and `-` read as `_`, ends with one of `SECRET_KEY_ENDS`,
+/// followed, after any closing quote, by `=` or a single `:`, a whole-word `--key` flag,
+/// or a key ending the word, whose value follows a lone separator word. Takes the word.
+/// Returns where the key's value sits, or none.
+fn secret_key(word: &str) -> Option<KeyValue> {
+    let bytes = word.as_bytes();
+    let name = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    let mut start = 0;
+    while start < bytes.len() {
+        if !name(bytes[start]) {
+            start += 1;
+            continue;
+        }
+        let end = start + bytes[start..].iter().take_while(|&&b| name(b)).count();
+        let run = &bytes[start..end];
+        let named = SECRET_KEY_ENDS.iter().any(|ending| {
+            let ending = ending.as_bytes();
+            run.len() >= ending.len()
+                && run[run.len() - ending.len()..]
+                    .iter()
+                    .zip(ending)
+                    .all(|(&have, &want)| {
+                        have.to_ascii_lowercase() == want || (have == b'-' && want == b'_')
+                    })
+        });
+        if named {
+            if start == 0 && end == bytes.len() && bytes[0] == b'-' {
+                return Some(KeyValue::Next);
+            }
+            let after = end
+                + bytes[end..]
+                    .iter()
+                    .take_while(|&&b| matches!(b, b'"' | b'\''))
+                    .count();
+            let separator = bytes.get(after);
+            if matches!(separator, Some(b'=' | b':')) && bytes.get(after + 1) != separator {
+                let value = &bytes[after + 1..];
+                return Some(if value.iter().any(u8::is_ascii_alphanumeric) {
+                    KeyValue::Inline
+                } else {
+                    KeyValue::Next
+                });
+            }
+            if after == bytes.len() {
+                return Some(KeyValue::Apart);
+            }
+        }
+        start = end;
+    }
+    None
+}
+
+/// Whether a word at a line's start can be the wrapped tail of a token masked at the end of
+/// the line before: at least `WRAPPED_TAIL_MIN` bytes of the token and base64 alphabets,
+/// holding a digit. Takes the word.
+fn wrapped_tail(word: &str) -> bool {
+    word.len() >= WRAPPED_TAIL_MIN
+        && word.bytes().any(|b| b.is_ascii_digit())
+        && word
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        && core.bytes().any(|b| b.is_ascii_digit())
-        && core.bytes().any(|b| b.is_ascii_alphabetic());
-    prefixed || opaque
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+}
+
+/// Appends a word with the user part of each URL in it, `scheme://user:password@host`,
+/// replaced by the hidden mark, keeping the scheme, host and path. Takes the text to extend
+/// and the word.
+fn push_without_user_part(kept: &mut String, word: &str) {
+    let mut rest = word;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        kept.push_str(head);
+        let authority = tail.find(['/', '?', '#']).map_or(tail, |end| &tail[..end]);
+        rest = match authority.rfind('@') {
+            Some(user_end) => {
+                kept.push_str(HIDDEN_WORD);
+                &tail[user_end..]
+            }
+            None => tail,
+        };
+    }
+    kept.push_str(rest);
+}
+
+/// Whether a word looks like a credential on its own: a run of letters, digits, `-` and
+/// `_` inside it (the value of `KEY=value` or `"key":"value"`) starting with a known token
+/// prefix and at least 16 bytes long, or an opaque such run of at least 32 bytes mixing
+/// letters and digits; a base64 run of at least `BASE64_RUN_MIN` bytes mixing upper case,
+/// lower case and digits with no plain lowercase folder name between its `/`, or one such
+/// part between its `/` alone (a webhook URL's secret path part); a `.pgpass`-style line,
+/// host, port, database and user fields of letters, digits, `.`, `_`, `-` or `*` and then a
+/// filled password field whatever it holds; a `-p<password>` flag other than the known
+/// `PLAIN_P_FLAGS`, or a `--user=user:password` flag; or a path to a
+/// credential the sandbox guards. Takes the word.
+fn secret_like(word: &str) -> bool {
+    let token = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let core = word.trim_matches(|c: char| !token(c));
+    let tokenish = std::iter::once(core)
+        .chain(core.split(|c: char| !token(c)))
+        .any(|part| {
+            let prefixed = SECRET_PREFIXES
+                .iter()
+                .any(|prefix| part.starts_with(*prefix) && part.len() >= 16);
+            let opaque = part.len() >= 32
+                && part.chars().all(token)
+                && part.bytes().any(|b| b.is_ascii_digit())
+                && part.bytes().any(|b| b.is_ascii_alphabetic());
+            prefixed || opaque
+        });
+    let base64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    let mixed = |run: &str| {
+        run.len() >= BASE64_RUN_MIN
+            && run.bytes().any(|b| b.is_ascii_digit())
+            && run.bytes().any(|b| b.is_ascii_uppercase())
+            && run.bytes().any(|b| b.is_ascii_lowercase())
+    };
+    let encoded = word.split(|c: char| !base64(c)).any(|run| {
+        let path = run
+            .split('/')
+            .any(|folder| folder.len() >= 3 && folder.bytes().all(|b| b.is_ascii_lowercase()));
+        (mixed(run) && !path) || run.split('/').any(mixed)
+    });
+    let named = |field: &&str| {
+        !field.is_empty()
+            && field
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'*'))
+    };
+    let mut fields = word
+        .trim_start_matches(['\'', '"', '`'])
+        .splitn(PGPASS_FIELDS_MIN, ':');
+    let pgpass = fields
+        .by_ref()
+        .take(PGPASS_FIELDS_MIN - 1)
+        .filter(named)
+        .count()
+        == PGPASS_FIELDS_MIN - 1
+        && fields.next().is_some_and(|password| !password.is_empty());
+    let password_flag = word
+        .strip_prefix("-p")
+        .is_some_and(|value| !value.is_empty())
+        && !PLAIN_P_FLAGS.contains(&word);
+    let user_flag = word
+        .strip_prefix("--user=")
+        .is_some_and(|value| value.contains(':'));
+    tokenish || encoded || pgpass || password_flag || user_flag || credential_path(word)
+}
+
+/// Whether a word names a credential file or folder the sandbox guards
+/// ([`crate::sandbox::credential_places`]) as a whole part of a path, in any ASCII case.
+/// Takes the word.
+fn credential_path(word: &str) -> bool {
+    if !word.contains(['.', '/']) {
+        return false;
+    }
+    let bytes = word.as_bytes();
+    let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-');
+    (0..bytes.len())
+        .filter(|&at| at == 0 || !part(bytes[at - 1]))
+        .any(|at| {
+            crate::sandbox::credential_places().any(|place| {
+                let end = at + place.len();
+                end <= bytes.len()
+                    && bytes[at..end].eq_ignore_ascii_case(place.as_bytes())
+                    && bytes.get(end).is_none_or(|&b| b == b'/' || !part(b))
+            })
+        })
 }
 
 #[cfg(all(test, unix))]
 mod engine_tests;
+pub mod links;
 #[cfg(all(test, unix))]
 mod tests;

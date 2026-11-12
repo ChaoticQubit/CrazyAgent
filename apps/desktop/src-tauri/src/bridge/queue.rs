@@ -3,34 +3,43 @@ use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::sync::{OwnedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use tokio::sync::{
+    OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Semaphore,
+};
 
 const BRIDGE_WAIT: Duration = Duration::from_secs(2);
 const BRIDGE_WAITERS_MAX: usize = 32;
 const BRIDGE_READERS_MAX: u32 = 4;
+const LISTINGS_MAX: u32 = 1;
+const PLAIN_READERS_MAX: u32 = BRIDGE_READERS_MAX - LISTINGS_MAX;
 
+const _: () = assert!(0 < LISTINGS_MAX && LISTINGS_MAX < BRIDGE_READERS_MAX);
 const _: () =
     assert!(2 * (2 * BRIDGE_READERS_MAX as usize) <= crazyagent::protocol::OWNER_CLIENTS_MAX);
 
 /// The one native bridge the window's calls share. A call that changes the bridge
-/// or the engine has it alone; plain reads share it, at most `BRIDGE_READERS_MAX`
-/// at once, each with one engine connection, so with the connections they are still
-/// closing they take at most half of the engine's `OWNER_CLIENTS_MAX` and leave the
-/// rest to the terminal app and agents' team tools. Calls wait their turn first come
-/// first served, so a read asked after a change sees it, for at most `BRIDGE_WAIT`,
-/// with at most `BRIDGE_WAITERS_MAX` calls waiting at once. Past either bound the
-/// call is refused with `busy` before it does anything.
+/// or the engine has it alone; plain reads share it, at most `PLAIN_READERS_MAX` at
+/// once, and file listings let it go once started, at most `LISTINGS_MAX` at once.
+/// Each takes one engine connection, so with the connections they are still closing
+/// the `BRIDGE_READERS_MAX` of them take at most half of the engine's
+/// `OWNER_CLIENTS_MAX` and leave the rest to the terminal app and agents' team tools.
+/// Calls wait their turn first come first served, so a read asked after a change sees
+/// it, for at most `BRIDGE_WAIT`, with at most `BRIDGE_WAITERS_MAX` calls waiting at
+/// once. Past either bound the call is refused with `busy` before it does anything.
 pub struct BridgeQueue {
     bridge: Arc<RwLock<NativeBridge>>,
     waiting: AtomicUsize,
+    listings: Arc<Semaphore>,
 }
 
 impl BridgeQueue {
     /// Puts the bridge behind the queue. Input: the bridge. Output: the queue.
     pub fn new(bridge: NativeBridge) -> Self {
         Self {
-            bridge: Arc::new(RwLock::with_max_readers(bridge, BRIDGE_READERS_MAX)),
+            bridge: Arc::new(RwLock::with_max_readers(bridge, PLAIN_READERS_MAX)),
             waiting: AtomicUsize::new(0),
+            listings: Arc::new(Semaphore::new(LISTINGS_MAX as usize)),
         }
     }
 
@@ -55,6 +64,15 @@ impl BridgeQueue {
     /// Output: the shared bridge, or `busy`.
     pub async fn read(&self) -> Result<RwLockReadGuard<'_, NativeBridge>, BridgeError> {
         self.queued(self.bridge.read()).await
+    }
+
+    /// Takes one of the `LISTINGS_MAX` places for a file listing that runs after it lets
+    /// the bridge go, with the same bounds as `enter`. Output: the place, held until the
+    /// listing ends, or `busy`.
+    pub(super) async fn listing(&self) -> Result<OwnedSemaphorePermit, BridgeError> {
+        self.queued(Arc::clone(&self.listings).acquire_owned())
+            .await?
+            .map_err(|_| super::failure("busy"))
     }
 
     async fn queued<G>(&self, lock: impl Future<Output = G>) -> Result<G, BridgeError> {
@@ -173,7 +191,7 @@ mod tests {
     async fn plain_reads_share_the_bridge_up_to_the_reader_bound() {
         let queue = Arc::new(BridgeQueue::new(NativeBridge::new(None)));
         let mut reads = Vec::new();
-        for _ in 0..BRIDGE_READERS_MAX {
+        for _ in 0..PLAIN_READERS_MAX {
             let asked = Instant::now();
             reads.push(queue.read().await.unwrap());
             assert!(asked.elapsed() < HOLD, "a read never waits on another read");
@@ -185,6 +203,41 @@ mod tests {
         tokio::time::sleep(HOLD).await;
         assert!(!extra.is_finished(), "a read past the bound waits");
         reads.pop();
+        assert_eq!(extra.await.unwrap(), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn file_listings_take_the_last_reader_places_and_leave_changes_free() {
+        let queue = Arc::new(BridgeQueue::new(NativeBridge::new(None)));
+        let mut reads = Vec::new();
+        for _ in 0..PLAIN_READERS_MAX {
+            reads.push(queue.read().await.unwrap());
+        }
+        let mut places = Vec::new();
+        for _ in 0..LISTINGS_MAX {
+            let asked = Instant::now();
+            places.push(queue.listing().await.unwrap());
+            assert!(
+                asked.elapsed() < HOLD,
+                "a listing never waits on plain reads"
+            );
+        }
+        assert_eq!(
+            reads.len() + places.len(),
+            BRIDGE_READERS_MAX as usize,
+            "plain reads and listings together keep to the reader bound"
+        );
+        let extra = tokio::spawn({
+            let queue = Arc::clone(&queue);
+            async move { queue.listing().await.map(drop).map_err(|e| e.code) }
+        });
+        tokio::time::sleep(HOLD).await;
+        assert!(!extra.is_finished(), "a listing past the bound waits");
+        drop(reads);
+        let asked = Instant::now();
+        assert_eq!(queue.enter().await.map(drop).map_err(|e| e.code), Ok(()));
+        assert!(asked.elapsed() < HOLD, "a change never waits on a listing");
+        places.pop();
         assert_eq!(extra.await.unwrap(), Ok(()));
     }
 

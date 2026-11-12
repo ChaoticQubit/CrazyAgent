@@ -3,23 +3,28 @@ use crate::config::plain_problem;
 use crate::engine::owner::{AgentInstructions, OwnerResult};
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
+use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{
-    AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction, TeamGraph,
+    AgentRole, AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamAction,
+    TeamGraph,
 };
 use crate::terminal::{AgentId, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
-use crate::tui::keys::Key;
+use crate::tui::keys::{Key, ShiftArrows};
+use crate::tui::screens::new_project::{harness_name, same_harness};
 use crate::tui::screens::new_project_page::{key_event, look};
 use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
 use crate::tui::screens::project_markdown::sanitize;
 use crate::tui::screens::project_team::{TeamReply, TeamView, account_name, team_plain};
 use crate::tui::screens::project_time::local_offset;
+use crate::tui::screens::team_messages::{ListKey, MASTER_ELSEWHERE, Messages};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -47,17 +52,35 @@ const STOPPED: &str = "agent_stopped";
 const PAGE_STEP: usize = 10;
 const MASTER_WAITING: &str =
     "Starting the master's terminal. It opens once the master signs in and starts.";
-const MASTER_ON: &str = "Live master on. It starts when you open this view.";
+const MASTER_ON_WHEN: &str = "It starts when you open this view.";
 const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
+pub(in crate::tui) const MASTER_NO_SESSION: &str =
+    "No master session opened, so this conversation won't be in Sessions.";
 const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
     "It starts again when you open this view again or press n for a new session.";
+const MASTER_START_AGAIN: &str = "s starts it again, on the same conversation.";
 const MASTER_HEAD_ROWS: u16 = 1;
 const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to run the master.";
 const MASTER_PAUSED_START: &str =
     "S starts every agent of this project again; the master starts with them.";
 const MASTER_TEAM_STOPPED: &str = "Team stopped.";
+const MASTER_PASTE_WAIT: &str = "Paste once the master's terminal is open.";
+const MASTER_HELD_FULL: &str = "The master's terminal is still starting.";
+const MASTER_HELD_REST: &str =
+    "What you typed so far goes in once it opens; the rest was not kept.";
+const MASTER_HELD_DROPPED: &str = "What you typed for the master was not sent.";
+const MASTER_HELD_AGAIN: &str = "Its terminal did not open. Type it again once it is open.";
+/// What the owner reads when the master view closes because Live terminal is Off.
+const LIVE_TERMINAL_OFF: &str = "Live terminal is off for this project.";
+/// Where that master's conversation is and how to change the setting.
+const LIVE_TERMINAL_HOW: &str =
+    "Its conversation is the console. V in the team settings turns it on.";
+/// The most keys kept while the master's terminal starts. Keys, not bytes: a key's bytes
+/// depend on the modes of the terminal, known once it opens; a kept key is at most 6
+/// bytes, so all of them come to at most 24 KiB, sent in `INPUT_BYTES_MAX` chunks.
+const HELD_KEYS_MAX: usize = 4096;
 /// The master view header's session keys, widest first; the state picks the widest that
 /// fits beside it whole.
 const MASTER_CONTROLS: [&str; 2] = ["n New session  l Sessions", "n New session"];
@@ -80,6 +103,7 @@ enum Body {
     Detail {
         account: Option<String>,
         branch: Option<String>,
+        live: Option<String>,
     },
     Note(String),
     Heading(&'static str),
@@ -93,14 +117,19 @@ struct TreeRow {
     body: Body,
 }
 
-/// The live master switch as the engine last told it: on, off, or never set, and why the
-/// master last could not start.
+/// The live master switch as the engine last told it: on, off, or never set, why the
+/// master last could not start, the team's saved master harness and the harness the
+/// running live master uses.
 #[derive(Debug)]
 struct LiveSwitch {
     on: Option<bool>,
     problem: Option<String>,
+    idle: bool,
     switched: Option<String>,
+    saved: Option<String>,
+    running: Option<String>,
     version: u64,
+    limits: Option<crate::team::master_limits::LimitsView>,
 }
 
 struct Attached {
@@ -130,13 +159,18 @@ struct Instructions {
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
 /// s opens the team settings over the whole body, read with `SetupQuery::Team`.
-/// The master view is the same screen showing only the live master's terminal.
+/// The master view is the same screen showing only the live master's terminal; it starts the
+/// live master on a read that shows it off, and once more per open after a stale refusal.
 pub struct Team {
     project: ProjectId,
     name: String,
     master: bool,
     asked: bool,
+    retried: bool,
+    checked: bool,
     switch: Option<LiveSwitch>,
+    master_agent: Option<Option<i64>>,
+    master_live: Option<bool>,
     want: Option<bool>,
     refused: Option<String>,
     paused: bool,
@@ -150,7 +184,9 @@ pub struct Team {
     finished: finished::Finished,
     questions: questions::Questions,
     instructions: Option<Instructions>,
+    messages: Option<Messages>,
     settings: Option<TeamView>,
+    held: Vec<Key>,
 }
 
 impl Team {
@@ -162,7 +198,11 @@ impl Team {
             name,
             master: false,
             asked: false,
+            retried: false,
+            checked: false,
             switch: None,
+            master_agent: None,
+            master_live: None,
             want: None,
             refused: None,
             paused: false,
@@ -176,7 +216,9 @@ impl Team {
             finished: finished::Finished::new(),
             questions: questions::Questions::new(),
             instructions: None,
+            messages: None,
             settings: None,
+            held: Vec::new(),
         }
     }
 
@@ -190,21 +232,28 @@ impl Team {
         self.pump_settings(ctx);
     }
 
-    /// Sends the open team settings' next team read once one is due.
-    /// Input: the context. Output: none; a Setup request may be queued.
+    /// Sends the open team settings' next read once one is due, and the harness catalog
+    /// read once their master harness picker asks for it; a read the full queue refuses is
+    /// forgotten so the next key asks again.
+    /// Input: the context. Output: none; a Setup or a Settings request may be queued.
     fn pump_settings(&mut self, ctx: &mut Ctx) {
-        if let Some(query) = self
-            .settings
-            .as_mut()
-            .and_then(|view| view.next_query(now_ms()))
+        let Some(view) = self.settings.as_mut() else {
+            return;
+        };
+        if view.wants_catalog() {
+            ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
+        }
+        if let Some(query) = view.next_query(now_ms())
+            && !ctx.try_request(Request::Setup(query))
         {
-            ctx.request(Request::Setup(query));
+            view.forget_reads();
         }
     }
 
     /// Takes a key while the team settings are open: the settings take it first, a change
-    /// goes to the engine as `SetupQuery::TeamChange`, and Esc the settings left alone
-    /// closes them. Inputs: the key and the context. Output: handled.
+    /// goes to the engine as `SetupQuery::TeamChange`, a setup save as `SetupQuery::Change`,
+    /// and Esc the settings left alone closes them. Inputs: the key and the context.
+    /// Output: handled.
     fn settings_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         let Some(view) = self.settings.as_mut() else {
             return Flow::Ignored;
@@ -222,6 +271,10 @@ impl Team {
                     generation,
                 }));
             }
+            TeamReply::Save(action) => {
+                let generation = ctx.next_generation();
+                ctx.request(Request::Setup(SetupQuery::Change { action, generation }));
+            }
             TeamReply::Ignored if *key == Key::Esc => self.settings = None,
             TeamReply::Ignored | TeamReply::Handled => {}
         }
@@ -232,12 +285,64 @@ impl Team {
     /// The master view of one project: a header with the live master's state, then the
     /// live master's own terminal filling the body, opened as soon as the team shows it.
     /// Every open turns the master on; it stops only on the master idle stop or app quit.
+    /// The terminal has the keys from the start; what is typed before it opens waits.
     /// Inputs: the project id and name. Output: the screen, waiting for the master.
     pub fn master(project: ProjectId, name: String) -> Self {
         Self {
             master: true,
+            focus: Focus::Terminal,
             ..Self::new(project, name)
         }
+    }
+
+    /// Whether the master view is still waiting for a terminal that is coming: none yet or
+    /// one the engine has not attached, the team not stopped, no refused start and the
+    /// switch not off. Input: none. Output: true while typed keys wait for the terminal.
+    fn starting(&self) -> bool {
+        self.master
+            && self
+                .attached
+                .as_ref()
+                .is_none_or(|attached| !attached.started && attached.closed.is_none())
+            && !self.paused
+            && self.refused.is_none()
+            && self.live_on() != Some(false)
+    }
+
+    /// Whether keys go to a terminal: the terminal has focus and, in the master view, one is
+    /// attached or coming; a stopped, refused or switched-off master keeps the view keys.
+    /// Input: none. Output: true while every key but Ctrl-] goes to the terminal.
+    fn terminal_keys(&self) -> bool {
+        self.focus == Focus::Terminal
+            && (!self.master || self.attached.is_some() || self.starting())
+    }
+
+    /// Keeps one key typed while the master's terminal starts, up to `HELD_KEYS_MAX` keys
+    /// (not bytes) in all; a paste is not kept, since its bracketing needs the open
+    /// terminal's mode. Inputs: the key and the context. Output: none; a dropped key says why.
+    fn hold(&mut self, key: &Key, ctx: &mut Ctx) {
+        assert!(self.starting());
+        if matches!(key, Key::Paste(_)) {
+            ctx.say(Message::warning(MASTER_PASTE_WAIT, MASTER_HELD_FULL));
+            return;
+        }
+        if self.held.len() >= HELD_KEYS_MAX {
+            ctx.say(Message::warning(MASTER_HELD_FULL, MASTER_HELD_REST));
+            return;
+        }
+        self.held.push(key.clone());
+    }
+
+    /// Drops the keys kept for a master terminal that will not get them: one that closed or
+    /// was rejected before it opened, one dropped or replaced by another, or a start ended
+    /// by a refusal, Stop all or the switch turned off. Says so when any were kept.
+    /// Input: the context. Output: none.
+    fn drop_held(&mut self, ctx: &mut Ctx) {
+        if self.held.is_empty() {
+            return;
+        }
+        self.held.clear();
+        ctx.say(Message::warning(MASTER_HELD_DROPPED, MASTER_HELD_AGAIN));
     }
 
     /// Whether the live master is on as the owner sees it: the owner's last change until the
@@ -245,6 +350,15 @@ impl Team {
     fn live_on(&self) -> Option<bool> {
         self.want
             .or_else(|| self.switch.as_ref().and_then(|switch| switch.on))
+    }
+
+    /// Whether an idle stop ended the live master and no Stop all holds the team, the one
+    /// stop that offers s to start it again from this view. Input: none. Output: the answer.
+    fn idle_stopped(&self) -> bool {
+        self.master
+            && !self.paused
+            && self.live_on() == Some(false)
+            && self.switch.as_ref().is_some_and(|switch| switch.idle)
     }
 
     fn start_live(&mut self, ctx: &mut Ctx) {
@@ -265,17 +379,35 @@ impl Team {
         }));
     }
 
+    /// Sends the owner's default Open check for a switch already on, once per open of a
+    /// running team's master view and after each accepted Start all, so an existing
+    /// project's live master with no session gets one and restarts on it (LMS-1).
+    /// Input: the context. Output: none; the check is queued.
+    fn check_session(&mut self, ctx: &mut Ctx) {
+        self.checked = true;
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::OpenLiveSession {
+            project: self.project.clone(),
+            generation,
+        }));
+    }
+
     fn read_switch(&self, ctx: &mut Ctx) {
         ctx.request(Request::Setup(SetupQuery::Team {
             project: self.project.clone(),
         }));
     }
 
-    /// Takes a team status read or a live switch change of this master view: a good read
-    /// replaces the switch, and the first one of this open turns a switch that is not on
-    /// on; a failed read changes nothing; an accepted change is the switch until the next
-    /// read, which is read at once; a change refused as stale reads the switch again, and
-    /// any other refusal keeps the switch.
+    /// Takes a team status read, a live switch change or a session check of this master
+    /// view: a good read replaces the switch, and the first one of this open turns a switch
+    /// that is not on on, or checks the session of a running team's switch already on, and a
+    /// switch seen on stays stopped after its next stop until the owner acts; a
+    /// failed read changes nothing but ends a start waiting to be retried; an accepted change
+    /// is the switch until the next read, which is read at once, and an accepted Start all
+    /// checks the session too; a change refused as stale reads the switch again, and the first
+    /// such start of this open stays wanted, keeping the owner's typed keys, until that read
+    /// starts it once more; any other refusal keeps the switch; an Open that opened no session
+    /// is named.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -289,23 +421,49 @@ impl Team {
         match query {
             SetupQuery::Team { project } if *project == self.project => {
                 let Ok(SetupView::Team(status)) = result else {
+                    if !self.asked && self.want == Some(true) {
+                        self.want = None;
+                    }
                     return;
                 };
                 self.paused = status.paused;
                 let switch = LiveSwitch {
                     on: status.live_master,
                     problem: status.live_problem.clone(),
+                    idle: status.live_idle_stopped,
                     switched: status.live_switch.as_ref().map(switched_words),
+                    saved: status
+                        .harnesses
+                        .iter()
+                        .find(|harness| harness.role == AgentRole::Master)
+                        .map(|harness| harness.harness.clone()),
+                    running: status
+                        .agents
+                        .iter()
+                        .find(|agent| agent.role == AgentRole::Master && agent.status.live())
+                        .map(|agent| agent.harness.clone()),
                     version: status.settings_version,
+                    limits: Some(crate::team::master_limits::LimitsView {
+                        rounds: crate::team::master_limits::Rounds {
+                            used: status.rounds_used,
+                            max: status.master_rounds,
+                            kept_going: status.rounds_kept_going,
+                        },
+                        run_secs: status.master_run_secs,
+                        deadline_ms: status.master_deadline_ms,
+                    }),
                 };
                 if self.want.is_some() && self.want == switch.on {
                     self.want = None;
                 }
                 let off = switch.on != Some(true);
                 self.switch = Some(switch);
-                if off && !self.asked {
+                if off && !self.asked && !self.paused {
                     self.start_live(ctx);
+                } else if !off && !self.paused && !self.asked && !self.checked {
+                    self.check_session(ctx);
                 }
+                self.asked |= !off && !self.paused;
             }
             SetupQuery::TeamChange {
                 action:
@@ -319,7 +477,12 @@ impl Team {
                 Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code)
                     if code == crate::storage::versioned::STALE_CODE =>
                 {
-                    self.want = None;
+                    if self.retried {
+                        self.want = None;
+                    } else {
+                        self.retried = true;
+                        self.asked = false;
+                    }
                     ctx.say(Message::warning(
                         "The live master switch changed in another window.",
                         plain_problem(code).unwrap_or(code.as_str()),
@@ -330,15 +493,26 @@ impl Team {
                     self.want = None;
                     self.refused = Some(code.clone());
                 }
-                Ok(_) => {
+                Ok(view) => {
                     self.want = None;
-                    let switched = self.switch.take().and_then(|switch| switch.switched);
+                    let last = self.switch.take();
+                    let (switched, saved, running, limits) = last
+                        .map_or((None, None, None, None), |switch| {
+                            (switch.switched, switch.saved, switch.running, switch.limits)
+                        });
                     self.switch = Some(LiveSwitch {
                         on: Some(*on),
                         problem: None,
+                        idle: false,
                         switched,
+                        saved,
+                        running,
                         version: version + 1,
+                        limits,
                     });
+                    if let SetupView::LiveWithoutSession(why) = view {
+                        ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
+                    }
                     self.read_switch(ctx);
                 }
             },
@@ -346,9 +520,17 @@ impl Team {
                 action: TeamAction::Resume { project_id },
                 ..
             } if *project_id == self.project => match result {
-                Ok(_) => self.read_switch(ctx),
+                Ok(_) => {
+                    self.read_switch(ctx);
+                    self.check_session(ctx);
+                }
                 Err(code) => ctx.say(Message::error(&refusal(code), "")),
             },
+            SetupQuery::OpenLiveSession { project, .. } if *project == self.project => {
+                if let Ok(SetupView::LiveWithoutSession(why)) | Err(why) = result {
+                    ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
+                }
+            }
             _ => {}
         }
     }
@@ -365,6 +547,48 @@ impl Team {
             },
             generation,
         }));
+    }
+
+    /// Reads the team again when the graph shows the master stopped after showing it running,
+    /// so the open master view says why it stopped. Input: the context. Output: none; a team
+    /// read may be queued.
+    fn note_master_stopped(&mut self, ctx: &mut Ctx) {
+        let live = self.graph.ready().and_then(|graph| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == NodeKind::Master)
+                .map(|node| node.status.is_none_or(|status| status.live()))
+        });
+        let last = std::mem::replace(&mut self.master_live, live);
+        if self.master && last == Some(true) && live == Some(false) {
+            self.read_switch(ctx);
+        }
+    }
+
+    /// Reads the team again when the graph shows another master agent than it showed last,
+    /// so the master view's harness follows a live master that started again (OP-28).
+    /// Input: the context. Output: none; a team read may be queued.
+    fn note_master_agent(&mut self, ctx: &mut Ctx) {
+        if !self.master {
+            return;
+        }
+        let Some(agent) = self.graph.ready().map(|graph| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.kind == NodeKind::Master)
+                .and_then(|node| node.agent)
+        }) else {
+            return;
+        };
+        if self
+            .master_agent
+            .replace(agent)
+            .is_some_and(|last| last != agent)
+        {
+            self.read_switch(ctx);
+        }
     }
 
     /// Opens the master's terminal once the team lists it, and the new one
@@ -401,6 +625,7 @@ impl Team {
         match key {
             Key::Enter | Key::Tab if open => self.focus = Focus::Terminal,
             Key::Char('S') if self.paused => self.start_team(ctx),
+            Key::Char('s') if self.idle_stopped() => self.start_live(ctx),
             Key::Char('r') => ctx.request(Request::TeamGraph {
                 project: self.project.clone(),
             }),
@@ -447,7 +672,10 @@ impl Team {
         }
     }
 
-    fn stream(&mut self, agent: &AgentId, frame: &TerminalFrame) {
+    /// Takes one frame of the attached terminal; at its `Attached` frame the keys held while
+    /// the master's terminal started are typed in, in the order typed.
+    /// Inputs: the agent, the frame and the context. Output: none.
+    fn stream(&mut self, agent: &AgentId, frame: &TerminalFrame, ctx: &mut Ctx) {
         let Some(attached) = self
             .attached
             .as_mut()
@@ -463,6 +691,16 @@ impl Team {
                 );
                 attached.pane.show(&[], None);
                 attached.started = true;
+                let bytes: Vec<u8> = std::mem::take(&mut self.held)
+                    .iter()
+                    .flat_map(|key| attached.pane.encode(key))
+                    .collect();
+                for chunk in bytes.chunks(INPUT_BYTES_MAX) {
+                    ctx.request(Request::TerminalInput {
+                        agent: attached.agent.clone(),
+                        bytes: chunk.to_vec(),
+                    });
+                }
             }
             TerminalFrame::Output { bytes } => attached.pane.feed(bytes),
             TerminalFrame::Closed { reason } => attached.closed = Some(reason.clone()),
@@ -534,7 +772,19 @@ impl Team {
         self.focus = Focus::Terminal;
     }
 
+    /// Whether a team read says this project's "Live terminal" setting is Off, which closes
+    /// the master view, since that master's conversation is the console (DEC-117 Q4).
+    /// Input: the setup event. Output: true for a good team read of this project showing Off.
+    fn live_terminal_off(&self, event: &crate::tui::client::SetupEvent) -> bool {
+        self.master
+            && matches!(&event.query, SetupQuery::Team { project } if *project == self.project)
+            && matches!(&event.result, Ok(SetupView::Team(status)) if !status.master_live_terminal)
+    }
+
     fn detach(&mut self, ctx: &mut Ctx) {
+        if self.attached.is_some() {
+            self.drop_held(ctx);
+        }
         if let Some(attached) = self.attached.take()
             && attached.closed.is_none()
         {
@@ -666,6 +916,47 @@ impl Team {
         });
     }
 
+    /// Opens the Messages list of one card's sub-agent in the right box, the same list the
+    /// Team view opens; the master card says where the master's own conversation is.
+    /// Inputs: the node index and context. Output: none; the first page read is queued.
+    fn open_messages(&mut self, node: usize, ctx: &mut Ctx) {
+        let Some(target) = self.graph.ready().and_then(|graph| graph.nodes.get(node)) else {
+            return;
+        };
+        if target.kind == NodeKind::Master {
+            ctx.say(Message::warning(
+                "The master has no Messages list.",
+                MASTER_ELSEWHERE,
+            ));
+            return;
+        }
+        let Some(agent) = AgentId::new(&target.id).ok().and_then(|id| id.team_agent()) else {
+            ctx.say(Message::warning(
+                "This card has no messages to show.",
+                "Only team sub-agents have a Messages list.",
+            ));
+            return;
+        };
+        let now = crate::tui::clock::now_ms();
+        self.task = None;
+        self.instructions = None;
+        self.messages = Some(Messages::new(
+            self.project.clone(),
+            agent,
+            &target.label,
+            local_offset(now),
+        ));
+        self.ask_messages(ctx);
+    }
+
+    /// Sends the open Messages list's next page read, if one is due.
+    fn ask_messages(&mut self, ctx: &mut Ctx) {
+        let now = crate::tui::clock::now_ms();
+        if let Some(query) = self.messages.as_mut().and_then(|list| list.next_query(now)) {
+            ctx.request(Request::Setup(query));
+        }
+    }
+
     fn take_instructions(&mut self, event: &ProcessEvent) {
         let Some(open) = self
             .instructions
@@ -683,8 +974,10 @@ impl Team {
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
                 | ProcessReply::Files(_)
-                | ProcessReply::Paths(_)
-                | ProcessReply::Committed(_),
+                | ProcessReply::Uncommitted(_)
+                | ProcessReply::Committed(_)
+                | ProcessReply::Proposal(_)
+                | ProcessReply::AppSettings(_),
             ) => return,
             Err(code) if code == NOT_READY => Load::NotReady,
             Err(code) => Load::Failed(code.clone()),
@@ -711,19 +1004,43 @@ impl Team {
     }
 
     /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
-    /// master view, any other key goes to the open terminal. A terminal that closed keeps
-    /// the keys and drops them until Ctrl-], so keys typed as it closed never act on the
-    /// view. Inputs: the key and the context. Output: handled.
+    /// master view, any other key goes to the open terminal. While the master's terminal
+    /// starts, keys wait for it and Esc goes back; a master view with no terminal coming
+    /// gives the keys to the view. A terminal that closed keeps the keys and drops them
+    /// until Ctrl-], so keys typed as it closed never act on the view, but for s after an
+    /// idle stop, which starts the master again.
+    /// Inputs: the key and the context. Output: the flow.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
             self.focus = Focus::Tree;
             return Flow::Handled;
         }
+        if self.master
+            && ctx.shift_arrows == ShiftArrows::SwitchTabs
+            && matches!(key, Key::ShiftLeft | Key::ShiftRight)
+        {
+            return self.step_tab(*key == Key::ShiftRight, ctx);
+        }
+        if self.starting() {
+            if *key == Key::Esc {
+                self.held.clear();
+                self.detach(ctx);
+                return Flow::Back;
+            }
+            self.hold(key, ctx);
+            return Flow::Handled;
+        }
         let Some(attached) = self.attached.as_mut() else {
             self.focus = Focus::Tree;
+            if self.master {
+                return self.master_key(key, ctx);
+            }
             return Flow::Handled;
         };
         if attached.closed.is_some() {
+            if *key == Key::Char('s') && self.idle_stopped() {
+                self.start_live(ctx);
+            }
             return Flow::Handled;
         }
         for chunk in attached.pane.encode(key).chunks(INPUT_BYTES_MAX) {
@@ -733,6 +1050,17 @@ impl Team {
             });
         }
         Flow::Handled
+    }
+
+    /// Leaves the master view for the project's previous or next tab, as the desktop tab
+    /// strip beside its live terminal does; keys kept while the terminal started go with
+    /// the view. Inputs: the direction and the context. Output: back to the project page.
+    fn step_tab(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
+        assert!(self.master);
+        self.held.clear();
+        self.detach(ctx);
+        ctx.project_step = Some((self.project.clone(), forward));
+        Flow::Back
     }
 
     fn tree_lines(&mut self, limit: usize, height: usize, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -795,8 +1123,9 @@ impl Team {
             .skip(self.offset)
             .take(height)
             .map(|(index, row)| {
+                let room = limit.saturating_sub(2).saturating_sub(width(&row.prefix));
                 list_row(
-                    join([Line::raw(row.prefix.clone()), body(row, graph, ctx)]),
+                    join([Line::raw(row.prefix.clone()), body(row, graph, ctx, room)]),
                     limit,
                     row.item.is_some() && index == selected,
                     focused,
@@ -847,22 +1176,39 @@ impl Team {
         Some(lines)
     }
 
-    /// The master view's header: whether the live master is on, where the live session's
-    /// master harness last switched, and the session keys at the right edge. The state is
-    /// kept whole: when it does not fit beside both keys, only n New session shows and
-    /// l Sessions stays in the hints. Inputs: the width and context. Output: the line.
+    /// The master view's header: whether the live master is on, the harness it runs and a
+    /// saved one that waits for its next start, where the live session's master harness
+    /// last switched, last its time left and the rounds of the current goal while a live
+    /// master runs (F01, F09), and the session keys at the right edge. The state is kept whole: when
+    /// it does not fit beside both keys, only n New session shows and l Sessions stays in
+    /// the hints. Inputs: the width and context. Output: the line.
     fn master_head(&self, limit: usize, ctx: &Ctx) -> Line<'static> {
-        let switched = self
-            .switch
-            .as_ref()
-            .and_then(|switch| switch.switched.as_deref());
-        let state = match (self.paused, self.live_on() == Some(false), switched) {
-            (true, _, _) => MASTER_TEAM_STOPPED.to_owned(),
-            (false, true, None) => MASTER_OFF.to_owned(),
-            (false, true, Some(switched)) => format!("{MASTER_OFF} {switched}"),
-            (false, false, None) => MASTER_ON.to_owned(),
-            (false, false, Some(switched)) => format!("{MASTER_ON_SWITCHED} {switched}"),
+        let switch = self.switch.as_ref();
+        let switched = switch.and_then(|switch| switch.switched.as_deref());
+        let off = self.live_on() == Some(false);
+        let lead = match (self.paused, off, switched) {
+            (true, _, _) => MASTER_TEAM_STOPPED,
+            (false, true, _) => MASTER_OFF,
+            (false, false, _) => MASTER_ON_SWITCHED,
         };
+        let rest = match (self.paused, off, switched) {
+            (true, _, _) => None,
+            (false, _, Some(switched)) => Some(switched),
+            (false, true, None) => None,
+            (false, false, None) => Some(MASTER_ON_WHEN),
+        };
+        let harness = switch
+            .and_then(|switch| harness_words(switch.saved.as_deref(), switch.running.as_deref()));
+        let limits = switch
+            .filter(|switch| switch.running.is_some())
+            .and_then(|switch| switch.limits)
+            .filter(|_| !self.paused && !off)
+            .map(|view| view.words(crate::team::now_ms()));
+        let state = [Some(lead), harness.as_deref(), rest, limits.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
         let control = MASTER_CONTROLS
             .into_iter()
             .find(|control| width(&state) + 2 + width(control) <= limit)
@@ -887,6 +1233,18 @@ impl Team {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
+        if let Some(list) = &self.messages {
+            let lines = list
+                .lines(limit, usize::from(inner.height))
+                .into_iter()
+                .map(|line| match line.role {
+                    Some(role) => styled(line.text, role, theme),
+                    None => Line::raw(line.text),
+                })
+                .collect();
+            boxed(frame, area, &list.title(), false, lines, ctx);
+            return None;
+        }
         if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
@@ -961,13 +1319,28 @@ impl Team {
                 .map(Line::raw)
                 .collect();
             lines.extend(
-                wrap(MASTER_RESTART, limit)
-                    .into_iter()
-                    .map(|text| styled(text, Role::Muted, theme)),
+                wrap(
+                    if self.idle_stopped() {
+                        MASTER_START_AGAIN
+                    } else {
+                        MASTER_RESTART
+                    },
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
             );
             boxed(frame, area, "Master", false, lines, ctx);
             return None;
         }
+        let idle_line = self
+            .idle_stopped()
+            .then(|| {
+                self.switch
+                    .as_ref()
+                    .and_then(|switch| switch.problem.clone())
+            })
+            .flatten();
         let Some(attached) = self.attached.as_mut() else {
             let waiting = if self.master {
                 self.switch
@@ -985,9 +1358,25 @@ impl Team {
             boxed(frame, area, title, false, lines, ctx);
             return None;
         };
+        if let Some(waiting) = self
+            .switch
+            .as_ref()
+            .and_then(|switch| switch.problem.as_deref())
+            .filter(|_| self.master && !self.paused && !attached.started)
+        {
+            let lines = wrap(waiting, limit)
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme))
+                .collect();
+            boxed(frame, area, &attached.label, false, lines, ctx);
+            return None;
+        }
         if let Some(code) = &attached.closed {
-            let (lead, rest) = closed_words(code);
-            let mut lines = vec![Line::raw(lead)];
+            let (lead, rest) = idle_line
+                .as_deref()
+                .map_or(closed_words(code), |line| (line, MASTER_START_AGAIN));
+            let mut lines: Vec<Line<'static>> =
+                wrap(lead, limit).into_iter().map(Line::raw).collect();
             lines.extend(
                 wrap(rest, limit)
                     .into_iter()
@@ -1027,16 +1416,32 @@ impl Screen for Team {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        if self.focus == Focus::Terminal && self.master {
-            return vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+        if self.terminal_keys() && self.master {
+            let mut hints = vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+            if self.idle_stopped() {
+                hints.insert(0, hint("s", "Start again"));
+            }
+            if self.starting() {
+                hints.push(hint("Esc", "Back"));
+            }
+            if ctx.shift_arrows == ShiftArrows::SwitchTabs {
+                hints.push(hint(
+                    &format!("Shift-{}{}", ctx.glyphs.left, ctx.glyphs.right),
+                    "Tabs",
+                ));
+            }
+            return hints;
         }
-        if self.focus == Focus::Terminal {
+        if self.terminal_keys() {
             return vec![hint("Ctrl-]", "Back to the team")];
         }
         if self.master {
             let mut hints = Vec::new();
             if self.paused {
                 hints.push(hint("S", "Start all"));
+            }
+            if self.idle_stopped() {
+                hints.push(hint("s", "Start again"));
             }
             if self
                 .attached
@@ -1058,6 +1463,13 @@ impl Screen for Team {
                 .map(|(key, label)| hint(key, label))
                 .collect();
         }
+        if let Some(list) = &self.messages {
+            return list
+                .help()
+                .into_iter()
+                .map(|(key, label)| hint(key, label))
+                .collect();
+        }
         if self.cleanup.open() {
             return self.cleanup.hints();
         }
@@ -1072,6 +1484,7 @@ impl Screen for Team {
             hint(&vertical, "Move"),
             hint("Enter", "Open"),
             hint("i", "Instructions"),
+            hint("m", "Messages"),
         ];
         if self
             .attached
@@ -1104,7 +1517,14 @@ impl Screen for Team {
     }
 
     fn raw(&self) -> bool {
-        self.focus == Focus::Terminal
+        self.terminal_keys()
+    }
+
+    fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
+        if !self.master {
+            return Flow::Ignored;
+        }
+        self.step_tab(forward, ctx)
     }
 
     fn typing(&self) -> bool {
@@ -1120,6 +1540,13 @@ impl Screen for Team {
         }
         if self.settings.is_some() {
             return self.settings_key(key, ctx);
+        }
+        if let Some(list) = self.messages.as_mut() {
+            if list.key(key) == ListKey::Closed {
+                self.messages = None;
+            }
+            self.ask_messages(ctx);
+            return Flow::Handled;
         }
         if !self.cleanup.open()
             && !self.finished.open()
@@ -1165,6 +1592,11 @@ impl Screen for Team {
                     self.read_instructions(*node, ctx);
                 }
             }
+            Key::Char('m') => {
+                if let Some(Item::Node(node)) = items.get(self.cursor) {
+                    self.open_messages(*node, ctx);
+                }
+            }
             Key::PageDown if self.instructions.is_some() => {
                 if let Some(open) = self.instructions.as_mut() {
                     open.top = open.top.saturating_add(PAGE_STEP);
@@ -1193,22 +1625,47 @@ impl Screen for Team {
         self.cleanup.arrive(arrival, &self.project, ctx);
         self.finished.arrive(arrival, &self.project, ctx);
         self.questions.arrive(arrival, &self.project, ctx);
+        if let Some(list) = self.messages.as_mut() {
+            match arrival {
+                Arrival::Owner(event) => {
+                    if let OwnerEvent::Setup(event) = event.as_ref() {
+                        list.apply(&event.query, &event.result);
+                    }
+                }
+                Arrival::Disconnected(_) => list.forget_reads(),
+                _ => {}
+            }
+        }
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
                 self.end_stopped(ctx);
+                self.note_master_agent(ctx);
+                self.note_master_stopped(ctx);
                 self.follow_master(ctx);
                 if !self.master {
                     questions::Questions::read(&self.project, ctx);
                 }
             }
-            Arrival::Terminal { agent, frame } => self.stream(agent, frame),
+            Arrival::Terminal { agent, frame } => self.stream(agent, frame, ctx),
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
                 OwnerEvent::Setup(event) => {
+                    if self.live_terminal_off(event) {
+                        self.detach(ctx);
+                        ctx.say(Message::warning(LIVE_TERMINAL_OFF, LIVE_TERMINAL_HOW));
+                        return Flow::Back;
+                    }
                     self.took_setup(&event.query, &event.result, ctx);
                     if let Some(view) = self.settings.as_mut() {
                         view.apply(&event.query, event.result.clone());
+                    }
+                }
+                OwnerEvent::Settings(event) => {
+                    if let (SettingsEvent::Harnesses(result), Some(view)) =
+                        (event.as_ref(), self.settings.as_mut())
+                    {
+                        view.take_catalog(result);
                     }
                 }
                 _ => {}
@@ -1219,6 +1676,10 @@ impl Screen for Team {
                 }
             }
             _ => {}
+        }
+        self.ask_messages(ctx);
+        if !self.starting() {
+            self.drop_held(ctx);
         }
         self.pump_settings(ctx);
         self.sync(ctx);
@@ -1341,6 +1802,7 @@ fn tree(graph: &TeamGraph, glyphs: &Glyphs, width: usize) -> Vec<TreeRow> {
             &graph.nodes[*master],
             stem(glyphs, kids.is_empty()),
             width,
+            None,
         );
         lead_rows(graph, glyphs, &kids, "", width, &mut seen, &mut out);
     }
@@ -1397,9 +1859,10 @@ fn stem(glyphs: &Glyphs, last: bool) -> String {
 }
 
 /// Adds the rows of agents that share one lead, each followed by its detail row and the
-/// agents it leads in turn. A node already drawn is skipped, so a cycle in the parent
-/// links cannot loop. Inputs: the graph, glyphs, the agents, the indent their branches
-/// hang from, the row width, the drawn nodes and the rows. Output: none; rows are appended.
+/// agents it leads in turn.
+/// A node already drawn is skipped, so a cycle in the parent links cannot loop. Inputs: the
+/// graph, glyphs, the agents, the indent their branches hang from, the row width, the drawn
+/// nodes and the rows. Output: none; rows are appended.
 fn lead_rows(
     graph: &TeamGraph,
     glyphs: &Glyphs,
@@ -1419,9 +1882,12 @@ fn lead_rows(
             continue;
         }
         let last = index + 1 == members.len();
+        let prefix = format!("{indent}{}", branch_glyph(glyphs, last));
+        let room = width.saturating_sub(crate::tui::text::width(&prefix));
+        let moved = moved_action(graph, &graph.nodes[*member], glyphs, room);
         out.push(TreeRow {
             item: Some(Item::Node(*member)),
-            prefix: format!("{indent}{}", branch_glyph(glyphs, last)),
+            prefix,
             body: Body::Agent(*member),
         });
         let base = format!("{indent}{}", stem(glyphs, last));
@@ -1434,16 +1900,93 @@ fn lead_rows(
         } else {
             format!("{base}{}", stem(glyphs, false))
         };
-        detail_row(out, &graph.nodes[*member], detail, width);
+        detail_row(out, &graph.nodes[*member], detail, width, moved);
         lead_rows(graph, glyphs, &kids, &base, width, seen, out);
     }
 }
 
+/// The engine's relation edge for the line from an agent's lead down to it: the edge from
+/// the agent's parent, when that parent is in the graph, as the tree then hangs the agent
+/// under it. Inputs: the graph and the agent. Output: the edge's index, or None.
+fn relation_of(graph: &TeamGraph, node: &GraphNode) -> Option<usize> {
+    let parent = node.parent.as_deref()?;
+    if !graph.nodes.iter().any(|other| other.id == parent) {
+        return None;
+    }
+    graph
+        .relations
+        .iter()
+        .position(|edge| edge.from == parent && edge.to == node.id)
+}
+
+/// The cells an agent's line takes around its relation words: its status glyph and label,
+/// then two spaces and its status word. Inputs: the node and the glyphs. Output: the two
+/// widths; the second is 0 for a node with no status word.
+fn line_cells(node: &GraphNode, glyphs: &Glyphs) -> (usize, usize) {
+    let glyph = node
+        .status
+        .map_or(0, |status| width(glyphs.status(agent_status(status))) + 1);
+    let word = node
+        .status_label
+        .as_deref()
+        .or(node.status.map(|status| status.label()));
+    (
+        glyph + width(&node.label),
+        word.map_or(0, |word| 2 + width(word)),
+    )
+}
+
+/// Says whether a live action stays on its agent's own line: the status word keeps its place
+/// and at least the action's first word shows, or all of it for a wait on the owner, whose
+/// last words say who it waits on. Inputs: the node, its edge, the action's words, the glyphs
+/// and the cells left after the row's prefix. Output: true to show it there, cut to fit.
+fn live_fits(
+    node: &GraphNode,
+    edge: &RelationEdge,
+    label: &str,
+    glyphs: &Glyphs,
+    room: usize,
+) -> bool {
+    let (head, word) = line_cells(node, glyphs);
+    let lead = 3 + width(glyphs.dot);
+    let first = label.split(' ').next().unwrap_or(label);
+    let least = if matches!(edge.live, Some(LiveAction::WaitingOn { owner: true })) {
+        width(label)
+    } else {
+        width(label).min(width(first) + width(glyphs.ellipsis))
+    };
+    head + word + lead + least <= room
+}
+
+/// The live action an agent's detail row shows because it did not fit on the agent's own
+/// line. Inputs: the graph, the node, the glyphs and the cells left after the agent row's
+/// prefix. Output: the action's words, or None when there is none to move.
+fn moved_action(
+    graph: &TeamGraph,
+    node: &GraphNode,
+    glyphs: &Glyphs,
+    room: usize,
+) -> Option<String> {
+    let edge = &graph.relations[relation_of(graph, node)?];
+    edge.live.as_ref()?;
+    let label = edge_label(edge);
+    (!live_fits(node, edge, &label, glyphs, room)).then_some(label)
+}
+
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
-/// whose launch fires no hooks, that its receipts and adoption are unavailable, wrapped to
-/// the width left after the prefix so the words are never cut. Inputs: the rows, the node,
-/// the prefix and the row width. Output: none; rows are appended.
-fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
+/// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
+/// when the Delivery setting leaves it no way to get messages, each wrapped to the width
+/// left after the prefix so the words are never cut. A live action that did not fit on the
+/// agent's own line goes first on the account row, or as the first note with no account row.
+/// Inputs: the rows, the node, the prefix, the row width and that action. Output: none; rows
+/// are appended.
+fn detail_row(
+    out: &mut Vec<TreeRow>,
+    node: &GraphNode,
+    prefix: String,
+    width: usize,
+    mut live: Option<String>,
+) {
     if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
             item: None,
@@ -1451,17 +1994,21 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
             body: Body::Detail {
                 account: node.account.clone(),
                 branch: node.branch.clone(),
+                live: live.take(),
             },
         });
     }
-    if node.hookless {
-        let words = format!(
-            "Receipts and adoption {}",
-            crate::coord::adoption::HOOKLESS_WORDS
-        );
-        let room = width
-            .saturating_sub(crate::tui::text::width(&prefix))
-            .max(1);
+    let room = width
+        .saturating_sub(crate::tui::text::width(&prefix))
+        .max(1);
+    let hookless = node
+        .hookless
+        .then(|| format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS));
+    for words in live
+        .into_iter()
+        .chain(hookless)
+        .chain(node.message_note.as_deref().map(plain))
+    {
         out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
             item: None,
             prefix: prefix.clone(),
@@ -1470,17 +2017,45 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
     }
 }
 
-/// One tree row's text after its prefix. A master or agent row leads with its
-/// status glyph, then its label and status word; a task row leads with its
-/// status glyph, then the agent it went to and its title. The row is cut from
-/// the right with an ellipsis, so the glyph always shows. Inputs: the row, the
-/// graph and the context. Output: the line.
-fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
+/// One tree row's text after its prefix: a master or agent row's status glyph and label, the
+/// live action on the line from its lead, its status word and that line's standing relation;
+/// a task row's status glyph, the agent it went to and its title. An agent row keeps its
+/// status word: the live action is cut to the cells left or moves to the detail row, and a
+/// standing relation shows whole or not at all. Anything else is cut from the right with an
+/// ellipsis, so the glyph always shows. Inputs: the row, the graph, the context and the cells
+/// left after the prefix. Output: the line.
+fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx, room: usize) -> Line<'static> {
     let theme = &ctx.theme;
     let glyphs = ctx.glyphs;
     match &row.body {
         Body::Master(node) | Body::Agent(node) => {
             let node = &graph.nodes[*node];
+            let edge = relation_of(graph, node).map(|pair| &graph.relations[pair]);
+            let (head, word) = line_cells(node, glyphs);
+            let live = edge
+                .filter(|edge| edge.live.is_some())
+                .map(|edge| (edge, edge_label(edge)))
+                .filter(|(edge, label)| live_fits(node, edge, label, glyphs, room))
+                .map(|(_, label)| {
+                    assert!(
+                        head + word < room,
+                        "a live action needs cells beside the status"
+                    );
+                    Span::styled(
+                        cut(
+                            &format!("  {} {label}", glyphs.dot),
+                            room - head - word,
+                            glyphs.ellipsis,
+                        ),
+                        theme.style(Role::Accent),
+                    )
+                });
+            let standing = edge
+                .filter(|edge| edge.live.is_none())
+                .map(edge_label)
+                .filter(|label| head + word + 2 + width(label) <= room)
+                .map(|label| Span::styled(format!("  {label}"), theme.muted));
+            let mut spans = Vec::new();
             match node.status {
                 Some(status) => {
                     let kind = agent_status(status);
@@ -1488,37 +2063,47 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                         .status_label
                         .clone()
                         .unwrap_or_else(|| status.label().to_owned());
-                    Line::from(vec![
-                        Span::styled(glyphs.status(kind), theme.style(kind.role())),
-                        Span::raw(format!(" {}", node.label)),
-                        Span::styled(format!("  {word}"), theme.style(kind.role())),
-                    ])
+                    spans.push(Span::styled(glyphs.status(kind), theme.style(kind.role())));
+                    spans.push(Span::raw(format!(" {}", node.label)));
+                    spans.extend(live);
+                    spans.push(Span::styled(format!("  {word}"), theme.style(kind.role())));
                 }
-                None => match &node.status_label {
-                    Some(word) => Line::from(vec![
-                        Span::raw(node.label.clone()),
-                        Span::styled(format!("  {word}"), theme.muted),
-                    ]),
-                    None => Line::raw(node.label.clone()),
-                },
+                None => {
+                    spans.push(Span::raw(node.label.clone()));
+                    spans.extend(live);
+                    spans.extend(
+                        node.status_label
+                            .as_ref()
+                            .map(|word| Span::styled(format!("  {word}"), theme.muted)),
+                    );
+                }
             }
+            spans.extend(standing);
+            Line::from(spans)
         }
-        Body::Detail { account, branch } => {
+        Body::Detail {
+            account,
+            branch,
+            live,
+        } => {
             let account = account.as_ref().map(|account| {
                 account_name(
                     Some(account),
                     ctx.store.accounts.ready().map_or(&[], Vec::as_slice),
                 )
             });
-            styled(
-                account
-                    .into_iter()
-                    .chain(branch.iter().cloned())
-                    .collect::<Vec<_>>()
-                    .join("  "),
-                Role::Muted,
-                theme,
-            )
+            let rest = account
+                .into_iter()
+                .chain(branch.iter().cloned())
+                .collect::<Vec<_>>()
+                .join("  ");
+            let Some(live) = live else {
+                return styled(rest, Role::Muted, theme);
+            };
+            Line::from(vec![
+                Span::styled(format!("{} {live}", glyphs.dot), theme.style(Role::Accent)),
+                Span::styled(format!("  {rest}"), theme.muted),
+            ])
         }
         Body::Note(text) => styled(text.clone(), Role::Muted, theme),
         Body::Heading(text) => styled(*text, Role::Muted, theme),
@@ -1532,6 +2117,36 @@ fn body(row: &TreeRow, graph: &TeamGraph, ctx: &Ctx) -> Line<'static> {
                 Span::styled(title(&edge.text), theme.muted),
             ])
         }
+    }
+}
+
+/// The words one tree line shows, as the desktop graph shows them: the live action while it
+/// happens, a handoff naming its task's title, a wait on the owner naming the owner's answer
+/// and a review the agent whose change set it reviews, else the relation. Input: the
+/// engine's relation edge. Output: the label.
+fn edge_label(edge: &RelationEdge) -> String {
+    match &edge.live {
+        Some(LiveAction::HandingOff { task }) => format!("handing off: {}", title(task)),
+        Some(LiveAction::Messaging) => "messaging".to_owned(),
+        Some(LiveAction::WaitingOn { owner: true }) => "waiting on: your answer".to_owned(),
+        Some(LiveAction::WaitingOn { owner: false }) => "waiting on".to_owned(),
+        Some(LiveAction::Reviewing { agent }) => {
+            let name = plain(agent)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            if name.is_empty() {
+                "reviewing: change set".to_owned()
+            } else {
+                format!("reviewing: {name}'s change set")
+            }
+        }
+        None => match edge.relation {
+            Relation::Leads => "leads",
+            Relation::DelegatedTo => "delegated to",
+            Relation::TeammateOf => "teammate of",
+        }
+        .to_owned(),
     }
 }
 
@@ -1576,6 +2191,17 @@ fn lost(code: &str) -> bool {
 /// else the team panel's sentence, which names an unknown code after a retry sentence.
 fn refusal(code: &str) -> String {
     plain_problem(code).map_or_else(|| team_plain(code), str::to_owned)
+}
+
+/// The plain words for why the owner's Open opened no master session (LMS-M1): the sentence
+/// a code has, or the reason itself when it is a sentence already. Input: the code or
+/// reason. Output: the words.
+pub(in crate::tui) fn unopened(why: &str) -> String {
+    if crate::tui::text::plain_code(why) {
+        refusal(why)
+    } else {
+        why.to_owned()
+    }
 }
 
 /// The words shown for a closed or refused terminal.
@@ -1716,9 +2342,16 @@ fn instruction_lines(
     lines
 }
 
+const GIVEN_AT_LAUNCH: &str =
+    "none loaded by the harness itself; CrazyAgent gives its instructions at launch";
+const NO_RECORD: &str = "A headless run reports nothing here while it keeps no transcript.";
+
 /// The lines saying what an agent's harness reported in its own session records: the
-/// instruction file names it loaded and the skills it invoked, then each file's place.
-/// Inputs: the view, the box width and context. Output: the lines and a blank line.
+/// instruction file names it loaded and the skills it invoked, then each file's place. The
+/// words are the same for every harness (DEC-141 PA-14): with no file loaded, the line says
+/// CrazyAgent gave the instructions at launch, and before any record it says a headless run
+/// that keeps no transcript reports nothing. Inputs: the view, the box width and context.
+/// Output: the lines and a blank line.
 fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
     let mut names: Vec<&str> = Vec::new();
     for file in &view.loaded {
@@ -1733,10 +2366,7 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     let used: Vec<&str> = view.skills_used.iter().map(String::as_str).collect();
     let (files, skills) = match view.sessions {
         0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
-        _ => (
-            listed(&names, "none loaded by its harness"),
-            listed(&used, "none"),
-        ),
+        _ => (listed(&names, GIVEN_AT_LAUNCH), listed(&used, "none")),
     };
     let mut lines: Vec<Line<'static>> = Vec::new();
     for text in [
@@ -1744,6 +2374,13 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
         format!("Skills used: {skills}"),
     ] {
         lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
+    }
+    if view.sessions == 0 {
+        lines.extend(
+            wrap(NO_RECORD, limit)
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, &ctx.theme)),
+        );
     }
     for file in &view.loaded {
         let place = plain(&format!("{} {}  {}", ctx.glyphs.dot, file.name, file.path));
@@ -1837,6 +2474,21 @@ fn inside(area: Rect) -> Rect {
         area.width.saturating_sub(2),
         area.height.saturating_sub(2),
     )
+}
+
+/// The master header's words for the master's harness: the running one, else the saved
+/// one, and the saved one from the next start while the two differ (OP-28).
+/// Takes the saved and the running harness ids. Returns the words, none when both are unknown.
+fn harness_words(saved: Option<&str>, running: Option<&str>) -> Option<String> {
+    let shown = running.or(saved)?;
+    let title = harness_name(&plain(shown), None);
+    Some(match saved {
+        Some(saved) if !same_harness(saved, shown) => format!(
+            "Harness: {title}; {} from the next start.",
+            harness_name(&plain(saved), None)
+        ),
+        _ => format!("Harness: {title}."),
+    })
 }
 
 /// The master header's words for the live session's last master harness switch.

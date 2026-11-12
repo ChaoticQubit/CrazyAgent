@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 
-export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "home", "github", "memory", "usage", "alerts", "profile", "updates"] as const;
-export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "settings", "ide"] as const;
+export const SETTINGS_TABS = ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "profile", "updates"] as const;
+/** The settings tabs the user menu under the profile name opens as dialogs over the page
+ * (DEC-151), in menu order; the Settings list leaves them out, and their routes stay so a
+ * deep link opens the dialog. */
+export const USER_MENU_TABS = ["profile", "updates", "github", "home"] as const;
+export const PROJECT_TABS = ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "metrics", "settings", "ide"] as const;
 export const NEW_PROJECT_STEPS = ["basics", "documents", "work", "pool", "team"] as const;
 const SETTINGS_ACTIONS = ["add", "new", "sign_in"] as const;
 export const ADD_PROJECT_WAYS = ["clone", "folder"] as const;
@@ -11,6 +15,8 @@ const SKILL_ID = /^[a-z0-9-]{1,64}$/;
 const HARNESS_ID = /^[a-z0-9-]{1,32}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
+export type UserMenuTab = typeof USER_MENU_TABS[number];
+export type ListedSettingsTab = Exclude<SettingsTab, UserMenuTab>;
 export type ProjectTab = typeof PROJECT_TABS[number];
 export type NewProjectStep = typeof NEW_PROJECT_STEPS[number];
 export type SettingsAction = typeof SETTINGS_ACTIONS[number];
@@ -20,13 +26,20 @@ export type Route =
   | { name: "welcome" }
   | { name: "home" }
   | { name: "new-project"; step: NewProjectStep }
-  | { name: "project"; id: string; tab: ProjectTab }
+  | { name: "project"; id: string; tab: ProjectTab; section?: string }
   | { name: "add-project"; way: AddProjectWay }
   | { name: "onboarding"; id: string }
+  | { name: "metrics" }
   | { name: "settings"; tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string };
 
 function pick<T extends string>(choices: readonly T[], value: string | null | undefined, fallback: T): T {
   return choices.find((choice) => choice === value) ?? fallback;
+}
+
+/** Whether a settings tab opens from the user menu as a dialog rather than in the Settings
+ * list. Input: the tab. Output: the answer. */
+export function isUserMenuTab(tab: SettingsTab): tab is UserMenuTab {
+  return (USER_MENU_TABS as readonly SettingsTab[]).includes(tab);
 }
 
 /** Reads the app's hash route. Unknown or malformed routes go Home; a missing tab or step
@@ -40,6 +53,8 @@ export function parseRoute(hash: string): Route {
   const parts = path.split("/").filter(Boolean);
   const params = new URLSearchParams(query);
   if (parts[0] === "welcome" && parts.length === 1) return { name: "welcome" };
+  if (parts[0] === "metrics" && parts.length === 1) return { name: "metrics" };
+  if (parts[0] === "settings" && parts[1] === "usage") return { name: "metrics" };
   if (parts[0] === "settings" && parts.length <= 2) {
     const tab = pick(SETTINGS_TABS, parts[1], "accounts");
     const action = SETTINGS_ACTIONS.find((choice) => choice === params.get("action"));
@@ -68,16 +83,18 @@ export function parseRoute(hash: string): Route {
   return { name: "home" };
 }
 
-/** Writes a route as a location hash, the inverse of parseRoute.
+/** Writes a route as a location hash, the inverse of parseRoute. A project route's section
+ * goes after "?section=", where the project page reads it, not parseRoute.
  * Input: a route. Output: a hash string starting with "#/". */
 export function formatRoute(route: Route): string {
   switch (route.name) {
     case "welcome": return "#/welcome";
     case "home": return "#/home";
     case "new-project": return `#/projects/new?step=${route.step}`;
-    case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}`;
+    case "project": return `#/projects/${encodeURIComponent(route.id)}/${route.tab}${route.section ? `?section=${encodeURIComponent(route.section)}` : ""}`;
     case "add-project": return `#/projects/add/${route.way}`;
     case "onboarding": return `#/projects/${encodeURIComponent(route.id)}/setup`;
+    case "metrics": return "#/metrics";
     case "settings": {
       const account = route.action && route.account ? `&account=${encodeURIComponent(route.account)}` : "";
       if (!route.action && route.tab === "plugins" && route.skill) return `#/settings/plugins?skill=${encodeURIComponent(route.skill)}`;

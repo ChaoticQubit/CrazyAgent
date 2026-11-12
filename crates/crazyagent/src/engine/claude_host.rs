@@ -7,10 +7,24 @@ use crate::adapters::NativeHarness;
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
 use crate::harness_settings::apply::Applied;
-use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 #[cfg(unix)]
-use crate::protocol::FRAME_BYTES_MAX;
-use crate::protocol::{CredentialRef, RequestId};
+use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
+use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
+use crate::master_step_limit::StepLimit;
+#[cfg(unix)]
+use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
+
+/// The code a Claude master stops with when it has not started by its start bound: the
+/// run clock's end when the owner's time limit bounds it, as the other masters stop, else
+/// the start bound's own. Input: whether a run clock bounds the start. Output: the code.
+pub(crate) fn start_end_code(clocked: bool) -> &'static str {
+    if clocked {
+        "claude_host_deadline"
+    } else {
+        "claude_host_startup_timeout"
+    }
+}
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
@@ -45,8 +59,6 @@ const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 pub(crate) const INSTRUCTIONS_BYTES_MAX: u64 =
     64 * 1024 + crate::instruction_files::SECTION_BYTES_MAX as u64;
 #[cfg(unix)]
-const TOOL_STEPS_MAX: &str = "24";
-#[cfg(unix)]
 const TOOLS_SHELL: &str = "/bin/zsh";
 /// Turns off Claude Code's background Bash commands and background agents for a tools-on
 /// master. In Claude Code 2.1.309 `claude -p` keeps running after a turn's result while a
@@ -60,12 +72,49 @@ const MCP_CONFIG_FLAG: &str = "--mcp-config";
 const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
 
 /// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
-/// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
-/// in the turn's private temporary folder where that tool records each proposed task.
+/// tool set: the engine executable that serves its team server, the absolute drop file in the
+/// turn's private temporary folder where its `delegate` tool records each proposed task, the
+/// mailbox beside it where its `remember` and `recall` calls wait for the engine, and the team
+/// tools the owner switched off, which the server leaves out.
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) engine: &'a Path,
     pub(in crate::engine) drop: &'a Path,
+    pub(in crate::engine) mailbox: &'a Path,
+    pub(in crate::engine) off: &'a [String],
+}
+
+impl MasterTools<'_> {
+    /// The arguments of the engine's team server, the same for Claude Code and Codex and in
+    /// the team runtime's order: `team-mcp`, the drop file, the mailbox, the tools left out and
+    /// `wake`, which a conversation master leaves out because it wakes no sub-agent. Input: the
+    /// tools. Output: the arguments, or `claude_host_invalid_launch` for a relative path, one
+    /// with a control character or an unknown tool name.
+    pub(in crate::engine) fn server_args(&self) -> Result<Vec<String>, EngineError> {
+        let (Some(drop), Some(mailbox)) = (plain_path(self.drop), plain_path(self.mailbox)) else {
+            return Err(failure("claude_host_invalid_launch"));
+        };
+        let wake = crate::team::tool::WAKE_TOOL;
+        let args: Vec<String> = [crate::team::tool::SERVER_COMMAND.to_owned(), drop, mailbox]
+            .into_iter()
+            .chain(self.off.iter().cloned())
+            .chain(std::iter::once(wake.to_owned()))
+            .collect();
+        if !crate::team::tool::known_tools(&args[3..]) || self.off.iter().any(|tool| tool == wake) {
+            return Err(failure("claude_host_invalid_launch"));
+        }
+        Ok(args)
+    }
+}
+
+/// Spells an absolute path as text for a launch argument. Input: the path. Output: the text,
+/// or none for a relative path, one that is not text or one with a control character.
+fn plain_path(path: &Path) -> Option<String> {
+    path.is_absolute()
+        .then(|| path.to_str())
+        .flatten()
+        .filter(|text| !text.chars().any(char::is_control))
+        .map(str::to_owned)
 }
 
 /// The most stream output one Claude master run may read: the 64 MiB a default master turn
@@ -78,44 +127,49 @@ const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 #[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
-    pub(in crate::engine) run_time: Duration,
+    pub(in crate::engine) run_time: Option<Duration>,
     pub(in crate::engine) cleanup_time: Duration,
     pub(in crate::engine) stdout_bytes: usize,
     pub(in crate::engine) stderr_bytes: usize,
-    pub(in crate::engine) events: usize,
 }
 
 #[cfg(unix)]
 impl ClaudeHostLimits {
     fn validate(&self) -> Result<(), EngineError> {
-        if self.run_time.is_zero()
-            || self.run_time > Duration::from_secs(600)
+        if self
+            .run_time
+            .is_some_and(|time| time.is_zero() || time > RUN_TIME_MAX)
             || self.cleanup_time.is_zero()
             || self.cleanup_time > Duration::from_secs(5)
             || !(1..=STDOUT_BYTES_MAX).contains(&self.stdout_bytes)
             || !(1..=262_144).contains(&self.stderr_bytes)
-            || !(1..=4096).contains(&self.events)
         {
             return Err(failure("claude_host_invalid_limits"));
         }
         Ok(())
     }
 
-    fn from_budget(budget: &ResourceBudget) -> Result<Self, EngineError> {
+    /// The limits of one master host: the owner's master time limit as its wall clock, none
+    /// for no limit (OB-5c), and the budget's output bounds. Inputs: the turn's budget and
+    /// the wall clock. Output: the limits, or `claude_host_invalid_budget` or
+    /// `claude_host_invalid_limits`.
+    fn from_budget(
+        budget: &ResourceBudget,
+        run_time: Option<Duration>,
+    ) -> Result<Self, EngineError> {
         budget
             .validate()
             .map_err(|_| failure("claude_host_invalid_budget"))?;
         let limits = Self {
-            run_time: Duration::from_millis(budget.wall_time_ms.min(600_000)),
+            run_time,
             cleanup_time: Duration::from_secs(5),
             stdout_bytes: usize::try_from(budget.output_bytes.min(STDOUT_BYTES_MAX as u64))
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
             stderr_bytes: usize::try_from(budget.output_bytes.min(262_144))
                 .map_err(|_| failure("claude_host_invalid_budget"))?,
-            events: 4096,
         };
         limits.validate()?;
-        assert!(limits.run_time.as_millis() <= u128::from(budget.wall_time_ms));
+        assert_eq!(limits.run_time, run_time);
         assert!(limits.stdout_bytes as u64 <= budget.output_bytes);
         Ok(limits)
     }
@@ -147,9 +201,10 @@ pub(in crate::engine) fn launch_command(
 }
 
 /// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
-/// agents' tool flags, a bounded number of steps, hooks and setting sources still off, and
-/// only the engine's `delegate` MCP server. Input: as `launch_command`, plus the engine
-/// executable and drop file. Output: the command, or a plain refusal for an unsafe input.
+/// agents' tool flags, hooks and setting sources off, only the engine's team MCP server, and
+/// no step count, since the host's run time and output limits bound the turn (OB-5).
+/// Input: as `launch_command`, plus the engine executable, drop file, mailbox and tools
+/// switched off. Output: the command, or a plain refusal for an unsafe input.
 #[cfg(unix)]
 pub(in crate::engine) fn tools_launch_command(
     executable: &Path,
@@ -209,24 +264,35 @@ fn master_settings_of(text: &str) -> Option<Applied> {
     )
 }
 
+/// The Claude Code flag that ends a turn once it has taken this many steps.
+const STEP_FLAG: &str = "--max-turns";
+
+/// Ends a tools-on master command with the owner's master step limit, the last thing the
+/// engine adds to it; no limit adds nothing, so a working turn is bounded by its run time
+/// only (OB-5). Inputs: the command the engine built with tools on and the limit.
+/// Output: none.
+pub(in crate::engine) fn limit_steps(command: &mut Command, limit: StepLimit) {
+    let before = command.get_args().count();
+    if let Some(steps) = limit.steps() {
+        command.arg(STEP_FLAG).arg(steps.to_string());
+    }
+    let added = command.get_args().count() - before;
+    assert_eq!(added == 2, limit != StepLimit::NoLimit);
+    assert!(added == 0 || added == 2);
+}
+
 /// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
-/// executable serving `team-mcp` on the drop file. Input: the tools. Output: the JSON text,
-/// or `claude_host_invalid_launch` for a relative path or one with a control character.
+/// executable serving `team-mcp` on the drop file and mailbox with the tools switched off.
+/// Input: the tools. Output: the JSON text, or `claude_host_invalid_launch` for a relative
+/// path, one with a control character or an unknown tool name.
 fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
-    let plain = |path: &Path| {
-        path.is_absolute()
-            .then(|| path.to_str())
-            .flatten()
-            .filter(|text| !text.chars().any(char::is_control))
-            .map(str::to_owned)
-    };
-    let (Some(engine), Some(drop)) = (plain(tools.engine), plain(tools.drop)) else {
+    let Some(engine) = plain_path(tools.engine) else {
         return Err(failure("claude_host_invalid_launch"));
     };
     let config = serde_json::json!({"mcpServers": {crate::team::tool::SERVER_NAME: {
         "type": "stdio",
         "command": engine,
-        "args": [crate::team::tool::SERVER_COMMAND, drop],
+        "args": tools.server_args()?,
     }}});
     Ok(config.to_string())
 }
@@ -305,7 +371,7 @@ fn command_for(
                 CLAUDE_DENY_FLAG,
             ])
             .args(CLAUDE_BUILT_IN_AGENTS),
-        None => command.args(["--tools", ""]),
+        None => command.args(["--tools", "", "--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
     };
     let settings = master_settings(settings);
     command.args([
@@ -318,9 +384,10 @@ fn command_for(
         settings.as_str(),
         "--disable-slash-commands",
         "--no-session-persistence",
-        "--max-turns",
-        if tools.is_some() { TOOL_STEPS_MAX } else { "1" },
     ]);
+    if tools.is_none() {
+        command.args([STEP_FLAG, "1"]);
+    }
     if let Some(file) = instructions {
         command.arg(INSTRUCTIONS_FLAG).arg(file);
     }
@@ -440,11 +507,30 @@ pub(in crate::engine) struct ClaudeHost {
     group: Arc<AtomicU32>,
     diagnostic: Arc<std::sync::Mutex<Option<diagnostic::StreamDiagnostic>>>,
     close_time: Duration,
-    expires: tokio::time::Instant,
+    expires: Option<tokio::time::Instant>,
+    frame_bytes: usize,
+}
+
+/// Waits for a master host's wall clock to run out; with none, the owner's choice of no
+/// master time limit, it never ends, and the owner's Stop or the turn's own end ends the
+/// wait it races. Input: when the clock runs out. Output: none.
+#[cfg(unix)]
+async fn expired(at: Option<tokio::time::Instant>) {
+    match at {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
+    }
 }
 
 #[cfg(unix)]
 impl ClaudeHost {
+    /// Starts one Claude Code master under custody. Inputs: the engine's command, its
+    /// sandbox, the account lease, the turn's home, the launch action, the account, the
+    /// project whose leftover setting and owner view its leftovers follow, the wall clock,
+    /// none for no master time limit (OB-5c), the turn's budget, whose output bounds it keeps,
+    /// and the owner's master frame size limit, which bounds each prompt frame (F39). Output:
+    /// the host, or the refusal.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
         sandbox: InstalledSandbox,
@@ -452,11 +538,16 @@ impl ClaudeHost {
         home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
+        project: ProjectId,
+        run_time: Option<Duration>,
         budget: ResourceBudget,
+        frames: crate::master_frame_limit::FrameSize,
     ) -> Result<Self, EngineError> {
-        let limits = ClaudeHostLimits::from_budget(&budget)?;
+        let limits = ClaudeHostLimits::from_budget(&budget, run_time)?;
+        let frame_bytes = frames.bytes();
         let protocol = ClaudeProtocol::new(action, account_ref)
-            .map_err(|error| Fault::Protocol(error).error())?;
+            .map_err(|error| Fault::Protocol(error).error())?
+            .with_frame_limit(frame_bytes);
         let (turns, input) = sync_channel(1);
         let (output, events) = mpsc::channel(128);
         let (report, status) = watch::channel(Status {
@@ -473,8 +564,16 @@ impl ClaudeHost {
             stop: Arc::clone(&stop),
             group: Arc::clone(&group),
             diagnostic: Arc::clone(&kept),
-            close_time: limits.cleanup_time,
-            expires: tokio::time::Instant::now() + limits.run_time,
+            close_time: limits.cleanup_time
+                + if sandbox.is_unconfined() {
+                    crate::harnesses::leftovers::STOP_TIME
+                } else {
+                    Duration::ZERO
+                },
+            expires: limits
+                .run_time
+                .map(|time| tokio::time::Instant::now() + time),
+            frame_bytes,
         };
         let _custodian = std::thread::Builder::new()
             .name("claude-master-custodian".into())
@@ -482,7 +581,7 @@ impl ClaudeHost {
                 process::run(
                     command,
                     sandbox,
-                    profile,
+                    (profile, project),
                     home,
                     protocol,
                     limits,
@@ -497,6 +596,10 @@ impl ClaudeHost {
                 );
             })
             .map_err(|_| failure("claude_host_custodian_unavailable"))?;
+        let clocked = host.expires.is_some();
+        let started_by = host
+            .expires
+            .unwrap_or_else(|| tokio::time::Instant::now() + START_TIME_MAX);
         loop {
             let current = *host.status.borrow();
             if let Some(error) = current.fault {
@@ -508,9 +611,9 @@ impl ClaudeHost {
             if current.phase == Phase::Retired {
                 return Err(failure("claude_host_disconnected"));
             }
-            tokio::time::timeout_at(host.expires, host.status.changed())
+            tokio::time::timeout_at(started_by, host.status.changed())
                 .await
-                .map_err(|_| failure("claude_host_startup_timeout"))?
+                .map_err(|_| failure(start_end_code(clocked)))?
                 .map_err(|_| failure("claude_host_custodian_lost"))?;
         }
     }
@@ -523,9 +626,11 @@ impl ClaudeHost {
         if self.stop.load(Ordering::Acquire)
             || self.status.borrow().phase != Phase::Running
             || text.is_empty()
-            || text.len() > FRAME_BYTES_MAX
         {
             return Err(failure("claude_host_turn_unavailable"));
+        }
+        if text.len() > self.frame_bytes {
+            return Err(failure("claude_host_input_limit"));
         }
         let (reply, mut response) = oneshot::channel();
         self.turns
@@ -550,7 +655,7 @@ impl ClaudeHost {
                 changed = self.status.changed() => {
                     changed.map_err(|_| failure("claude_host_custodian_lost"))?;
                 }
-                _ = tokio::time::sleep_until(self.expires) => {
+                () = expired(self.expires) => {
                     self.stop.store(true, Ordering::Release);
                     return Err(failure("claude_host_deadline"));
                 }
@@ -582,7 +687,7 @@ impl ClaudeHost {
                 changed = self.status.changed() => {
                     changed.map_err(|_| failure("claude_host_custodian_lost"))?;
                 }
-                _ = tokio::time::sleep_until(self.expires) => {
+                () = expired(self.expires) => {
                     self.stop.store(true, Ordering::Release);
                     return Err(failure("claude_host_deadline"));
                 }
@@ -645,7 +750,9 @@ pub(in crate::engine) enum ClaudeHost {}
 #[cfg(not(unix))]
 impl ClaudeHost {
     /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
-    /// action, account and budget. Returns nothing because the lease cannot exist.
+    /// action, account, project, wall clock, budget and frame size. Returns nothing because
+    /// the lease cannot exist.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         _command: Command,
         _sandbox: InstalledSandbox,
@@ -653,7 +760,10 @@ impl ClaudeHost {
         _home: PathBuf,
         _action: NativeAction,
         _account_ref: CredentialRef,
+        _project: ProjectId,
+        _run_time: Option<std::time::Duration>,
         _budget: ResourceBudget,
+        _frames: crate::master_frame_limit::FrameSize,
     ) -> Result<Self, EngineError> {
         match profile {}
     }
@@ -697,18 +807,35 @@ fn failure(code: &'static str) -> EngineError {
     EngineError(code.into())
 }
 
-/// Reads the delegate server a tools-on master command names, so the command can be built
-/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable
-/// and drop file, or none when the text is not one engine server.
+/// Reads the team server a tools-on master command names, so the command can be built
+/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable,
+/// drop file, mailbox and tools switched off before the trailing `wake` that `server_args`
+/// adds, or none when the text is not one engine server ending in it.
 #[cfg(unix)]
-fn named_tools(config: &str) -> Option<(PathBuf, PathBuf)> {
+fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
     let server = config
         .get("mcpServers")?
         .get(crate::team::tool::SERVER_NAME)?;
     let engine = server.get("command")?.as_str()?;
-    let drop = server.get("args")?.as_array()?.get(1)?.as_str()?;
-    Some((PathBuf::from(engine), PathBuf::from(drop)))
+    let args = server
+        .get("args")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<&str>>>()?;
+    let [_, drop, mailbox, off @ .., last] = args.as_slice() else {
+        return None;
+    };
+    if *last != crate::team::tool::WAKE_TOOL {
+        return None;
+    }
+    Some((
+        PathBuf::from(engine),
+        PathBuf::from(drop),
+        PathBuf::from(mailbox),
+        off.iter().map(|tool| (*tool).to_owned()).collect(),
+    ))
 }
 
 /// Confirms a Claude Code master command names exactly the delegate server the engine gave
@@ -835,7 +962,15 @@ fn validate_command(
     } else {
         None
     };
-    let expected = command_for(
+    let steps = match args.iter().position(|arg| *arg == OsStr::new(STEP_FLAG)) {
+        Some(index) if tools => args
+            .get(index + 1)
+            .and_then(|steps| steps.to_str())
+            .and_then(StepLimit::of_steps)
+            .ok_or(Fault::Host("claude_host_invalid_command"))?,
+        _ => StepLimit::NoLimit,
+    };
+    let mut expected = command_for(
         Path::new(command.get_program()),
         directory,
         home,
@@ -843,10 +978,18 @@ fn validate_command(
         instructions,
         named
             .as_ref()
-            .map(|(engine, drop)| MasterTools { engine, drop }),
+            .map(|(engine, drop, mailbox, off)| MasterTools {
+                engine,
+                drop,
+                mailbox,
+                off,
+            }),
         &settings,
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
+    if tools {
+        limit_steps(&mut expected, steps);
+    }
     if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {
         return Err(Fault::Host("claude_host_unapproved_command"));
     }

@@ -462,15 +462,35 @@ function renderInline(nodes: Inline[], open: (href: string, text: string) => voi
   });
 }
 
+/** The fenced-block languages whose lines are shell commands. */
+const SHELL_LANGUAGES = ["sh", "bash", "zsh", "shell", "console"];
+
+/** The most lines of one shell block that get an action each; a longer block shows whole. */
+export const CODE_ACTION_LINES_MAX = 200;
+
+/** One fenced block: whole, or line by line with an action after each line when the block is
+ * a shell block within the line bound and the view was given an action.
+ * Inputs: the language, the text and the optional per-line action. Output: the block. */
+function CodeBlock({ lang, text, action }: { lang: string; text: string; action?: (line: string, language: string) => ReactNode }) {
+  const language = lang.toLowerCase();
+  const lines = action && SHELL_LANGUAGES.includes(language) ? text.split("\n").filter((line) => line.trim() !== "") : [];
+  if (!action || lines.length === 0 || lines.length > CODE_ACTION_LINES_MAX) return <pre><code>{displayText(text)}</code></pre>;
+  return <div className="markdown-commands">{lines.map((line, index) => <div className="markdown-command" key={index}>
+    <pre><code>{displayText(line)}</code></pre>{action(line, language)}
+  </div>)}</div>;
+}
+
 /** Renders untrusted Markdown as React elements; raw HTML stays visible text. Every link shows
  * its target on hover, and one whose URL text names another host asks before it opens, in the
  * report and in its optional Sources list alike.
- * Inputs: the source, a link handler, an optional per-heading action and whether to list the
- * report's links as Sources. Output: the rendered report. */
-export function MarkdownView({ source, onOpenLink, headingAction, sources = false }: {
+ * Inputs: the source, a link handler, an optional per-heading action, an optional action shown
+ * after each line of a shell block, and whether to list the report's links as Sources.
+ * Output: the rendered report. */
+export function MarkdownView({ source, onOpenLink, headingAction, codeAction, sources = false }: {
   source: string;
   onOpenLink: (href: string) => void;
   headingAction?: (heading: string) => ReactNode;
+  codeAction?: (line: string, language: string) => ReactNode;
   sources?: boolean;
 }) {
   const blocks = useMemo(() => parseMarkdown(source), [source]);
@@ -493,7 +513,7 @@ export function MarkdownView({ source, onOpenLink, headingAction, sources = fals
       case "paragraph": return <p key={key}>{renderInline(block.children, follow)}</p>;
       case "quote": return <blockquote key={key}>{renderInline(block.children, follow)}</blockquote>;
       case "rule": return <hr key={key} />;
-      case "code": return <pre key={key}><code>{displayText(block.text)}</code></pre>;
+      case "code": return <CodeBlock key={key} lang={block.lang} text={block.text} action={codeAction} />;
       case "list": {
         const items = block.items.map((item, index) => <li key={index}>{renderInline(item, follow)}</li>);
         return block.ordered ? <ol key={key}>{items}</ol> : <ul key={key}>{items}</ul>;

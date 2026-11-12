@@ -287,7 +287,7 @@ pub fn performed<R: tauri::Runtime>(app: &tauri::AppHandle<R>, performed: &Actio
     if !app.state::<Notices>().clicked(id) {
         return;
     }
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -304,6 +304,7 @@ mod tests {
             project: ProjectId::new("p-1").unwrap(),
             asker: asker.into(),
             question: text.into(),
+            kind: crazyagent::questions::QuestionKind::Single,
             options: vec!["Postgres".into(), "SQLite".into()],
             recommended: Some("SQLite".into()),
             context: Some("The app runs on one laptop.".into()),
@@ -313,6 +314,7 @@ mod tests {
             answered_by: None,
             created_ms: 1,
             settled_ms: None,
+            closed_by: None,
         }
     }
 

@@ -1,13 +1,15 @@
-import { nextGeneration, poolSummaries } from "../../api";
+import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api";
 import type { HarnessEntry, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadTrust, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, saveTrust, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup, Trust, TrustView } from "../../api-projects";
-import type { IntentReceipt } from "../../engine-client";
-import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadRemovalPreview, loadTrust, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, saveTrust, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import type { AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, IdeAgentFiles, PolicyView, ProjectCatalog, RemovalPreview, SharedFolders, StoredSetup, ToolCacheScope, Trust, TrustView } from "../../api-projects";
+import type { IntentReceipt, MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import { AccessLevels, ApplyChoices, DEFAULT_SHARED_FOLDERS, FULL_ACCESS_IDE, FULL_ACCESS_WARNING, GrantLog, GrantsEditor, IdeAgentFilesChoices, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, POLICY_RESTARTS_IDE, SHARED_SECRETS_MAX, SharedFoldersChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolCacheChoices, ToolchainSwitches, accessLabel, confirmFirst, grantLabel, policyOf, sameShared, savedGrants, sharedSecretsOf } from "./access";
 import { RAISE_WARNING, TRUST_STALE, TrustLevels, TrustRules, raises, trustLabel } from "./trust";
-import { Button, ConfirmDialog, Select } from "../../ui";
+import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
+import { Button, ConfirmDialog, Dialog, Segmented, Select } from "../../ui";
+import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
@@ -16,18 +18,27 @@ import { basicsErrors, draftOf, editRequest, poolName, researchChoices, teamVali
 import type { TeamDraft } from "../new-project/wizard";
 import { folderLabel, projectFolder } from "./overview";
 import { changeOutcome } from "./research";
+import { MoveHome } from "./move-home";
+import { RemoveDialogView, deleteReady, removeTitle } from "./remove-dialog";
+import type { RemoveChoice } from "./remove-dialog";
 import { PlanningLine } from "./planning";
-import { SessionContext, useLoad } from "../../state";
+import { SessionContext, useHeld, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { HarnessPage } from "../settings/harness-page";
 import { ProjectChecks } from "../settings/checks";
 import { PluginsAndSkills } from "../settings/plugins";
 import { TicketSettingsPanel } from "../settings/tickets";
+import { TEAM_SETTINGS_STALE, changeNote, settingsVersion } from "../team/controls";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
+import { loadRunMode, runCopy, setRunMode } from "../../api-ide";
+import { loadOverview, overviewCopy, setOverviewApply, setOverviewRefresh } from "../../api-overview";
+import type { OverviewApply, OverviewRefresh, ProjectOverview } from "../../api-overview";
+import type { RunMode } from "./run-command";
 
 const SECTIONS = [
   { id: "general", label: "General" },
+  { id: "overview", label: "Overview" },
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
   { id: "harnesses", label: "Harnesses" },
@@ -37,15 +48,20 @@ const SECTIONS = [
   { id: "trust", label: "Repository trust" },
   { id: "sandbox", label: "Sandbox" },
   { id: "checks", label: "Checks" },
+  { id: "messages", label: "Messages" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
 type SectionId = typeof SECTIONS[number]["id"];
 
-function hashSection(): string | null {
+function hashParam(name: string): string | null {
   if (typeof window === "undefined") return null;
   const query = window.location.hash.split("?")[1];
-  return query ? new URLSearchParams(query).get("section") : null;
+  return query ? new URLSearchParams(query).get(name) : null;
+}
+
+function hashSection(): string | null {
+  return hashParam("section");
 }
 
 /** The project setup Project Settings saves: the stored details with this team, as the engine
@@ -70,6 +86,33 @@ export function poolSaved(name: string | null): string {
   return name === null ? "This project has no pool now. Pick a pool to start." : `${name} is assigned.`;
 }
 
+/** Assigns a project's pool as the Pool section does: the pool first, then the project details
+ * name it too, then the project and its pools are read again. Inputs: the project data, the
+ * stored setup or null, and the pool id or null for none. Output: the error to show, empty once
+ * both steps applied, when the owner is told which pool is assigned. */
+export async function savePool(data: Pick<ProjectData, "id" | "pools" | "assigned" | "notify" | "reload" | "reloadPools">, setup: StoredSetup | null, choice: string | null): Promise<string> {
+  const steps = poolSteps(data.assigned?.pool.id ?? null, setup ? setup.pool : undefined, choice);
+  const found = choice === null ? undefined : valueOf(data.pools)?.find((item) => item.pool.id === choice);
+  const name = choice === null ? null : found ? poolName(found.pool) : "The pool";
+  let error = "";
+  if (steps.assign) {
+    const assigned = await setProjectPool(data.id, choice, nextGeneration());
+    error = assigned.kind !== "ok" ? failureCopy(assigned.kind === "error" ? assigned.code : "unknown")
+      : assigned.value.kind === "rejected" ? failureCopy(assigned.value)
+        : assigned.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
+  }
+  if (!error && steps.record && setup) {
+    const recorded = await updateProjectSetup(data.id, { ...setupOf(setup, setup.team), pool: choice }, nextGeneration(), null, setup.revision);
+    if (recorded.kind !== "ok" || receiptState(recorded.value).kind !== "applied") {
+      error = `${choice === null ? "The project has no pool" : `${name} is assigned`}, but the project details still name the old pool. Save again.`;
+    }
+  }
+  data.reloadPools();
+  data.reload();
+  if (!error) data.notify(poolSaved(name));
+  return error;
+}
+
 function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const pools = valueOf(data.pools);
   const [summaries] = useLoad(poolSummaries, [data.id], "pool-summaries");
@@ -81,25 +124,7 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
 
   async function save() {
     setState({ busy: true, error: "" });
-    const found = choice === null ? undefined : valueOf(data.pools)?.find((item) => item.pool.id === choice);
-    const name = choice === null ? null : found ? poolName(found.pool) : "The pool";
-    let error = "";
-    if (steps.assign) {
-      const assigned = await setProjectPool(data.id, choice, nextGeneration());
-      error = assigned.kind !== "ok" ? failureCopy(assigned.kind === "error" ? assigned.code : "unknown")
-        : assigned.value.kind === "rejected" ? failureCopy(assigned.value)
-          : assigned.value.kind === "unconfirmed" ? "We couldn't confirm your last change. Check it and save again." : "";
-    }
-    if (!error && steps.record && setup) {
-      const recorded = await updateProjectSetup(data.id, { ...setupOf(setup, setup.team), pool: choice }, nextGeneration(), null, setup.revision);
-      if (recorded.kind !== "ok" || receiptState(recorded.value).kind !== "applied") {
-        error = `${choice === null ? "The project has no pool" : `${name} is assigned`}, but the project details still name the old pool. Save again.`;
-      }
-    }
-    setState({ busy: false, error });
-    data.reloadPools();
-    data.reload();
-    if (!error) data.notify(poolSaved(name));
+    setState({ busy: false, error: await savePool(data, setup, choice) });
   }
 
   return <div className="pj-stack">
@@ -117,24 +142,35 @@ function PoolSection({ data, setup }: { data: ProjectData; setup: StoredSetup | 
   </div>;
 }
 
+/** Saves a project's team as the Team section does: the stored setup with this team, at the
+ * setup revision shown, so a save from an older read is refused. Inputs: the project data, the
+ * stored setup and the team. Output: the note to show, empty once the engine applied it, when
+ * the owner is told and the project is read again. */
+export async function saveTeam(data: Pick<ProjectData, "id" | "notify" | "reload">, setup: StoredSetup, team: TeamDraft): Promise<string> {
+  const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration(), null, setup.revision);
+  if (result.kind === "not_ready") return "Not ready yet: changing a project's team isn't in this build.";
+  if (result.kind === "error") return failureCopy(result);
+  const state = receiptState(result.value);
+  if (state.kind !== "applied") return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.";
+  data.notify("Team saved.");
+  data.reload();
+  return "";
+}
+
 function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup }) {
   const harnesses = valueOf(data.harnesses);
   const [team, setTeam] = useState<TeamDraft>(setup.team);
   const [note, setNote] = useState("");
   async function save() {
-    const result = await updateProjectSetup(data.id, setupOf(setup, team), nextGeneration(), null, setup.revision);
-    if (result.kind === "not_ready") return setNote("Not ready yet: changing a project's team isn't in this build.");
-    if (result.kind === "error") return setNote(failureCopy(result));
-    const state = receiptState(result.value);
-    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    if (state.kind === "applied") { data.notify("Team saved."); data.reload(); }
+    setNote(await saveTeam(data, setup, team));
   }
   return <div className="pj-stack">
     <h2>Team</h2>
     <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={researchChoices(setup.research).research} onChange={setTeam} />
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <div className="pj-summary"><span>Running agents keep their current harness. Changes apply to agents started after you save; waiting research moves to the new team.</span>
+    <div className="pj-summary"><span>Running sub-agents keep their current harness; changes apply to agents started after you save, and the master follows Apply a master harness change. Waiting research moves to the new team.</span>
       <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
+    <ApplySwitch data={data} />
   </div>;
 }
 
@@ -162,6 +198,47 @@ function HarnessesSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** The choices for when a saved master harness change reaches the running live master. */
+export const APPLY_OPTIONS: SelectOption[] = [
+  { value: "when_idle", label: "When the master is idle" },
+  { value: "next_start", label: "At the next start" },
+];
+
+/** The Apply a master harness change choice a team status holds, When the master is idle when
+ * an older engine sends none. Input: the status. Output: the choice. */
+export function applyMode(status: Pick<TeamStatus, "apply_harness_switch">): SwitchApply {
+  return status.apply_harness_switch ?? "when_idle";
+}
+
+/** The Apply a master harness change setting (N-D26), saved at once like the team's other
+ * switches with the team settings version the page read; a save from an older read says the
+ * settings changed and the page reads the team again. Input: the project data with its team
+ * status read. Output: the select with the last change's note, or nothing before the team
+ * status is read. */
+export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | "reloadTeam"> }) {
+  const [saving, setSaving] = useState(false);
+  const [note, setNote] = useState("");
+  const status = data.team.result?.kind === "ok" ? data.team.result.value : null;
+  const [shown, hold] = useHeld<SwitchApply | null>(status === null ? null : applyMode(status), Object.is, status);
+  if (status === null) return null;
+  const choose = async (mode: SwitchApply) => {
+    const settled = hold(mode);
+    setSaving(true);
+    const result = await setApplyHarnessSwitch(data.id, mode, settingsVersion(status));
+    const message = savedStale(result) ? TEAM_SETTINGS_STALE : changeNote(result, "the Apply a master harness change setting");
+    setSaving(false);
+    settled(message);
+    setNote(message);
+    data.reloadTeam();
+  };
+  return <>
+    <Select id="ps-apply-switch" label="Apply a master harness change" value={shown ?? applyMode(status)} options={APPLY_OPTIONS}
+      onValue={(value) => { if (!saving && (value === "when_idle" || value === "next_start")) void choose(value); }}
+      helper="When the master is idle switches the running master once it finishes its turn and an account of the pool can run the new harness. At the next start keeps it on its harness until it starts again." />
+    {note && <p className="pj-note warn" role="status">{displayText(note)}</p>}
+  </>;
+}
+
 /** What removing a project does, for the section and its confirm. Inputs: the project folder, or
  * null when the project has no saved setup. Output: one plain paragraph. */
 export function removeLine(folder: string | null): string {
@@ -171,13 +248,28 @@ export function removeLine(folder: string | null): string {
 
 function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup | null }) {
   const session = useContext(SessionContext);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState(() => hashParam("ask") === "remove");
+  const [preview, setPreview] = useState<Result<RemovalPreview>>();
+  const [choice, setChoice] = useState<RemoveChoice>("dashboard");
+  const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const line = removeLine(setup ? projectFolder(setup.folder) : null);
+  const read = preview?.kind === "ok" ? preview.value : null;
+  useEffect(() => {
+    if (!confirming) return;
+    let live = true;
+    setPreview(undefined);
+    setChoice("dashboard");
+    setTyped("");
+    void loadRemovalPreview(data.id).then((result) => { if (live) setPreview(result); });
+    return () => { live = false; };
+  }, [confirming, data.id]);
   async function remove() {
+    const deleting = choice === "everything";
+    if (deleting && !deleteReady(read, typed)) return;
     setBusy(true);
-    const result = await removeProject(data.id, nextGeneration());
+    const result = await removeProject(data.id, nextGeneration(), deleting ? typed : null);
     setBusy(false);
     setConfirming(false);
     if (result.kind === "not_ready") return setNote("Not ready yet: removing a project isn't in this build.");
@@ -185,7 +277,8 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     const state = receiptState(result.value);
     if (state.kind === "applied") {
       await session?.refreshProjects();
-      data.notify(`${data.name || "The project"} was removed. Its folder stays on disk.`);
+      const name = data.name || "The project";
+      data.notify(deleting ? `${name} was deleted. Its folder is in the Trash.` : `${name} was removed. Its folder stays on disk.`);
       data.navigate("/home");
       return;
     }
@@ -196,10 +289,15 @@ function RemoveSection({ data, setup }: { data: ProjectData; setup: StoredSetup 
     <p>Remove {displayText(data.name)} from CrazyAgent? {displayText(line)}</p>
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><button type="button" className="btn danger" onClick={() => setConfirming(true)}>Remove project</button></div>
-    <ConfirmDialog open={confirming} title={`Remove ${displayText(data.name)} from CrazyAgent?`} confirmLabel="Remove project" cancelLabel="Keep project" pending={busy}
-      onCancel={() => setConfirming(false)} onConfirm={() => void remove()}>
-      {displayText(line)}
-    </ConfirmDialog>
+    <Dialog open={confirming} title={removeTitle(displayText(data.name))} onClose={() => setConfirming(false)} busy={busy} wide>
+      {preview === undefined
+        ? <p className="pj-muted" role="status">Reading what removing would do...</p>
+        : <>
+          {preview.kind !== "ok" && <p className="pj-note warn" role="status">We couldn't read what deleting would remove, so only Remove from dashboard is offered.</p>}
+          <RemoveDialogView preview={read} choice={choice} typed={typed} pending={busy} onChoice={setChoice} onTyped={setTyped}
+            onConfirm={() => void remove()} onCancel={() => setConfirming(false)} />
+        </>}
+    </Dialog>
   </div>;
 }
 
@@ -275,6 +373,13 @@ export const READ_PATHS_STALE = "These folders changed since you opened them. Th
 /** What Agent access says after a save refused because the policy changed since the page read
  * it, once it shows the saved access again. */
 export const ACCESS_STALE = "Agent access changed since you opened it. The page now shows the saved access; make your change again.";
+
+const ACCESS_NOT_READY = "Not ready yet: agent access isn't in this build.";
+
+/** What the owner is told once agent access is saved. Input: the saved level. Output: the line. */
+export function accessSaved(access: AgentAccess): string {
+  return `Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`;
+}
 
 /** Whether a versioned save, such as read-only folders or agent access, was refused because
  * the value changed since the screen read it, so the screen reads it again instead of
@@ -431,22 +536,51 @@ function HiddenSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** Saves a project's agent access as the Agent access section does, at the policy version
+ * shown; a save from an older read reads the policy again and says so. Inputs: the project id,
+ * the policy shown and the policy to save. Output: the note to show, empty once the engine
+ * applied it, and the policy read again, or null when it was not read. */
+export async function saveAccess(projectId: string, view: PolicyView, policy: AgentPolicy): Promise<{ note: string; fresh: PolicyView | null }> {
+  const result = await saveAgentPolicy(projectId, policy, view.version, nextGeneration());
+  if (savedStale(result)) {
+    const fresh = await loadAgentPolicy(projectId);
+    return fresh.kind === "ok" ? { note: ACCESS_STALE, fresh: fresh.value } : { note: "Agent access changed since you opened it. Reopen this page to see it.", fresh: null };
+  }
+  if (result.kind !== "ok") return { note: result.kind === "not_ready" ? ACCESS_NOT_READY : failureCopy(result), fresh: null };
+  const state = receiptState(result.value);
+  if (state.kind !== "applied") return { note: state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.", fresh: null };
+  const fresh = await loadAgentPolicy(projectId);
+  return { note: "", fresh: fresh.kind === "ok" ? fresh.value : null };
+}
+
 function AccessSection({ data }: { data: ProjectData }) {
   const [view, setView] = useState<PolicyView | null>(null);
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
   const [network, setNetwork] = useState<AgentNetwork>("open");
+  const [toolCache, setToolCache] = useState<ToolCacheScope>("shared");
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [ideGitHooks, setIdeGitHooks] = useState(false);
+  const [ideAgentFiles, setIdeAgentFiles] = useState<IdeAgentFiles>("allow_all");
+  const [applyChanges, setApplyChanges] = useState<AccessApply>("when_idle");
+  const [grants, setGrants] = useState<AccessGrant[]>([]);
+  const [shared, setShared] = useState<SharedFolders>(DEFAULT_SHARED_FOLDERS);
+  const [secretsText, setSecretsText] = useState("");
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
-  const notReady = "Not ready yet: agent access isn't in this build.";
+  const notReady = ACCESS_NOT_READY;
   function seed(next: PolicyView) {
     setView(next);
     setAccess(next.access);
     setNetwork(next.network);
+    setToolCache(next.tool_cache);
     setAllowed(next.toolchains.map((row) => row.allowed));
     setIdeGitHooks(next.ide_git_hooks);
+    setIdeAgentFiles(next.ide_agent_files);
+    setApplyChanges(next.apply_changes ?? "when_idle");
+    setGrants(savedGrants(next));
+    setShared(next.shared_folders);
+    setSecretsText(next.shared_folders.secrets.join("\n"));
   }
   useEffect(() => {
     let live = true;
@@ -462,46 +596,40 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const result = await saveAgentPolicy(data.id, policyOf(view, access, network, allowed, ideGitHooks), view.version, nextGeneration());
-    if (savedStale(result)) {
-      const fresh = await loadAgentPolicy(data.id);
-      setBusy(false);
-      if (fresh.kind !== "ok") return setNote("Agent access changed since you opened it. Reopen this page to see it.");
-      seed(fresh.value);
-      return setNote(ACCESS_STALE);
-    }
-    if (result.kind !== "ok") {
-      setBusy(false);
-      return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
-    }
-    const state = receiptState(result.value);
-    if (state.kind !== "applied") {
-      setBusy(false);
-      return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
-    }
-    const fresh = await loadAgentPolicy(data.id);
+    const saved = await saveAccess(data.id, view, policyOf(view, access, network, allowed, ideGitHooks, ideAgentFiles, toolCache, sharedFolders, applyChanges, grants));
     setBusy(false);
-    if (fresh.kind === "ok") seed(fresh.value);
-    setNote("");
-    data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
+    if (saved.fresh) seed(saved.fresh);
+    setNote(saved.note);
+    if (saved.note === "") data.notify(accessSaved(access));
   }
 
-  const changed = view !== null && (access !== view.access || network !== view.network || ideGitHooks !== view.ide_git_hooks || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const sharedFolders: SharedFolders = { ...shared, secrets: sharedSecretsOf(secretsText) };
+  const sharedValid = sharedFolders.secrets.length <= SHARED_SECRETS_MAX;
+  const grantsChanged = view !== null && grants.map(grantLabel).join("\n") !== savedGrants(view).map(grantLabel).join("\n");
+  const changed = view !== null && (access !== view.access || network !== view.network || toolCache !== view.tool_cache || ideGitHooks !== view.ide_git_hooks || ideAgentFiles !== view.ide_agent_files || !sameShared(sharedFolders, view.shared_folders) || applyChanges !== (view.apply_changes ?? "when_idle") || grantsChanged || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
+    {view && <p className="pj-help">{POLICY_RESTARTS_IDE}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
+    {view && <ToolCacheChoices name="ps-tool-cache" value={toolCache} access={access} onChange={setToolCache} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
+    {view && <IdeAgentFilesChoices name="ps-agent-files" value={ideAgentFiles} access={access} onChange={setIdeAgentFiles} />}
+    {view && <SharedFoldersChoices prefix="ps" value={shared} secretsText={secretsText} local={view.local_folders} access={access} onChange={setShared} onSecretsText={setSecretsText} />}
+    {view && <GrantsEditor prefix="ps" view={view} grants={grants} access={access} onChange={setGrants} />}
+    {view && <ApplyChoices name="ps-apply-changes" value={applyChanges} onChange={setApplyChanges} />}
+    {view && <GrantLog rows={view.grant_log ?? []} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || !sharedValid || busy}
       onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
     <ConfirmDialog open={confirming} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
       onCancel={() => setConfirming(false)} onConfirm={() => void save()}>
-      {FULL_ACCESS_WARNING}
+      {FULL_ACCESS_WARNING} {FULL_ACCESS_IDE}
     </ConfirmDialog>
   </div>;
 }
@@ -572,6 +700,151 @@ function TrustSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** The Messages section: the six settings of the sub-agents' Messages timelines, each with every
+ * choice and the proposed default named. A choice changes its one setting against what the
+ * engine stores now; when another client changed the settings since this view was read, it
+ * saves nothing and shows the stored ones. The section shows the outcome until the next team
+ * read, then what the engine stored. Input: the project data. Output: the section. */
+function MessagesSection({ data }: { data: ProjectData }) {
+  const [pending, setPending] = useState<{ settings: MessageSettings; at: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const read = data.team.result;
+  const saved = read?.kind === "ok" ? messageSettingsOf(read.value) : null;
+  const shown = pending !== null && data.team.at < pending.at ? pending.settings : saved;
+
+  async function choose(key: keyof MessageSettings, value: string) {
+    if (busy || shown === null) return;
+    setBusy(true);
+    const change = await changeMessageSetting(data.id, shown, key, value);
+    setBusy(false);
+    if (change.kind === "elsewhere") {
+      setPending({ settings: change.settings, at: Date.now() });
+      setNote("Messages settings changed elsewhere, so nothing was saved. This shows what's saved now; choose again.");
+    } else {
+      const message = changeNote(change.result, "Messages settings");
+      setPending(message || change.kind === "unread" ? null : { settings: change.settings, at: Date.now() });
+      setNote(message);
+    }
+    data.reloadTeam();
+  }
+
+  return <div className="pj-stack">
+    <h2>Messages</h2>
+    <p className="pj-secondary">Each sub-agent's Messages show its tasks, what the master and you told it, and its questions, progress and results, newest first. Open them from the Agents tab or the team graph.</p>
+    {read === undefined && <p className="pj-muted" role="status">Loading...</p>}
+    {read?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
+    {read?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(read)}</p>}
+    {read?.kind === "ok" && shown === null && <NotReady what="Messages settings aren't in this build." />}
+    {shown !== null && MESSAGE_SETTING_FIELDS.map((field) => {
+      const proposed = field.options.find((option) => option.value === fieldValue(DEFAULT_MESSAGE_SETTINGS, field.key));
+      return <div className="pj-field" key={field.key}>
+        <span className="pj-label" aria-hidden="true">{field.label}</span>
+        <Segmented label={field.label} value={fieldValue(shown, field.key)} options={[...field.options]} onValue={(value) => void choose(field.key, value)} />
+        <p className="pj-help">{field.help} Recommended: {proposed?.label}.</p>
+      </div>;
+    })}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+  </div>;
+}
+
+const OVERVIEW_REFRESH: { value: OverviewRefresh; label: string }[] = [
+  { value: "after_landing", label: "After each landed change set and Refresh" },
+  { value: "refresh_only", label: "Refresh only" },
+  { value: "off", label: "Off" },
+];
+const OVERVIEW_APPLY: { value: OverviewApply; label: string }[] = [
+  { value: "always_ask", label: "Always ask me" },
+  { value: "when_unedited", label: "Apply when I have not edited the tab" },
+];
+const RUN_MODES: { value: RunMode; label: string }[] = [
+  { value: "type_and_run", label: "Type and run" },
+  { value: "type_only", label: "Type only" },
+  { value: "off", label: "Off, Copy only" },
+];
+
+/** One Overview setting: its name, every choice with the saved one picked, and what it does.
+ * Inputs: the name, the saved value, the choices, the change handler and the help line.
+ * Output: the row. */
+function OverviewSettingRow<T extends string>({ label, value, options, onValue, help }: { label: string; value: T; options: { value: T; label: string }[]; onValue: (value: T) => void; help: string }) {
+  return <div className="pj-field">
+    <span className="pj-label" aria-hidden="true">{label}</span>
+    <Segmented label={label} value={value} options={options} onValue={onValue} />
+    <p className="pj-help">{help}</p>
+  </div>;
+}
+
+/** The three Overview settings of a project with every choice: when the tabs are written, what
+ * a refresh does with a tab, and what Run in project terminal does. Each read shows on its
+ * own, so a failed one keeps the other; a project outside the CrazyAgent folder is told the
+ * tabs need it there. Nothing is saved while a change is being sent.
+ * Inputs: the overview read, the Run setting read, whether a change is being sent, the note of
+ * a refused change, the three change handlers and the way to the move. Output: the rows. */
+export function OverviewSettingsRows({ overview, runMode, busy, note, onRefresh, onApply, onRunMode, onMove }: {
+  overview: Result<ProjectOverview> | undefined;
+  runMode: Result<RunMode> | undefined;
+  busy: boolean;
+  note: string;
+  onRefresh: (value: OverviewRefresh) => void;
+  onApply: (value: OverviewApply) => void;
+  onRunMode: (value: RunMode) => void;
+  onMove: () => void;
+}) {
+  const idle = <T,>(send: (value: T) => void) => (value: T) => { if (!busy) send(value); };
+  return <>
+    {(overview === undefined || runMode === undefined) && <p className="pj-muted" role="status">Loading...</p>}
+    {overview?.kind === "not_ready" && <NotReady what="the Overview tabs aren't in this build." />}
+    {overview?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the Overview settings. {overviewCopy(overview)}</p>}
+    {overview?.kind === "ok" && <>
+      {overview.value.needs_home && <div className="pj-need"><span>Overview tabs need this project in the CrazyAgent folder. These settings apply once it is there.</span>
+        <button type="button" className="btn" onClick={onMove}>Move into CrazyAgent folder</button></div>}
+      <OverviewSettingRow label="Overview tabs" value={overview.value.refresh} options={OVERVIEW_REFRESH} onValue={idle(onRefresh)}
+        help="When CrazyAgent writes the Quick info, Features, Competitors and Install & use tabs. A refresh costs one agent run on this project's pool. Off writes nothing and disables Refresh. Recommended: After each landed change set and Refresh." />
+      <OverviewSettingRow label="Refreshed tabs" value={overview.value.apply} options={OVERVIEW_APPLY} onValue={idle(onApply)}
+        help="What a refresh does with a tab. Always ask me shows every change as a proposal you accept or reject. The other choice replaces a tab you have not edited and still asks about one you edited. Recommended: Always ask me." />
+    </>}
+    {runMode?.kind === "not_ready" && <NotReady what="Run in project terminal isn't in this build." />}
+    {runMode?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the Run in project terminal setting. {runCopy(runMode)}</p>}
+    {runMode?.kind === "ok" && <OverviewSettingRow label="Run in project terminal" value={runMode.value} options={RUN_MODES} onValue={idle(onRunMode)}
+      help="What Run does with a command line on the Overview, after you confirm it. Type and run types it into this project's IDE terminal and presses Enter. Type only leaves Enter to you. Off, Copy only shows no Run button. Recommended: Type and run." />}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+  </>;
+}
+
+/** Project Settings, Overview: reads the project's Overview settings and its Run setting,
+ * saves a choice as it is made and reads again, so the rows show what the engine stored.
+ * Inputs: the project data and the way to the Remove section, where the move lives.
+ * Output: the section. */
+function OverviewSection({ data, onMove }: { data: ProjectData; onMove: () => void }) {
+  const [overview, setOverview] = useState<Result<ProjectOverview>>();
+  const [runMode, setMode] = useState<Result<RunMode>>();
+  const [round, setRound] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  useEffect(() => {
+    let live = true;
+    void loadOverview(data.id).then((result) => { if (live) setOverview(result); });
+    void loadRunMode(data.id).then((result) => { if (live) setMode(result); });
+    return () => { live = false; };
+  }, [data.id, round]);
+  async function change<T>(send: () => Promise<Result<T>>, copy: (failure: { code: string; cause?: string }) => string) {
+    if (busy) return;
+    setBusy(true);
+    const result = await send().catch((): Result<T> => ({ kind: "not_ready" }));
+    setBusy(false);
+    setNote(result.kind === "ok" ? "" : result.kind === "error" ? copy(result) : "CrazyAgent's engine isn't ready yet. Nothing was saved; choose again in a moment.");
+    setRound((count) => count + 1);
+  }
+  return <div className="pj-stack">
+    <h2>Overview</h2>
+    <p className="pj-secondary">The Overview tabs describe this project: Quick info, Features, Competitors and Install &amp; use. An agent writes them from the project's files and research.</p>
+    <OverviewSettingsRows overview={overview} runMode={runMode} busy={busy} note={note} onMove={onMove}
+      onRefresh={(value) => void change(() => setOverviewRefresh(data.id, value), overviewCopy)}
+      onApply={(value) => void change(() => setOverviewApply(data.id, value), overviewCopy)}
+      onRunMode={(value) => void change(() => setRunMode(data.id, value), runCopy)} />
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -579,9 +852,9 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Tickets, Agent
- * access, Repository trust, Sandbox, Checks and Remove project. A setup that belongs to another
- * project counts as still loading, so no form seeds from it.
+/** Project Settings tab: General, Overview, Pool, Team, Harnesses, Plugins and skills, Tickets,
+ * Agent access, Repository trust, Sandbox, Checks, Messages and Remove project. A setup that
+ * belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
@@ -596,7 +869,8 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {SECTIONS.map((item) => <button type="button" key={item.id} aria-current={active === item.id ? "page" : undefined} onClick={() => setActive(item.id)}>{item.label}</button>)}
     </nav>
     <div className="pj-settings-body">
-      {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} /></>)}
+      {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} settings /></>)}
+      {active === "overview" && <OverviewSection data={data} onMove={() => setActive("remove")} />}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
       {active === "harnesses" && <HarnessesSection data={data} />}
@@ -614,7 +888,11 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "trust" && <TrustSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
       {active === "checks" && <ProjectChecks projectId={data.id} />}
-      {active === "remove" && <RemoveSection data={data} setup={setup} />}
+      {active === "messages" && <MessagesSection data={data} />}
+      {active === "remove" && <div className="pj-stack">
+        {setup && <MoveHome data={data} setup={setup} />}
+        <RemoveSection data={data} setup={setup} />
+      </div>}
     </div>
   </div>;
 }

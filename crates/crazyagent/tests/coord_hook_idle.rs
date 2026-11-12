@@ -3,13 +3,13 @@
 mod pane_support;
 
 use pane_support::{LEAD_PANE, PaneCallers};
+use rusqlite::{Connection, params};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const MATE_PANE: &str = "%7";
-const MATE_RESTS: &str = "00000000000000000000000000000008.idle";
 const LEAD_SESSION: &str = "lead-session";
 const MATE_SESSION: &str = "mate-session";
 
@@ -18,6 +18,9 @@ struct Team {
     config: PathBuf,
     mailbox: PathBuf,
     callers: PaneCallers,
+    db: Connection,
+    lead: i64,
+    mate: i64,
 }
 
 impl Team {
@@ -40,11 +43,37 @@ impl Team {
         )
         .unwrap();
         let (mailbox, callers) = PaneCallers::new(root.path(), &[(MATE_PANE, "greet")]);
+        let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+        std::fs::create_dir(&part).unwrap();
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let db = Connection::open(root.path().join("engine.db")).unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}');")
+            .unwrap();
+        crazyagent::team::initialize(&db).unwrap();
+        crazyagent::project_setup::initialize(&db).unwrap();
+        crazyagent::coord::ensure(&db).unwrap();
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES ('alpha','sub_agent','claude-code',1,'working',0,0)",
+            [],
+        )
+        .unwrap();
+        let lead = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES ('alpha','teammate','claude-code',1,'working',0,0,?1,?2)",
+            params![lead, MATE_PANE],
+        )
+        .unwrap();
+        let mate = db.last_insert_rowid();
         Self {
             _root: root,
             config,
             mailbox,
             callers,
+            db,
+            lead,
+            mate,
         }
     }
 
@@ -73,21 +102,50 @@ impl Team {
         String::from_utf8(done.stdout).unwrap()
     }
 
+    /// Whether the engine shows the teammate's row Idle.
     fn resting(&self) -> bool {
-        exists(&self.mailbox.join(MATE_RESTS))
+        let status: String = self
+            .db
+            .query_row(
+                "SELECT status FROM team_agents WHERE id=?1",
+                [self.mate],
+                |row| row.get(0),
+            )
+            .unwrap();
+        status == "idle"
+    }
+
+    /// Sends the teammate one note from the lead. Takes the body. Returns its id.
+    fn note(&self, body: &str) -> i64 {
+        crazyagent::coord::send(
+            &self.db,
+            crazyagent::coord::NewMessage {
+                project: crazyagent::protocol::ProjectId::new("alpha").unwrap(),
+                from: crazyagent::coord::Party::Agent(self.lead),
+                to: crazyagent::coord::Party::Agent(self.mate),
+                kind: crazyagent::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.to_owned(),
+                idempotency_key: None,
+            },
+            0,
+        )
+        .unwrap()
     }
 
     fn marks(&self) -> Vec<String> {
-        std::fs::read_dir(&self.mailbox)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .filter(|name| name.ends_with(".idle"))
-            .collect()
+        [
+            self.mailbox.clone(),
+            self.mailbox.join(crazyagent::coord::relay::LEAD_PART),
+        ]
+        .iter()
+        .flat_map(|folder| std::fs::read_dir(folder).unwrap())
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".idle"))
+        .collect()
     }
-}
-
-fn exists(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
 }
 
 fn session(id: &str) -> serde_json::Value {
@@ -129,21 +187,7 @@ fn a_native_teammate_rests_when_its_turn_ends_and_works_again_on_its_next_tool_c
 #[test]
 fn a_teammate_handed_a_waiting_message_at_its_stop_does_not_rest_and_the_lead_never_does() {
     let team = Team::new();
-    std::fs::write(
-        team.mailbox.join("00000000000000000000000000000005.inbox"),
-        serde_json::json!({
-            "id": 5,
-            "to": MATE_PANE,
-            "from": "Ada (@lead-a)",
-            "kind": "note",
-            "question": null,
-            "work": null,
-            "reply_to": null,
-            "body": "Also add a docstring.",
-        })
-        .to_string(),
-    )
-    .unwrap();
+    team.note("Also add a docstring.");
     let blocked = team.hook("stop", MATE_PANE, session(MATE_SESSION));
     let answer: serde_json::Value = serde_json::from_str(blocked.trim()).unwrap();
     assert_eq!(answer["decision"], "block", "{blocked}");

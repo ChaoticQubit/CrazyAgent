@@ -236,6 +236,29 @@ impl CustodyCase {
         )
     }
 
+    /// Changes the settings under a running sign-in of connection-a: `bytes` rewrites the
+    /// same settings with other bytes, `other` edits only account-z's connection and `own`
+    /// edits connection-a; the last two are taken up as the engine's settings. A sign-in
+    /// outlives the first two and not the last, being bound to its own entry (NS-3).
+    /// Input: the change. Output: nothing.
+    fn change(&mut self, change: &str) {
+        let edited = |from: &str, to: &str| {
+            assert_eq!(CATALOG.matches(from).count(), 1);
+            CATALOG.replace(from, to)
+        };
+        let settings = match change {
+            "bytes" => format!("{CATALOG}\n"),
+            "other" => edited(r#"id = "model-z""#, r#"id = "model-z2""#),
+            "own" => edited(r#"id = "model-a""#, r#"id = "model-a2""#),
+            _ => unreachable!(),
+        };
+        std::fs::write(&self.global, settings).unwrap();
+        let config =
+            crate::config::resolve_config(&self.global, &self.root.path().join("p.toml")).unwrap();
+        assert_eq!(config.id == self.config.id, change == "bytes");
+        self.config = config;
+    }
+
     fn snapshot(&self) -> Snapshot {
         snapshot(&self.path)
     }
@@ -277,8 +300,14 @@ impl CustodyCase {
     }
 
     fn recover(&mut self, ended: Option<&NativeAuthFact>) -> Option<NativeAuthFact> {
-        native_auth::recover_native_auth(&mut self.db, &mut self.custody, &self.started.host, ended)
-            .unwrap()
+        native_auth::recover_native_auth(
+            &mut self.db,
+            &mut self.custody,
+            &self.started.host,
+            ended,
+            None,
+        )
+        .unwrap()
     }
 
     fn end_custody(&mut self, dispatch: &NativeAuthDispatch) -> Option<NativeAuthFact> {
@@ -422,32 +451,40 @@ fn native_auth_custody_check_rejects_another_still_active_fence_owner() {
 }
 
 #[test]
-fn native_auth_custody_dispatch_rejects_changed_source_bytes() {
-    let mut case = CustodyCase::new();
-    let (_, work) = case.work("changed-before-dispatch");
-    std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
-    let before = case.snapshot();
-    assert!(case.dispatch(work).is_err());
-    assert_eq!(case.snapshot(), before);
+fn native_auth_custody_dispatch_goes_on_only_while_its_own_entry_holds() {
+    for change in ["bytes", "other", "own"] {
+        let mut case = CustodyCase::new();
+        let (_, work) = case.work("changed-before-dispatch");
+        case.change(change);
+        if change != "own" {
+            assert!(case.dispatch(work).is_ok(), "refused {change} change");
+            continue;
+        }
+        let before = case.snapshot();
+        assert_eq!(
+            case.dispatch(work).err().unwrap().0,
+            "native_profile_source_conflict"
+        );
+        assert_eq!(case.snapshot(), before);
+    }
 }
 
 #[test]
-fn native_auth_custody_check_rejects_source_and_config_changes() {
-    for change in ["source", "config"] {
+fn native_auth_custody_check_goes_on_only_while_its_own_entry_holds() {
+    for change in ["bytes", "other", "own"] {
         let mut case = CustodyCase::new();
         let (_, work) = case.work("changed-after-dispatch");
         let dispatch = case.dispatch(work).unwrap();
-        if change == "source" {
-            std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
-        } else {
-            std::fs::write(&case.global, CATALOG.replace("model-a", "changed-model")).unwrap();
-            case.config =
-                crate::config::resolve_config(&case.global, &case.root.path().join("p.toml"))
-                    .unwrap();
-            assert_ne!(case.config.id, dispatch.fact().binding.config_id);
+        case.change(change);
+        if change != "own" {
+            assert!(case.check(&dispatch).is_ok(), "refused {change} change");
+            continue;
         }
         let before = case.snapshot();
-        assert!(case.check(&dispatch).is_err(), "accepted {change} change");
+        assert_eq!(
+            case.check(&dispatch).err().unwrap().0,
+            "native_profile_source_conflict"
+        );
         assert_eq!(case.snapshot(), before);
     }
 }
@@ -591,6 +628,7 @@ fn native_auth_custody_dropping_dispatch_never_retires_a_free_physical_lock() {
     drop(dispatch);
     let probe = case.probe();
     flock(&probe, FlockOperation::NonBlockingLockExclusive).unwrap();
+    flock(&probe, FlockOperation::Unlock).unwrap();
     drop(probe);
     assert_eq!(case.snapshot(), before);
     let mut alias = case.command("drop-cannot-authorize-alias");
@@ -848,7 +886,7 @@ async fn native_auth_custody_that_ended_during_a_renewal_is_settled_by_a_later_r
     .unwrap();
     assert_eq!(lost.phase, NativeAuthPhase::Uncertain);
     let released = ask(&storage, |send| {
-        Job::NativeAuthCustodyReleased(dispatch.clone(), send)
+        Job::NativeAuthCustodyReleased(dispatch.clone(), None, send)
     })
     .await
     .unwrap();

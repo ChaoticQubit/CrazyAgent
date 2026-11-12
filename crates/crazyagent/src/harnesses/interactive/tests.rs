@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::launch::LaunchLimits;
+use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchLimits};
 use std::os::unix::fs::PermissionsExt;
 
 const SESSION: &str = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
@@ -299,6 +299,7 @@ fn a_tools_off_codex_runs_its_app_without_the_shared_app_server() {
             built.cwd.display()
         ),
     ]));
+    argv.extend(strings(&["-c", "tui.alternate_screen=\"never\""]));
     assert_eq!(built.argv, argv);
     let home = case.home().to_str().unwrap().to_owned();
     assert_eq!(
@@ -432,6 +433,51 @@ fn a_resumed_harness_continues_the_conversation_it_recorded() {
     );
 }
 
+/// A Claude Code app renders its system prompt fresh on every request (QR2): Claude Code
+/// 2.1.309 otherwise records the prompt of a conversation's first request and sends that
+/// record on every resume, so a relaunch after an instructions edit would run with the old
+/// text. A signed-in launch, where recording is on by default, and a keyed `--bare` one
+/// both turn it off, fresh and resumed, tools on and off.
+#[test]
+fn a_claude_app_renders_its_system_prompt_fresh_so_a_resume_runs_with_the_relaunch_s_text() {
+    let case = Case::new();
+    let key = case.keyed(None);
+    let key_file = write_key(&case.home(), key.key().unwrap()).unwrap();
+    for keyed in [false, true] {
+        let fresh = run(keyed.then_some(key_file.as_path()));
+        let resumed = Run {
+            resume: true,
+            ..fresh
+        };
+        for tools in [true, false] {
+            let account = if keyed {
+                case.keyed(None)
+            } else {
+                case.subscription()
+            };
+            let request = case.request("claude-code", account, tools);
+            assert_eq!(claude_bare(&request.account), keyed);
+            for launch in [fresh, resumed] {
+                let built = command(&request, None, &launch).unwrap();
+                let at = built
+                    .argv
+                    .iter()
+                    .position(|argument| argument == "--system-prompt-snapshot")
+                    .unwrap_or_else(|| panic!("no snapshot setting: {:?}", built.argv));
+                assert_eq!(built.argv[at + 1], "off", "{:?}", built.argv);
+                assert_eq!(
+                    built
+                        .argv
+                        .iter()
+                        .filter(|argument| *argument == "--system-prompt-snapshot")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment() {
     let case = Case::new();
@@ -477,25 +523,28 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
     .unwrap();
     assert_eq!(String::from_utf8(helper.stdout).unwrap(), KEY);
 
-    let output = crate::spawn_gate::output(
-        std::process::Command::new(&built.argv[0])
-            .args(&built.argv[1..])
-            .env_clear()
-            .envs(built.env.iter().map(|(name, value)| (name, value)))
-            .current_dir(&built.cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let seen = String::from_utf8(output.stdout).unwrap();
-    assert!(!seen.contains(KEY), "{seen}");
-    assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
-    assert!(
-        seen.lines()
-            .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let output = crate::spawn_gate::output(
+            std::process::Command::new(&built.argv[0])
+                .args(&built.argv[1..])
+                .env_clear()
+                .envs(built.env.iter().map(|(name, value)| (name, value)))
+                .current_dir(&built.cwd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let seen = String::from_utf8(output.stdout).unwrap();
+        assert!(!seen.contains(KEY), "{seen}");
+        assert!(!seen.contains("CRAZYAGENT_API_KEY"), "{seen}");
+        assert!(
+            seen.lines()
+                .any(|line| line == format!("CODEX_HOME={}", case.home().display()))
+        );
+    }
 
     let quoted = case.path().join("say \"hi\"");
     std::fs::create_dir(&quoted).unwrap();
@@ -613,6 +662,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
+        "--system-prompt-snapshot",
+        "off",
     ]);
     argv.extend(strings(&CLAUDE_NO_MCP));
     argv.extend(strings(&[
@@ -621,6 +672,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "--tools",
         "",
         "--disable-slash-commands",
+        "--system-prompt",
+        crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT,
     ]));
     assert_eq!(built.argv, argv);
     for headless in [
@@ -648,6 +701,10 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
             ("DISABLE_TELEMETRY".to_owned(), "1".to_owned()),
             (
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
+                "1".to_owned()
+            ),
+            (
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
                 "1".to_owned()
             ),
         ])
@@ -1220,6 +1277,209 @@ fn claude_settings(built: &InteractiveCommand) -> serde_json::Value {
     serde_json::from_str(&built.argv[at + 1]).unwrap()
 }
 
+/// The display variables a built Claude Code command carries, in order, after the launch's
+/// environment filter. Input: the command. Output: the name and value pairs of the three
+/// variables the N-D9 display sets.
+fn display_variables(built: &InteractiveCommand) -> Vec<(String, String)> {
+    built
+        .env
+        .iter()
+        .filter(|(name, _)| {
+            name == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"
+                || name == "CLAUDE_CODE_SCROLL_SPEED"
+                || name == "CLAUDE_CODE_NO_FLICKER"
+        })
+        .cloned()
+        .collect()
+}
+
+/// A Claude Code terminal at the Classic display, the default and the display of a launch
+/// without a project context, turns Claude Code's alternate screen off (N-D9), so Claude
+/// Code draws on the normal screen and leaves the wheel and a plain drag to the terminal,
+/// and never asks for Claude Code's fullscreen renderer. A native lead's teammates get the
+/// same variables through their script.
+#[test]
+fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let classic = [(
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+        "1".to_owned(),
+    )];
+    let bare = command(&request, None, &run(None)).unwrap();
+    assert_eq!(display_variables(&bare), classic, "{:?}", bare.env);
+
+    let plain = project_context(&case, "plain")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), classic, "{:?}", built.env);
+    drop(plain);
+
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let lead = project_context(&case, "lead")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Classic)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&lead), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), classic, "{:?}", built.env);
+    write_teammate_command(&case.home(), &built, &request, lead.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1' "),
+        "{written}"
+    );
+    assert!(!written.contains("CLAUDE_CODE_NO_FLICKER"), "{written}");
+    drop(lead);
+}
+
+/// A Claude Code terminal at the Fullscreen display asks for Claude Code's fullscreen
+/// renderer with `CLAUDE_CODE_NO_FLICKER=1` (R8-FS), so the account's own settings and
+/// rollout cannot leave it on the classic one, at 3 rows a wheel notch (N-D9), the step
+/// Claude Code picks itself for xterm.js, and does not turn the alternate screen off. A
+/// native lead's teammates get the same variables.
+#[test]
+fn a_fullscreen_claude_code_terminal_asks_for_the_fullscreen_renderer_at_three_rows_a_notch() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let fullscreen = [
+        ("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned()),
+        ("CLAUDE_CODE_NO_FLICKER".to_owned(), "1".to_owned()),
+    ];
+    let chosen = project_context(&case, "chosen")
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Fullscreen)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&chosen), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), fullscreen, "{:?}", built.env);
+    drop(chosen);
+
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let lead = project_context(&case, "lead")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .with_terminal_display(crate::coord::settings::TerminalDisplay::Fullscreen)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&lead), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), fullscreen, "{:?}", built.env);
+    write_teammate_command(&case.home(), &built, &request, lead.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_SCROLL_SPEED=3' "),
+        "{written}"
+    );
+    assert!(
+        written.contains(" 'CLAUDE_CODE_NO_FLICKER=1' "),
+        "{written}"
+    );
+    assert!(
+        !written.contains("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"),
+        "{written}"
+    );
+    drop(lead);
+}
+
+/// PA-7: a Codex lead in the Native mode leaves out the multi-agent v2 off switch, so the
+/// `config.toml` its context wrote turns Codex's own sub-agents on; an App-spawned Codex lead
+/// keeps both multi-agent switches off.
+#[test]
+fn a_native_codex_lead_keeps_codex_sub_agents_on_and_an_app_spawned_one_off() {
+    let case = Case::new();
+    let request = case.request("codex", case.subscription(), true);
+    let installed = project_context(&case, "data")
+        .with_native_sub_agents(3)
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(installed.native_threads());
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    assert!(
+        !built
+            .argv
+            .iter()
+            .any(|argument| argument == "features.multi_agent_v2=false"),
+        "{:?}",
+        built.argv
+    );
+    let config = std::fs::read_to_string(case.home().join("config.toml")).unwrap();
+    assert!(config.contains("[features.multi_agent_v2]"), "{config}");
+    assert!(config.contains("max_threads = 3"), "{config}");
+    drop(installed);
+
+    let spawned = project_context(&case, "data-spawned")
+        .install("codex", &case.home(), true)
+        .unwrap();
+    assert!(!spawned.native_threads());
+    let built = command(&request, Some(&spawned), &run(None)).unwrap();
+    for setting in [
+        "features.multi_agent=false",
+        "features.multi_agent_v2=false",
+    ] {
+        assert!(
+            built.argv.iter().any(|argument| argument == setting),
+            "{setting}"
+        );
+    }
+    drop(spawned);
+}
+
+/// PA-7, macOS only like every agent launch: the installed Codex (the pinned 0.164.0 in CI)
+/// reads a native lead's settings and `config.toml` with multi-agent v2 on, and an
+/// App-spawned lead's with it off.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_installed_codex_reads_a_native_lead_with_its_own_sub_agents_on() {
+    let installed_codex = crate::harnesses::catalog(&crate::harnesses::Search::from_environment())
+        .into_iter()
+        .find(|entry| entry.id == "codex")
+        .and_then(|entry| entry.executable)
+        .expect("installed codex");
+    let case = Case::new();
+    let request = case.request("codex", case.subscription(), true);
+    for (data, native, expected) in [("data", true, "true"), ("data-spawned", false, "false")] {
+        let mut context = project_context(&case, data);
+        if native {
+            context = context.with_native_sub_agents(2);
+        }
+        let installed = context.install("codex", &case.home(), true).unwrap();
+        let built = command(&request, Some(&installed), &run(None)).unwrap();
+        let settings: Vec<&String> = built
+            .argv
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| &pair[1])
+            .collect();
+        let mut features = std::process::Command::new(&installed_codex);
+        features
+            .args(settings.iter().flat_map(|setting| ["-c", setting.as_str()]))
+            .args(["features", "list"])
+            .env_clear()
+            .env("HOME", case.home())
+            .env("CODEX_HOME", case.home())
+            .env("PATH", "/usr/bin:/bin")
+            .current_dir(case.path().join("work"))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let output = crate::spawn_gate::output(&mut features).unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = text.lines().find_map(|line| {
+            let columns: Vec<&str> = line.split_whitespace().collect();
+            (columns.first() == Some(&"multi_agent_v2"))
+                .then(|| columns.last().copied())
+                .flatten()
+        });
+        assert_eq!(state, Some(expected), "{data}: {text}");
+        drop(installed);
+    }
+}
+
 #[test]
 fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() {
     let case = Case::new();
@@ -1303,6 +1563,138 @@ fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() 
         );
     }
     drop(installed);
+}
+
+/// A native lead and every teammate its script starts get Claude Code's task list tools
+/// (OP-3): Claude Code 2.1.309 offers TaskCreate, TaskGet, TaskUpdate and TaskList to a
+/// current model only when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is set, and without them a lead
+/// cannot share its team's tasks. An agent outside a native team does not get the variable.
+#[test]
+fn a_native_lead_and_its_teammates_get_claude_code_s_task_list_tools() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let todo = |built: &InteractiveCommand| -> Vec<String> {
+        built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "CLAUDE_CODE_ENABLE_TODO_TOOLS")
+            .map(|(_, value)| value.clone())
+            .collect()
+    };
+    let alone = project_context(&case, "alone")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let agent = command(&request, Some(&alone), &run(None)).unwrap();
+    assert!(todo(&agent).is_empty(), "{:?}", agent.env);
+    drop(alone);
+
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+    assert_eq!(todo(&lead), ["1"], "{:?}", lead.env);
+    write_teammate_command(&case.home(), &lead, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_ENABLE_TODO_TOOLS=1' "),
+        "{written}"
+    );
+    drop(installed);
+}
+
+/// A native lead's teammates run in their own config home beside the lead's (TPH-2 C): the
+/// script the lead's Claude Code runs for each teammate names that home in place of the
+/// lead's for Claude Code's config and temp folders, `HOME` and the cargo home, and keeps the
+/// lead's sign-in folder, where the engine keeps the account's copy the teammates read.
+#[test]
+fn a_native_lead_s_teammates_get_their_own_config_home_and_the_lead_s_sign_in() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    write_teammate_command(&case.home(), &built, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    let home = case.home();
+    let mates = home.with_file_name("mates-home");
+    let word = |name: &str, value: &Path| format!(" '{name}={}' ", value.display());
+
+    for name in ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR", "HOME"] {
+        assert!(written.contains(&word(name, &mates)), "{name}: {written}");
+        assert!(!written.contains(&word(name, &home)), "{name}: {written}");
+    }
+    assert!(
+        written.contains(&word("CARGO_HOME", &mates.join(".cargo"))),
+        "{written}"
+    );
+    assert!(
+        written.contains(&word("CLAUDE_SECURESTORAGE_CONFIG_DIR", &home)),
+        "{written}"
+    );
+    drop(installed);
+}
+
+/// A native lead's temp files are its own (TPH-2 residual): the lead's `TMPDIR` and zsh
+/// prefix name its own folder in the short temp folder, and the script its Claude Code runs
+/// for each teammate names the shared short temp folder in their place, never the lead's
+/// own. A script that would still name the lead's own folder is refused.
+#[test]
+fn a_native_lead_s_temp_folder_is_its_own_and_its_teammates_keep_the_shared_one() {
+    let case = Case::new();
+    let shared = toolchains::make_tmp(&case.home()).unwrap();
+    let own = toolchains::native_lead_tmp(&shared);
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    let value = |name: &str| {
+        built
+            .env
+            .iter()
+            .filter(|(known, _)| known == name)
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(value("TMPDIR"), [own.to_str().unwrap()]);
+    assert_eq!(value("TMPPREFIX"), [own.join("zsh").to_str().unwrap()]);
+    assert_ne!(own, shared);
+
+    write_teammate_command(&case.home(), &built, &request, installed.native().unwrap()).unwrap();
+    let script = crate::launch_context::teammate_command(&case.home());
+    let written = std::fs::read_to_string(&script).unwrap();
+    let word = |name: &str, value: &Path| format!(" '{name}={}' ", value.display());
+    assert!(written.contains(&word("TMPDIR", &shared)), "{written}");
+    assert!(
+        written.contains(&word("TMPPREFIX", &shared.join("zsh"))),
+        "{written}"
+    );
+    assert!(!written.contains(own.to_str().unwrap()), "{written}");
+
+    std::fs::remove_file(&script).unwrap();
+    let mut leaky = built.clone();
+    leaky.env.push((
+        "XDG_RUNTIME_DIR".to_owned(),
+        own.join("run").display().to_string(),
+    ));
+    assert_eq!(
+        write_teammate_command(&case.home(), &leaky, &request, installed.native().unwrap())
+            .unwrap_err()
+            .0,
+        "launch_teammate_command_invalid"
+    );
+    assert!(!script.exists());
+    drop(installed);
+    toolchains::remove_tmp(&case.home()).unwrap();
 }
 
 #[test]
@@ -1393,4 +1785,279 @@ fn a_pane_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
         format!("{}:{TOOLS_OFF_PATH}", bin.display())
     );
     toolchains::remove_tmp(&case.home()).unwrap();
+}
+
+#[test]
+fn a_codex_folder_decides_the_trust_setting_on_both_launch_shapes() {
+    let case = Case::new();
+    let work = case.path().join("work");
+    std::fs::create_dir(work.join(".git")).unwrap();
+    let names = |level: &str| {
+        format!(
+            "projects={{\"{}\"={{trust_level=\"{level}\"}}}}",
+            work.display()
+        )
+    };
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let built = command(&request, None, &run(None)).unwrap();
+        let wanted = names("trusted");
+        assert!(
+            built
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted),
+            "{tools}: {:?}",
+            built.argv
+        );
+    }
+    std::fs::create_dir(work.join(".codex")).unwrap();
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let built = command(&request, None, &run(None)).unwrap();
+        let wanted = names("untrusted");
+        assert!(
+            built
+                .argv
+                .windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == wanted),
+            "{tools}: {:?}",
+            built.argv
+        );
+    }
+}
+
+/// The values of the `tui.alternate_screen` settings a built Codex command carries, in order.
+/// Input: the command. Output: the values as written, quotes included.
+fn codex_screen(built: &InteractiveCommand) -> Vec<String> {
+    built
+        .argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .filter_map(|pair| pair[1].strip_prefix("tui.alternate_screen="))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Builds a Codex command in a project whose owner chose `display`, for each launch shape.
+/// Inputs: the case, a name for the context's folder, the display, whether tools are on and
+/// whether the run resumes a conversation. Output: the command.
+fn codex_at(
+    case: &Case,
+    name: &str,
+    display: crate::coord::settings::TerminalDisplay,
+    tools: bool,
+    resume: bool,
+) -> InteractiveCommand {
+    let request = case.request("codex", case.subscription(), tools);
+    let installed = project_context(case, name)
+        .with_terminal_display(display)
+        .install("codex", &case.home(), tools)
+        .unwrap();
+    let run = Run {
+        session_id: SESSION,
+        key_file: None,
+        resume,
+    };
+    command(&request, Some(&installed), &run).unwrap()
+}
+
+/// DEC-141 parity: the one Terminal display setting has a mapping for every harness kind.
+/// Classic, the display where a plain drag selects text, holds for every kind. Two displays a
+/// kind can draw start it differently, and a display it cannot draw starts it as Classic does
+/// and is left out of the displays the settings list for it. A kind with a terminal app
+/// carries exactly its display's switches in its built command, on both launch shapes, and
+/// none of the other display's. A kind added without a mapping fails here.
+#[test]
+fn every_harness_kind_maps_every_terminal_display() {
+    use crate::coord::settings::{HarnessKind, TerminalDisplay};
+    assert_eq!(
+        TerminalDisplay::ALL,
+        [TerminalDisplay::Classic, TerminalDisplay::Fullscreen]
+    );
+    assert_eq!(TerminalDisplay::default(), TerminalDisplay::Classic);
+    let starts = |switches: DisplaySwitches| (switches.variables, switches.arguments);
+    let case = Case::new();
+    let mut launched = 0;
+    for kind in HarnessKind::ALL {
+        let classic = display_switches(kind, TerminalDisplay::Classic);
+        assert!(classic.honoured, "{kind:?} has no Classic display");
+        for display in TerminalDisplay::ALL {
+            let switches = display_switches(kind, display);
+            assert_eq!(
+                displays(kind).contains(&display),
+                switches.honoured,
+                "{kind:?} {display:?}"
+            );
+            if display == TerminalDisplay::Classic {
+                continue;
+            }
+            assert_eq!(
+                switches.honoured,
+                starts(switches) != starts(classic),
+                "{kind:?} {display:?} is honoured only when it starts the kind differently"
+            );
+        }
+        if support(kind.as_str()) != Support::Terminal {
+            for display in TerminalDisplay::ALL {
+                let switches = display_switches(kind, display);
+                assert!(
+                    switches.variables.is_empty() && switches.arguments.is_empty(),
+                    "{kind:?} has no terminal app to switch"
+                );
+            }
+            continue;
+        }
+        for display in TerminalDisplay::ALL {
+            let switches = display_switches(kind, display);
+            assert!(switches.honoured, "{kind:?} {display:?}");
+            let others: Vec<DisplaySwitches> = TerminalDisplay::ALL
+                .into_iter()
+                .filter(|other| *other != display)
+                .map(|other| display_switches(kind, other))
+                .collect();
+            for tools in [false, true] {
+                launched += 1;
+                let request = case.request(kind.as_str(), case.subscription(), tools);
+                let installed = project_context(&case, &format!("parity-{launched}"))
+                    .with_terminal_display(display)
+                    .install(kind.as_str(), &case.home(), tools)
+                    .unwrap();
+                let built = command(&request, Some(&installed), &run(None)).unwrap();
+                let has_variable = |(name, value): &(&str, &str)| {
+                    built.env.iter().any(|(n, v)| n == name && v == value)
+                };
+                let has_arguments = |arguments: &[&str]| {
+                    !arguments.is_empty()
+                        && built
+                            .argv
+                            .windows(arguments.len())
+                            .any(|window| window == arguments)
+                };
+                assert!(
+                    switches.variables.iter().all(has_variable),
+                    "{kind:?} {display:?} tools {tools}: {:?}",
+                    built.env
+                );
+                assert!(
+                    switches.arguments.is_empty() || has_arguments(switches.arguments),
+                    "{kind:?} {display:?} tools {tools}: {:?}",
+                    built.argv
+                );
+                for other in &others {
+                    assert!(
+                        !other.variables.iter().any(has_variable)
+                            && !has_arguments(other.arguments),
+                        "{kind:?} {display:?} tools {tools} carries another display's switches"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        launched, 8,
+        "Claude Code and Codex, two displays, two launch shapes"
+    );
+}
+
+/// The displays the settings list for each kind (DEC-141): Claude Code and Codex draw both,
+/// RCLI, a one-turn master with no view of its own, only Classic.
+#[test]
+fn the_displays_of_each_harness_kind_are_named_for_the_settings() {
+    use crate::coord::settings::{HarnessKind, TerminalDisplay};
+    let both = TerminalDisplay::ALL.to_vec();
+    assert_eq!(displays(HarnessKind::ClaudeCode), both);
+    assert_eq!(displays(HarnessKind::Codex), both);
+    assert_eq!(displays(HarnessKind::Rcli), [TerminalDisplay::Classic]);
+}
+
+/// OB-8: a Codex terminal at the Classic display, the default and the display of a launch
+/// without a project context, starts with `tui.alternate_screen="never"`, so Codex draws on
+/// the normal screen with no mouse reporting and a plain drag in the app's terminal view
+/// selects text. The setting is a `-c` setting among the others, ahead of `resume`, because
+/// the bridge script hands the same arguments to `codex app-server`, which takes `-c` and
+/// exits on `--no-alt-screen`.
+#[test]
+fn a_classic_codex_terminal_draws_on_the_normal_screen_on_both_launch_shapes() {
+    use crate::coord::settings::TerminalDisplay;
+    let case = Case::new();
+    let never = ["\"never\"".to_owned()];
+    for tools in [false, true] {
+        let request = case.request("codex", case.subscription(), tools);
+        let bare = command(&request, None, &run(None)).unwrap();
+        assert_eq!(codex_screen(&bare), never, "{tools}: {:?}", bare.argv);
+        for resume in [false, true] {
+            let name = format!("classic-{tools}-{resume}");
+            let built = codex_at(&case, &name, TerminalDisplay::Classic, tools, resume);
+            assert_eq!(codex_screen(&built), never, "{name}: {:?}", built.argv);
+            assert!(
+                !built
+                    .argv
+                    .iter()
+                    .any(|argument| argument == "--no-alt-screen"),
+                "{name}: {:?}",
+                built.argv
+            );
+            let at = |word: &str| built.argv.iter().position(|argument| argument == word);
+            let setting = at("tui.alternate_screen=\"never\"").unwrap();
+            assert_eq!(built.argv[setting - 1], "-c", "{name}");
+            if tools {
+                let script = at(CODEX_BRIDGE_SCRIPT).unwrap();
+                assert!(
+                    setting > script + 3,
+                    "{name}: after the program and the resume word"
+                );
+                assert_eq!(built.argv[script + 3] == SESSION, resume, "{name}");
+            } else if resume {
+                assert!(setting < at("resume").unwrap(), "{name}: {:?}", built.argv);
+            }
+        }
+    }
+}
+
+/// A Codex terminal at the Fullscreen display starts with `tui.alternate_screen="always"`,
+/// Codex's own view on the alternate screen, which takes the mouse, whatever the account's
+/// own Codex settings say, on both launch shapes, and never also asks for the normal screen.
+#[test]
+fn a_fullscreen_codex_terminal_keeps_codex_own_view_on_both_launch_shapes() {
+    use crate::coord::settings::TerminalDisplay;
+    let case = Case::new();
+    for tools in [false, true] {
+        for resume in [false, true] {
+            let name = format!("fullscreen-{tools}-{resume}");
+            let built = codex_at(&case, &name, TerminalDisplay::Fullscreen, tools, resume);
+            assert_eq!(
+                codex_screen(&built),
+                ["\"always\"".to_owned()],
+                "{name}: {:?}",
+                built.argv
+            );
+            assert!(
+                !built
+                    .argv
+                    .iter()
+                    .any(|argument| argument == "--no-alt-screen"),
+                "{name}: {:?}",
+                built.argv
+            );
+        }
+    }
+}
+
+/// Every display switch Codex gets is a `-c` setting and no variable: the bridge script hands
+/// a tools-on launch's arguments to `codex app-server` too, which exits on any TUI-only flag
+/// and would leave the agent without its native bridge, and the Codex launch adds no display
+/// variables. Claude Code's are variables only, as its launch adds no display arguments.
+#[test]
+fn each_kind_s_display_switches_are_of_the_shape_its_launch_carries() {
+    use crate::coord::settings::{HarnessKind, TerminalDisplay};
+    for display in TerminalDisplay::ALL {
+        let codex = display_switches(HarnessKind::Codex, display);
+        assert!(codex.variables.is_empty(), "{display:?}");
+        assert_eq!(codex.arguments.len(), 2, "{display:?}");
+        assert_eq!(codex.arguments[0], "-c", "{display:?}");
+        let claude = display_switches(HarnessKind::ClaudeCode, display);
+        assert!(claude.arguments.is_empty(), "{display:?}");
+        assert!(!claude.variables.is_empty(), "{display:?}");
+    }
 }

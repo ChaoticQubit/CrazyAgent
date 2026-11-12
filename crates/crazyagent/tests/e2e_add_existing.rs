@@ -25,7 +25,12 @@ async fn add(owner: &mut Owner, source: &Path, mode: AddMode) -> OwnerResult {
     result(
         owner
             .controller
-            .add_existing_folder(source.to_str().unwrap().into(), mode, generation)
+            .add_existing_folder(
+                source.to_str().unwrap().into(),
+                mode,
+                Vec::new(),
+                generation,
+            )
             .await
             .unwrap(),
     )
@@ -72,7 +77,8 @@ async fn existing_folders_move_and_copy_into_the_home_and_onboarding_reports_its
         .controller
         .folder_size(copied.to_str().unwrap().into())
         .await
-        .unwrap();
+        .unwrap()
+        .bytes;
     assert!(size >= README.len() as u64, "{size}");
     assert_eq!(
         add(&mut owner, &copied, AddMode::Copy).await,

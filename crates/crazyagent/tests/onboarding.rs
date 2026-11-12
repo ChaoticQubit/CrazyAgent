@@ -757,6 +757,7 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
         &bench.project_settings,
         Some(&codex()),
         None,
+        None,
     )
     .unwrap();
     let view = bench.settle(&project, Duration::from_secs(1200)).await;
@@ -814,7 +815,7 @@ async fn a_missing_graphify_fails_with_its_plain_reason_and_a_second_start_retri
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1062,7 +1063,7 @@ async fn unticking_graphify_in_setup_installs_nothing_and_the_graph_is_not_insta
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         installed_graphify,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1122,15 +1123,17 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
             mapping_time: Duration::from_secs(8),
+            mapping_try_time: Duration::from_secs(8),
         },
         Duration::from_millis(50),
     );
@@ -1139,6 +1142,90 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
     assert!(processes_with(&agents).is_empty());
     stop_service(service).await;
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+/// A mapping try that runs out of its own time or fails starts a fresh try on a new pick
+/// of the pool, with no process left behind: while a later try runs, the view names it and
+/// the earlier try's reason, and once all three failed the step names each try's reason,
+/// well inside the step's time.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mapping_try_that_runs_out_of_time_starts_a_fresh_try_and_the_step_names_every_try() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (hanging, _server) = hanging_endpoint();
+    let rejecting = rejecting_endpoint();
+    let endpoint = |port: u16, model: &str| ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: model.into(),
+        key: None,
+    };
+    let accounts = [
+        endpoint(hanging, "hanging-model"),
+        endpoint(rejecting, "closed-model"),
+        endpoint(hanging, "hanging-model"),
+    ];
+    let picks = std::sync::atomic::AtomicUsize::new(0);
+    let (runner, agents) = bench.runner();
+    let started = Instant::now();
+    let service = OnboardingService::start(
+        runner,
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| {
+            let pick = picks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            picked(&accounts[pick.min(accounts.len() - 1)])
+        },
+        || None,
+        OnboardingLimits {
+            graph_time: Duration::from_secs(60),
+            mapping_time: Duration::from_secs(120),
+            mapping_try_time: Duration::from_secs(8),
+        },
+        Duration::from_millis(50),
+    );
+    let mut third = None;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let view = loop {
+        let view = bench.view(&project).await;
+        if let Some(progress) = view
+            .mapping_try
+            .clone()
+            .filter(|progress| progress.number == 3)
+        {
+            third = Some(progress);
+        }
+        if settled(&view.mapping) {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mapping did not settle: {view:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let took = started.elapsed();
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed(
+            "Mapping agent failed 3 tries: try 1: Mapping agent ran out of time; try 2: Agent stopped: The model closed-model does not exist; try 3: Mapping agent ran out of time"
+        ),
+        "{view:?}"
+    );
+    assert_eq!(view.mapping_try, None);
+    assert!(
+        third.is_some(),
+        "the view never showed the third try while it ran"
+    );
+    let third = third.unwrap();
+    assert_eq!((third.number, third.tries), (3, 3));
+    assert_eq!(
+        third.earlier.as_deref(),
+        Some("Agent stopped: The model closed-model does not exist")
+    );
+    assert!(took < Duration::from_secs(60), "{took:?}");
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 3);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
@@ -1152,11 +1239,12 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1223,7 +1311,7 @@ async fn a_draft_brief_or_overview_the_folder_came_with_is_never_taken_as_the_en
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1357,6 +1445,7 @@ async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "hanging-model".into(),
+        key: None,
     };
     let asked = Arc::new(Mutex::new(0_usize));
     let (runner, agents) = bench.runner_without_codex(false);
@@ -1364,7 +1453,7 @@ async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
         let asked = asked.clone();
         OnboardingService::start(
             runner,
-            move |_: &CredentialRef, _: &[ResearchHarness]| {
+            move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| {
                 *asked.lock().unwrap() += 1;
                 picked(&account)
             },
@@ -1399,7 +1488,7 @@ async fn an_overview_entry_that_is_not_a_text_file_fails_mapping_before_any_acco
         let asked = asked.clone();
         OnboardingService::start(
             runner,
-            move |_: &CredentialRef, _: &[ResearchHarness]| {
+            move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| {
                 *asked.lock().unwrap() += 1;
                 AccountPick::NoUsableAccount
             },
@@ -1431,11 +1520,12 @@ async fn with_only_claude_code_installed_mapping_asks_for_a_claude_code_account(
         let seen = seen.clone();
         OnboardingService::start(
             runner,
-            move |_: &CredentialRef, harnesses: &[ResearchHarness]| {
+            move |_: &str, _: &CredentialRef, harnesses: &[ResearchHarness]| {
                 seen.lock().unwrap().push(harnesses.to_vec());
                 picked(&ResearchAccount::Endpoint {
                     base_url: "http://127.0.0.1:9/v1".into(),
                     model: "codex-only-model".into(),
+                    key: None,
                 })
             },
             || None,
@@ -1468,29 +1558,35 @@ async fn the_pool_pick_offers_only_accounts_of_installed_harnesses() {
     let local = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:11434/v1".into(),
         model: MODEL.into(),
+        key: None,
     };
     let local = AccountPick::Account {
         connection: CredentialRef::new("local-connection").unwrap(),
         account: Box::new(local),
     };
     assert_eq!(
-        resolver.pool_pick(&pool, &[ResearchHarness::Codex]),
+        resolver.pool_pick("project-a", &pool, &[ResearchHarness::Codex]),
         local.clone()
     );
     assert_eq!(
         resolver.pool_pick(
+            "project-a",
             &pool,
             &[ResearchHarness::ClaudeCode, ResearchHarness::Codex]
         ),
         local
     );
     assert_eq!(
-        resolver.pool_pick(&pool, &[ResearchHarness::ClaudeCode]),
+        resolver.pool_pick("project-a", &pool, &[ResearchHarness::ClaudeCode]),
         AccountPick::NoUsableAccount
     );
-    assert_eq!(resolver.pool_pick(&pool, &[]), AccountPick::NoUsableAccount);
+    assert_eq!(
+        resolver.pool_pick("project-a", &pool, &[]),
+        AccountPick::NoUsableAccount
+    );
     assert_eq!(
         resolver.pool_pick(
+            "project-a",
             &CredentialRef::new("absent-pool").unwrap(),
             &[ResearchHarness::Codex]
         ),
@@ -1536,7 +1632,7 @@ async fn an_onboarded_folder_in_the_home_shows_as_onboarding_until_both_steps_ar
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1714,7 +1810,7 @@ async fn saving_the_setup_after_mapping_fails_finishes_onboarding_and_reopening_
     let (runner, _) = bench.runner_without_codex(false);
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1765,7 +1861,7 @@ async fn a_setup_saved_before_mapping_starts_keeps_the_mapping_agent_from_runnin
     let (runner, _) = bench.runner_without_codex(false);
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1797,15 +1893,17 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "closed-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
             mapping_time: Duration::from_secs(240),
+            mapping_try_time: Duration::from_secs(240),
         },
         Duration::from_millis(50),
     );
@@ -1816,9 +1914,9 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     };
     assert_eq!(
         reason,
-        "Agent stopped: The model closed-model does not exist"
+        "Mapping agent failed 3 tries: Agent stopped: The model closed-model does not exist"
     );
-    assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 3);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
@@ -1841,6 +1939,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "closed-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let earlier = [
@@ -1852,11 +1951,12 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     }
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         move || Some(graphify.clone()),
         OnboardingLimits {
             graph_time: Duration::from_secs(240),
             mapping_time: Duration::from_secs(240),
+            mapping_try_time: Duration::from_secs(240),
         },
         Duration::from_millis(50),
     );
@@ -1865,7 +1965,9 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     assert_eq!(view.graph, Step::Done, "{view:?}");
     assert_eq!(
         view.mapping,
-        failed("Agent stopped: The model closed-model does not exist"),
+        failed(
+            "Mapping agent failed 3 tries: Agent stopped: The model closed-model does not exist"
+        ),
         "{view:?}"
     );
     for name in &earlier {
@@ -1875,7 +1977,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
         );
     }
     assert_eq!(agent_runs(&agents, "onboard-g-"), 2);
-    assert_eq!(agent_runs(&agents, "onboard-m-"), 2);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 4);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
@@ -1900,19 +2002,20 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "never-asked-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let created = onboarding_created_ms(&bench.root);
     let taken = [
         format!("onboard-g-{PROJECT}-{created}-1"),
-        format!("onboard-m-{PROJECT}-{created}-2"),
+        format!("onboard-m-{PROJECT}-{created}-2-t1"),
     ];
     for name in &taken {
         leftover_agent(&agents, name);
     }
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || Some(PathBuf::from("/usr/bin/true")),
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1942,11 +2045,12 @@ async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
     let account = ResearchAccount::Endpoint {
         base_url: "http://127.0.0.1:9/v1".into(),
         model: "linux-model".into(),
+        key: None,
     };
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        move |_: &CredentialRef, _: &[ResearchHarness]| picked(&account),
+        move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| picked(&account),
         || None,
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -1971,7 +2075,7 @@ async fn the_graph_build_on_linux_stops_with_the_plain_unavailable_line() {
     let (runner, agents) = bench.runner();
     let service = OnboardingService::start(
         runner,
-        |_: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
+        |_: &str, _: &CredentialRef, _: &[ResearchHarness]| AccountPick::NoUsableAccount,
         || Some(PathBuf::from("/usr/bin/true")),
         OnboardingLimits::default(),
         Duration::from_millis(50),
@@ -2058,7 +2162,7 @@ async fn a_paused_mapping_rechecks_without_rewriting_its_draft_and_moves_on_once
         let asked = asked.clone();
         OnboardingService::start(
             runner,
-            move |_: &CredentialRef, _: &[ResearchHarness]| {
+            move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| {
                 *asked.lock().unwrap() += 1;
                 pick.lock().unwrap().clone()
             },
@@ -2106,7 +2210,7 @@ async fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
         let asked = asked.clone();
         OnboardingService::start(
             runner,
-            move |_: &CredentialRef, _: &[ResearchHarness]| {
+            move |_: &str, _: &CredentialRef, _: &[ResearchHarness]| {
                 *asked.lock().unwrap() += 1;
                 AccountPick::Paused { until_ms: UNTIL_MS }
             },
@@ -2298,6 +2402,10 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
                 network: crazyagent::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                tool_cache: Default::default(),
+                ide_agent_files: Default::default(),
+                shared_folders: Default::default(),
+                ..Default::default()
             },
             bench.generation,
         )
@@ -2309,5 +2417,531 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
     assert_eq!(rejection(&restarted), None, "{restarted:?}");
     let kept = bench.owner.project_agent_policy(project).await.unwrap();
     assert_eq!(kept.access, AgentAccess::Sandboxed);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_own_branch_change_set_still_lands_when_the_owner_asks_to_move_the_home() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let repo = bench.repo.clone();
+    let response = bench.start_onboarding_at(&repo).await;
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let project = project_id_for(&repo).unwrap();
+    let worktree = crazyagent::projects_home::state_folder(&repo)
+        .join("worktrees")
+        .join("agent-own");
+    assert!(
+        worktree.starts_with(repo.join(".crazyagent")),
+        "{worktree:?}"
+    );
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    crazyagent::landing::add_agent_clone(&repo, &worktree).unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&worktree);
+    let db = crazyagent::landing::open(&bench.root).unwrap();
+    crazyagent::landing::record_worktree_start(&db, &repo, &worktree, &git_dir).unwrap();
+    fs::write(worktree.join("NOTES.md"), "agent notes\n").unwrap();
+    git(&worktree, &["add", "NOTES.md"]);
+    git(&worktree, &["commit", "-q", "-m", "Add notes"]);
+    let workspace = crazyagent::landing::Workspace {
+        project: project.clone(),
+        agent: crazyagent::landing::ChangeAgent {
+            kind: crazyagent::landing::AgentKind::Sub,
+            id: "agent-own".into(),
+            label: "worker".into(),
+        },
+        repository: repo.clone(),
+        worktree: worktree.clone(),
+        git_dir,
+    };
+    let turn = crazyagent::landing::TurnEnd {
+        outcome: crazyagent::landing::TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add notes".into(),
+    };
+    let id = crazyagent::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("the agent's commit opens a change set");
+    let next_place = tempfile::Builder::new()
+        .prefix("ca-onboard-next-")
+        .tempdir()
+        .unwrap();
+    let next = next_place.path().canonicalize().unwrap().join("home");
+    fs::create_dir(&next).unwrap();
+    bench.generation += 1;
+    let moved = bench
+        .owner
+        .move_projects_home(next.to_str().unwrap().to_owned(), true, bench.generation)
+        .await
+        .unwrap();
+    let head = crazyagent::landing::list(&db, &project)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.id == id)
+        .expect("the change set is listed")
+        .head;
+    let owner_home = tempfile::tempdir().unwrap();
+    fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n",
+    )
+    .unwrap();
+    let landed = crazyagent::landing::accept(
+        &db,
+        owner_home.path(),
+        &id,
+        &head,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    );
+    assert!(
+        matches!(
+            landed,
+            Ok(crazyagent::landing::AcceptOutcome::Landed { .. })
+        ),
+        "after the home move answered {moved:?}, Accept answered {landed:?}"
+    );
+    assert_eq!(rejection(&moved).as_deref(), Some("home_move_agent_work"));
+    assert!(crazyagent::projects_home::plain_problem("home_move_agent_work").is_some());
+    assert!(repo.join("NOTES.md").is_file() && !next.join(PROJECT).exists());
+    bench.generation += 1;
+    let again = bench
+        .owner
+        .move_projects_home(next.to_str().unwrap().to_owned(), true, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&again), None, "{again:?}");
+    assert!(next.join(PROJECT).join("NOTES.md").is_file() && !repo.exists());
+    drop(db);
+    bench.stop().await;
+}
+
+/// A new folder for the projects home outside the bench. Returns its holder and path.
+fn next_home() -> (tempfile::TempDir, PathBuf) {
+    let place = tempfile::Builder::new()
+        .prefix("ca-onboard-next-")
+        .tempdir()
+        .unwrap();
+    let next = place.path().canonicalize().unwrap().join("home");
+    fs::create_dir(&next).unwrap();
+    (place, next)
+}
+
+/// Checks that a home move was refused with `code`, which reads as a plain sentence, and
+/// that the bench repository stayed where it was with nothing in the new home.
+fn refused_move(moved: &OwnerResponse, code: &str, repo: &Path, next: &Path) {
+    assert_eq!(rejection(moved).as_deref(), Some(code), "{moved:?}");
+    assert!(
+        crazyagent::projects_home::plain_problem(code).is_some(),
+        "{code}"
+    );
+    assert!(repo.join(".git").is_dir() && !next.join(PROJECT).exists());
+}
+
+/// Checks that a home move went through and took the bench repository with it.
+fn moved_home(moved: &OwnerResponse, repo: &Path, next: &Path) {
+    assert_eq!(rejection(moved), None, "{moved:?}");
+    assert!(next.join(PROJECT).join(".git").is_dir() && !repo.exists());
+}
+
+/// Makes an own clone for the agent `name` in the bench repository and commits a file in
+/// it, so the agent's turn opens a change set. Returns the landing store, the change set
+/// and the head the owner reviews.
+fn agent_change(
+    bench: &Bench,
+    project: &ProjectId,
+    name: &str,
+) -> (
+    rusqlite::Connection,
+    crazyagent::landing::ChangeSetId,
+    String,
+) {
+    let worktree = crazyagent::projects_home::state_folder(&bench.repo)
+        .join("worktrees")
+        .join(name);
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    crazyagent::landing::add_agent_clone(&bench.repo, &worktree).unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&worktree);
+    let db = crazyagent::landing::open(&bench.root).unwrap();
+    crazyagent::landing::record_worktree_start(&db, &bench.repo, &worktree, &git_dir).unwrap();
+    fs::write(worktree.join("NOTES.md"), "agent notes\n").unwrap();
+    git(&worktree, &["add", "NOTES.md"]);
+    git(&worktree, &["commit", "-q", "-m", "Add notes"]);
+    let workspace = crazyagent::landing::Workspace {
+        project: project.clone(),
+        agent: crazyagent::landing::ChangeAgent {
+            kind: crazyagent::landing::AgentKind::Sub,
+            id: name.into(),
+            label: "worker".into(),
+        },
+        repository: bench.repo.clone(),
+        worktree,
+        git_dir,
+    };
+    let turn = crazyagent::landing::TurnEnd {
+        outcome: crazyagent::landing::TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add notes".into(),
+    };
+    let id = crazyagent::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("the agent's commit opens a change set");
+    let head = crazyagent::landing::list(&db, project)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.id == id)
+        .expect("the change set is listed")
+        .head;
+    (db, id, head)
+}
+
+impl Bench {
+    /// Asks the engine to move the projects home, with its projects, to `next`.
+    /// Returns the owner response.
+    async fn move_home(&mut self, next: &Path) -> OwnerResponse {
+        self.generation += 1;
+        self.owner
+            .move_projects_home(next.to_str().unwrap().to_owned(), true, self.generation)
+            .await
+            .unwrap()
+    }
+}
+
+/// A change set the owner discarded stays restorable for 7 days and holds a home move with
+/// its own sentence, which says when the move can go; once that time passed the move goes
+/// through. The agent work sentence no longer says that a discard is enough.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restorable_discarded_change_holds_a_home_move_until_its_restore_window_ends() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let (db, id, head) = agent_change(&bench, &project, "agent-discard");
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let until = crazyagent::landing::discard(&db, &id, &head, now).unwrap();
+    assert!(until > now, "{until} {now}");
+    assert_eq!(
+        crazyagent::landing::RESTORE_WINDOW_MS,
+        7 * 24 * 60 * 60 * 1000
+    );
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_changes_restorable", &repo, &next);
+    for code in ["home_move_changes_restorable", "home_move_agent_work"] {
+        let sentence = crazyagent::projects_home::plain_problem(code).unwrap();
+        assert!(sentence.contains("7 days"), "{code}: {sentence}");
+    }
+    db.execute(
+        "UPDATE landing_change_sets SET restorable_until_ms=?1 WHERE id=?2",
+        rusqlite::params![i64::try_from(now).unwrap() - 1, id.as_str()],
+    )
+    .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A research job that runs for a project in the home holds a home move with its own
+/// sentence, since its worktree in the project would be cut off; once the job ended the
+/// move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_running_research_job_holds_a_home_move_until_it_ends() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let jobs =
+        crazyagent::research::jobs::ResearchJobs::open(&bench.root.join("engine.db")).unwrap();
+    jobs.enqueue(project.as_str(), "stack", "codex", false)
+        .unwrap();
+    let job = jobs
+        .claim(project.as_str(), "test-runner", 4)
+        .unwrap()
+        .expect("a queued job is claimed");
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_research_running", &repo, &next);
+    jobs.finish(&job, "context/research/stack.md").unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(jobs);
+    bench.stop().await;
+}
+
+/// Opens the bench engine's database for writing the agent records a test stands in for.
+fn engine_db(root: &Path) -> rusqlite::Connection {
+    let db = rusqlite::Connection::open_with_flags(
+        root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db
+}
+
+/// A team agent that is starting in a project in the home holds a home move, since its
+/// worktree is about to be made there; once it stopped the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_starting_in_the_home_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+         VALUES (?1,'sub','codex',0,'local-connection','starting',1,1)",
+        [project.as_str()],
+    )
+    .unwrap();
+    let agent = db.last_insert_rowid();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute(
+        "UPDATE team_agents SET status='failed', stopped_ms=2 WHERE id=?1",
+        [agent],
+    )
+    .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A projects home move recorded before its folders move holds every research launch in
+/// the home: a job claimed meanwhile goes back to the queue without spending its attempt,
+/// and runs on once the move is finished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_research_job_claimed_while_the_home_moves_goes_back_to_wait() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let repo = bench.repo.clone();
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO projects_home_move VALUES (1,'request-held',1,?1,?2,'[\"demo-app\"]')",
+        rusqlite::params![
+            repo.parent().unwrap().to_str().unwrap(),
+            bench.root.join("next").to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let jobs =
+        crazyagent::research::jobs::ResearchJobs::open(&bench.root.join("engine.db")).unwrap();
+    let id = jobs
+        .enqueue("held-research", "stack", "codex", false)
+        .unwrap();
+    let (runner, _) = bench.runner_without_codex(false);
+    let project = crazyagent::research::runner::ResearchProject {
+        id: "held-research",
+        root: &repo,
+        account: None,
+    };
+    let held = runner
+        .run_once(&project)
+        .unwrap()
+        .expect("the queued job is claimed");
+    assert_eq!(
+        (held.job, held.status),
+        (id, crazyagent::research::jobs::ResearchStatus::Queued)
+    );
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!(
+        (job.status, job.attempts),
+        (crazyagent::research::jobs::ResearchStatus::Queued, 0)
+    );
+    db.execute("DELETE FROM projects_home_move WHERE singleton=1", [])
+        .unwrap();
+    let ran = runner
+        .run_once(&project)
+        .unwrap()
+        .expect("the job is claimed again");
+    assert_eq!(
+        (ran.job, ran.status),
+        (id, crazyagent::research::jobs::ResearchStatus::NeedsPool)
+    );
+    drop(jobs);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A team agent's own clone recorded in a project in the home holds a home move; once the
+/// agent is removed with its clone the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_team_agent_clone_in_the_home_holds_a_home_move_until_the_agent_is_removed() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let worktree = crazyagent::projects_home::state_folder(&repo)
+        .join("worktrees")
+        .join("agent-7");
+    fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+    crazyagent::landing::add_agent_clone(&repo, &worktree).unwrap();
+    let git_dir = crazyagent::agent_git::git_dir(&worktree);
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (7,?1,?2,?3,?4)",
+        rusqlite::params![
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            git_dir.to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute("DELETE FROM team_worktrees WHERE agent=7", [])
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// An agent the owner confirmed for removal whose files are not gone yet holds a home move
+/// while its record waits; once its removal finished the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_waiting_for_removal_in_the_home_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let db = engine_db(&bench.root);
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    assert!(
+        crazyagent::team::cleanup::finished(&db, &project, now)
+            .unwrap()
+            .is_empty()
+    );
+    let worktree = crazyagent::projects_home::state_folder(&repo)
+        .join("worktrees")
+        .join("agent-8");
+    fs::create_dir_all(&worktree).unwrap();
+    db.execute(
+        "INSERT INTO team_retiring(agent,project,repository,worktree,git_dir,since_ms) VALUES (8,?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            worktree.join(".git").to_str().unwrap(),
+            now
+        ],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute("DELETE FROM team_retiring WHERE agent=8", [])
+        .unwrap();
+    fs::remove_dir_all(&worktree).unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A landed change set with a worktree step recorded but not finished holds a home move,
+/// since an engine start finishes that step at the recorded paths; once no step is left
+/// the move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_set_with_an_unfinished_step_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let (db, id, head) = agent_change(&bench, &project, "agent-step");
+    let owner_home = tempfile::tempdir().unwrap();
+    fs::write(
+        owner_home.path().join(".gitconfig"),
+        "[user]\n\tname = Owner Example\n\temail = owner@example.invalid\n",
+    )
+    .unwrap();
+    let landed = crazyagent::landing::accept(
+        &db,
+        owner_home.path(),
+        &id,
+        &head,
+        None,
+        crazyagent::activity::AcceptPlace::Changes,
+    );
+    assert!(
+        matches!(
+            landed,
+            Ok(crazyagent::landing::AcceptOutcome::Landed { .. })
+        ),
+        "{landed:?}"
+    );
+    let step = serde_json::json!({ "step": "reset", "target": head }).to_string();
+    db.execute(
+        "UPDATE landing_change_sets SET intent=?1 WHERE id=?2",
+        rusqlite::params![step, id.as_str()],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute(
+        "UPDATE landing_change_sets SET intent=NULL WHERE id=?1",
+        [id.as_str()],
+    )
+    .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
+    bench.stop().await;
+}
+
+/// A team agent's worktree recorded through a link to the home still holds a home move:
+/// the check follows the recorded path to where it is now. Once the record is gone the
+/// move goes through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_team_worktree_recorded_through_a_link_still_holds_a_home_move() {
+    let mut bench = Bench::start(|_| {}).await;
+    bench.use_repos_as_home().await;
+    let project = bench.start_onboarding().await;
+    let repo = bench.repo.clone();
+    let home = repo.parent().unwrap().to_path_buf();
+    let links = tempfile::tempdir().unwrap();
+    let link = links.path().join("repos");
+    std::os::unix::fs::symlink(&home, &link).unwrap();
+    let through = link.join(PROJECT);
+    assert!(!through.starts_with(&home) && through.canonicalize().unwrap() == repo);
+    let worktree = through.join("agent-9");
+    let db = engine_db(&bench.root);
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (9,?1,?2,?3,?4)",
+        rusqlite::params![
+            project.as_str(),
+            through.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            worktree.join(".git").to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    let (_place, next) = next_home();
+    let moved = bench.move_home(&next).await;
+    refused_move(&moved, "home_move_agent_work", &repo, &next);
+    db.execute("DELETE FROM team_worktrees WHERE agent=9", [])
+        .unwrap();
+    let again = bench.move_home(&next).await;
+    moved_home(&again, &repo, &next);
+    drop(db);
     bench.stop().await;
 }

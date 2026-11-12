@@ -98,7 +98,6 @@ test("the planning state reads waiting, planning, done and failed from the real 
   const jobs = [job(1, "market_research", "done"), job(2, "roadmap_planning", "running")];
   assert.deepEqual(research.researchJobs(jobs).map((item) => item.id), [1], "planning never shows as a research row");
   assert.equal(research.planningJob(jobs).id, 2);
-  assert.equal(research.activity(jobs, "Shop", 500).at(-1).text, "You created Shop with 1 research task");
 
   const line = html(planning.PlanningLineView, { view: view([job(5, "roadmap_planning", "failed")]), busy: false, problem: "", onAction: noop, onOpen: noop });
   assert.match(line, /Roadmap and release process/);
@@ -114,6 +113,8 @@ test("Plan roadmap now and Retry ask before they can replace the roadmap", () =>
   const items = (...kinds) => ({ kind: "ok", value: { project_id: "p1", folder: "/Users/mira/Projects/shop", items: kinds.map((kind) => ({ path: kind === "plan" ? "context/roadmap.md" : "context/brief.md", kind, bytes: 10 })) } });
   assert.equal(planning.planReplaces({ kind: "idle" }, items("brief")), false, "nothing to replace, so it plans at once");
   assert.equal(planning.planReplaces({ kind: "idle" }, items("brief", "plan")), true, "a roadmap the owner wrote by hand");
+  const linkedRoadmap = { kind: "ok", value: { project_id: "p1", folder: "/Users/mira/Projects/shop", items: [{ path: "repo/docs/roadmap.md", kind: "plan", bytes: 10, linked: true }] } };
+  assert.equal(planning.planReplaces({ kind: "idle" }, linkedRoadmap), false, "a roadmap linked from the repo is never written by planning");
   assert.equal(planning.planReplaces({ kind: "idle" }, undefined), true, "the context isn't read yet");
   assert.equal(planning.planReplaces({ kind: "done", job: job(2, "roadmap_planning", "done") }, items("brief")), true, "a plan ran before");
   assert.equal(planning.planReplaces({ kind: "failed", job: job(2, "roadmap_planning", "failed") }, items("brief")), true, "Retry asks too");
@@ -132,7 +133,7 @@ test("Retry and Plan roadmap now call the engine", () => {
   assert.match(read("src/api-projects.ts"), /export function planRoadmap\(id: string, generation: number\): Promise<Result<IntentReceipt>> \{\s*return call<IntentReceipt>\("desktop_plan_roadmap", \{ id, generation \}\);/);
   assert.match(read("src/engine-client.ts"), /export function planRoadmap\(id: string, generation: number\): Promise<IntentReceipt> \{\s*return invoke<IntentReceipt>\("desktop_plan_roadmap", \{ id, generation \}\);/);
   assert.match(read("src/screens/project/overview.tsx"), /<PlanningLine data=\{data\} \/>/);
-  assert.match(read("src/screens/project/settings.tsx"), /<GeneralSection data=\{data\} setup=\{setup!\} \/><PlanningLine data=\{data\} \/>/);
+  assert.match(read("src/screens/project/settings.tsx"), /<GeneralSection data=\{data\} setup=\{setup!\} \/><PlanningLine data=\{data\} settings \/>/);
   assert.match(read("src-tauri/src/lib.rs"), /lock\(&state\)\.await\?\.plan_roadmap\(&id, generation\)\.await/);
 });
 

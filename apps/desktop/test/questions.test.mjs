@@ -10,10 +10,11 @@ const view = await import("../src/screens/project/questions.tsx");
 
 const NOW = Date.UTC(2026, 9, 27, 15, 0);
 const question = (extra = {}) => ({
-  id: 12, project_id: "p-1", asker: "agent:team-3", question: "Which database should the app use?", options: ["Postgres", "SQLite"],
+  id: 12, project_id: "p-1", asker: "agent:team-3", question: "Which database should the app use?", kind: "single", options: ["Postgres", "SQLite"],
   recommended: "SQLite", context: "It runs on one laptop.", status: "pending", version: 3, answer: null, created_ms: NOW - 120_000, settled_ms: null,
   ...extra,
 });
+const COMMENT_AFTER_THE_GROUP = /<\/fieldset><label class="qs-option qs-comment"><input type="checkbox"[^>]*\/><span>Add a comment<\/span><\/label>/;
 const card = (item, extra = {}) => renderToStaticMarkup(createElement(view.QuestionCard, {
   question: item, now: NOW, busy: false, onAnswer: () => {}, onDismiss: () => {}, ...extra,
 }));
@@ -41,8 +42,9 @@ test("a pending card names who asked, marks the recommended option and waits for
   assert.equal(markup.match(/>Recommended</g)?.length, 1);
   assert.match(markup, /<span>SQLite<\/span><span class="qs-recommended pj-small">Recommended<\/span>/);
   assert.doesNotMatch(markup, /<span>Postgres<\/span><span class="qs-recommended/);
-  assert.match(markup, /<label for="[^"]+">Or write your own answer<\/label>/);
-  assert.match(markup, /<button[^>]*disabled=""[^>]*>Answer<\/button>/, "Answer waits for an option or text");
+  assert.match(markup, /<legend[^>]*>Pick one<\/legend>/);
+  assert.doesNotMatch(markup, /<textarea/, "the comment box opens only once Add a comment is picked");
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>Answer<\/button>/, "Answer waits for a pick or a comment");
   assert.match(markup, /<button[^>]*>Dismiss<\/button>/);
   assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>Dismiss<\/button>/);
   assert.equal(client.isRecommended(question(), 1), true);
@@ -53,12 +55,57 @@ test("a pending card names who asked, marks the recommended option and waits for
 });
 
 test("a question with no options offers its suggested answer and a field of its own", () => {
-  const markup = card(question({ options: [], recommended: "Keep it private" }));
+  const markup = card(question({ kind: "text", options: [], recommended: "Keep it private" }));
   assert.match(markup, />Suggested: Keep it private</);
   assert.match(markup, />Use suggested answer</);
   assert.match(markup, /<label for="[^"]+">Your answer<\/label>/);
   assert.doesNotMatch(markup, /type="radio"/);
-  assert.doesNotMatch(card(question({ options: [], recommended: null })), /Suggested/);
+  assert.doesNotMatch(card(question({ kind: "text", options: [], recommended: null })), /Suggested/);
+});
+
+test("a multi question shows checkboxes and Add a comment last", () => {
+  const html = card(question({ kind: "multi", options: ["Web", "Desktop"], recommended: "Web" }));
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 3);
+  assert.doesNotMatch(html, /type="radio"/);
+  assert.match(html, /<legend[^>]*>Pick any<\/legend>/);
+  assert.match(html, COMMENT_AFTER_THE_GROUP);
+  assert.equal(html.match(/>Recommended</g)?.length, 1);
+});
+
+test("a single question shows radios and Add a comment last", () => {
+  const html = card(question({ kind: "single" }));
+  assert.equal((html.match(/type="radio"/g) ?? []).length, 2);
+  assert.equal((html.match(/type="checkbox"/g) ?? []).length, 1);
+  assert.match(html, COMMENT_AFTER_THE_GROUP);
+  assert.equal(client.COMMENT_LABEL, "Add a comment");
+});
+
+test("Add a comment is a checkbox outside the option group that says whether its box is open, and opening moves the keyboard into the box", () => {
+  for (const kind of ["single", "multi"]) {
+    const html = card(question({ kind }));
+    const group = html.slice(html.indexOf("<fieldset"), html.indexOf("</fieldset>"));
+    assert.doesNotMatch(group, /Add a comment/, kind);
+    assert.match(html, /<input type="checkbox" aria-expanded="false"\/><span>Add a comment<\/span>/, kind);
+    assert.doesNotMatch(html, /<textarea/, kind);
+  }
+  const source = readFileSync(new URL("../src/screens/project/questions.tsx", import.meta.url), "utf8");
+  assert.match(source, /useEffect\(\(\) => \{\s*if \(commenting\) document\.getElementById\(field\)\?\.focus\(\);\s*\}, \[commenting, field\]\);/);
+  assert.match(source, /aria-controls=\{commenting \? field : undefined\}/);
+});
+
+test("a text question shows only the text box", () => {
+  const html = card(question({ kind: "text", options: [], recommended: "Call it Atlas" }));
+  assert.doesNotMatch(html, /type="radio"|type="checkbox"|Add a comment/);
+  assert.match(html, /<textarea/);
+});
+
+test("picking replaces the pick of a single question, adds to a multi one, and a second click clears it", () => {
+  assert.deepEqual(view.picksAfter("single", [], 1), [1]);
+  assert.deepEqual(view.picksAfter("single", [1], 0), [0]);
+  assert.deepEqual(view.picksAfter("single", [1], 1), []);
+  assert.deepEqual(view.picksAfter("multi", [2], 0), [0, 2]);
+  assert.deepEqual(view.picksAfter("multi", [0, 2], 2), [0]);
+  assert.deepEqual(view.picksAfter("text", [], 0), []);
 });
 
 test("a question asked in an agent's terminal is answered there, so its card offers only Dismiss", () => {
@@ -73,12 +120,26 @@ test("a question asked in an agent's terminal is answered there, so its card off
   assert.doesNotMatch(card(question({ asker: "terminal:2", status: "answered_in_terminal", settled_ms: NOW })), />Dismiss</);
 });
 
-test("the answer sent is one option or trimmed text of at most 4096 bytes", () => {
-  assert.deepEqual(view.choiceOf(1, ""), { option: 1 });
-  assert.deepEqual(view.choiceOf(0, "ignored while an option is picked"), { option: 0 });
-  assert.deepEqual(view.choiceOf(null, "  Use SQLite  "), { text: "Use SQLite" });
-  assert.equal(view.choiceOf(null, ""), null);
-  assert.equal(view.choiceOf(null, " \n\t "), null);
+test("the choice sent holds the picks in order and a trimmed comment, or nothing to send", () => {
+  assert.deepEqual(view.choiceOf("multi", [2, 0], "  later "), { picks: [0, 2], comment: "later" });
+  assert.deepEqual(view.choiceOf("single", [], "Neither"), { picks: [], comment: "Neither" });
+  assert.deepEqual(view.choiceOf("single", [1], null), { picks: [1], comment: null });
+  assert.deepEqual(view.choiceOf("single", [1], " \n\t "), { picks: [1], comment: null });
+  assert.deepEqual(view.choiceOf("single", [0], "Ship the web first."), { picks: [0], comment: "Ship the web first." });
+  assert.deepEqual(view.choiceOf("text", [], "  Use SQLite  "), { picks: [], comment: "Use SQLite" });
+  assert.equal(view.choiceOf("single", [], "   "), null);
+  assert.equal(view.choiceOf("single", [], null), null);
+  assert.equal(view.choiceOf("single", [0, 1], null), null);
+  assert.equal(view.choiceOf("text", [0], "Atlas"), null);
+  assert.equal(view.choiceOf("multi", [client.OPTIONS_MAX], null), null);
+  assert.equal(view.choiceOf("multi", [-1], null), null);
+  assert.equal(view.choiceOf("multi", [0.5], null), null);
+  assert.deepEqual(view.choiceOf("multi", [0], "a".repeat(client.COMMENT_BYTES_MAX)), { picks: [0], comment: "a".repeat(client.COMMENT_BYTES_MAX) });
+  assert.equal(view.choiceOf("multi", [0], "a".repeat(client.COMMENT_BYTES_MAX + 1)), null, "a comment with picks is at most 2048 bytes");
+  assert.equal(view.choiceOf("multi", [0], "é".repeat(client.COMMENT_BYTES_MAX / 2 + 1)), null, "the bound is bytes, not characters");
+  assert.deepEqual(view.choiceOf("single", [], "a".repeat(client.ANSWER_BYTES_MAX)), { picks: [], comment: "a".repeat(client.ANSWER_BYTES_MAX) });
+  assert.equal(view.choiceOf("single", [], "a".repeat(client.ANSWER_BYTES_MAX + 1)), null);
+  assert.equal(client.COMMENT_BYTES_MAX, 2048);
   assert.equal(client.typedAnswer("a".repeat(client.ANSWER_BYTES_MAX)), "a".repeat(client.ANSWER_BYTES_MAX));
   assert.equal(client.typedAnswer("a".repeat(client.ANSWER_BYTES_MAX + 1)), null);
   assert.equal(client.typedAnswer("é".repeat(client.ANSWER_BYTES_MAX / 2)), "é".repeat(client.ANSWER_BYTES_MAX / 2));
@@ -107,6 +168,46 @@ test("a settled question shows its status and answer, with no answer controls", 
   assert.match(card(question({ status: "answered_in_terminal", answer: "2", settled_ms: NOW })), />Answered in the terminal</);
   assert.deepEqual(client.statusBadge("pending"), { word: "Waiting for you", tone: "warn" });
   assert.deepEqual(client.statusBadge("dismissed"), { word: "Dismissed", tone: "neutral" });
+});
+
+test("a question the master closed says so: withdrawn, asked again as a choice, or answered in its terminal (F12, F14)", () => {
+  assert.deepEqual(client.statusBadge("dismissed", "master"), { word: "Withdrawn by the master", tone: "neutral" });
+  assert.deepEqual(client.statusBadge("dismissed", "replaced"), { word: "Asked again as a choice", tone: "neutral" });
+  assert.deepEqual(client.statusBadge("answered_in_terminal", "relay"), { word: "Answered in the master's terminal", tone: "ok" });
+  assert.deepEqual(client.statusBadge("pending", "master"), { word: "Waiting for you", tone: "warn" }, "a waiting question is never shown as closed");
+  assert.deepEqual(client.statusBadge("dismissed", null), { word: "Dismissed", tone: "neutral" });
+  const withdrawn = card(question({ status: "dismissed", closed_by: "master", settled_ms: NOW }));
+  assert.match(withdrawn, />Withdrawn by the master</);
+  assert.doesNotMatch(withdrawn, />Dismiss</);
+  const relayed = card(question({ status: "answered_in_terminal", closed_by: "relay", answer: "Use SQLite.", settled_ms: NOW }));
+  assert.match(relayed, />Answered in the master&#x27;s terminal</);
+  assert.match(relayed, /<span class="pj-secondary">The master reports: <\/span>Use SQLite\./);
+  assert.match(card(question({ status: "dismissed", closed_by: "replaced", settled_ms: NOW })), />Asked again as a choice</);
+});
+
+test("Dismiss all sends the waiting questions shown, oldest first, at most one page, and says what happened to each", async () => {
+  const shown = [
+    question({ id: 1, status: "answered", answer: "Yes", settled_ms: NOW }),
+    ...Array.from({ length: client.BULK_DISMISS_MAX + 3 }, (_, at) => question({ id: 100 + at, version: at, created_ms: NOW - 1000 + at })),
+  ];
+  const waiting = view.dismissAllOf(view.mergedQuestions({ items: shown, next: null }, []));
+  assert.equal(waiting.length, client.BULK_DISMISS_MAX);
+  assert.equal(client.BULK_DISMISS_MAX, 50);
+  assert.ok(waiting.every((item) => item.status === "pending"));
+  assert.deepEqual(waiting.slice(0, 2).map((item) => item.id), [100, 101]);
+  assert.deepEqual(view.dismissAllOf([question({ status: "answered" })]), []);
+  assert.equal(client.bulkDismissedLine({ settled: [1, 2], stale: [], refused: [] }), "Dismissed 2 questions.");
+  assert.equal(
+    client.bulkDismissedLine({ settled: [1], stale: [3], refused: [{ id: 4, code: "questions_delivery_full" }] }),
+    "Dismissed 1 question. 1 changed since you read them. Review them again. 1 could not be dismissed: The master's conversation is full right now. Try again after it reads its messages.",
+  );
+  assert.match(client.bulkDismissNote(3), /^All 3 waiting questions leave the list\. Each agent that asked is told once/);
+  await assert.rejects(async () => client.dismissQuestions([]), /1 to 50 questions/);
+  const source = readFileSync(new URL("../src/api-questions.ts", import.meta.url), "utf8");
+  assert.match(source, /call<QuestionsDismissed>\("desktop_dismiss_questions", \{ items: questions\.map\(\(question\) => \[question\.id, question\.version\]\) \}\)/);
+  const tab = readFileSync(new URL("../src/screens/project/questions.tsx", import.meta.url), "utf8");
+  assert.match(tab, /waiting\.length >= 2 && /);
+  assert.match(tab, /<ConfirmDialog open=\{dismissingAll !== null\}/);
 });
 
 test("a question settled from an older page never stays waiting: the older pages are dropped and read again", () => {
@@ -163,7 +264,7 @@ test("a stale answer says the question changed, and every questions code reads a
   assert.ok(own.includes("owner_busy") && own.includes("versioned_unavailable"), "connection and versioning codes are read too");
   assert.ok(own.length >= 3, `engine questions codes: ${own.length}`);
   const transport = ["questions_request_bounds", "questions_reply_bounds", "questions_request_invalid"];
-  const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_turn_invalid", "questions_page_unavailable"];
+  const askSide = ["questions_ask_invalid", "questions_asker_full", "questions_full", "questions_not_terminal", "questions_notes_invalid", "questions_owner_not_typed", "questions_owner_turn_invalid", "questions_owner_turn_used", "questions_page_unavailable", "questions_replace_invalid"];
   for (const code of askSide) assert.ok(own.includes(code), `${code} is still an engine code; drop it from the ask-side list when it goes`);
   for (const code of own.filter((code) => ![...transport, ...askSide].includes(code))) {
     assert.ok(client.QUESTIONS_REFUSALS.includes(code), `${code} has its own sentence`);
@@ -190,13 +291,62 @@ test("a project's flag counts its pending questions once, with its other unseen 
   assert.deepEqual(Object.fromEntries(flags), { "p-1": 3, "p-2": 1, "p-3": 4 });
   assert.deepEqual([...client.withPendingQuestions(new Map([["p-1", 1]]), new Map([["p-1", 5]]), new Map())], [], "a seen-out count never goes below zero");
   assert.deepEqual([...client.withPendingQuestions(new Map(), new Map(), new Map([["p-9", 1]]))], [["p-9", 1]], "an answered-later question stays counted while pending");
+  const linked = client.unseenQuestionAlerts([{ project_id: "p-7", unseen: 1, questions: 1 }]);
+  assert.deepEqual([...client.withPendingQuestions(new Map([["p-7", 1]]), linked, new Map([["p-7", 1]]))], [["p-7", 1]], "a team question linked into the questions log, its alert unseen, counts once (F12)");
 });
 
 test("the Questions tab sits after Changes and the commands go through the bridge with only ids, version and the choice", async () => {
   const { TABS } = await import("../src/screens/project/index.tsx");
-  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "settings"]);
+  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "metrics", "settings"]);
   const source = readFileSync(new URL("../src/api-questions.ts", import.meta.url), "utf8");
-  assert.match(source, /call<void>\("desktop_answer_question", \{ id, version, option, text \}\)/);
+  assert.match(source, /call<void>\("desktop_answer_question", \{ id, version, picks: choice\.picks, comment: choice\.comment \}\)/);
   assert.match(source, /call<void>\("desktop_dismiss_question", \{ id, version \}\)/);
   assert.match(source, /call<QuestionPage>\("desktop_questions", \{ projectId, after \}\)/);
+});
+
+const { QuestionRow } = await import("../src/screens/team/questions.tsx");
+
+const forbidden = () => { throw new Error("static rendering must not open or answer"); };
+const agentQuestion = (id, asked_for, for_label) => ({
+  id, agent: id, label: `Agent ${id}`, severity: "normal", asked_for, for_label,
+  text: "May I delete the old fixtures?", assumption: null, created_ms: 1, terminal: null,
+});
+const agentRow = (item) => renderToStaticMarkup(createElement(QuestionRow, { projectId: "project-a", question: item, onOpen: forbidden, onAnswered: forbidden }));
+
+test("each question row says whom its asker meant it for (OP-50)", () => {
+  assert.match(agentRow(agentQuestion(1, "me", "Me")), /For: Me</);
+  assert.match(agentRow(agentQuestion(2, "master", "Master")), /For: Master</);
+  const lead = agentRow(agentQuestion(3, "lead", "Ada (@lead-graph)"));
+  assert.match(lead, /For: Ada \(@lead-graph\)</);
+  assert.doesNotMatch(lead, /For: Me</);
+});
+
+test("the Agents toolbar says how many ask the owner, and the drawer counts the open questions in its title", async () => {
+  const inbox = await import("../src/screens/team/questions.tsx");
+  const read = (questions, more, waiting) => ({ project_id: "p", questions: Array.from({ length: questions }, (_, index) => question({ id: index + 1 })), more, waiting: Array.from({ length: waiting }, (_, index) => ({ agent: index + 1, label: `A${index}`, waiting: "question", since_ms: 0, terminal: null })) });
+  assert.equal(inbox.askCount(read(1, 2, 1)), 4);
+  assert.equal(inbox.asksWords(inbox.askCount(read(0, 0, 1))), "1 asks you");
+  assert.equal(inbox.asksWords(3), "3 ask you");
+  assert.equal(inbox.asksWords(0), "no one asks you");
+  assert.throws(() => inbox.asksWords(1.5), /whole number/);
+  assert.equal(inbox.questionsTitle({ shown: { kind: "ok", value: read(0, 0, 2) }, stale: null }), "Questions for you");
+  assert.equal(inbox.questionsTitle({ shown: { kind: "ok", value: read(1, 1, 0) }, stale: null }), "Questions for you (2)");
+  assert.equal(inbox.questionsTitle({ shown: undefined, stale: null }), "Questions for you");
+});
+
+test("a row read later takes the keyboard only while the owner has not put it anywhere in the drawer (MOCKB2-BUTTON-FOCUS)", async () => {
+  const panel = await import("../src/screens/team/questions.tsx");
+  assert.equal(typeof panel.keyboardFree, "function", "the panel decides when a row may take the keyboard");
+  const doc = {};
+  const body = { ownerDocument: doc, closest: () => null };
+  doc.body = body;
+  const drawer = { ownerDocument: doc, contains: (node) => node.inside === true, closest: () => null };
+  const inDrawer = (head) => ({ ownerDocument: doc, inside: true, closest: (selector) => head && selector === ".dialog-head" ? drawer : null });
+  assert.equal(panel.keyboardFree(null, drawer), true, "nothing focused");
+  assert.equal(panel.keyboardFree(body, drawer), true, "the page");
+  assert.equal(panel.keyboardFree(drawer, drawer), true, "the drawer itself");
+  assert.equal(panel.keyboardFree(inDrawer(true), drawer), true, "the drawer's Close button, where a drawer with no field starts");
+  assert.equal(panel.keyboardFree(inDrawer(false), drawer), false, "a button the owner moved to, like Send answer");
+  assert.equal(panel.keyboardFree({ ...inDrawer(true), inside: false }, drawer), false, "another dialog's head");
+  assert.equal(panel.keyboardFree(inDrawer(false), null), false, "no drawer, a control keeps its focus");
 });

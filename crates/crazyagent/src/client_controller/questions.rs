@@ -1,6 +1,6 @@
 use super::*;
 use crate::protocol::ProjectId;
-use crate::questions::{Answer, Page, Settlement};
+use crate::questions::{Answer, BulkDismissal, Page, Settlement};
 
 impl OwnerController {
     fn questions_client(&self) -> Result<&OwnerClient, EngineError> {
@@ -45,6 +45,16 @@ impl OwnerController {
         self.questions_client()?
             .questions_dismiss(id, version)
             .await
+    }
+
+    /// Dismisses up to `LISTED_MAX` owner questions at once, each naming the version the owner
+    /// read. Input: each question's id and version. Output: what happened to each, or a
+    /// `QUESTIONS_CODES` refusal.
+    pub async fn questions_dismiss_many(
+        &self,
+        items: Vec<(u64, u64)>,
+    ) -> Result<BulkDismissal, EngineError> {
+        self.questions_client()?.questions_dismiss_many(items).await
     }
 
     /// Counts the questions waiting for the owner per project. Output: the projects that

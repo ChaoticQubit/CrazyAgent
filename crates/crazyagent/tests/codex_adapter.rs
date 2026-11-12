@@ -1,7 +1,9 @@
 use crazyagent::adapters::LINE_BYTES_MAX;
 use crazyagent::adapters::codex::{
-    ApprovalKind, CodexProtocol, Event, FRAME_BYTES_MAX, ProtocolError, State, TurnStatus, WireId,
+    ApprovalKind, CodexProtocol, DEVELOPER_INSTRUCTIONS_BYTES_MAX, Event, FRAME_BYTES_MAX,
+    ProtocolError, State, TurnStatus, WireId,
 };
+use crazyagent::master_frame_limit::{BYTES_MAX, FrameSize};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -24,7 +26,10 @@ fn reply(protocol: &mut CodexProtocol, id: i64, result: Value) -> Vec<Event> {
 }
 
 fn initialized() -> CodexProtocol {
-    let mut protocol = CodexProtocol::new();
+    initialized_from(CodexProtocol::new())
+}
+
+fn initialized_from(mut protocol: CodexProtocol) -> CodexProtocol {
     assert_eq!(request(&protocol.initialize().unwrap())["id"], 1);
     assert_eq!(
         reply(
@@ -65,7 +70,10 @@ fn thread_result() -> Value {
 }
 
 fn idle() -> CodexProtocol {
-    let mut protocol = initialized();
+    idle_from(initialized())
+}
+
+fn idle_from(mut protocol: CodexProtocol) -> CodexProtocol {
     let outgoing = request(&protocol.start_thread(Path::new("/unit/worktree")).unwrap());
     assert_eq!(outgoing["id"], 2);
     assert_eq!(
@@ -213,7 +221,7 @@ fn decoder_preserves_fragmented_utf8_and_multiple_lines() {
 }
 
 #[test]
-fn decoder_enforces_frame_chunk_and_event_bounds() {
+fn decoder_enforces_frame_and_chunk_bounds_and_counts_no_frames() {
     let mut protocol = CodexProtocol::new();
     assert!(
         protocol
@@ -229,8 +237,52 @@ fn decoder_enforces_frame_chunk_and_event_bounds() {
         Err(ProtocolError::FrameTooLarge)
     );
     let mut protocol = initialized();
-    let bytes = wire(json!({"method":"warning","params":{}})).repeat(129);
-    assert_eq!(protocol.receive(&bytes), Err(ProtocolError::Capacity));
+    let bytes = wire(json!({"method":"warning","params":{}})).repeat(10_000);
+    assert!(bytes.len() <= LINE_BYTES_MAX);
+    let events = protocol.receive(&bytes).unwrap();
+    assert_eq!(
+        events.len(),
+        10_000,
+        "one chunk is bounded by bytes, not frames"
+    );
+    assert_eq!(protocol.state(), State::Ready);
+}
+
+/// A long turn ends completed whatever it counts (OB-5e): 10,000 reply deltas, 10,000
+/// server requests, each declined, where the 1,025th used to be refused, and a turn end
+/// listing 10,000 items, where 129 used to be refused. A request id sent twice is still
+/// refused.
+#[test]
+fn a_long_turn_of_ten_thousand_items_and_requests_ends_completed() {
+    let mut protocol = active();
+    let delta = wire(json!({"method":"item/agentMessage/delta","params":{
+        "threadId":"thread-unit","turnId":"turn-unit","itemId":"item-unit","delta":"x"
+    }}));
+    for number in 0..10_000 {
+        let events = protocol.receive(&delta).unwrap();
+        assert!(matches!(&events[..], [Event::AgentMessageDelta { .. }]));
+        let asked = wire(json!({"id":number,"method":"thread/child/cancel","params":{}}));
+        let events = protocol.receive(&asked).unwrap();
+        assert!(matches!(&events[..], [Event::UnsupportedRequest { .. }]));
+        protocol.deny_request(&WireId::Number(number)).unwrap();
+    }
+    assert_eq!(protocol.state(), State::Active);
+    let items: Vec<Value> = (0..10_000).map(|item| json!({"id":item})).collect();
+    let ended = wire(json!({"method":"turn/completed","params":{
+        "threadId":"thread-unit",
+        "turn":{"id":"turn-unit","items":items,"status":"completed"}
+    }}));
+    assert!(ended.len() <= LINE_BYTES_MAX);
+    assert_eq!(
+        protocol.receive(&ended).unwrap(),
+        vec![Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }]
+    );
+    assert_eq!(protocol.state(), State::Idle);
+    let twice = wire(json!({"id":9_999,"method":"thread/child/cancel","params":{}}));
+    assert_eq!(protocol.receive(&twice), Err(ProtocolError::StaleMessage));
     assert_eq!(protocol.state(), State::Failed);
 }
 
@@ -874,4 +926,217 @@ fn unsupported_request_while_idle_is_deniable_and_blocks_new_dispatch() {
         -32601
     );
     assert_eq!(request(&protocol.start_turn("next").unwrap())["id"], 4);
+}
+
+/// A master may start any number of native sub-agents in one turn (OB-5 r2): 1,000 threads
+/// one after another, where the 17th used to end the turn as over capacity, then 100 at
+/// once, where the 17th waiting interrupt did. Each is interrupted, none reaches the turn,
+/// and the turn still ends completed.
+#[test]
+fn a_turn_that_starts_a_thousand_native_sub_agents_still_ends_completed() {
+    let mut protocol = active();
+    let mut next = 4;
+    for index in 0..1_000 {
+        let (thread, turn) = (format!("child-{index}"), format!("child-turn-{index}"));
+        let started = child_turn(&thread, &turn, "turn-unit", "inProgress");
+        assert_eq!(
+            protocol.receive(&started).unwrap(),
+            vec![Event::NativeSubAgentStarted {
+                thread_id: thread.clone(),
+                turn_id: turn.clone()
+            }]
+        );
+        let interrupt = request(&protocol.interrupt_child(&thread, &turn).unwrap());
+        assert_eq!(interrupt["id"], next);
+        assert!(reply(&mut protocol, next, json!({})).is_empty());
+        let ended = child_turn(&thread, &turn, "turn-unit", "interrupted");
+        assert!(protocol.receive(&ended).unwrap().is_empty());
+        next += 1;
+    }
+    for index in 0..100 {
+        let (thread, turn) = (format!("batch-{index}"), format!("batch-turn-{index}"));
+        let started = child_turn(&thread, &turn, "turn-unit", "inProgress");
+        assert_eq!(protocol.receive(&started).unwrap().len(), 1);
+        protocol.interrupt_child(&thread, &turn).unwrap();
+    }
+    for index in 0..100 {
+        assert!(reply(&mut protocol, next + index, json!({})).is_empty());
+    }
+    assert_eq!(protocol.state(), State::Active);
+    let ended = notification("turn/completed", "turn-unit", "completed");
+    assert_eq!(
+        protocol.receive(&ended).unwrap(),
+        vec![Event::TurnCompleted {
+            turn_id: "turn-unit".into(),
+            status: TurnStatus::Completed
+        }]
+    );
+    assert_eq!(protocol.state(), State::Idle);
+}
+
+fn item_started(thread: &str, turn: &str, kind: &str, id: &str) -> Vec<u8> {
+    wire(json!({"method":"item/started","params":{
+        "threadId":thread, "turnId":turn, "startedAtMs":1,
+        "item":{"type":kind,"id":id}
+    }}))
+}
+
+fn tokens_counted(thread: &str, turn: &str) -> Vec<u8> {
+    wire(json!({"method":"thread/tokenUsage/updated","params":{
+        "threadId":thread, "turnId":turn,
+        "tokenUsage":{"last":{"cachedInputTokens":0,"inputTokens":1,"outputTokens":1,
+            "reasoningOutputTokens":0,"totalTokens":2},
+            "total":{"cachedInputTokens":0,"inputTokens":1,"outputTokens":1,
+            "reasoningOutputTokens":0,"totalTokens":2}}
+    }}))
+}
+
+/// The Codex adapter counts the steps of the master step limit (PA-9) as Claude Code's
+/// --max-turns does: one step per model round that started a tool, ended by the token count
+/// Codex 0.164 sends once the round's tools are done. Parallel tools in one round are one
+/// step, a token count with no tool before it (a compaction, the final answer) is none, and
+/// another thread's tools and a later turn's count start from nothing.
+#[test]
+fn a_codex_turn_counts_one_step_per_model_round_that_started_a_tool() {
+    let mut protocol = active();
+    assert_eq!(protocol.steps(), 0);
+    for kind in ["commandExecution", "fileChange", "mcpToolCall"] {
+        let events = protocol
+            .receive(&item_started("thread-unit", "turn-unit", kind, kind))
+            .unwrap();
+        assert_eq!(
+            events,
+            vec![Event::UnsupportedNotification {
+                method: "item/started".into()
+            }]
+        );
+    }
+    assert_eq!(protocol.steps(), 0);
+    protocol
+        .receive(&tokens_counted("thread-unit", "turn-unit"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 1);
+    protocol
+        .receive(&tokens_counted("thread-unit", "turn-unit"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 1);
+    for kind in [
+        "agentMessage",
+        "reasoning",
+        "plan",
+        "userMessage",
+        "contextCompaction",
+    ] {
+        protocol
+            .receive(&item_started("thread-unit", "turn-unit", kind, kind))
+            .unwrap();
+    }
+    protocol
+        .receive(&tokens_counted("thread-unit", "turn-unit"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 1);
+    for kind in [
+        "dynamicToolCall",
+        "collabAgentToolCall",
+        "webSearch",
+        "imageView",
+        "imageGeneration",
+    ] {
+        protocol
+            .receive(&item_started("thread-unit", "turn-unit", kind, kind))
+            .unwrap();
+        protocol
+            .receive(&tokens_counted("thread-unit", "turn-unit"))
+            .unwrap();
+    }
+    assert_eq!(protocol.steps(), 6);
+    protocol
+        .receive(&item_started(
+            "thread-other",
+            "turn-other",
+            "commandExecution",
+            "x",
+        ))
+        .unwrap();
+    protocol
+        .receive(&tokens_counted("thread-other", "turn-other"))
+        .unwrap();
+    assert_eq!(protocol.steps(), 6);
+    let ended = notification("turn/completed", "turn-unit", "completed");
+    protocol.receive(&ended).unwrap();
+    assert_eq!(protocol.state(), State::Idle);
+    assert_eq!(protocol.steps(), 6);
+    let next = request(&protocol.start_turn("unit input").unwrap());
+    let id = next["id"].as_i64().unwrap();
+    reply(
+        &mut protocol,
+        id,
+        json!({"turn":turn("turn-two","inProgress")}),
+    );
+    assert_eq!(protocol.state(), State::Active);
+    assert_eq!(protocol.steps(), 0);
+}
+
+#[test]
+fn a_master_frame_limit_lets_each_option_carry_a_turn_up_to_its_bytes() {
+    assert_eq!(CodexProtocol::new().frame_limit(), FRAME_BYTES_MAX);
+    for limit in FrameSize::ALL {
+        let bytes = limit.bytes();
+        let mut protocol = idle_from(initialized_from(
+            CodexProtocol::new().with_frame_limit(bytes),
+        ));
+        assert_eq!(protocol.frame_limit(), bytes);
+        assert_eq!(
+            protocol.start_turn(&"\"".repeat(bytes / 2)),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(
+            protocol.start_turn(&"x".repeat(bytes + 1)),
+            Err(ProtocolError::FrameTooLarge)
+        );
+        assert_eq!(protocol.state(), State::Idle);
+        let text = "x".repeat(bytes - 1024);
+        let frame = protocol.start_turn(&text).unwrap();
+        assert!(frame.len() <= bytes, "{}", frame.len());
+        assert!(frame.len() > bytes - 1024, "{}", frame.len());
+        assert_eq!(request(&frame)["params"]["input"][0]["text"], json!(text));
+        assert_eq!(protocol.state(), State::TurnStarting);
+    }
+}
+
+#[test]
+fn a_master_frame_limit_past_the_wire_size_starts_a_thread_whose_instructions_escape_past_it() {
+    let instructions = "\"".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
+    let cwd = Path::new("/unit/worktree");
+    let mut protocol = initialized();
+    assert_eq!(
+        protocol.start_instructed_thread(cwd, &instructions),
+        Err(ProtocolError::FrameTooLarge)
+    );
+    assert_eq!(protocol.state(), State::Ready);
+    for limit in [FrameSize::Kib256, FrameSize::Mib1] {
+        let mut protocol = initialized_from(CodexProtocol::new().with_frame_limit(limit.bytes()));
+        let frame = protocol
+            .start_instructed_thread(cwd, &instructions)
+            .unwrap();
+        assert!(frame.len() > FRAME_BYTES_MAX, "{}", frame.len());
+        assert!(frame.len() <= limit.bytes(), "{}", frame.len());
+        assert_eq!(
+            request(&frame)["params"]["developerInstructions"],
+            json!(instructions)
+        );
+        assert_eq!(protocol.state(), State::ThreadStarting);
+    }
+}
+
+#[test]
+#[should_panic]
+fn a_codex_frame_limit_below_the_wire_size_is_refused() {
+    let _ = CodexProtocol::new().with_frame_limit(FRAME_BYTES_MAX - 1);
+}
+
+#[test]
+#[should_panic]
+fn a_codex_frame_limit_past_the_ceiling_is_refused() {
+    let _ = CodexProtocol::new().with_frame_limit(BYTES_MAX + 1);
 }

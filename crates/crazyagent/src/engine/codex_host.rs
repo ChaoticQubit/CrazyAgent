@@ -6,11 +6,14 @@ pub use protocol::{CodexHostBatch, CodexHostProtocol};
 
 use crate::adapters::NativeAction;
 use crate::adapters::codex::{AuthControl, State};
-use crate::adapters::events::ObservedEvent;
+use crate::adapters::events::{EventKind, ObservedEvent, TurnOutcome};
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::engine::claude_host::diagnostic::StreamDiagnostic;
-use crate::protocol::{CredentialRef, RequestId};
+use crate::master_frame_limit::FrameSize;
+use crate::master_step_limit::StepLimit;
+use crate::master_time_limit::START_TIME_MAX;
+use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
 use process::{CodexHostOutput, CodexHostProcess};
@@ -18,8 +21,7 @@ use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-const EVENTS_MAX: usize = 128;
+use std::time::Duration;
 
 pub(in crate::engine) struct CodexHost {
     protocol: CodexHostProtocol,
@@ -29,6 +31,15 @@ pub(in crate::engine) struct CodexHost {
     outbound: VecDeque<Vec<u8>>,
     disconnected: bool,
     diagnostic: StreamDiagnostic,
+    steps: StepStop,
+}
+
+/// The owner's master step limit on one Codex host (PA-9) and whether the host already
+/// interrupted the turn for it.
+#[derive(Clone, Copy, Debug, Default)]
+struct StepStop {
+    limit: StepLimit,
+    stopped: bool,
 }
 
 impl CodexHost {
@@ -38,6 +49,12 @@ impl CodexHost {
         self.process.pid()
     }
 
+    /// Starts the Codex harness under custody and brings its thread to idle. `run_time` is
+    /// the wall clock of the whole run; with none the run has no clock and only its start
+    /// is bounded, by `START_TIME_MAX`. Inputs: the launch, its sandbox, lease, home, action,
+    /// account, the project whose leftover setting and owner view its leftovers follow,
+    /// clock, budget, instructions and the owner's master frame size limit, which bounds every
+    /// frame the host writes. Output: the idle host or a plain code.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine) async fn spawn(
         command: Command,
@@ -46,17 +63,29 @@ impl CodexHost {
         home: PathBuf,
         action: NativeAction,
         account_ref: CredentialRef,
+        project: ProjectId,
+        run_time: Option<Duration>,
         budget: ResourceBudget,
         instructions: &str,
+        frames: FrameSize,
     ) -> Result<Self, EngineError> {
-        let protocol = CodexHostProtocol::new(action, account_ref)?;
+        let mut protocol = CodexHostProtocol::new(action, account_ref)?;
+        protocol.limit_frames(frames.bytes());
         let (command, cwd, tools) = prepare_command(command, &profile, &home)?;
         let command = sandbox
             .wrap(&command)
             .map_err(|_| EngineError("codex_host_sandbox_refused".into()))?;
         assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
         assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
-        let process = CodexHostProcess::spawn_guarded(command, &budget, Some(profile)).await?;
+        let mut process = CodexHostProcess::spawn_guarded(
+            command,
+            &budget,
+            run_time,
+            Some((profile, project)),
+            sandbox.is_unconfined(),
+        )
+        .await?;
+        process.limit_input(frames.bytes());
         let mut host = Self {
             protocol,
             process,
@@ -65,16 +94,36 @@ impl CodexHost {
             outbound: VecDeque::new(),
             disconnected: false,
             diagnostic: StreamDiagnostic::default(),
+            steps: StepStop::default(),
         };
-        let bytes = host.protocol.initialize()?;
-        host.process.send(&bytes).await?;
-        host.wait_for(State::Ready).await?;
-        let bytes = host
-            .protocol
-            .start_instructed_thread(&cwd, instructions, tools)?;
-        host.process.send(&bytes).await?;
-        host.wait_for(State::Idle).await?;
+        let started = host.start(&cwd, instructions, tools);
+        match run_time {
+            Some(_) => started.await?,
+            None => tokio::time::timeout(START_TIME_MAX, started)
+                .await
+                .map_err(|_| EngineError("codex_host_startup_timeout".into()))??,
+        }
+        assert!(host.protocol.state() == State::Idle);
         Ok(host)
+    }
+
+    /// Initializes the harness and starts its instructed thread. Inputs: the host, the
+    /// thread's folder, the instructions and whether tools are on. Output: Ok once the
+    /// thread is idle, or a plain code.
+    async fn start(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+        tools: bool,
+    ) -> Result<(), EngineError> {
+        let bytes = self.protocol.initialize()?;
+        self.process.send(&bytes).await?;
+        self.wait_for(State::Ready).await?;
+        let bytes = self
+            .protocol
+            .start_instructed_thread(cwd, instructions, tools)?;
+        self.process.send(&bytes).await?;
+        self.wait_for(State::Idle).await
     }
 
     /// What this host kept about its app-server stream for the engine log: the protocol
@@ -111,14 +160,60 @@ impl CodexHost {
         self.process.send(&bytes).await
     }
 
+    /// Gives a tools-on master the owner's master step limit, as Claude Code's --max-turns
+    /// does (PA-9): once the turn has taken that many steps, the host interrupts it before
+    /// its next model round, and the interrupted turn ends with the limit's cause,
+    /// `master_step_limit_<steps>`. No limit leaves the turn bounded by its run time only.
+    /// Input: the limit. Output: none.
+    pub(in crate::engine) fn limit_steps(&mut self, limit: StepLimit) {
+        assert!(!self.steps.stopped);
+        self.steps.limit = limit;
+    }
+
     pub(in crate::engine) async fn next_event(&mut self) -> Result<ObservedEvent, EngineError> {
         loop {
             self.flush_outbound().await?;
             if let Some(event) = self.events.pop_front() {
-                return Ok(event);
+                return self.step_end(event);
             }
             self.pump().await?;
+            self.stop_at_step_limit().await?;
         }
+    }
+
+    /// Interrupts the running turn once it has taken the steps its limit allows. Input: the
+    /// host. Output: Ok, or the send's plain code.
+    async fn stop_at_step_limit(&mut self) -> Result<(), EngineError> {
+        let reached = self
+            .steps
+            .limit
+            .steps()
+            .is_some_and(|steps| self.protocol.steps() >= steps);
+        if !reached || self.steps.stopped || self.protocol.state() != State::Active {
+            return Ok(());
+        }
+        let bytes = self.protocol.interrupt()?;
+        self.steps.stopped = true;
+        self.process.send(&bytes).await
+    }
+
+    /// Names the step limit in the end of a turn this host interrupted for it; a turn that
+    /// still completed on its own keeps its end. Input: the event. Output: the event, or
+    /// the limit's cause for the interrupted turn's end.
+    fn step_end(&self, event: ObservedEvent) -> Result<ObservedEvent, EngineError> {
+        let interrupted = matches!(
+            event.kind,
+            EventKind::TurnFinished {
+                outcome: TurnOutcome::Incomplete,
+                ..
+            }
+        );
+        if !(self.steps.stopped && interrupted) {
+            return Ok(event);
+        }
+        let cause = self.steps.limit.cause();
+        assert!(cause.is_some());
+        Err(EngineError(cause.unwrap_or_default()))
     }
 
     pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
@@ -152,6 +247,10 @@ impl CodexHost {
         Ok(())
     }
 
+    /// Takes one chunk of the harness's output, or its exit, into the host's queues. No count
+    /// of events ends a run (OB-5e): one chunk holds at most as many frames as bytes, a turn
+    /// takes the next chunk only once it has read these events, and the process holds the
+    /// rest back. Input: the host. Output: Ok, or a plain code.
     async fn pump(&mut self) -> Result<(), EngineError> {
         self.flush_outbound().await?;
         if self.disconnected {
@@ -164,18 +263,13 @@ impl CodexHost {
                     self.diagnostic.fault = Some(error.0.clone());
                     self.diagnostic.message = self.protocol.refused().map(str::to_owned);
                 })?;
-                if self.events.len() + batch.events.len() > EVENTS_MAX
-                    || self.auth.len() + batch.auth.len() > EVENTS_MAX
-                    || self.outbound.len() + batch.outbound.len() > EVENTS_MAX
-                {
-                    return Err(EngineError("codex_host_event_capacity".into()));
-                }
+                assert!(batch.events.len() + batch.auth.len() <= bytes.len());
+                assert!(batch.outbound.len() <= batch.events.len());
                 self.events.extend(batch.events);
                 self.auth.extend(batch.auth);
                 self.outbound.extend(batch.outbound);
                 self.flush_outbound().await?;
-                assert!(self.events.len() <= EVENTS_MAX);
-                assert!(self.auth.len() <= EVENTS_MAX);
+                assert!(self.outbound.is_empty());
             }
             CodexHostOutput::Exited => {
                 self.events.push_back(self.protocol.disconnect());

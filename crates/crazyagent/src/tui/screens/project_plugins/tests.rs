@@ -1004,6 +1004,7 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                 Request::Process(query) => connection.process(*query).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
+                Request::TeamGraph { project } => connection.team_graph(project).unwrap(),
                 Request::Recovery(query) => connection.recovery(*query).unwrap(),
                 Request::Settings(job) => {
                     sent.push(match job.as_ref() {
@@ -1015,6 +1016,12 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                     });
                     connection.settings(*job).unwrap();
                 }
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
+                    connection.questions(*query).unwrap();
+                }
+                Request::Roadmap(query) => connection.roadmap(*query).unwrap(),
                 other => panic!("the project page never sends {other:?}"),
             }
         }
@@ -1157,6 +1164,69 @@ async fn the_project_settings_tab_switches_and_adds_through_the_engine() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_remove_question_warning_stays_visible_at_80x24() {
+    let engine = engine().await;
+    engine
+        .controller
+        .add_mcp_server(
+            here(),
+            "postgres".into(),
+            ServerSpec::Stdio {
+                command: "/bin/echo".into(),
+                args: vec!["hello".into()],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 80;
+    ctx.height = 24;
+    let screen = open(
+        &Place::Project {
+            id: project(),
+            name: "Tidepool".into(),
+            tab: ProjectTab::Settings,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+    for _ in 0..6 {
+        if render(&mut shell, 80, 24).contains("> postgres") {
+            break;
+        }
+        shell.key(Key::Down);
+    }
+    assert!(
+        render(&mut shell, 80, 24).contains("> postgres"),
+        "the server is selected"
+    );
+
+    shell.key(Key::Char('d'));
+    let shown = render(&mut shell, 80, 24);
+    assert!(shown.contains("Remove postgres?"), "{shown}");
+    assert!(
+        shown.contains("Its saved secrets are deleted."),
+        "the remove warning stays visible at 80x24: {shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list() {
     let engine = engine().await;
     engine
@@ -1238,6 +1308,123 @@ async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list(
     assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keys_typed_into_the_hidden_folders_box_never_reach_the_plugins_list() {
+    let engine = engine().await;
+    engine
+        .controller
+        .add_mcp_server(
+            here(),
+            "postgres".into(),
+            ServerSpec::Stdio {
+                command: "/bin/echo".into(),
+                args: vec!["hello".into()],
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('k'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Hidden folders"), "the box opens: {shown}");
+
+    let typed = "/Users/x/vau[l]t?";
+    for character in typed.chars() {
+        shell.key(Key::Char(character));
+    }
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains(typed),
+        "every typed key reaches the hidden box: {shown}"
+    );
+    assert!(
+        !shown.contains("This help") && shown.contains("Hidden folders"),
+        "the banner keys fire nothing while typing: {shown}"
+    );
+    let sent = drive(&mut shell, &mut connection).await;
+    assert!(!sent.contains(&"plugin change"), "{sent:?}");
+    assert_eq!(shell.place(), Some(settings));
+    let servers = engine
+        .controller
+        .plugin_servers(Some(project()))
+        .await
+        .unwrap();
+    assert!(
+        servers.iter().any(|server| server.name == "postgres"),
+        "typing in the hidden box removed no server"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quitting_with_the_hidden_box_open_warns_the_hidden_folders_are_unsaved() {
+    let engine = engine().await;
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('k'));
+    assert!(
+        render(&mut shell, 100, 40).contains("Hidden folders"),
+        "the hidden box opens"
+    );
+
+    shell.key(Key::Ctrl('q'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Your hidden folders will not be saved."),
+        "quit warns the open hidden box is a draft: {shown}"
+    );
+    assert_eq!(shell.place(), Some(settings));
+}
+
 #[test]
 fn l_asks_for_the_tools_page_with_every_server_starting_on_the_selected_one() {
     let mut view = loaded();
@@ -1282,6 +1469,15 @@ async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&
                 Request::Process(query) => connection.process(*query).unwrap(),
                 Request::Setup(query) => connection.project_setup(query).unwrap(),
                 Request::Master(job) => connection.master(*job).unwrap(),
+                Request::TeamGraph { project } => connection.team_graph(project).unwrap(),
+                Request::Recovery(query)
+                    if matches!(
+                        *query,
+                        crate::tui::client::recovery::RecoveryQuery::Read { .. }
+                    ) =>
+                {
+                    connection.recovery(*query).unwrap();
+                }
                 Request::Settings(job) => {
                     sent.push(match job.as_ref() {
                         SettingsJob::Plugin(_) => "plugin change",
@@ -1289,6 +1485,19 @@ async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&
                         _ => "settings",
                     });
                     connection.settings(*job).unwrap();
+                }
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
+                    connection.questions(*query).unwrap();
+                }
+                Request::Roadmap(query)
+                    if matches!(
+                        *query,
+                        crate::tui::client::roadmap::RoadmapQuery::Read { .. }
+                    ) =>
+                {
+                    connection.roadmap(*query).unwrap();
                 }
                 other => panic!("the plugins pages never send {other:?}"),
             }

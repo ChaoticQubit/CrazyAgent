@@ -105,7 +105,8 @@ impl OwnerController {
 
     /// Reads a project's agent policy (DEC-101, DEC-102): its access level, every level with
     /// its availability here, and the toolchains its agents may read. Takes the project id.
-    /// Returns the policy view, or the engine's refusal for an unknown project.
+    /// Returns the policy view, or the engine's refusal: `invalid_project` for an unknown
+    /// project, `project_setup_missing` for one made before project setup.
     pub async fn project_agent_policy(
         &mut self,
         project_id: ProjectId,
@@ -174,6 +175,27 @@ impl OwnerController {
             .data
         {
             OwnerData::ResearchJobs { jobs, .. } => Ok(jobs),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Lists what happened in a project, newest first, as the Overview shows it.
+    /// Takes the project id and the most events to return, 1 to `activity::LIST_MAX`.
+    /// Returns the events, at most one engine frame of them, and whether older ones were
+    /// left out.
+    pub async fn project_activity(
+        &mut self,
+        project_id: ProjectId,
+        limit: usize,
+    ) -> Result<crate::activity::Listed, EngineError> {
+        match self
+            .read(OwnerRead::ProjectActivity { project_id, limit })
+            .await?
+            .data
+        {
+            OwnerData::ProjectActivity { items, more, .. } => {
+                Ok(crate::activity::Listed { items, more })
+            }
             _ => Err(EngineError("controller_read_response".into())),
         }
     }
@@ -286,6 +308,24 @@ impl OwnerController {
         setup: ProjectSetup,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
+        self.confirm_project_setup(project_id, expected_revision, name, setup, None, generation)
+            .await
+    }
+
+    /// Changes a project's setup as [`Self::update_project_setup`] does and, with `kept`,
+    /// links the files the setup mapping found that the owner kept in place of earlier links.
+    /// Takes the project id, the setup revision the owner edited, an optional new name, the
+    /// new setup, the kept files (none leaves the links alone) and the client generation.
+    /// Returns the actual owner response.
+    pub async fn confirm_project_setup(
+        &mut self,
+        project_id: ProjectId,
+        expected_revision: u64,
+        name: Option<String>,
+        setup: ProjectSetup,
+        kept: Option<Vec<crate::project_setup::KeptFile>>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
         self.project_setup(project_id.clone()).await?;
         self.begin_mutation(
             OwnerMutation::UpdateProjectSetup {
@@ -293,6 +333,7 @@ impl OwnerController {
                 expected_revision,
                 name,
                 setup,
+                kept,
             },
             generation,
         )?;
@@ -309,6 +350,48 @@ impl OwnerController {
     ) -> Result<OwnerResponse, EngineError> {
         self.project_setup(project_id.clone()).await?;
         self.begin_mutation(OwnerMutation::RemoveProject { project_id }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Deletes a project with its files: the engine stops its agents, moves its folders to
+    /// the Trash and removes its records, only when the typed name is the project's exact
+    /// name. Takes the project id, the name the owner typed and the client generation.
+    /// Returns the actual owner response; a refusal names its plain code.
+    pub async fn delete_project(
+        &mut self,
+        project_id: ProjectId,
+        name: String,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::DeleteProject { project_id, name },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Moves or copies a project kept where it is into the projects home: the engine waits
+    /// for its team to stop, moves the folder and points the project and its agents' copies
+    /// at the new place. Takes the project id, Move or Copy, the soft refusals the owner
+    /// chose to go past and the client generation. Returns the actual owner response; a
+    /// refusal names its plain code.
+    pub async fn move_project_home(
+        &mut self,
+        project_id: ProjectId,
+        mode: crate::projects_home::AddMode,
+        overrides: Vec<crate::projects_home::AddOverride>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_setup(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            },
+            generation,
+        )?;
         self.send_pending().await
     }
 

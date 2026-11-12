@@ -180,7 +180,7 @@ impl OwnerClient {
                 .write_all(&frame)
                 .await
                 .map_err(|_| failure("account_profile_owner_unavailable"))?;
-            let first = read_wire(&mut stream).await?;
+            let first = read_wire(self, &mut stream, read_kind(&action)).await?;
             let result = if let WireReply::AcceptSecret {
                 request_id,
                 database_instance,
@@ -209,7 +209,7 @@ impl OwnerClient {
                 .await;
                 bytes.fill(0);
                 write.map_err(|_| unknown())?;
-                let result = read_wire(&mut stream).await?;
+                let result = read_wire(self, &mut stream, None).await?;
                 if reply_epoch(&result).is_some_and(|value| value != engine_epoch) {
                     return Err(unknown());
                 }
@@ -371,39 +371,31 @@ pub(super) async fn serve(
                     reply.connection.auth,
                     ModelAuthentication::NativeManaged { .. }
                 ) {
-                    let capability = match reply.connection.harness.as_str() {
-                        "codex" => {
-                            let producer = if runtime.registered_codex_executable().is_ok() {
-                                ProducerCapability::Available
-                            } else {
-                                unavailable("native_auth_host_unavailable")
-                            };
-                            vec![
-                                ManagedAuthCapability {
-                                    method: NativeAuthMethod::CodexBrowser,
-                                    producer: producer.clone(),
-                                },
-                                ManagedAuthCapability {
-                                    method: NativeAuthMethod::CodexDeviceCode,
-                                    producer: producer.clone(),
-                                },
-                                ManagedAuthCapability {
-                                    method: NativeAuthMethod::CodexExisting,
-                                    producer,
-                                },
-                            ]
-                        }
-                        "claude" => vec![ManagedAuthCapability {
-                            method: NativeAuthMethod::ClaudeOfficial,
-                            producer: if runtime.registered_claude_executable().is_ok() {
-                                ProducerCapability::Available
-                            } else {
-                                unavailable("claude_official_producer_unavailable")
-                            },
-                        }],
-                        _ => Vec::new(),
+                    let harness = reply.connection.harness.as_str();
+                    let catalog = if harness == "claude" {
+                        "claude-code"
+                    } else {
+                        harness
                     };
-                    reply.managed = capability;
+                    let pinned = match harness {
+                        "codex" => runtime.registered_codex_executable().is_ok(),
+                        "claude" => runtime.registered_claude_executable().is_ok(),
+                        _ => true,
+                    };
+                    if !pinned && crate::harnesses::finding::CHOOSABLE.contains(&catalog) {
+                        let _ = runtime.look_again(catalog);
+                    }
+                    let producer = match harness {
+                        "codex" if runtime.registered_codex_executable().is_ok() => {
+                            ProducerCapability::Available
+                        }
+                        "codex" => unavailable("native_auth_host_unavailable"),
+                        "claude" if runtime.registered_claude_executable().is_ok() => {
+                            ProducerCapability::Available
+                        }
+                        _ => unavailable("claude_official_producer_unavailable"),
+                    };
+                    reply.managed = managed_capabilities(harness, &producer);
                 }
                 Ok(WireReply::Capabilities { reply })
             }
@@ -518,9 +510,13 @@ async fn write_wire(stream: &mut UnixStream, reply: &WireReply) -> Result<(), En
         .map_err(io_error)
 }
 
-async fn read_wire(stream: &mut UnixStream) -> Result<WireReply, EngineError> {
+async fn read_wire(
+    client: &OwnerClient,
+    stream: &mut UnixStream,
+    read: Option<&str>,
+) -> Result<WireReply, EngineError> {
     let frame = read_frame(stream).await.map_err(|_| unknown())?;
-    serde_json::from_slice(&frame[4..]).map_err(|_| unknown())
+    serde_json::from_slice(&frame[4..]).map_err(|error| client.skewed_reply(&error, read, unknown))
 }
 
 fn reply_epoch(reply: &WireReply) -> Option<&str> {
@@ -601,6 +597,29 @@ fn unavailable(code: &str) -> ProducerCapability {
     ProducerCapability::Unavailable { code: code.into() }
 }
 
+/// The managed sign-ins one harness offers, one per way it has (DEC-141 PA-13), each with the
+/// harness's producer state. Inputs: the connection's harness and its producer. Output: the
+/// capabilities in `SignInWay::ALL` order, empty for a harness with no managed sign-in.
+fn managed_capabilities(
+    harness: &str,
+    producer: &ProducerCapability,
+) -> Vec<ManagedAuthCapability> {
+    let offered: Vec<ManagedAuthCapability> = crate::engine::owner::native_auth::SignInWay::ALL
+        .into_iter()
+        .filter_map(|way| NativeAuthMethod::for_way(harness, way))
+        .map(|method| ManagedAuthCapability {
+            method,
+            producer: producer.clone(),
+        })
+        .collect();
+    assert!(
+        offered
+            .iter()
+            .all(|entry| entry.method.harness() == harness)
+    );
+    offered
+}
+
 fn public_code(error: EngineError) -> String {
     if error.0.len() <= 96
         && error
@@ -614,6 +633,15 @@ fn public_code(error: EngineError) -> String {
     }
 }
 
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Capabilities => Some("account_profile.capabilities"),
+        _ => None,
+    }
+}
+
 fn unknown() -> EngineError {
     failure("account_profile_outcome_unknown")
 }
@@ -623,4 +651,35 @@ fn hex_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod managed_capabilities_tests {
+    use super::*;
+
+    #[test]
+    fn both_subscription_harnesses_offer_a_browser_sign_in_and_a_check() {
+        let methods = |harness: &str| -> Vec<NativeAuthMethod> {
+            managed_capabilities(harness, &ProducerCapability::Available)
+                .into_iter()
+                .map(|entry| entry.method)
+                .collect()
+        };
+        assert_eq!(
+            methods("claude"),
+            [
+                NativeAuthMethod::ClaudeOfficial,
+                NativeAuthMethod::ClaudeExisting
+            ]
+        );
+        assert_eq!(
+            methods("codex"),
+            [
+                NativeAuthMethod::CodexBrowser,
+                NativeAuthMethod::CodexDeviceCode,
+                NativeAuthMethod::CodexExisting
+            ]
+        );
+        assert!(methods("rcli").is_empty());
+    }
 }

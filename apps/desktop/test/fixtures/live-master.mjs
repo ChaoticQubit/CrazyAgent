@@ -7,13 +7,14 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
-import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
+import { TerminalMenu, TerminalPanel, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
 let menuRoot = null;
 let terminal = null;
+let seen = null;
 export const notes = [];
 export const typed = [];
 let starts = 0;
@@ -40,14 +41,23 @@ function page() {
   return document.getElementById("panel");
 }
 
-function data(master, on, team = undefined) {
+/** Builds one ready harness catalog entry. Inputs: the id, the name and its aliases.
+ * Output: the entry as the engine lists it. */
+const entry = (id, name, aliases = []) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
+  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases });
+
+/** The engine's harness catalog as the project page reads it: Claude Code answers to its
+ * alias "claude", as plans saved by older builds store it. */
+const CATALOG = [entry("codex", "Codex"), entry("claude-code", "Claude Code", ["claude"]), entry("rcli", "RCLI")];
+
+function data(master, on, team = undefined, catalog = undefined) {
   const setup = master === undefined ? undefined : {
     kind: "ok",
     value: { project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research: [], pool: null, documents: [], folder: "/tmp/alpha", created_ms: 0, revision: 1,
       team: { master, master_tools: true, sub_harnesses: [] } },
   };
   return {
-    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
+    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: catalog === undefined ? undefined : { kind: "ok", value: catalog },
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
     team: team !== undefined ? { result: team, at: 0 } : on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
     reloadTeam: () => { reloads += 1; },
@@ -62,22 +72,62 @@ const node = { id: "team-1", kind: "master", parent: null, label: "Master", harn
 
 /** Mounts the project's master area for a team plan whose master is the given harness, or
  * whose setup is still loading when it is undefined, with the engine's live switch read as
- * `on` (true, false or null for never set), or the team not read yet when it is undefined. */
-export function mountArea(master, on) {
+ * `on` (true, false or null for never set), or the team not read yet when it is undefined,
+ * and the harness catalog read unless `catalog` is false. */
+export function mountArea(master, on, catalog = true) {
   const panel = page();
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on) })));
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
+}
+
+/** Mounts the project's master area with no master known yet, the plan not read. Output:
+ * none. */
+export function mountAreaNoMaster() {
+  const panel = page();
+  root = createRoot(panel);
+  const read = data("codex", true, undefined, CATALOG);
+  read.setup = { kind: "not_ready" };
+  flushSync(() => root.render(createElement(MasterArea, { data: read })));
+}
+
+/** Mounts the project's master area with the Live terminal setting Off. Inputs: the master
+ * harness and the engine's run flag. Output: none. */
+export function mountAreaOff(master, on) {
+  const panel = page();
+  root = createRoot(panel);
+  const team = { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, master_live_terminal: false }) };
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, team, CATALOG) })));
+}
+
+/** Mounts the project's master area for a team stopped by Stop all. Inputs: the master
+ * harness and the engine's live switch. Output: none. */
+export function mountAreaStopped(master, on) {
+  const panel = page();
+  root = createRoot(panel);
+  const team = { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, paused: true }) };
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, team, CATALOG) })));
+}
+
+/** Renders the mounted master area again with the engine's live switch read as `on`, as the
+ * team read after an idle stop does. Inputs: the master harness, the switch and more fields
+ * of the read. Output: none. */
+export function readSwitch(master, on, patch = {}) {
+  const read = data(master, on, undefined, CATALOG);
+  read.team = { result: { kind: "ok", value: teamStatus({ live_master: on, live_problem: null, ...patch }) }, at: 1 };
+  flushSync(() => root.render(createElement(MasterArea, { data: read })));
 }
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
  * running before the terminal opens, starting, refused with an engine code, or stopped with
- * the engine's reason when the code is given, with the team status read so far, if any. */
+ * the engine's reason when the code is given, idle-stopped when the state says so, with the
+ * team status read so far, if any. */
 export function mountView(state, code = "", team = undefined) {
   const panel = page();
   const live = state === "running" ? { kind: "running", node }
     : state === "waiting" ? { kind: "running", node: null }
     : state === "refused" ? { kind: "refused", code, copy: "The engine refused." }
-    : state === "stopped" ? { kind: "stopped", problem: code || null }
+    : state === "stopped" ? { kind: "stopped", problem: code || null, idle: false }
+    : state === "idle-stopped" ? { kind: "stopped", problem: code, idle: true }
     : { kind: state };
   root = createRoot(panel);
   flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex", undefined, team), harness: "codex", live, onStart: async () => { starts += 1; } })));
@@ -105,6 +155,51 @@ export function click(text) {
   const button = [...document.querySelectorAll("button")].find((item) => item.textContent.trim() === text);
   if (!button) return false;
   flushSync(() => button.click());
+  return true;
+}
+
+/** Puts keyboard focus on the button with this exact text, as Tab does. A mouse click in the
+ * app's web view leaves focus where it was. Output: whether the button holds focus. */
+export function focusButton(text) {
+  const button = [...document.querySelectorAll("button")].find((item) => item.textContent.trim() === text);
+  button?.focus();
+  return button !== undefined && document.activeElement === button;
+}
+
+/** Leaves focus on the page, where a mouse click in the app's web view finds it. Output:
+ * whether the page holds focus. */
+export function leaveFocus() {
+  document.activeElement?.blur();
+  return document.activeElement === document.body;
+}
+
+/** Puts keyboard focus on the drawer's Live terminal switch, as Tab does. Output: whether the
+ * switch holds focus. */
+export function focusSwitch() {
+  const field = document.getElementById("tg-live-terminal-alpha");
+  field?.focus();
+  return field !== null && document.activeElement === field;
+}
+
+/** Reads the drawer's Live terminal row. Output: the switch's aria-disabled value and the
+ * row's text. */
+export function liveTerminalRow() {
+  const field = document.getElementById("tg-live-terminal-alpha");
+  return { disabled: field?.getAttribute("aria-disabled") ?? null, text: field?.closest(".set-row")?.textContent ?? "" };
+}
+
+/** Where the Master settings drawer and keyboard focus are. Output: whether the drawer is open
+ * and the focused element's id and text. */
+export function focusState() {
+  const active = document.activeElement;
+  return { drawer: document.querySelector("dialog.drawer")?.open === true, id: active?.id ?? "", text: active?.textContent?.trim() ?? "" };
+}
+
+/** Closes the Master settings drawer with its Close button. Output: whether one was open. */
+export function closeDrawer() {
+  const close = document.querySelector('dialog.drawer [aria-label="Close"]');
+  if (!close) return false;
+  flushSync(() => close.click());
   return true;
 }
 
@@ -198,6 +293,12 @@ export function clearSelection() {
   terminal.clearSelection();
 }
 
+/** Whether the panel's xterm settings let a right-click replace the selection with the word
+ * under the pointer. Output: the setting as `terminalOptions` gives it. */
+export function rightClickSelectsWord() {
+  return terminalOptions().rightClickSelectsWord;
+}
+
 /** The text the routed keys typed, in order. */
 export function typedText() {
   return [...typed];
@@ -241,5 +342,46 @@ export function menuView() {
     panel: box(document.querySelector(".tg-terminal")),
     screen: box(document.querySelector("#screen .xterm-screen")),
     notes: [...notes],
+  };
+}
+
+/** Mounts the real agent terminal panel for a team node whose terminal has the given name,
+ * keyed by the node as the team page keys it. The page has no engine bridge, so the real
+ * xterm opens and the attach then fails. */
+export function mountPanel(name) {
+  root = createRoot(page());
+  seen = null;
+  retarget(name);
+}
+
+/** Renders the mounted panel again for the same node with this terminal, as a team poll
+ * does when the node's terminal changes or stays the same. */
+export function retarget(name) {
+  flushSync(() => root.render(createElement(TerminalPanel, { key: node.id, node: { ...node, terminal: name } })));
+}
+
+/** Waits until the panel's screen holds an opened xterm terminal other than the one this
+ * last saw, whether or not the earlier one is still in the page, and remembers it. */
+export async function newTerminal() {
+  const fresh = () => [...document.querySelectorAll(".tg-terminal-screen .xterm")].find((element) => element !== seen);
+  for (let waited = 0; !fresh(); waited += 10) {
+    if (waited > 3000) throw new Error("no new terminal opened");
+    await new Promise((done) => setTimeout(done, 10));
+  }
+  seen = fresh();
+}
+
+/** Right-clicks the middle of the panel's terminal screen, as the owner does. */
+export function rightClick() {
+  const screen = document.querySelector(".tg-terminal-screen");
+  const box = screen.getBoundingClientRect();
+  flushSync(() => screen.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 })));
+}
+
+/** Whether the panel's right-click menu is open and whether focus is on one of its items. */
+export function panelView() {
+  return {
+    menu: Boolean(document.querySelector(".tg-terminal-menu")),
+    menuFocus: Boolean(document.activeElement?.closest(".tg-terminal-menu")),
   };
 }

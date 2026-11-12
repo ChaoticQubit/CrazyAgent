@@ -178,3 +178,39 @@ end(state, "sdk-two");
 assert.deepEqual(state.complete("two", "completed"), [{ kind: "completed", turn_id: "two", status: "succeeded" }]);
 }
 });
+test("a failed turn names the provider limit or rejected key the SDK reported, and nothing else names one", () => {
+for (const [message, failure] of [
+["OpenAI request failed (HTTP 429): Rate limit reached for requests", "rate_limited"],
+["OpenAI request failed (HTTP 429): You exceeded your current quota, please check your plan and billing details.", "quota_exhausted"],
+["Anthropic request failed (HTTP 402): payment required", "quota_exhausted"],
+["Anthropic request failed (HTTP 400): Your credit balance is too low to access the Anthropic API.", "quota_exhausted"],
+["OpenRouter request failed: HTTP 401", "invalid_authentication"],
+["Google request failed (HTTP 403): API key not valid", "invalid_authentication"],
+["openai-compatible request failed: HTTP 429", "rate_limited"],
+["OpenAI request failed (HTTP 400): Invalid request", undefined],
+["OpenAI request failed (HTTP 500): server error", undefined],
+["The model said: OpenAI request failed (HTTP 429)", undefined],
+["stream closed unexpectedly", undefined],
+]) {
+const state = new SdkTurnProjection();
+state.admit(prompt("one")); start(state, "one");
+assert.equal(state.event({ type: "run:error", error: message }).length, 1, message);
+end(state, "sdk-one", "failed");
+const expected = { kind: "completed", turn_id: "one", status: "failed" };
+if (failure) expected.failure = failure;
+assert.deepEqual(state.complete("one", "failed"), [expected], message);
+}
+const state = new SdkTurnProjection();
+state.admit(prompt("one"));
+state.start("one");
+assert.equal(state.event({ type: "run:error", error: "OpenAI request failed (HTTP 429): before the turn" }).length, 1);
+assert.deepEqual(state.event({ type: "turn:start", turnId: "sdk-one" }), []);
+end(state, "sdk-one");
+assert.equal(state.event({ type: "run:error", error: "OpenAI request failed (HTTP 429): after the turn" }).length, 1);
+assert.deepEqual(state.complete("one", "completed"), [{ kind: "completed", turn_id: "one", status: "succeeded" }]);
+const late = new SdkTurnProjection();
+late.admit(prompt("two")); start(late, "two");
+late.event({ type: "run:error", error: "OpenAI request failed (HTTP 429): limited" });
+end(late, "sdk-two", "cancelled");
+assert.deepEqual(late.complete("two", "cancelled"), [{ kind: "completed", turn_id: "two", status: "cancelled" }]);
+});

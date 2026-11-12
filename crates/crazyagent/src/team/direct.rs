@@ -1,7 +1,7 @@
 use super::{AgentRole, DIRECT_INPUT_BYTES_MAX, DirectInput, bound_text, error};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 pub const PENDING_PER_PROJECT_MAX: i64 = 200;
 pub const NOTES_PER_TURN_MAX: i64 = 20;
@@ -36,9 +36,11 @@ pub fn erase_typed_input(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Records one prompt the owner sent to a team sub-agent with an explicit send, on the
-/// sub-agent's current task, for the master's next turn. Prompts to a master need no note.
-/// Inputs: the engine connection, the team agent id, the prompt and the time. Output: the
-/// recorded prompt, or none for a master, an unknown agent, a blank prompt or a full queue.
+/// sub-agent's current task, for the master's next turn, and keeps it in the agent's Messages
+/// timeline in the same transaction; a full note queue still keeps it there. Prompts to a
+/// master need no note. Inputs: the engine connection, the team agent id, the prompt and the
+/// time. Output: the recorded prompt, or none for a master, an unknown agent, a blank prompt
+/// or a full queue.
 pub fn record(
     connection: &Connection,
     agent: i64,
@@ -66,7 +68,17 @@ pub fn record(
     let Ok(project) = ProjectId::new(project) else {
         return Ok(None);
     };
-    let pending: i64 = connection
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)?;
+    super::agent_messages::record(
+        &tx,
+        &project,
+        agent,
+        super::agent_messages::Said::Prompt,
+        text,
+        at_ms,
+    )?;
+    let pending: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM team_owner_prompts WHERE project=?1",
             [project.as_str()],
@@ -74,14 +86,15 @@ pub fn record(
         )
         .map_err(error)?;
     if pending >= PENDING_PER_PROJECT_MAX {
+        tx.commit().map_err(error)?;
         return Ok(None);
     }
-    connection
-        .execute(
-            "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![project.as_str(), agent, task, harness, text, at_ms],
-        )
-        .map_err(error)?;
+    tx.execute(
+        "INSERT INTO team_owner_prompts(project,agent,task,harness,text,created_ms) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![project.as_str(), agent, task, harness, text, at_ms],
+    )
+    .map_err(error)?;
+    tx.commit().map_err(error)?;
     Ok(Some(DirectInput {
         project,
         agent,

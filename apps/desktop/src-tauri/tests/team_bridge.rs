@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 14] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
@@ -22,6 +22,7 @@ const COMMANDS: [&str; 13] = [
     "desktop_team_keep_warm",
     "desktop_team_time_limits",
     "desktop_team_on_harness_switch",
+    "desktop_team_apply_harness_switch",
     "desktop_team_finished_agents",
     "desktop_team_live_master",
     "desktop_team_pause",
@@ -578,8 +579,8 @@ fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls
 
 async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     use crazyagent::coord::settings::{
-        CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
-        SubagentMode,
+        CoordSettings, Delivery, HarnessKind, HeavyLane, Nudges, Overlaps, QuestionsTo, RoleSkills,
+        SharedResource, SubagentMode, TaskStart, TerminalDisplay,
     };
     use crazyagent::coord::tool_switches::Switch;
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
@@ -659,6 +660,13 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
             lead: Some(Vec::new()),
             worker: Some(vec!["release-notes".into()]),
         },
+        terminal_display: TerminalDisplay::Fullscreen,
+        task_start: TaskStart::Off,
+        heavy_lane: HeavyLane::Two,
+        shared_resources: vec![SharedResource {
+            name: "ollama".into(),
+            slots: 1,
+        }],
     };
     for receipt in [
         bridge.team_coordination(&id, chosen.clone(), 2).await?,
@@ -684,6 +692,7 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     let saved = bridge.team_status(&id).await?.coordination.unwrap();
     assert_eq!(saved.settings, chosen);
+    assert!(saved.lane.running.is_empty() && saved.lane.waiting.is_empty());
     let row = |harness: HarnessKind| {
         let row = saved
             .harnesses
@@ -768,6 +777,62 @@ async fn new_folder_limits(root: &Path) -> Result<(), Box<dyn Error>> {
         crazyagent::team::NEW_FOLDER_FILES_CHOICES[3]
     );
     Ok(())
+}
+
+/// Sends every Terminals per window choice through the desktop bridge to the real engine
+/// and reads each back the way a terminal wall window reads it and in the team status the
+/// Agent settings show; Six until the owner picks another. Takes the engine root. Returns
+/// any failure.
+async fn terminals_per_window_choices(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::team::TerminalsPerWindow::{Four, Nine, Six};
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let spec = ProjectSpec {
+        name: "Wall".into(),
+        repositories: vec![],
+    };
+    let created = bridge.setup_project(spec, setup(), 1).await?;
+    assert!(
+        matches!(created.outcome, ActionOutcome::Applied),
+        "{created:?}"
+    );
+    let id = created.intent.project_id.clone().unwrap();
+    assert_eq!(bridge.terminals_per_window(&id).await?, Six);
+    assert_eq!(bridge.team_status(&id).await?.terminals_per_window, Six);
+    for (generation, choice) in (2..).zip([Four, Nine, Six, Nine]) {
+        let saved = bridge
+            .team_terminals_per_window(&id, choice, generation)
+            .await?;
+        assert!(matches!(saved.outcome, ActionOutcome::Applied), "{saved:?}");
+        assert_eq!(bridge.terminals_per_window(&id).await?, choice);
+        assert_eq!(bridge.team_status(&id).await?.terminals_per_window, choice);
+    }
+    Ok(())
+}
+
+/// Every Terminals per window choice the desktop sends is saved, read back by the wall and
+/// shown (owner 2026-11-07, OS-4, every-option rule).
+#[tokio::test]
+async fn desktop_saves_and_reads_every_terminals_per_window_choice() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-wall-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = engine_support::engine_config(root.path());
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        terminals_per_window_choices(root.path()),
+    )
+    .await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
 }
 
 /// Every New folder limit choice the desktop sends is saved and shown (fix/changes-vs-owner-branch

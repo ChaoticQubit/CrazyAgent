@@ -114,7 +114,7 @@ enum RecordAction {
 }
 
 pub(super) struct State {
-    native_auth: native_auth::State,
+    pub(super) native_auth: native_auth::State,
     profile: account_profile::Profile,
     managed_setup: Option<managed_setup::Setup>,
     pool_setup: Option<pool_setup::Setup>,
@@ -245,6 +245,7 @@ impl State {
             return Ok(Some(Job::ClaudeCode(Box::new(job))));
         }
         self.native_auth.poll_pending(std::time::Instant::now());
+        self.native_auth.recheck(self.basis.as_ref());
         if let Some(job) = self.native_auth.request() {
             return Ok(Some(Job::NativeAuth(Box::new(job))));
         }
@@ -545,8 +546,9 @@ impl State {
                     self.needs_page = true;
                 }
             }
-            UiEvent::Character('c') if self.native_auth.stuck().is_some() => {
-                self.native_auth.clear(self.identity.clone())?;
+            UiEvent::Character('c') if self.native_auth.stuck(self.basis.as_ref()).is_some() => {
+                self.native_auth
+                    .clear(self.identity.clone(), self.basis.as_ref())?;
                 self.notice = self.native_auth.notice().to_owned();
             }
             UiEvent::Character('x') => {
@@ -732,12 +734,10 @@ impl State {
         edit.validate().map_err(|error| error.to_string())?;
         if self
             .native_auth
-            .stuck()
-            .is_some_and(|stuck| edit.touches(stuck))
+            .open_account()
+            .is_some_and(|open| edit.touches(open))
         {
-            return Err(
-                "A sign-in for this account is still open; c clears a stuck sign-in".into(),
-            );
+            return Err(self.native_auth.open_refusal(Some(&basis)).into());
         }
         let generation = self.advance()?;
         let submission = Submission {
@@ -770,12 +770,14 @@ impl State {
                 self.apply_profile_capabilities(submission, result);
             }
             Event::NativeAuth(event) => {
+                let said = self.native_auth.notice().to_owned();
                 self.native_auth.apply(*event)?;
-                self.notice = if self.native_auth.is_open() {
-                    "Native authentication observation updated; metadata retained".into()
-                } else {
-                    self.native_auth.notice().to_owned()
-                };
+                if self.native_auth.is_open() {
+                    self.notice =
+                        "Native authentication observation updated; metadata retained".into();
+                } else if self.native_auth.notice() != said {
+                    self.notice = self.native_auth.notice().to_owned();
+                }
             }
             Event::Read {
                 identity,

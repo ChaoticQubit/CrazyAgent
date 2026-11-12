@@ -11,6 +11,7 @@ pub(super) const IDE_EXTENSIONS_TIMEOUT: Duration = Duration::from_secs(7 * 60);
 pub const IDE_EXTENSIONS_CODES: &[&str] = &[
     "changes_unavailable",
     "ide_entropy_unavailable",
+    "ide_extension_ai_locked",
     "ide_extension_ask_missing",
     "ide_extension_download_failed",
     "ide_extension_hash_invalid",
@@ -71,6 +72,15 @@ enum Reply {
     Approved { approved: Approved },
     Done,
     Rejected { code: String },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::Asks { .. } => Some("ide_extensions.asks"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -134,6 +144,7 @@ impl OwnerClient {
 
     async fn ide_extensions_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(IDE_EXTENSIONS_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope {
                 ide_extensions: action,
             })
@@ -162,7 +173,9 @@ impl OwnerClient {
                 .await
                 .map_err(|_| failure("ide_extensions_owner_unavailable"))?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }

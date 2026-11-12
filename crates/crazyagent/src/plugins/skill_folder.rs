@@ -32,7 +32,7 @@ const STORED_READ_MAX: u64 = 64 * 1024;
 #[cfg(unix)]
 const ENTRIES_MAX: usize = 4096;
 #[cfg(unix)]
-const FOLDER: OFlags = OFlags::RDONLY
+pub(super) const FOLDER: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
@@ -506,7 +506,7 @@ fn copy_tree(
 /// ([`crate::platform::open_beneath`]). Inputs: the path and the flags for its last part.
 /// Output: the descriptor, or the error.
 #[cfg(unix)]
-fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd> {
+pub(super) fn open_real(path: &Path, last: OFlags) -> rustix::io::Result<OwnedFd> {
     let below = path
         .strip_prefix("/")
         .map_err(|_| rustix::io::Errno::INVAL)?;

@@ -23,10 +23,24 @@ test("extraction preserves the existing closed event codec", () => {
     { kind: "output", turn_id: "turn-a", text: "answer 🙂" },
     { kind: "input", turn_id: "turn-a", prompt_id: "prompt-a", question: "Choose", choices: ["A", "B"] },
     { kind: "completed", turn_id: "turn-a", status: "succeeded" },
+    { kind: "completed", turn_id: "turn-a", status: "failed", failure: "rate_limited" },
+    { kind: "completed", turn_id: "turn-a", status: "failed", failure: "quota_exhausted" },
+    { kind: "completed", turn_id: "turn-a", status: "failed", failure: "invalid_authentication" },
   ]) {
     assert.deepEqual(unpack(encodeEvent("session-a", "instance-a", 1n, body)), {
       protocol_version: 1, session_id: "session-a", instance_id: "instance-a", sequence: 1, event: body,
     });
+  }
+});
+
+test("only a failed completion names a provider failure, and only a known one", () => {
+  for (const body of [
+    { kind: "completed", turn_id: "turn-a", status: "succeeded", failure: "rate_limited" },
+    { kind: "completed", turn_id: "turn-a", status: "cancelled", failure: "rate_limited" },
+    { kind: "completed", turn_id: "turn-a", status: "failed", failure: "overloaded" },
+    { kind: "completed", turn_id: "turn-a", status: "failed", failure: null },
+  ]) {
+    assert.throws(() => encodeEvent("session-a", "instance-a", 1n, body), /host_event_rejected/, JSON.stringify(body));
   }
 });
 

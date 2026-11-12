@@ -48,7 +48,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
     <p className="pj-error" role="alert">{status.message}</p>
     <span><Button onClick={onContinue}>Continue</Button></span>
   </div>;
-  const { dependencies, pack } = status.value;
+  const { dependencies, pack, notes } = status.value;
   const running = setupBusy(status.value);
   const locked = started || running;
   const approval = approvalLine(pack, ticks);
@@ -64,6 +64,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
           <StatusBadge word={row.word} tone={row.tone} />
         </li>;
       })}</ul>
+      {notes?.map((note) => <p className="pj-small pj-error" key={note}>{displayText(note)}</p>)}
     </section>
     <section className="pj-stack-s" aria-label="Default pack">
       <h2>Default pack</h2>

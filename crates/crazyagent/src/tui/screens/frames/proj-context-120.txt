@@ -13,7 +13,7 @@
   Agents write results here            │
   as Markdown files.                   │ Who pays
                                        │ - University ecology labs, mostly grant funded
-                                       │ - Park and reserve services
+  p opens Project memory.              │ - Park and reserve services
                                        │ - Environmental consultancies
                                        │
                                        │ Sources

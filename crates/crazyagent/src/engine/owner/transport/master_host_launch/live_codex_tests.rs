@@ -61,8 +61,11 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
             worktree_lease: RequestId::new("codex-live-master-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("codex-live-master-project").unwrap(),
+        Some(Duration::from_millis(ResourceBudget::unit().wall_time_ms)),
         ResourceBudget::unit(),
         "You are a test. Follow the user's instruction exactly.",
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -152,8 +155,9 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         &profile,
         &codex,
         &connection,
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         Some(&engine),
+        &[],
     )
     .unwrap();
     assert_ne!(home, managed);
@@ -163,6 +167,8 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         Some(crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &record,
+            mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         }),
     )
     .unwrap();
@@ -178,8 +184,11 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
             worktree_lease: RequestId::new("codex-live-tools-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("codex-live-master-project").unwrap(),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         budget,
         "You are a test. Follow the user's steps exactly and use your tools for them.",
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();
@@ -375,8 +384,9 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         &profile,
         &codex,
         &connection,
-        Duration::from_millis(budget.wall_time_ms),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         Some(&engine),
+        &[],
     )
     .unwrap();
     let record = tool_record.unwrap();
@@ -392,8 +402,11 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
             worktree_lease: RequestId::new("codex-live-sub-agents-lease").unwrap(),
         },
         connection.account_ref.clone(),
+        crate::protocol::ProjectId::new("codex-live-master-project").unwrap(),
+        Some(Duration::from_millis(budget.wall_time_ms)),
         budget,
         &instructions,
+        crate::master_frame_limit::FrameSize::default(),
     )
     .await
     .unwrap();

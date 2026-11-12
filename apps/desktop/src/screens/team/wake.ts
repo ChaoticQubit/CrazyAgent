@@ -25,6 +25,7 @@ const STATES: Record<TeamEvent["state"], string> = {
   muted: "Not sent",
   carried: "In the task result",
   dropped: "Replaced by newer events",
+  settled: "Handled before the master heard",
 };
 
 const LEVELS: Record<WakeRuleLevel, string> = {
@@ -97,6 +98,13 @@ export function unseenByProject(events: Pick<AppTeamEvents, "projects">): Map<st
   return new Map(events.projects.filter((item) => item.unseen > 0).map((item) => [item.project_id, item.unseen]));
 }
 
+/** The agents at work in each project for its sidebar dot, as the engine counts them in one
+ * read. A reply from an engine without the list counts nothing. Input: the app events.
+ * Output: a map from project id to its count, without projects at zero. */
+export function workingByProject(events: Pick<AppTeamEvents, "working">): Map<string, number> {
+  return new Map((events.working ?? []).filter((item) => item.agents > 0).map((item) => [item.project_id, item.agents]));
+}
+
 const BADGE_ONLY: ReadonlySet<TeamNotification["kind"]> = new Set(["question"]);
 
 /** Finds the notifications that arrived since the window last looked and should alert. The
@@ -113,10 +121,12 @@ export function freshAlerts(last: number | null, events: Pick<AppTeamEvents, "no
   return { last: newest, fresh };
 }
 
-/** Where the toast for one notification leads: an urgent question or an agent waiting in its
- * terminal opens the project's Agents tab, where the Questions inbox lists it (Q14, Q14b).
- * Input: the notification. Output: the route, or undefined for one that only informs. */
+/** Where the toast for one notification leads: an urgent question opens the project's
+ * Questions tab, where every owner question waits (F12), and an agent waiting in its terminal
+ * opens the Agents tab on Waiting on you (Q14, Q14b). Input: the notification. Output: the
+ * route, or undefined for one that only informs. */
 export function alertRoute(item: Pick<TeamNotification, "kind" | "project_id">): Route | undefined {
-  if (item.kind !== "urgent_question" && item.kind !== "waiting_on_you") return undefined;
-  return { name: "project", id: item.project_id, tab: "agents" };
+  if (item.kind === "urgent_question") return { name: "project", id: item.project_id, tab: "questions" };
+  if (item.kind === "waiting_on_you") return { name: "project", id: item.project_id, tab: "agents", section: "waiting" };
+  return undefined;
 }

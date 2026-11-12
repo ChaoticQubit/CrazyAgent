@@ -181,7 +181,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         const diff = await page.evaluate("document.querySelector('pre.ch-diff')?.textContent ?? null");
         assert.ok(diff?.includes("+Now with tomatoes."), "the diff is the engine's text");
         assert.ok(diff.includes(`+${XSS}`), "markup in the diff shows as text");
-        assert.equal(await page.evaluate("document.querySelector('.ch-detail img, .ch-diff *') === null && window.__changesXss === undefined"), true, "markup in the diff never renders or runs");
+        assert.equal(await page.evaluate("document.querySelector('.ch-detail img') === null && document.querySelectorAll('.ch-diff *').length === 1 && document.querySelector('.ch-diff *').matches('span.ch-end[aria-hidden=true]:empty') && document.querySelector('.ch-diff *').attributes.length === 2 && window.__changesXss === undefined"), true, "markup in the diff never renders or runs: the last page's box holds exactly its own empty end marker");
 
         await me.click("Discard");
         await me.waitFor("the discard question", (text) => /Discard these changes\?/.test(text));
@@ -191,6 +191,16 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(head(), start, "a discard leaves the owner's branch alone");
         await me.click("Restore");
         await me.waitFor("the restored change set", (text) => text.includes("Restored. The changes are ready to review again.") && /Ready to review/.test(text));
+
+        writeFileSync(join(worktree, "seeds.txt"), `${Array.from({ length: 400 }, (_, at) => `seed ${at}`).join("\n")}\n`);
+        recordTurn("List every seed");
+        await me.waitFor("the moved diff", (text) => text.includes("Added seeds.txt"));
+        const acceptHeld = () => page.evaluate(`[...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Accept")?.disabled ?? null`);
+        assert.equal(await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); return box.scrollHeight > box.clientHeight; })()`), true, "the moved diff needs the box's own scroll");
+        assert.equal(await acceptHeld(), true, "Accept holds until the moved diff's end was on screen");
+        await page.evaluate(`(() => { const box = document.querySelector("pre.ch-diff"); box.scrollTop = box.scrollHeight; box.querySelector(".ch-end").scrollIntoView({ block: "nearest" }); })()`);
+        for (const deadline = Date.now() + STEP_MS; await acceptHeld() !== false; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "Accept comes back once the moved diff's end was on screen");
+        await me.capture("changes-moved-diff-read");
 
         await me.click("Accept");
         await me.waitFor("the accept question", (text) => /Accept these changes\?/.test(text) && text.includes("under your own Git name. CrazyAgent did not check them."));
@@ -214,11 +224,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.ok(statSync(join(repo, "bin", "grow.sh")).mode & 0o100, "the script stays runnable");
         assert.ok(lstatSync(join(repo, "latest")).isSymbolicLink() && readlinkSync(join(repo, "latest")) === "README.md", "the link stays a link");
 
+        writeFileSync(join(worktree, "README.md"), readFileSync(join(worktree, "README.md"), "utf8").replace("# Seed shop", "# Seed shop for gardens"));
+        const second = recordTurn("Name the shop for gardens");
         writeFileSync(join(repo, "README.md"), readFileSync(join(repo, "README.md"), "utf8").replace("# Seed shop", "# Seed shop, open daily"));
         git(repo, "commit", "-q", "-am", "Open daily");
         const daily = head();
-        writeFileSync(join(worktree, "README.md"), readFileSync(join(worktree, "README.md"), "utf8").replace("# Seed shop", "# Seed shop for gardens"));
-        const second = recordTurn("Name the shop for gardens");
         assert.notEqual(second, first, "a turn after an Accept opens a new change set");
         for (const deadline = Date.now() + STEP_MS; await rows() < 2; await pause(POLL_MS)) assert.ok(Date.now() < deadline, "the new change set reaches the list");
         await me.follow(".ch-row");
@@ -232,7 +242,7 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         assert.equal(conflicted.split("These files also changed on your branch").length - 1, 1, "the owner reads the conflict sentence once");
 
         await me.click("Ask agent to update");
-        await me.waitFor("the updating change set", (text) => /Agent is updating/.test(text) && text.includes("The agent is resolving the conflicts with your branch. Review again when it finishes."));
+        await me.waitFor("the updating change set", (text) => /Agent is fixing conflicts with main/.test(text) && text.includes("The agent is resolving the conflicts with your branch. Review again when it finishes."));
         await me.capture("changes-updating");
         assert.match(readFileSync(join(worktree, "README.md"), "utf8"), /^<<<<<<< /m, "the update merged the owner's branch into the agent's worktree with conflict markers");
         assert.equal(head(), daily, "an update never moves the owner's branch");

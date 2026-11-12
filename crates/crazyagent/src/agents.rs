@@ -60,7 +60,7 @@ CREATE INDEX IF NOT EXISTS agent_runs_project ON agent_runs(project, started_ms)
 const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms,substr(spec,1,8)='{\"host\":'";
 
 fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
 }
 
 fn database<E>(_: E) -> LaunchError {
@@ -378,8 +378,9 @@ pub struct HostedRestart {
 
 /// Something other than a hosted agent that holds an account's native profile while it
 /// runs, so a refused sign-out can name it and the owner can end it: a master
-/// conversation's turn, ended by closing that conversation, or a research job, ended by
-/// cancelling it.
+/// conversation's turn, ended by closing that conversation, a research job, ended by
+/// cancelling it, or processes a Full access agent left running, named by `report`,
+/// which signing the account out lets go of while they still run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Holder {
@@ -391,6 +392,9 @@ pub enum Holder {
         project: ProjectId,
         job: i64,
         title: String,
+    },
+    Leftover {
+        report: String,
     },
 }
 
@@ -819,7 +823,6 @@ impl Agents {
             attempt,
             folder: self.folder(&id),
         };
-        let limit = LaunchLimits::default().output_bytes as u64;
         let thread = {
             let (output, probe, quit) = (output.clone(), probe.clone(), quit.clone());
             std::thread::Builder::new()
@@ -830,17 +833,8 @@ impl Agents {
                             recorder.finish(AgentState::Exited, None, None);
                             return;
                         }
-                        if probe
-                            .metadata()
-                            .is_ok_and(|metadata| metadata.len() > limit)
-                        {
-                            recorder.ended(
-                                AgentState::Failed,
-                                None,
-                                Some("launch_output_limit"),
-                                kill_holders(group, &output, &probe),
-                            );
-                            return;
+                        if launch::trim_unread_output(&output, &probe) {
+                            eprintln!("agent_output_trimmed agent={}", recorder.id);
                         }
                         std::thread::sleep(MONITOR_POLL);
                     }
@@ -1132,8 +1126,10 @@ impl Agents {
     }
 
     /// Stops every running hosted agent that signs in with one account and waits, at most
-    /// `HOST_WAIT` in all, for their hosts to end them. Input: the account. Output: those
-    /// agents as they are after the wait.
+    /// `HOST_WAIT` in all, for their hosts to end them, then lets go of the holds Full
+    /// access stops keep on it, theirs included, as the owner chose to sign it out while
+    /// what those name may still run. Input: the account. Output: those agents as they are
+    /// after the wait.
     pub fn stop_using(&self, account: &CredentialRef) -> Result<Vec<AgentView>, LaunchError> {
         let hosted = self.hosted_using(account)?;
         for (_, control) in &hosted {
@@ -1143,6 +1139,7 @@ impl Agents {
         for (id, control) in &hosted {
             self.await_host(id, control, deadline);
         }
+        crate::harnesses::leftovers::release(account);
         hosted.iter().map(|(id, _)| self.view(id)).collect()
     }
 
@@ -1158,17 +1155,29 @@ impl Agents {
         }
     }
 
-    /// The holders of one account's profile other than hosted agents, newest first, at
-    /// most `LIST_MAX`. Input: the account. Output: the holders.
+    /// The holders of one account's profile other than hosted agents, newest first, then
+    /// what Full access agents left running, at most `LIST_MAX`. Input: the account.
+    /// Output: the holders.
     pub fn holders(&self, account: &CredentialRef) -> Vec<Holder> {
-        let holds = self.holds.lock().unwrap_or_else(PoisonError::into_inner);
-        holds
+        let mut holders: Vec<Holder> = self
+            .holds
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
             .values()
             .rev()
             .filter(|(held, _)| held == account)
             .map(|(_, holder)| holder.clone())
             .take(LIST_MAX)
-            .collect()
+            .collect();
+        let room = LIST_MAX - holders.len();
+        holders.extend(
+            crate::harnesses::leftovers::held_by(account)
+                .into_iter()
+                .take(room)
+                .map(|report| Holder::Leftover { report }),
+        );
+        assert!(holders.len() <= LIST_MAX);
+        holders
     }
 
     fn hosted_using(
@@ -1534,12 +1543,16 @@ fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
 }
 
 /// Opens an agent output log read-only to probe its lock, refusing a link, anything but
-/// a regular file and a file another user owns. Input: the log path. Output: the open.
+/// a regular file and a file another user owns, and never waiting on a FIFO or device
+/// placed at its name. Input: the log path. Output: the open.
 #[cfg(unix)]
 fn log_probe(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )
     .ok()

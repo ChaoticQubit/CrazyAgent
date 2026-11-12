@@ -3,7 +3,7 @@ use super::console;
 use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
-use super::planning_line::{Planning, planning, planning_key};
+use super::planning_line::{Planning, StatusLine, planning, planning_key, refreshes_status};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
@@ -30,6 +30,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
 
 pub(in crate::tui) const REFRESH_MS: i64 = 3_000;
+pub(in crate::tui) const ACTIVITY_SHOWN: usize = 5;
+pub(in crate::tui) const ACTIVITY_MAX: usize = 20;
+const _: () = assert!(ACTIVITY_SHOWN <= ACTIVITY_MAX);
 const PREVIEW_BYTES_MAX: usize = 1024 * 1024;
 const MEMORY_BYTES_MAX: usize = 4096;
 pub(in crate::tui) const REVIEW_WIDTH: usize = 54;
@@ -41,6 +44,20 @@ const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
 const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
+/// The Overview tabs the project view lists, in the desktop's order: the four an agent
+/// writes, in `project_overview::Tab::ALL` order, then the README.
+pub(in crate::tui) const OVERVIEW_TAB_LABELS: [&str; 5] = [
+    "Quick info",
+    "Features",
+    "Competitors",
+    "Install & use",
+    "README",
+];
+/// How many lines PgUp and PgDn move the picked Overview tab's text.
+const OVERVIEW_PAGE_ROWS: usize = 10;
+/// The most lines the picked Overview tab's text can be scrolled down; the view stops at
+/// the text's last line.
+pub(in crate::tui) const OVERVIEW_SCROLL_MAX: usize = 1 << 16;
 
 /// Names the eight tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
@@ -170,6 +187,14 @@ pub(in crate::tui) enum Speaker {
     Task,
 }
 
+/// How the remove ask removes the project: Remove from dashboard keeps every file, and
+/// Delete everything also moves its folders to the Trash (DEC-118).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveChoice {
+    Dashboard,
+    Everything,
+}
+
 /// What the prompt's inline menu offers at the cursor: the commands matching a `/` word, or
 /// the tags completing an `@` word with how many characters that word has, `@` included.
 #[derive(Debug, PartialEq, Eq)]
@@ -205,11 +230,15 @@ pub(in crate::tui) struct Message {
 
 /// The master's status word in the conversation header.
 /// Uses the status words of DESIGN.md section 2.
-/// NotReady is shown until the engine reports the master; Thinking carries the start time when the engine knows it.
+/// NotReady is shown until the engine reports the master. Thinking carries the start time when
+/// the engine knows it and the running turn's activity, oldest first, at most `ACTIVITY_MAX` lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum MasterStatus {
     Ready,
-    Thinking { since_ms: Option<i64> },
+    Thinking {
+        since_ms: Option<i64>,
+        activity: Vec<crate::master_session::MasterActivityLine>,
+    },
     Replied,
     NeedsYou,
     NeedsPool,
@@ -224,6 +253,16 @@ impl MasterStatus {
     /// Returns true for Stopped and Not signed in.
     pub fn retryable(&self) -> bool {
         matches!(self, Self::Stopped | Self::NotSignedIn)
+    }
+
+    /// Counts the activity lines of a running turn.
+    /// Takes the status.
+    /// Returns the count, zero for every status but Thinking.
+    pub fn activity_len(&self) -> usize {
+        match self {
+            Self::Thinking { activity, .. } => activity.len(),
+            _ => 0,
+        }
     }
 }
 
@@ -257,6 +296,13 @@ pub(in crate::tui) struct Preview {
 }
 
 impl Preview {
+    /// The offset of the chunk this preview reads next: 0 before its first chunk, then the
+    /// engine's next offset, so a chunk read for an earlier preview of the same file is
+    /// told apart. Takes the preview. Returns the offset, or none once it is complete.
+    fn wanted(&self) -> Option<u64> {
+        if self.loaded { self.next } else { Some(0) }
+    }
+
     /// Gives the report rendered for a width, rendering once per width.
     /// Takes the width in cells.
     /// Returns the wrapped lines.
@@ -469,21 +515,14 @@ impl GeneralEdit {
         }
     }
 
-    /// Builds the engine edit from the form. The form has no roadmap switch, so the roadmap
-    /// planning choice comes from the setup as it is now, not as the form opened.
-    /// Takes the form and the current setup.
+    /// Builds the engine edit from the form, with the stack read by [`stack_entries`]. The
+    /// form has no roadmap switch, so the roadmap planning choice comes from the setup as it
+    /// is now, not as the form opened. Takes the form and the current setup.
     /// Returns the edit with the name only when it changed, or none when nothing changed.
     pub fn action(&self, setup: &StoredSetup) -> Option<SetupAction> {
         let name = self.name.value().trim();
         let about = self.about.value().trim().to_owned();
-        let tech_stack: Vec<String> = self
-            .stack
-            .value()
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let tech_stack = stack_entries(self.stack.value(), &setup.tech_stack);
         let platforms: Vec<Platform> = Platform::ALL
             .into_iter()
             .filter(|platform| self.platforms.contains(platform))
@@ -508,6 +547,7 @@ impl GeneralEdit {
         }
         Some(SetupAction::Update {
             project_id: setup.project_id.clone(),
+            kept: None,
             expected_revision: self.revision,
             name: (name != setup.name).then(|| name.to_owned()),
             setup: ProjectSetup {
@@ -521,6 +561,47 @@ impl GeneralEdit {
             },
         })
     }
+}
+
+/// Reads the stack field: entries split by commas, where a saved entry that holds a comma
+/// and still shows whole between separators stays one entry, so editing the field never
+/// splits an entry the owner did not touch. Inputs: the field text and the saved entries.
+/// Output: the trimmed entries without empty ones, or the saved entries themselves while
+/// the field still shows them as the form wrote them.
+fn stack_entries(text: &str, saved: &[String]) -> Vec<String> {
+    if text == saved.join(", ") {
+        return saved.to_vec();
+    }
+    let mut whole: Vec<&str> = saved
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| entry.contains(','))
+        .collect();
+    whole.sort_by_key(|entry| std::cmp::Reverse(entry.len()));
+    let mut entries = Vec::new();
+    let mut rest = text;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+        if rest.is_empty() {
+            break;
+        }
+        let kept = whole.iter().copied().find(|entry| {
+            rest.strip_prefix(*entry).is_some_and(|after| {
+                let after = after.trim_start();
+                after.is_empty() || after.starts_with(',')
+            })
+        });
+        let (entry, after) = match kept {
+            Some(entry) => (entry, &rest[entry.len()..]),
+            None => rest.split_once(',').unwrap_or((rest, "")),
+        };
+        let entry = entry.trim();
+        if !entry.is_empty() {
+            entries.push(entry.to_owned());
+        }
+        rest = after;
+    }
+    entries
 }
 
 fn sorted<T: Ord + Copy>(list: &[T]) -> Vec<T> {
@@ -581,12 +662,16 @@ pub(in crate::tui) enum ProjectReply {
     EndConversation,
     Retry,
     Team,
+    TeamSettings,
     Master,
     Process,
     Harnesses,
+    Memory,
     Usage,
     Session(SessionsAction),
     AccountOrder(Option<crate::scheduling::Strategy>),
+    RefreshOverview,
+    MoveHome(crate::projects_home::AddMode),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -617,7 +702,11 @@ pub(in crate::tui) struct ProjectScreen {
     pub cleared: Option<(usize, Message)>,
     pub files: Option<(String, Vec<String>)>,
     pub transcript_scroll: usize,
+    pub activity_open: bool,
     pub overview_cursor: usize,
+    pub overview_tabs: Option<crate::project_overview::Overview>,
+    pub overview_tab: usize,
+    pub overview_scroll: usize,
     pub agents_cursor: usize,
     pub tree_cursor: usize,
     pub preview: Option<Preview>,
@@ -627,6 +716,10 @@ pub(in crate::tui) struct ProjectScreen {
     pub confirm_delete: Option<String>,
     pub confirm_stop: Option<i64>,
     pub confirm_remove: bool,
+    pub confirm_move: bool,
+    pub removal: Option<crate::team::cleanup::RemovalPreview>,
+    pub remove_choice: RemoveChoice,
+    pub remove_typed: String,
     pub confirm_plan: Option<SetupAction>,
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
@@ -648,6 +741,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub tests: ProjectTests,
     pub tickets: ProjectTickets,
     pub recovery: ProjectRecovery,
+    pub roadmap: StatusLine,
     pub sessions: Sessions,
     pub now_ms: i64,
     pub offset: i64,
@@ -662,8 +756,10 @@ pub(in crate::tui) struct ProjectScreen {
     repository_trust_read_ms: Option<i64>,
     trust_stale: bool,
     memories_read_ms: Option<i64>,
+    overview_read_ms: Option<i64>,
+    removal_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
-    setup_due: bool,
+    pub setup_due: bool,
     waiting: Option<SetupQuery>,
 }
 
@@ -679,6 +775,7 @@ impl ProjectScreen {
             tests: ProjectTests::new(project.clone(), name.clone()),
             tickets: ProjectTickets::new(project.clone(), name.clone()),
             recovery: ProjectRecovery::new(project.clone()),
+            roadmap: StatusLine::new(project.clone()),
             sessions: Sessions::default(),
             project,
             name,
@@ -704,7 +801,11 @@ impl ProjectScreen {
             cleared: None,
             files: None,
             transcript_scroll: 0,
+            activity_open: false,
             overview_cursor: 0,
+            overview_tabs: None,
+            overview_tab: 0,
+            overview_scroll: 0,
             agents_cursor: 0,
             tree_cursor: 0,
             preview: None,
@@ -714,6 +815,10 @@ impl ProjectScreen {
             confirm_delete: None,
             confirm_stop: None,
             confirm_remove: false,
+            confirm_move: false,
+            removal: None,
+            remove_choice: RemoveChoice::Dashboard,
+            remove_typed: String::new(),
             confirm_plan: None,
             adding: None,
             folders: None,
@@ -742,6 +847,8 @@ impl ProjectScreen {
             repository_trust_read_ms: None,
             trust_stale: false,
             memories_read_ms: None,
+            overview_read_ms: None,
+            removal_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
             waiting: None,
@@ -756,7 +863,7 @@ impl ProjectScreen {
         self.reading = false;
         self.confirm_delete = None;
         self.confirm_stop = None;
-        self.confirm_remove = false;
+        self.close_remove();
         self.confirm_plan = None;
         self.adding = None;
         self.folders = None;
@@ -783,12 +890,16 @@ impl ProjectScreen {
         let project = self.project.clone();
         let due = |last: Option<i64>| last.is_none_or(|last| now_ms - last >= REFRESH_MS);
         let setup_wanted = (self.setup.is_none() || self.setup_due) && !self.setup_missing;
-        let query = if setup_wanted && due(self.setup_failed_ms) {
+        let query = if self.confirm_remove && self.removal.is_none() && due(self.removal_read_ms) {
+            SetupQuery::Removal { project }
+        } else if setup_wanted && due(self.setup_failed_ms) {
             SetupQuery::Setup { project }
         } else if self.setup_missing || self.setup.is_none() {
             return None;
         } else if self.jobs_read_ms.is_none() || (due(self.jobs_read_ms) && self.jobs_live()) {
             SetupQuery::Jobs { project }
+        } else if self.tab == Tab::Overview && self.overview_due(now_ms) {
+            SetupQuery::Overview { project }
         } else if let Some(job) = self.log_due(now_ms) {
             SetupQuery::Log { project, job }
         } else if due(self.context_read_ms)
@@ -845,6 +956,51 @@ impl ProjectScreen {
         };
         self.waiting = Some(query.clone());
         Some(query)
+    }
+
+    /// Says whether the Overview tabs are read now: at once before the first read and after
+    /// a refresh was asked, then every `REFRESH_MS` only until they are read once, while a
+    /// run writes them, or while a landed change set waits for a run that can start.
+    /// Takes the screen and the current time in milliseconds. Returns whether to read.
+    fn overview_due(&self, now_ms: i64) -> bool {
+        let Some(read_ms) = self.overview_read_ms else {
+            return true;
+        };
+        if now_ms.saturating_sub(read_ms) < REFRESH_MS {
+            return false;
+        }
+        self.overview_tabs.as_ref().is_none_or(|overview| {
+            let waits = overview.stale
+                && overview.refresh != crate::roadmap_status::Refresh::Off
+                && !overview.needs_home;
+            overview.running || waits
+        })
+    }
+
+    /// Answers Shift+R on the Overview: asks for one writing run of the tabs, or says why
+    /// none can start now. Takes the screen. Returns the ask, or handled with the reason
+    /// shown; ignored before the tabs were read.
+    fn refresh_overview(&mut self) -> ProjectReply {
+        let Some(overview) = &self.overview_tabs else {
+            return ProjectReply::Ignored;
+        };
+        let reason = if overview.needs_home {
+            Some(plain_problem(crate::project_overview::NEEDS_HOME))
+        } else if overview.refresh == crate::roadmap_status::Refresh::Off {
+            Some(plain_problem("overview_off"))
+        } else if overview.running {
+            Some("A run is writing the tabs now. They fill in when it ends.".to_owned())
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => {
+                assert!(!reason.is_empty());
+                self.problem = Some(reason);
+                ProjectReply::Handled
+            }
+            None => ProjectReply::RefreshOverview,
+        }
     }
 
     /// Forgets the read in flight after the engine connection dropped, so the next read is sent again.
@@ -944,8 +1100,15 @@ impl ProjectScreen {
                         self.repository_trust_read_ms = Some(self.now_ms);
                     }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
-                    SetupQuery::Item { path, .. } => {
-                        if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
+                    SetupQuery::Overview { .. } => self.overview_read_ms = Some(self.now_ms),
+                    SetupQuery::RefreshOverview { .. } => self.overview_read_ms = None,
+                    SetupQuery::Removal { .. } => self.removal_read_ms = Some(self.now_ms),
+                    SetupQuery::Item { path, offset, .. } => {
+                        if let Some(preview) = self
+                            .preview
+                            .as_mut()
+                            .filter(|p| &p.path == path && p.wanted() == Some(*offset))
+                        {
                             preview.next = None;
                             preview.problem = Some(plain_problem(&problem));
                             preview.cache = None;
@@ -1047,7 +1210,11 @@ impl ProjectScreen {
                 self.repository_trust_read_ms = Some(self.now_ms);
             }
             SetupView::Item(chunk) => {
-                if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
+                if let Some(preview) = self
+                    .preview
+                    .as_mut()
+                    .filter(|p| p.path == chunk.path && p.wanted() == Some(chunk.offset))
+                {
                     preview.loaded = true;
                     match chunk.text {
                         Some(text) => {
@@ -1068,8 +1235,31 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
+            SetupView::Overview(overview) => {
+                self.overview_tabs = Some(*overview);
+                self.overview_read_ms = Some(self.now_ms);
+            }
+            SetupView::OverviewAsked => self.overview_read_ms = None,
+            SetupView::LiveWithoutSession(why) => {
+                self.changed(query, crate::engine::owner::OwnerResult::Applied);
+                self.problem = Some(format!(
+                    "{} {}",
+                    crate::tui::screens::team::MASTER_NO_SESSION,
+                    crate::tui::screens::team::unopened(&why)
+                ));
+            }
+            SetupView::Removal(preview) => {
+                self.removal_read_ms = Some(self.now_ms);
+                if self.confirm_remove {
+                    if !preview.can_delete {
+                        self.remove_choice = RemoveChoice::Dashboard;
+                    }
+                    self.removal = Some(*preview);
+                }
+            }
             SetupView::Catalog(_)
             | SetupView::Team(_)
+            | SetupView::TeamMessages(_)
             | SetupView::CoordQuestions(_)
             | SetupView::Library(_) => {}
         }
@@ -1189,9 +1379,15 @@ impl ProjectScreen {
                 }
             }
             SetupQuery::Change {
-                action: SetupAction::Remove { .. },
+                action: SetupAction::Remove { .. } | SetupAction::Delete { .. },
                 ..
             } => self.removed = applied,
+            SetupQuery::MoveHome { .. } => {
+                self.setup_due = true;
+                if !applied && self.problem.is_none() {
+                    self.problem = Some(plain_problem("change_outcome_unknown"));
+                }
+            }
             SetupQuery::Change {
                 action: SetupAction::SetReadPaths { .. },
                 ..
@@ -1355,9 +1551,20 @@ impl ProjectScreen {
     }
 
     /// Names one context file to open: the folder its context paths start from, as the
-    /// engine listed them, and the path inside it. Takes the path inside that folder.
-    /// Returns the request, or none before the folder is known.
+    /// engine listed them, and the path inside it; a linked repository file, listed as
+    /// `repo/<path>`, is named by the project folder and its path below it. Takes the path
+    /// the context tree lists. Returns the request, or none before the folder is known.
     pub fn context_request(&self, path: &str) -> Option<OpenRequest> {
+        if let Some(linked) = path.strip_prefix(crate::project_setup::LINKED_PREFIX) {
+            if linked.is_empty() {
+                return None;
+            }
+            let folder = self.project_folder()?;
+            return Some(OpenRequest::Context {
+                folder: folder.to_string_lossy().into_owned(),
+                path: linked.to_owned(),
+            });
+        }
         let folder = self
             .context
             .as_ref()
@@ -1393,6 +1600,7 @@ impl ProjectScreen {
             || self.trust_edit.is_some()
             || self.general.is_some()
             || self.confirm_remove
+            || self.confirm_move
             || self.pool_picker.is_some()
             || self.confirm_delete.is_some()
             || self.confirm_stop.is_some()
@@ -1428,19 +1636,10 @@ impl ProjectScreen {
             return self.general_key(key);
         }
         if self.confirm_remove {
-            return match key.code {
-                KeyCode::Char('y') => {
-                    self.confirm_remove = false;
-                    ProjectReply::Change(Box::new(SetupAction::Remove {
-                        project_id: self.project.clone(),
-                    }))
-                }
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    self.confirm_remove = false;
-                    ProjectReply::Handled
-                }
-                _ => ProjectReply::Handled,
-            };
+            return self.remove_key(key);
+        }
+        if self.confirm_move {
+            return self.move_key(key);
         }
         if let Some(cursor) = self.pool_picker {
             return self.picker_key(key, cursor);
@@ -1645,8 +1844,10 @@ impl ProjectScreen {
                 self.input.set("");
                 self.console_note.clear();
                 self.transcript_scroll = 0;
+                self.activity_open = false;
                 ProjectReply::Send(text)
             }
+            KeyCode::Char('o') if control && self.more_activity() => self.toggle_activity(),
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
             KeyCode::Char('t') if control => ProjectReply::Team,
             KeyCode::PageUp => self.scroll_transcript(5),
@@ -1787,6 +1988,21 @@ impl ProjectScreen {
             })
     }
 
+    /// Says whether the running turn has more activity lines than the console lists at once.
+    /// Takes the screen.
+    /// Returns true while Ctrl-O has a longer list to open or close.
+    pub fn more_activity(&self) -> bool {
+        self.transcript
+            .as_ref()
+            .is_some_and(|transcript| transcript.status.activity_len() > ACTIVITY_SHOWN)
+    }
+
+    fn toggle_activity(&mut self) -> ProjectReply {
+        assert!(self.more_activity());
+        self.activity_open = !self.activity_open;
+        ProjectReply::Handled
+    }
+
     fn scroll_transcript(&mut self, by: isize) -> ProjectReply {
         self.transcript_scroll = self.transcript_scroll.saturating_add_signed(by);
         ProjectReply::Handled
@@ -1827,6 +2043,7 @@ impl ProjectScreen {
             {
                 ProjectReply::Retry
             }
+            KeyCode::Char('o') if control && self.more_activity() => self.toggle_activity(),
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
             KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
@@ -1945,7 +2162,26 @@ impl ProjectScreen {
         if let Some(reply) = self.planning_reply(key.code) {
             return reply;
         }
+        let tabs = self.overview_tabs.is_some();
         match key.code {
+            KeyCode::Left | KeyCode::Right if tabs => {
+                let count = OVERVIEW_TAB_LABELS.len();
+                let step = if key.code == KeyCode::Right {
+                    1
+                } else {
+                    count - 1
+                };
+                self.overview_tab = (self.overview_tab + step) % count;
+                self.overview_scroll = 0;
+            }
+            KeyCode::Char('R') if tabs => return self.refresh_overview(),
+            KeyCode::PageDown if tabs => {
+                let down = self.overview_scroll + OVERVIEW_PAGE_ROWS;
+                self.overview_scroll = down.min(OVERVIEW_SCROLL_MAX);
+            }
+            KeyCode::PageUp if tabs => {
+                self.overview_scroll = self.overview_scroll.saturating_sub(OVERVIEW_PAGE_ROWS);
+            }
             KeyCode::Up => self.overview_cursor = self.overview_cursor.saturating_sub(1),
             KeyCode::Down => {
                 self.overview_cursor = (self.overview_cursor + 1).min(rows.saturating_sub(1));
@@ -2043,6 +2279,7 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('t') => return ProjectReply::Team,
+            KeyCode::Char('s') => return ProjectReply::TeamSettings,
             KeyCode::Char('r') => {
                 let Some((job, status)) = self.focused_job().map(|job| (job.id, job.status)) else {
                     return ProjectReply::Handled;
@@ -2164,6 +2401,9 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Char('d') => match item {
+                Some(item) if item.linked => {
+                    self.problem = Some(LINKED_KEPT.into());
+                }
                 Some(item) if item.kind == ContextKind::Plan => {
                     self.problem = Some("The roadmap and release process can't be deleted.".into());
                 }
@@ -2173,6 +2413,7 @@ impl ProjectScreen {
                 Some(_) => self.problem = Some("The project brief can't be deleted.".into()),
                 None => {}
             },
+            KeyCode::Char('p') => return ProjectReply::Memory,
             KeyCode::Char('m') => {
                 let research = item
                     .as_ref()
@@ -2233,6 +2474,109 @@ impl ProjectScreen {
         }
     }
 
+    /// Answers one key in the remove ask. Remove from dashboard sends on y; Delete everything
+    /// is offered only when the preview allows it and sends on Enter once the typed text is the
+    /// project's exact name. Takes the key. Returns the change to send, or Handled.
+    fn remove_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let can_delete = self
+            .removal
+            .as_ref()
+            .is_some_and(|removal| removal.can_delete);
+        if key.code == KeyCode::Esc {
+            self.close_remove();
+            return ProjectReply::Handled;
+        }
+        if can_delete
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Tab | KeyCode::BackTab
+            )
+        {
+            self.remove_choice = match self.remove_choice {
+                RemoveChoice::Dashboard => RemoveChoice::Everything,
+                RemoveChoice::Everything => RemoveChoice::Dashboard,
+            };
+            return ProjectReply::Handled;
+        }
+        match self.remove_choice {
+            RemoveChoice::Dashboard => match key.code {
+                KeyCode::Char('y') => {
+                    self.close_remove();
+                    ProjectReply::Change(Box::new(SetupAction::Remove {
+                        project_id: self.project.clone(),
+                    }))
+                }
+                KeyCode::Char('n') => {
+                    self.close_remove();
+                    ProjectReply::Handled
+                }
+                _ => ProjectReply::Handled,
+            },
+            RemoveChoice::Everything => {
+                match key.code {
+                    KeyCode::Enter => {
+                        let name = self
+                            .removal
+                            .as_ref()
+                            .filter(|removal| {
+                                removal.can_delete && removal.name == self.remove_typed
+                            })
+                            .map(|removal| removal.name.clone());
+                        let Some(name) = name else {
+                            self.problem =
+                                Some("Type the project's exact name to delete everything.".into());
+                            return ProjectReply::Handled;
+                        };
+                        self.close_remove();
+                        return ProjectReply::Change(Box::new(SetupAction::Delete {
+                            project_id: self.project.clone(),
+                            name,
+                        }));
+                    }
+                    KeyCode::Backspace => {
+                        self.remove_typed.pop();
+                    }
+                    KeyCode::Char(letter)
+                        if !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && self.remove_typed.len() + letter.len_utf8() <= NAME_BYTES_MAX =>
+                    {
+                        self.remove_typed.push(letter);
+                    }
+                    _ => {}
+                }
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    /// Answers one key in the move ask: m moves the project into the projects home, c copies
+    /// it there, and n or Esc keeps it where it is. Takes the key. Returns the move to send,
+    /// or Handled.
+    fn move_key(&mut self, key: KeyEvent) -> ProjectReply {
+        use crate::projects_home::AddMode;
+        assert!(self.confirm_move);
+        let mode = match key.code {
+            KeyCode::Char('m') => AddMode::Move,
+            KeyCode::Char('c') => AddMode::Copy,
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.confirm_move = false;
+                return ProjectReply::Handled;
+            }
+            _ => return ProjectReply::Handled,
+        };
+        self.confirm_move = false;
+        ProjectReply::MoveHome(mode)
+    }
+
+    /// Closes the remove ask and forgets its preview, choice and typed name.
+    /// Takes the screen. Returns nothing.
+    fn close_remove(&mut self) {
+        self.confirm_remove = false;
+        self.removal = None;
+        self.remove_choice = RemoveChoice::Dashboard;
+        self.remove_typed.clear();
+    }
+
     /// Moves the pool picker or settles it. The rows are the pools, then "No pool" last.
     /// Takes the key and the cursor. Returns the chosen pool, None for "No pool", or Handled.
     fn picker_key(&mut self, key: KeyEvent, cursor: usize) -> ProjectReply {
@@ -2291,7 +2635,9 @@ impl ProjectScreen {
                 ProjectReply::Handled
             }
             KeyCode::Char('x') => {
+                self.close_remove();
                 self.confirm_remove = true;
+                self.removal_read_ms = None;
                 ProjectReply::Handled
             }
             KeyCode::Char('f') => {
@@ -2314,7 +2660,7 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('d') => {
+            KeyCode::Char('k') => {
                 match &self.hidden_paths {
                     Some(paths) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);
@@ -2343,7 +2689,7 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('k') => {
+            KeyCode::Char('w') => {
                 match &self.repository_trust {
                     Some(view) => {
                         self.trust_edit = Some(TrustEdit::of(view));
@@ -2354,6 +2700,10 @@ impl ProjectScreen {
                             Some("Still loading the repository trust. Try again.".into());
                     }
                 }
+                ProjectReply::Handled
+            }
+            KeyCode::Char('m') => {
+                self.confirm_move = true;
                 ProjectReply::Handled
             }
             KeyCode::Char('i') => ProjectReply::Process,
@@ -2376,7 +2726,8 @@ impl ProjectScreen {
     }
 
     /// Whether a planning run can replace roadmap documents the owner may have edited: a plan
-    /// ran before, the context lists one of them, or the context is not read yet.
+    /// ran before, the context lists one of them, or the context is not read yet. A roadmap
+    /// linked from the repository is never written by planning, so it does not count.
     /// Takes the planning state. Returns true when the owner must confirm first.
     fn plan_replaces(&self, state: &Planning) -> bool {
         *state != Planning::Idle
@@ -2384,7 +2735,7 @@ impl ProjectScreen {
                 context
                     .items
                     .iter()
-                    .any(|item| item.kind == ContextKind::Plan)
+                    .any(|item| item.kind == ContextKind::Plan && !item.linked)
             })
     }
 
@@ -2405,6 +2756,12 @@ impl ProjectScreen {
     /// none for a key the planning line does not use.
     fn planning_reply(&mut self, key: KeyCode) -> Option<ProjectReply> {
         let state = planning(self.jobs.as_ref()?);
+        if refreshes_status(&state, key) {
+            if let Err(line) = self.roadmap.refresh() {
+                self.problem = Some(line.into());
+            }
+            return Some(ProjectReply::Handled);
+        }
         match planning_key(&state, &self.project, key)? {
             Ok(action) if self.plan_replaces(&state) => {
                 self.confirm_plan = Some(action);
@@ -2689,6 +3046,8 @@ impl ProjectScreen {
     }
 
     fn assert_consistent(&self) {
+        assert!(self.overview_tab < OVERVIEW_TAB_LABELS.len());
+        assert!(self.overview_scroll <= OVERVIEW_SCROLL_MAX);
         if let Some(cursor) = self.pool_picker {
             assert!(!self.pool_choices.is_empty() && cursor <= self.pool_choices.len());
         }
@@ -2710,8 +3069,19 @@ impl ProjectScreen {
             self.trust_edit.is_some(),
             self.general.is_some(),
             self.confirm_remove,
+            self.confirm_move,
         ];
         assert!(boxes.iter().filter(|open| **open).count() <= 1);
+        if self.remove_choice == RemoveChoice::Everything {
+            assert!(self.confirm_remove);
+            assert!(
+                self.removal
+                    .as_ref()
+                    .is_some_and(|removal| removal.can_delete)
+            );
+        }
+        assert!(self.confirm_remove || (self.removal.is_none() && self.remove_typed.is_empty()));
+        assert!(self.remove_typed.len() <= NAME_BYTES_MAX);
         if let Some(review) = &self.review {
             assert!(review.scroll < review.lines().len().max(1));
         }
@@ -2723,6 +3093,7 @@ impl ProjectScreen {
         }
         if self.general.is_some()
             || self.confirm_remove
+            || self.confirm_move
             || self.folders.is_some()
             || self.hidden.is_some()
             || self.access.is_some()
@@ -2750,7 +3121,12 @@ impl ProjectScreen {
             );
         }
         if let Some(preview) = &self.preview {
-            assert!(preview.path.starts_with(CONTEXT_DIRECTORY));
+            assert!(
+                preview.path.starts_with(CONTEXT_DIRECTORY)
+                    || preview
+                        .path
+                        .starts_with(crate::project_setup::LINKED_PREFIX)
+            );
         }
     }
 }
@@ -2774,6 +3150,10 @@ pub(in crate::tui) fn memory_source(memory: &KnowledgeEntry) -> Option<ResearchK
     })
 }
 
+/// What the Context tab says when the owner asks to delete a file linked from the repository.
+pub(in crate::tui) const LINKED_KEPT: &str =
+    "This file is linked from your repo. It can't be deleted here.";
+
 /// Finds the research kind of a report path.
 /// Takes a context path such as `context/research/market_research.md`.
 /// Returns the kind, or none for other files.
@@ -2794,6 +3174,12 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "This report isn't written yet. Try again when the research is done."
         }
         "research_section_missing" => "That part of the report is gone. Open the report again.",
+        "overview_off" => "Overview tabs are off for this project. Turn them on in Project settings.",
+        "overview_needs_project_home" => {
+            "Overview tabs need this project in the CrazyAgent folder. Move it there in the desktop app, in Project settings."
+        }
+        "overview_unavailable" => "The Overview tabs can't be read right now. Try again in a moment.",
+        "overview_project_unknown" => "CrazyAgent doesn't know this project any more.",
         "memory_entry_exists" => "This report is already saved to memory.",
         "memory_text_too_long" => "This report is too long to save to memory as one entry.",
         "memory_text_hidden" => {
@@ -2809,8 +3195,35 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "repository_trust_unreadable" => {
             "CrazyAgent couldn't read this project's repository trust."
         }
-        "agent_policy_invalid" => "Each toolchain can be listed once.",
-        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
+        crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
+        "agent_policy_invalid" => {
+            "That choice isn't valid: each toolchain once, at most 16 picked folders and 16 secret paths."
+        }
+        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access. Try again.",
+        "agent_access_lowered" => {
+            "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it."
+        }
+        "agent_network_narrowed" => {
+            "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network."
+        }
+        "agent_toolchain_lowered" => {
+            "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it."
+        }
+        "agent_project_unreadable" => {
+            "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again."
+        }
+        "shared_folders_unlisted" => {
+            "CrazyAgent couldn't list the project folder's files with git, so the agent didn't start. Choose All local folders with Read-only in Agent access, or check the project's git."
+        }
+        "shared_folders_too_many" => {
+            "The project folder has more than 256 untracked files and folders to keep out, or more than 32 folders to open for writing, so the agent didn't start. Choose All local folders in Agent access, or gather those files into fewer folders."
+        }
+        "shared_folders_refused" => {
+            "The sandbox couldn't keep the project's secret files closed or open a shared folder, so the agent didn't start. Check Shared project folders in Agent access."
+        }
+        "shared_folders_need_macos" => {
+            "On Linux and Windows only All local folders with Read-only can start agents. Change Shared project folders in Agent access."
+        }
         "read_path_missing" => "One of those folders doesn't exist on this computer.",
         "read_path_not_folder" => "One of those paths is a file. Add folders only.",
         "read_path_holds_home" => {
@@ -2895,6 +3308,15 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "stale_revision" => "This project changed since you opened the form. Open it again.",
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
+        "move_project_busy" => {
+            "Stop the team first (Stop all on the Team tab), then move the project. If its agents are still stopping, try again in a few seconds."
+        }
+        code if code.starts_with("move_project_") || code.starts_with("home_") => {
+            return crate::projects_home::plain_problem(code).map_or_else(
+                || coded("That didn't work. Try again.", code),
+                str::to_owned,
+            );
+        }
         _ => return coded("That didn't work. Try again.", code),
     }
     .into()

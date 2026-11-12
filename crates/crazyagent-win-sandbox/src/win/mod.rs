@@ -2,7 +2,10 @@ mod acl;
 mod container;
 mod job;
 mod launch;
+mod name;
 mod record;
+
+pub use name::final_name;
 
 use crate::plan::plan;
 use crate::profile::{BoundaryProfile, ProfileError};

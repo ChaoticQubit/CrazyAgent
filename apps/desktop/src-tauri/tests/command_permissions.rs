@@ -32,8 +32,15 @@ fn quoted(source: &str, prefix: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The commands only a terminal wall window may call. The runtime refuses the main window, so
+/// the main window's capability does not grant them.
+const WALL_ONLY: [&str; 2] = [
+    "desktop_extend_terminal_windows",
+    "desktop_focus_terminal_window",
+];
+
 #[test]
-fn every_bound_command_is_listed_in_the_build_and_granted_to_the_main_window() {
+fn every_bound_command_is_listed_in_the_build_and_all_but_the_wall_only_ones_granted_to_main() {
     let bound = bound_commands(include_str!("../src/lib.rs"));
     assert!(bound.len() > 100, "{}", bound.len());
     for hooks in [
@@ -65,14 +72,21 @@ fn every_bound_command_is_listed_in_the_build_and_granted_to_the_main_window() {
         Vec::<String>::new(),
         "built, not bound"
     );
+    let wall_only: BTreeSet<String> = WALL_ONLY.iter().map(|name| (*name).to_owned()).collect();
+    let for_main: BTreeSet<String> = bound.difference(&wall_only).cloned().collect();
     assert_eq!(
-        missing(&bound, &granted),
+        missing(&wall_only, &bound),
+        Vec::<String>::new(),
+        "wall only, not bound"
+    );
+    assert_eq!(
+        missing(&for_main, &granted),
         Vec::<String>::new(),
         "bound, not granted"
     );
     assert_eq!(
-        missing(&granted, &bound),
+        missing(&granted, &for_main),
         Vec::<String>::new(),
-        "granted, not bound"
+        "granted, not for the main window"
     );
 }

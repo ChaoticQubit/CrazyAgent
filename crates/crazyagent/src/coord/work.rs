@@ -22,7 +22,13 @@ struct WorkRow {
 /// labels. Overlaps with other agents' active claims come back at once for both sides
 /// to hear; `breadth` gives the soft "split this" note. Takes the database, the project,
 /// the agent, the title, the claims and the time in ms. Returns the work and the
-/// overlaps, or a plain refusal for a stopped agent or invalid input.
+/// overlaps, or a plain refusal for a stopped agent or invalid input. Under Wait a start on
+/// a file another agent's work holds starts nothing: it records the wait and is refused
+/// with `coord_claim_waits`, unless that wait would close a cycle of waits; then the start
+/// goes ahead without the files other agents' live claims hold, their overlaps marked
+/// `left_out`, and the owner is told of the pair once (OS-8). The wait is written in the
+/// transaction that checked for the cycle, so two starts on each other's file never both
+/// wait (T9-R2-F2).
 pub fn start_work(
     db: &Connection,
     project: &ProjectId,
@@ -38,6 +44,7 @@ pub fn start_work(
     if !agent_in(tx, project, agent)?.live() {
         return Err(failure("coord_agent_stopped"));
     }
+    let started = Change::begin(tx)?;
     tx.execute(
         "INSERT INTO coord_work(project,title,owner_agent,state,version,created,updated)
          VALUES (?1,?2,?3,'active',1,?4,?4)",
@@ -47,17 +54,46 @@ pub fn start_work(
     let work = tx.last_insert_rowid();
     audit(tx, project, work, Party::Agent(agent), "start", 0, 1, now)?;
     super::claims::add(tx, project, agent, work, &claims, now)?;
-    let overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
+    let mut overlaps = super::claims::overlaps_for(tx, project, agent, work, now)?;
+    if waits(tx, project)?
+        && let Some(held) = super::claims::waits_on(&overlaps)
+    {
+        let file = held.mine.pattern.clone();
+        if super::claims::closes_cycle(tx, agent, held.theirs.agent)? {
+            super::claims::note_cycle(tx, project, agent, held.theirs.agent, &file, now)?;
+            super::claims::leave_out(tx, &mut overlaps)?;
+        } else {
+            let (holder, pattern) = (held.theirs.work, held.theirs.pattern.clone());
+            drop(started);
+            super::claims::wait_for(tx, project, agent, holder, &file, &pattern, now)?;
+            change.commit()?;
+            return Err(failure("coord_claim_waits"));
+        }
+    }
     super::presence::seen(tx, agent, now)?;
+    started.commit()?;
     change.commit()?;
     Ok((work, overlaps))
+}
+
+/// Says whether the project's Overlapping edits option is Wait. A store failure fails;
+/// settings that cannot be read count as the default, as the start's answer reads them.
+/// Takes the database and the project. Returns whether starts wait.
+fn waits(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
+    match super::settings::read(db, project) {
+        Ok(settings) => Ok(settings.overlaps == super::settings::Overlaps::Wait),
+        Err(problem) if problem.0.starts_with("coord_state_unavailable") => Err(problem),
+        Err(_) => Ok(false),
+    }
 }
 
 /// Changes who owns a unit of work (Concord's transfer verbs), first transition wins:
 /// Assign gives Open, Declined or the owner's own work to a running agent; the owner
 /// Accepts or Declines what was assigned; Release gives it back as Open and Handoff
-/// passes it on, both dropping the owner's claims; Reopen brings ended work back. The
-/// owner, the engine, the master and the owner's lead may Assign, Release and Reopen too.
+/// passes it on, both dropping the owner's claims; Reopen brings ended work back, its
+/// claims no longer waiting on a change set, so a set landing later frees none of the
+/// reopened work's later edits. The owner, the engine, the master and the owner's lead
+/// may Assign, Release and Reopen too.
 /// Takes the database, the work, the version the caller read, the change, who acts and
 /// the time in ms. Returns the new version, `coord_work_stale`, `coord_transfer_invalid`
 /// for the state or `coord_transfer_refused` for who acts.
@@ -140,6 +176,13 @@ pub fn transfer(
     {
         super::claims::release_claims(tx, previous, work, now)?;
     }
+    if action == Transfer::Reopen {
+        tx.execute(
+            "DELETE FROM coord_held WHERE claim IN (SELECT id FROM coord_claims WHERE work=?1)",
+            [work],
+        )
+        .map_err(super::store::state)?;
+    }
     let next = advance(tx, work, &row, state, owner, now)?;
     audit(tx, &row.project, work, by, name, version, next, now)?;
     if let Party::Agent(agent) = by {
@@ -151,7 +194,9 @@ pub fn transfer(
 
 /// Ends a unit of work with evidence (Concord's finish_work): its owner marks Accepted or
 /// Active work ReviewReady, Complete or Closed, and work waiting for review is Completed
-/// or Closed by its owner or whoever supervises it. The owner's claims are released.
+/// or Closed by its owner or whoever supervises it. An agent's claims hold at every end
+/// until the change set carrying its edits lands or is rejected, or its turn ends with
+/// nothing to land (OS-8, DEC-117 Q7); a master is no exception (T5-R2-L1).
 /// Checks that belong to a role, such as a lead's unmerged sub-agent branches, run
 /// before this. Takes the database, the work, the version the caller read, the outcome,
 /// the evidence, who finishes and the time in ms. Returns the new version or a plain
@@ -173,9 +218,11 @@ pub fn finish(
     let owns = row.owner == Some(by);
     let allowed = match row.state {
         WorkState::Accepted | WorkState::Active => owns,
+        WorkState::ReviewReady if outcome == Finish::ReviewReady => {
+            return Err(failure("coord_work_review_ready"));
+        }
         WorkState::ReviewReady => {
-            outcome != Finish::ReviewReady
-                && (owns || supervisor(tx, &row.project, Party::Agent(by), row.owner)?)
+            owns || supervisor(tx, &row.project, Party::Agent(by), row.owner)?
         }
         _ => return Err(failure("coord_transfer_invalid")),
     };
@@ -187,7 +234,9 @@ pub fn finish(
         Finish::Complete => (WorkState::Complete, "finish_complete"),
         Finish::Closed => (WorkState::Closed, "finish_closed"),
     };
-    if let Some(owner) = row.owner {
+    if let Some(owner) = row.owner
+        && super::store::agent(tx, owner)?.is_none()
+    {
         super::claims::release_claims(tx, owner, work, now)?;
     }
     let next = advance(tx, work, &row, ended, row.owner, now)?;
@@ -367,5 +416,6 @@ fn audit(
         params![project.as_str(), work, kind, agent, action, from, to, now],
     )
     .map_err(state)?;
+    crate::activity::note_audit(tx, project, work, (kind, agent), action, now);
     Ok(())
 }

@@ -192,11 +192,20 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
             .unwrap(),
         opened
     );
+    for scope in [None, Some(project.clone())] {
+        assert!(matches!(
+            desk.save_process_text(scope, TUI_TEXT.into(), 0, None)
+                .await
+                .unwrap(),
+            SavedText::Saved { version: 1, .. }
+        ));
+    }
 
     let quiet = InstructionSettings {
         mode: Mode::ProjectOnly,
         transcripts: false,
         edits: EditDelivery::Badge,
+        ..Default::default()
     };
     let saved = desk
         .save_instruction_settings(project.clone(), quiet, Some(opened.version))
@@ -209,6 +218,7 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::Restart,
+        ..Default::default()
     };
     assert_eq!(
         tui.controller

@@ -64,7 +64,25 @@ pub(crate) const STEPS: &[Step] = &[
         to: 8,
         run: nest_team_agents,
     },
+    Step {
+        to: 9,
+        run: widen_trash_for_account_files,
+    },
+    Step {
+        to: 10,
+        run: usage_counts_by_model,
+    },
 ];
+
+/// Step 10 (CODEBURN-COUNT): usage rows gain the model and estimated dollars. A database that
+/// never opened the usage store gets the new shape when the store first opens.
+/// Input: the open upgrade transaction. Output: done, or the store's failure.
+fn usage_counts_by_model(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if !has_table(tx, "usage_tokens")? {
+        return Ok(());
+    }
+    crate::usage::capture::migrate_counts(tx)
+}
 
 /// Says whether a table of that name exists. Inputs: the open transaction and the name.
 /// Output: true when `sqlite_schema` holds a table row for it.
@@ -103,6 +121,17 @@ fn widen_file_trash_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
 /// the lead that started them.
 fn nest_team_agents(tx: &Transaction<'_>) -> Result<(), EngineError> {
     crate::team::add_parent_columns(tx)
+}
+
+/// Step 9: a removed account's sign-in files and generated SDK home go through the file
+/// trash, so `file_trash` must take their two kinds. An existing table is rebuilt with the
+/// current check, keeping its rows; a missing one gets the current schema when the engine
+/// opens it. Input: the transaction. Output: any SQLite failure.
+fn widen_trash_for_account_files(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if has_table(tx, "file_trash")? {
+        tx.execute_batch(super::trash::WIDEN).map_err(error)?;
+    }
+    Ok(())
 }
 
 /// Step 7 (H2): hooks are plugin items, and their stored folder copies go through the file
@@ -295,10 +324,13 @@ pub(crate) fn upgrade(
     let found = version(db)?;
     let from = match standing(db, latest)? {
         Some(from) if from < latest => from,
-        _ => return stamp_version(db, found, latest),
+        _ => {
+            forget_backup_failure(path);
+            return stamp_version(db, found, latest);
+        }
     };
     let before = schema(db)?;
-    let backup = backup(db, path, settings, from, latest)?;
+    let backup = recorded(path, backup(db, path, settings, from, latest))?;
     let failure = match run(db, steps, from, latest) {
         Ok(()) => {
             assert!(db.is_autocommit());
@@ -440,7 +472,7 @@ fn restore(
 
 /// Builds a backup error. Input: the cause. Output: `storage_backup_failed` with it.
 fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
-    error(format!("storage_backup_failed: {cause}"))
+    error(format!("{BACKUP_FAILED}: {cause}"))
 }
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
@@ -472,8 +504,10 @@ fn backup(
     Ok(target)
 }
 
-/// Creates `<root>/backups` when missing and checks that it is a private folder of
-/// this user. Input: the engine root. Output: the backups folder path.
+/// Creates `<root>/backups` when missing, or makes a folder of this user there private
+/// again when an older build or a copy left it open to others (F36), and checks it. A link,
+/// a file or a folder of another user is refused. Input: the engine root. Output: the
+/// backups folder path.
 fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     let folder = root.join(BACKUPS);
     match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
@@ -481,17 +515,124 @@ fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
         Err(cause) if cause.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(cause) => return Err(backup_failed(cause)),
     }
+    let unsafe_folder = || {
+        error(format!(
+            "{BACKUP_UNSAFE}: {} must be a private folder of this user",
+            folder.display()
+        ))
+    };
     let metadata = std::fs::symlink_metadata(&folder).map_err(backup_failed)?;
-    if !metadata.is_dir()
+    if !metadata.is_dir() || metadata.uid() != rustix::process::getuid().as_raw() {
+        return Err(unsafe_folder());
+    }
+    if metadata.mode() & 0o077 != 0 {
+        make_private(&folder, &metadata).map_err(|_| unsafe_folder())?;
+        eprintln!("storage_backup_folder_made_private");
+    }
+    let checked = std::fs::symlink_metadata(&folder).map_err(backup_failed)?;
+    if !checked.is_dir()
+        || checked.uid() != rustix::process::getuid().as_raw()
+        || checked.mode() & 0o077 != 0
+        || (checked.dev(), checked.ino()) != (metadata.dev(), metadata.ino())
+    {
+        return Err(unsafe_folder());
+    }
+    Ok(folder)
+}
+
+/// Sets one folder of this user to 0700 through a handle opened without following a link,
+/// only when it is still the folder that was checked. Inputs: the folder and its checked
+/// metadata. Output: done, or the refusal or I/O error.
+fn make_private(folder: &Path, checked: &std::fs::Metadata) -> Result<(), EngineError> {
+    use rustix::fs::{Mode, OFlags};
+    let handle = std::fs::File::from(
+        rustix::fs::open(
+            folder,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(error)?,
+    );
+    let opened = handle.metadata().map_err(error)?;
+    if !opened.is_dir()
+        || (opened.dev(), opened.ino()) != (checked.dev(), checked.ino())
+        || opened.uid() != rustix::process::getuid().as_raw()
+    {
+        return Err(error(BACKUP_UNSAFE));
+    }
+    rustix::fs::fchmod(&handle, Mode::RWXU).map_err(error)
+}
+
+/// The code a backup refused for an unsafe backups folder starts with.
+const BACKUP_UNSAFE: &str = "storage_backup_unsafe";
+/// The code any other failed backup starts with.
+const BACKUP_FAILED: &str = "storage_backup_failed";
+/// The private file beside engine.db that names why the last upgrade backup failed, so a
+/// client can say so while no engine answers (F36). A successful backup removes it.
+pub(crate) const BACKUP_FAILURE_FILE: &str = "backup-failed";
+
+/// Keeps a durable record of how an upgrade backup ended: a failure writes its code into
+/// [`BACKUP_FAILURE_FILE`], a success removes the file. Writing the record never changes
+/// the result. Inputs: the database path and the backup's result. Output: the same result.
+fn recorded(path: &Path, result: Result<PathBuf, EngineError>) -> Result<PathBuf, EngineError> {
+    let Some(root) = path.parent() else {
+        return result;
+    };
+    let record = root.join(BACKUP_FAILURE_FILE);
+    match &result {
+        Ok(_) => forget_backup_failure(path),
+        Err(cause) => {
+            let code = if cause.0.starts_with(BACKUP_UNSAFE) {
+                BACKUP_UNSAFE
+            } else {
+                BACKUP_FAILED
+            };
+            let _ = std::fs::remove_file(&record);
+            if private_file(&record, code.as_bytes()).is_err() {
+                eprintln!("storage_backup_record_unwritten");
+            }
+        }
+    }
+    result
+}
+
+/// Removes the record of a failed upgrade backup once the database needs no backup or one
+/// was made. Input: the database path. Output: none; a record that cannot be removed is
+/// logged.
+fn forget_backup_failure(path: &Path) {
+    let Some(root) = path.parent() else {
+        return;
+    };
+    match std::fs::remove_file(root.join(BACKUP_FAILURE_FILE)) {
+        Ok(()) => {}
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => eprintln!("storage_backup_record_kept"),
+    }
+}
+
+/// Reads why the last upgrade backup of the engine at `root` failed, without an engine and
+/// without following a link: only a private regular file of this user holding one known
+/// code counts. Input: the engine root. Output: `storage_backup_unsafe` or
+/// `storage_backup_failed`, or none.
+pub fn backup_failure(root: &Path) -> Option<&'static str> {
+    use std::io::Read;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
+        .open(root.join(BACKUP_FAILURE_FILE))
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file()
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o077 != 0
     {
-        return Err(error(format!(
-            "storage_backup_unsafe: {} must be a private folder of this user",
-            folder.display()
-        )));
+        return None;
     }
-    Ok(folder)
+    let mut text = String::new();
+    file.take(64).read_to_string(&mut text).ok()?;
+    [BACKUP_UNSAFE, BACKUP_FAILED]
+        .into_iter()
+        .find(|code| text == *code)
 }
 
 /// Writes the database and settings copies into a new backup folder.

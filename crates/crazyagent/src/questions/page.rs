@@ -1,6 +1,7 @@
 use super::{
-    AnsweredBy, COLUMNS, PENDING_PER_PROJECT_MAX, Question, QuestionStatus, STORED_BYTES_MAX,
-    asker_label, ensure, immediate, is_terminal, item, select, unavailable,
+    AnsweredBy, COLUMNS, COMMENT_LABEL, ClosedBy, PENDING_PER_PROJECT_MAX, Question, QuestionKind,
+    QuestionStatus, STORED_BYTES_MAX, asker_label, ensure, immediate, is_terminal, item, select,
+    unavailable,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
@@ -88,7 +89,7 @@ fn shown(
     let pending = select(
         tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status='pending'
+            "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status='pending'
              ORDER BY id LIMIT ?2"
         ),
         params![project.as_str(), PENDING_PER_PROJECT_MAX],
@@ -96,7 +97,7 @@ fn shown(
     let settled = select(
         tx,
         &format!(
-            "SELECT {COLUMNS} FROM owner_questions WHERE project=?1 AND status!='pending'
+            "SELECT {COLUMNS} FROM questions_log WHERE project=?1 AND status!='pending'
              ORDER BY id DESC LIMIT ?2"
         ),
         params![project.as_str(), SETTLED_SHOWN_MAX],
@@ -161,7 +162,8 @@ fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
     ));
     fenced(page, &question.question);
     if !question.options.is_empty() {
-        let options = question
+        assert!(question.kind != QuestionKind::Text);
+        let mut options = question
             .options
             .iter()
             .enumerate()
@@ -170,10 +172,13 @@ fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
                 let mark = if recommended { " (recommended)" } else { "" };
                 format!("{}. {option}{mark}", n + 1)
             })
-            .collect::<Vec<_>>()
-            .join("\n");
-        page.push_str("\nOptions:\n\n");
-        fenced(page, &options);
+            .collect::<Vec<_>>();
+        options.push(format!("- {COMMENT_LABEL}"));
+        page.push_str(match question.kind {
+            QuestionKind::Multi => "\nPick any:\n\n",
+            QuestionKind::Single | QuestionKind::Text => "\nPick one:\n\n",
+        });
+        fenced(page, &options.join("\n"));
     }
     if let Some(recommended) = &question.recommended
         && !question.options.contains(recommended)
@@ -186,6 +191,24 @@ fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
         fenced(page, context);
     }
     let terminal = is_terminal(&question.asker);
+    if question.status != QuestionStatus::Pending
+        && let Some(closer) = question.closed_by
+    {
+        match (closer, &question.answer) {
+            (ClosedBy::Master, _) => page.push_str("\nWithdrawn by the master.\n"),
+            (ClosedBy::Replaced, _) => page.push_str("\nAsked again as a choice question.\n"),
+            (ClosedBy::Relay, Some(answer)) => {
+                page.push_str(
+                    "\nAnswered by the owner in the master's terminal. The master reports:\n\n",
+                );
+                fenced(page, answer);
+            }
+            (ClosedBy::Relay, None) => {
+                page.push_str("\nAnswered by the owner in the master's terminal.\n");
+            }
+        }
+        return;
+    }
     match (question.status, question.answered_by) {
         (QuestionStatus::Pending, _) if terminal => {
             page.push_str("\nWaiting for your answer in that agent's terminal.\n");

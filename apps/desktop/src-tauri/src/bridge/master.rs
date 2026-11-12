@@ -1,4 +1,6 @@
-use super::{BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, caused, failure};
+use super::{
+    BridgeError, IntentReceipt, NativeBridge, PAGE_SIZE, bounded, caused, failure, uncaused,
+};
 use crazyagent::engine::owner::{OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::master_session::{
     MasterCursor, MasterOwnerAction, MasterSessionView, MasterTurnPage,
@@ -36,11 +38,26 @@ pub struct MasterInputs {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MasterMessages {
+    pub ticket: String,
+    pub revision: String,
+    pub page: crazyagent::master_sessions::SessionMessagePage,
+}
+
+#[derive(Debug, Serialize)]
 pub struct MasterTurns {
     pub ticket: String,
     pub revision: String,
     pub config_id: String,
     pub page: MasterTurnPage,
+}
+
+/// The refusal of a default master open: an engine version mismatch when one of the open's
+/// reads hit it, so the page says restart, else `master_open_unavailable`, which the page
+/// answers with its pick-a-pool prompt (PROTO-SKEW-MASTER-OPEN). Input: the reason
+/// `default_master_open` gave. Output: the error.
+pub(super) fn open_failure(reason: &str) -> BridgeError {
+    uncaused("master_open_unavailable", reason)
 }
 
 impl NativeBridge {
@@ -188,7 +205,7 @@ impl NativeBridge {
         let project_id = self.master_project(ticket)?;
         let action = crazyagent::tui::default_master_open(self.controller()?, &project_id)
             .await
-            .map_err(|_| failure("master_open_unavailable"))?;
+            .map_err(|reason| open_failure(&reason))?;
         self.apply_master(ticket, action, generation).await
     }
 
@@ -326,6 +343,60 @@ impl NativeBridge {
         })
     }
 
+    /// Reads one page of the stored messages of any session of the selected project, live
+    /// or parked, whatever harness or master mode wrote them: the newest when `before` is
+    /// absent, else those with a sequence number below it. Inputs: the selection ticket,
+    /// the session id, the cursor and the page size, 1 to 64. Output: the page, oldest
+    /// first, or `master_messages_page_limit` for a size out of bounds.
+    pub async fn master_messages(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        before: Option<u64>,
+        limit: u8,
+    ) -> Result<MasterMessages, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        if !(1..=crazyagent::master_sessions::MESSAGES_PAGE_MAX).contains(&limit) {
+            return Err(failure("master_messages_page_limit"));
+        }
+        let state = self
+            .controller()?
+            .read(OwnerRead::ProjectMasterMessages {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                before,
+                limit,
+            })
+            .await
+            .map_err(|error| caused("owner_read_failed", &error.0))?;
+        let OwnerData::ProjectMasterMessages { page } = state.data else {
+            return Err(failure("unexpected_reply"));
+        };
+        let rising = page
+            .messages
+            .windows(2)
+            .all(|pair| pair[0].seq < pair[1].seq);
+        let below = before.is_none_or(|before| page.messages.iter().all(|row| row.seq < before));
+        let older = page
+            .next
+            .is_none_or(|next| page.messages.first().is_some_and(|row| row.seq == next));
+        if page.project_id != project_id
+            || page.session_id != session_id
+            || page.messages.len() > usize::from(limit)
+            || !rising
+            || !below
+            || !older
+        {
+            return Err(failure("unexpected_reply"));
+        }
+        bounded(MasterMessages {
+            ticket: ticket.into(),
+            revision: state.revision.value().to_string(),
+            page,
+        })
+    }
+
     /// Reads the owner's messages behind some turns of a session of the selected project,
     /// so a resumed or parked session shows its earlier lines. Inputs: the selection
     /// ticket, the session id and at most 32 turn input cursors. Output: the lines found.
@@ -392,7 +463,7 @@ impl NativeBridge {
         let project_id = self.master_project(ticket)?;
         let opened = crazyagent::tui::default_master_open(self.controller()?, &project_id)
             .await
-            .map_err(|_| failure("master_open_unavailable"))?;
+            .map_err(|reason| open_failure(&reason))?;
         let MasterOwnerAction::Open {
             project_id,
             expected_config_id,
@@ -835,6 +906,34 @@ fallback_allowed = false
             .expect("real master paging setup or readback failed");
     }
 
+    /// The most times the paging case sends one owner action again after a stale refusal.
+    const STALE_RESENDS_MAX: usize = 8;
+
+    /// Tells whether the engine refused an owner action only because the revision moved
+    /// between the bridge's read and its send, as a master turn that ends by itself moves it;
+    /// the case then sends the action again, and the bridge reads the revision anew. Counts
+    /// the resends. Inputs: the receipt and the resends so far. Output: true to send again.
+    fn stale_again(receipt: &IntentReceipt, resends: &mut usize) -> bool {
+        if receipt.rejection.as_deref() != Some("stale_revision") {
+            return false;
+        }
+        assert_eq!(receipt.outcome, ActionOutcome::Rejected);
+        *resends += 1;
+        assert!(
+            *resends <= STALE_RESENDS_MAX,
+            "the revision moved under {resends} sends in a row"
+        );
+        true
+    }
+
+    /// Sends one more owner message than a page holds, stopping each turn before the next,
+    /// then reads the turns back in two pages and checks a cursor from before a later turn is
+    /// refused. In this fixture every turn also ends by itself, blocked for a missing
+    /// profile, and a blocked turn can no longer be cancelled: a cancel that loses that race
+    /// is refused, and the turn then reads Blocked, not Cancelled. A turn that ends between
+    /// the bridge's revision read and its send makes the engine refuse the action as stale;
+    /// the case then sends it again with a fresh generation. Input: the engine's owner root.
+    /// Output: Ok, or the setup or readback step that failed.
     async fn real_turn_pages_flow(root: &Path) -> Result<(), String> {
         let mut observer =
             OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
@@ -889,29 +988,64 @@ fallback_allowed = false
         let session_id = session.session_id.as_str();
         let count = u64::from(PAGE_SIZE) + 1;
         let mut ids = Vec::new();
+        let mut ended_alone = Vec::new();
+        let mut generation = 1;
         for round in 0..count {
-            let sent = bridge
-                .submit_master(
-                    &ticket,
-                    session_id,
-                    &format!("Owner message {round}."),
-                    2 + 2 * round,
-                )
-                .await
-                .map_err(|error| error.code)?;
+            let mut resends = 0;
+            let sent = loop {
+                generation += 1;
+                let sent = bridge
+                    .submit_master(
+                        &ticket,
+                        session_id,
+                        &format!("Owner message {round}."),
+                        generation,
+                    )
+                    .await
+                    .map_err(|error| error.code)?;
+                if !stale_again(&sent, &mut resends) {
+                    break sent;
+                }
+            };
             assert_eq!(sent.outcome, ActionOutcome::Applied);
-            let stopped = bridge
-                .cancel_master_turn(
-                    &ticket,
-                    session_id,
-                    &sent.intent.operation_id,
-                    3 + 2 * round,
-                )
-                .await
-                .map_err(|error| error.code)?;
-            assert_eq!(stopped.outcome, ActionOutcome::Applied);
+            let stopped = loop {
+                generation += 1;
+                let stopped = bridge
+                    .cancel_master_turn(&ticket, session_id, &sent.intent.operation_id, generation)
+                    .await
+                    .map_err(|error| error.code)?;
+                if !stale_again(&stopped, &mut resends) {
+                    break stopped;
+                }
+            };
+            let alone = match stopped.outcome {
+                ActionOutcome::Applied => false,
+                ActionOutcome::Rejected => {
+                    assert_eq!(
+                        stopped.rejection.as_deref(),
+                        Some("master_turn_not_current"),
+                        "a cancel is refused only for a turn the engine already ended"
+                    );
+                    let current = bridge
+                        .master_state(&ticket)
+                        .await
+                        .map_err(|error| error.code)?
+                        .session
+                        .ok_or("the session is gone after its turn ended")?
+                        .current_turn;
+                    assert_ne!(
+                        current.as_ref().map(|turn| turn.as_str()),
+                        Some(sent.intent.operation_id.as_str()),
+                        "a refused cancel leaves no turn {round} running"
+                    );
+                    true
+                }
+                other => panic!("the cancel of turn {round} ended {other:?}"),
+            };
+            ended_alone.push(alone);
             ids.push(sent.intent.operation_id);
         }
+        assert_eq!(ended_alone.len(), ids.len());
         let first = bridge
             .master_turns(&ticket, session_id, None)
             .await
@@ -936,25 +1070,172 @@ fallback_allowed = false
             all.iter().map(|turn| turn.id.as_str()).collect::<Vec<_>>(),
             ids.iter().map(String::as_str).collect::<Vec<_>>()
         );
-        assert!(
-            all.iter()
-                .all(|turn| turn.phase == MasterTurnPhase::Cancelled)
-        );
-        let later = bridge
-            .submit_master(
-                &ticket,
-                session_id,
-                "One more owner message.",
-                2 + 2 * count,
-            )
-            .await
-            .map_err(|error| error.code)?;
+        assert_eq!(all.len(), ended_alone.len());
+        for (turn, alone) in all.iter().zip(&ended_alone) {
+            if *alone {
+                assert!(
+                    matches!(
+                        turn.phase,
+                        MasterTurnPhase::Blocked | MasterTurnPhase::Failed
+                    ),
+                    "turn {} ended on its own as {:?}",
+                    turn.ordinal,
+                    turn.phase
+                );
+            } else {
+                assert_eq!(
+                    turn.phase,
+                    MasterTurnPhase::Cancelled,
+                    "turn {} was cancelled",
+                    turn.ordinal
+                );
+            }
+        }
+        let mut resends = 0;
+        let later = loop {
+            generation += 1;
+            let later = bridge
+                .submit_master(&ticket, session_id, "One more owner message.", generation)
+                .await
+                .map_err(|error| error.code)?;
+            if !stale_again(&later, &mut resends) {
+                break later;
+            }
+        };
         assert_eq!(later.outcome, ActionOutcome::Applied);
         let stale = bridge
             .master_turns(&ticket, session_id, Some(next))
             .await
             .unwrap_err();
         assert_eq!(stale.code, "resync_required");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn real_master_messages_read_a_session_s_page_and_refuse_a_size_or_session_out_of_bounds()
+    {
+        let root = tempfile::Builder::new()
+            .prefix("ca-desktop-messages-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g.toml");
+        std::fs::write(&global, CATALOG).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let path = root.path().to_path_buf();
+        let mut body = tokio::spawn(async move { real_messages_flow(&path).await });
+        let result = tokio::time::timeout(Duration::from_secs(60), &mut body).await;
+        if result.is_err() {
+            body.abort();
+            let _ = body.await;
+        }
+        let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+        assert!(
+            matches!(cleanup, Ok(Ok(()))),
+            "actual engine cleanup failed"
+        );
+        result
+            .expect("real master messages case exceeded 60 seconds")
+            .expect("real master messages assertion failed after engine cleanup")
+            .expect("real master messages setup or readback failed");
+    }
+
+    async fn real_messages_flow(root: &Path) -> Result<(), String> {
+        let mut observer =
+            OwnerController::attach(root, OwnerClientKind::Tui, Duration::from_secs(2))
+                .await
+                .map_err(|error| error.to_string())?;
+        observer
+            .read(OwnerRead::Capabilities)
+            .await
+            .map_err(|error| error.to_string())?;
+        observer
+            .begin_mutation(
+                OwnerMutation::CreateProject {
+                    project_id: ProjectId::new("p").unwrap(),
+                    spec: ProjectSpec {
+                        name: "Stored messages".into(),
+                        repositories: vec![
+                            root.join("p")
+                                .to_str()
+                                .ok_or("private path encoding")?
+                                .into(),
+                        ],
+                    },
+                },
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        let created = observer
+            .send_pending()
+            .await
+            .map_err(|error| error.to_string())?;
+        assert!(
+            matches!(created, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied)
+        );
+        let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+        bridge.connect().await.map_err(|error| error.code)?;
+        let ticket = bridge
+            .open_project("p")
+            .await
+            .map_err(|error| error.code)?
+            .ticket;
+        let opened = bridge
+            .open_default_master(&ticket, 1)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(opened.outcome, ActionOutcome::Applied);
+        let session = bridge
+            .master_state(&ticket)
+            .await
+            .map_err(|error| error.code)?
+            .session
+            .ok_or("Start master left no configured session")?;
+        let session_id = session.session_id.as_str();
+
+        let read = bridge
+            .master_messages(&ticket, session_id, None, 32)
+            .await
+            .map_err(|error| error.code)?;
+        assert_eq!(read.ticket, ticket);
+        assert_eq!(read.page.project_id.as_str(), "p");
+        assert_eq!(read.page.session_id.as_str(), session_id);
+        assert_eq!(
+            read.page.count,
+            u64::try_from(read.page.messages.len()).unwrap(),
+            "a session with no turn yet holds no message outside its newest page"
+        );
+        assert_eq!(read.page.next, None);
+
+        for limit in [0, crazyagent::master_sessions::MESSAGES_PAGE_MAX + 1] {
+            let refused = bridge
+                .master_messages(&ticket, session_id, None, limit)
+                .await
+                .err()
+                .ok_or("a page size out of bounds was read")?;
+            assert_eq!(refused.code, "master_messages_page_limit");
+        }
+        let missing = bridge
+            .master_messages(&ticket, "no-such-session", None, 32)
+            .await;
+        assert!(
+            missing.is_err(),
+            "a session the project does not have was read"
+        );
+        let stale = bridge
+            .master_messages("not-a-ticket", session_id, None, 32)
+            .await;
+        assert!(stale.is_err(), "a ticket the bridge never gave was taken");
         Ok(())
     }
 
@@ -1285,5 +1566,44 @@ fallback_allowed = false
         assert_eq!(turns.page.turns.len(), 1);
         assert_eq!(turns.page.turns[0].id.as_str(), sent.intent.operation_id);
         Ok(())
+    }
+
+    /// PROTO-LOWS r1 L1: both default master open routes map the open's refusal through
+    /// `open_failure`, which keeps an engine version mismatch, and the TUI's open keeps that
+    /// code from its project setup read, so neither route turns a skew back into the
+    /// pick-a-pool prompt. A live skewed engine on this path is PROTO-SKEW-LIVE's row.
+    #[test]
+    fn both_default_master_open_routes_keep_an_engine_version_mismatch() {
+        let source = include_str!("master.rs");
+        let product = source.split("#[cfg(all(test, unix))]").next().unwrap();
+        let open = "crazyagent::tui::default_master_open(self.controller()?, &project_id)\n            .await\n            .map_err(|reason| open_failure(&reason))?;";
+        assert_eq!(
+            product.matches(open).count(),
+            2,
+            "open_default_master and new_master_session"
+        );
+        assert_eq!(product.matches("default_master_open(").count(), 2);
+        assert_eq!(
+            product
+                .matches(".map_err(|_| failure(\"master_open_unavailable\"))")
+                .count(),
+            0,
+            "neither open route maps every failure to master_open_unavailable"
+        );
+        let tui = include_str!("../../../../../crates/crazyagent/src/tui/master_session.rs");
+        let opened = tui
+            .split("pub async fn default_master_open(")
+            .nth(1)
+            .unwrap();
+        let setup = opened
+            .split(".project_setup(project_id.clone())")
+            .nth(1)
+            .unwrap();
+        let kept = ".await\n        .map_err(|error| match error.0.as_str() {\n            \"engine_version_mismatch\" => error.0,";
+        assert!(setup.trim_start().starts_with(kept), "{setup}");
+        assert_eq!(
+            open_failure("engine_version_mismatch").code,
+            "engine_version_mismatch"
+        );
     }
 }

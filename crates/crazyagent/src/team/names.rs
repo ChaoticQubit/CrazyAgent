@@ -1,4 +1,4 @@
-use super::{AgentRole, error, failure};
+use super::{AgentRole, error, failure, now_ms};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::storage::versioned;
@@ -37,12 +37,17 @@ pub const HANDLE_CHARS_MAX: usize = 32;
 pub const MASTER_HANDLE: &str = "master";
 const NAME_CHARS_MAX: usize = 64;
 const LIVE: &str = "a.status IN ('starting','idle','working')";
+const FINISHED: &str = "a.status IN ('stopped','failed')";
+/// The most handles the registry keeps per project, the newest ones (F16).
+pub const HANDLES_KEPT_MAX: usize = 512;
+const WAITING_TASKS_READ_MAX: i64 = 64;
 const WAKING: &str = "EXISTS(SELECT 1 FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
      WHERE p.agent=a.id AND t.status IN ('queued','needs_pool'))";
 const SUFFIXES_MAX: usize = PANES_PER_PROJECT_MAX + 2;
 
 const _: () = assert!(PERSONAS.len() > PANES_PER_PROJECT_MAX);
 const _: () = assert!(HANDLE_CHARS_MAX >= 8 && HANDLE_CHARS_MAX < NAME_CHARS_MAX);
+const _: () = assert!(HANDLES_KEPT_MAX >= PANES_PER_PROJECT_MAX);
 
 /// A team sub-agent's stable persona and the role handle of its current job, without the `@`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +94,13 @@ fn create(connection: &Connection) -> Result<(), EngineError> {
                 task INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
                 role TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_handles (
+                project TEXT NOT NULL,
+                handle TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                held_ms INTEGER NOT NULL,
+                PRIMARY KEY(project, handle)
             );",
         )
         .map_err(error)
@@ -397,7 +409,105 @@ fn store_handle(
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
+    remember(connection, project, agent, &chosen)?;
     Ok(Ok(chosen))
+}
+
+/// Records in the handle registry that an agent holds a handle now (F16), so a later name
+/// for that handle still finds the agent after it moves to another job's handle or the
+/// owner renames it, and a new holder of the handle takes it over. Keeps the newest
+/// `HANDLES_KEPT_MAX` handles of the project and none of an agent that no longer exists.
+/// Takes the connection, project, team agent id and handle. Returns any SQLite failure.
+fn remember(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    handle: &str,
+) -> Result<(), EngineError> {
+    assert!(!handle.is_empty() && handle.len() <= HANDLE_CHARS_MAX);
+    connection
+        .execute(
+            "INSERT INTO team_handles(project,handle,agent,held_ms) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(project,handle) DO UPDATE SET agent=excluded.agent, held_ms=excluded.held_ms",
+            params![project.as_str(), handle, agent, now_ms()],
+        )
+        .map_err(error)?;
+    connection
+        .execute(
+            "DELETE FROM team_handles WHERE project=?1 AND (agent NOT IN (SELECT id FROM team_agents)
+               OR rowid NOT IN (SELECT rowid FROM team_handles WHERE project=?1
+                                ORDER BY held_ms DESC, rowid DESC LIMIT ?2))",
+            params![project.as_str(), HANDLES_KEPT_MAX as i64],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Follows the handle registry for a handle no agent in the wanted state carries (F16): its
+/// last holder, a renamed or reused sub-agent in that state, one hop with no chain. A task
+/// waiting under that handle outranks the earlier holder, since the master gave it the name.
+/// Takes the connection, project, the handle without its `@` and `LIVE` or `FINISHED`.
+/// Returns the agent, or None.
+fn redirected(
+    connection: &Connection,
+    project: &ProjectId,
+    handle: &str,
+    state: &str,
+) -> Result<Option<i64>, EngineError> {
+    assert!(state == LIVE || state == FINISHED);
+    if waiting_task(connection, project, handle)?.is_some() {
+        return Ok(None);
+    }
+    connection
+        .query_row(
+            &format!(
+                "SELECT a.id FROM team_handles h JOIN team_agents a ON a.id=h.agent
+                 WHERE h.project=?1 AND a.project=?1 AND a.role='sub' AND {state}
+                   AND h.handle=?2 COLLATE NOCASE
+                 ORDER BY h.held_ms DESC LIMIT 1"
+            ),
+            params![project.as_str(), handle],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)
+}
+
+/// Finds the waiting task whose role reserves a handle no agent carries yet (F16, DM
+/// "@classifier-storage not recognized"): a task the master named that has not started,
+/// the newest when several do. Takes the connection, project and the name, `@` allowed.
+/// Returns the task id, or None.
+pub fn waiting_task(
+    connection: &Connection,
+    project: &ProjectId,
+    text: &str,
+) -> Result<Option<i64>, EngineError> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > NAME_CHARS_MAX {
+        return Ok(None);
+    }
+    let Some(wanted) = handle(text) else {
+        return Ok(None);
+    };
+    let mut statement = connection
+        .prepare(
+            "SELECT t.id,r.role FROM team_task_roles r JOIN team_tasks t ON t.id=r.task
+             WHERE r.project=?1 AND t.project=?1 AND t.status IN ('queued','needs_pool')
+             ORDER BY t.id DESC LIMIT ?2",
+        )
+        .map_err(error)?;
+    let waiting = statement
+        .query_map(params![project.as_str(), WAITING_TASKS_READ_MAX], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(waiting.len() <= WAITING_TASKS_READ_MAX as usize);
+    Ok(waiting
+        .into_iter()
+        .find(|(_, role)| handle(role).as_deref() == Some(wanted.as_str()))
+        .map(|(task, _)| task))
 }
 
 /// Gives a sub-agent that starts again its names back (DEC-102): its persona while no other
@@ -592,8 +702,9 @@ pub fn rename(
 }
 
 /// Finds the live agent of a project that a name addresses: `@handle`, `@master`, a persona
-/// in any case, or a bare handle. A name in a numbered form ([`numbered`]) is an agent
-/// number, never a name, even for a handle stored before such handles were refused.
+/// in any case, or a bare handle, else the live agent the handle registry says last held
+/// that handle (F16). A name in a numbered form ([`numbered`]) is an agent number, never a
+/// name, even for a handle stored before such handles were refused.
 /// Takes the connection, project and the name text.
 /// Returns the team agent id, or None when no live agent of the project carries that name.
 pub fn resolve(
@@ -639,12 +750,16 @@ pub fn resolve(
     if !marked && let Some(found) = by("persona")? {
         return Ok(Some(found));
     }
-    by("handle")
+    match by("handle")? {
+        Some(found) => Ok(Some(found)),
+        None => redirected(connection, project, &bare, LIVE),
+    }
 }
 
 /// Finds the finished sub-agent of a project that a name addresses, for a wake (DEC-102):
 /// a persona in any case first, then an `@handle` or bare handle, among the project's
-/// sub-agents that stopped or failed, the most recently stopped one when several carried it.
+/// sub-agents that stopped or failed, the most recently stopped one when several carried it,
+/// else the finished agent the handle registry says last held that handle (F16).
 /// A name in a numbered form is left to the number lookup, as in [`resolve`].
 /// Takes the connection, project and the name text. Returns the team agent id, or None.
 pub fn resolve_finished(
@@ -681,7 +796,10 @@ pub fn resolve_finished(
     if !marked && let Some(found) = by("persona")? {
         return Ok(Some(found));
     }
-    by("handle")
+    match by("handle")? {
+        Some(found) => Ok(Some(found)),
+        None => redirected(connection, project, &bare, FINISHED),
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -1,11 +1,14 @@
 use super::*;
+#[cfg(unix)]
 use crate::questions::{Ask, Asker, Page, QuestionStatus, Settlement};
 use serde_json::json;
 
+#[cfg(unix)]
 const PROJECT: &str = "alpha";
 
 /// An engine root whose database holds the team tables and one set-up project with its
 /// `.crazyagent/` folder. Output: the temporary folder, the engine root and the project.
+#[cfg(unix)]
 fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     let tmp = tempfile::Builder::new()
         .prefix("ca-owner-questions-")
@@ -28,12 +31,14 @@ fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
 /// Sends one request through this protocol's selector, parsing and handler, as an owner
 /// client's frame body. Inputs: the engine root and the body. Output: the reply, or the
 /// refusal.
+#[cfg(unix)]
 fn send(root: &Path, body: serde_json::Value) -> Result<Reply, EngineError> {
     let bytes = serde_json::to_vec(&body).unwrap();
     assert!(matches!(protocol(&bytes).unwrap(), Protocol::Questions));
     run(root, parse(&bytes)?)
 }
 
+#[cfg(unix)]
 fn listed(root: &Path, after: Option<u64>) -> Page {
     let body = json!({"questions": {"kind": "list", "project": PROJECT, "after": after}});
     match send(root, body).unwrap() {
@@ -42,6 +47,7 @@ fn listed(root: &Path, after: Option<u64>) -> Page {
     }
 }
 
+#[cfg(unix)]
 fn settled(reply: Result<Reply, EngineError>) -> Settlement {
     match reply.unwrap() {
         Reply::Settled { settlement } => settlement,
@@ -49,15 +55,18 @@ fn settled(reply: Result<Reply, EngineError>) -> Settlement {
     }
 }
 
+#[cfg(unix)]
 fn asked(question: &str) -> Ask {
     Ask {
         question: question.into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Yes".into(), "No".into()],
-        recommended: None,
+        recommended: Some("Yes".into()),
         context: None,
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
     let (_tmp, root, project) = engine();
@@ -96,11 +105,11 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
         )
     };
     assert_eq!(
-        settled(answer(first, 0, json!({"option": 0}))),
+        settled(answer(first, 0, json!({"picks": [0]}))),
         Settlement::Settled
     );
     assert_eq!(
-        settled(answer(first, 0, json!({"text": "No"}))),
+        settled(answer(first, 0, json!({"comment": "No"}))),
         Settlement::Stale
     );
     assert_eq!(settled(dismiss(second, 1)), Settlement::Stale);
@@ -122,8 +131,10 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
         other => panic!("expected counts, got {other:?}"),
     }
     let refused = [
-        answer(second + 1, 0, json!({"text": "Yes"})).unwrap_err().0,
-        answer(first, 1, json!({"option": 0, "text": "Yes"}))
+        answer(second + 1, 0, json!({"comment": "Yes"}))
+            .unwrap_err()
+            .0,
+        answer(first, 1, json!({"picks": [], "comment": null}))
             .unwrap_err()
             .0,
         answer(first, 1, json!({})).unwrap_err().0,
@@ -138,15 +149,17 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
     );
     let third = questions::ask(&db, &project, &master, &asked("Use Postgres?")).unwrap();
     let refused = [
-        answer(third, 0, json!({"option": 2})).unwrap_err().0,
-        answer(third, 0, json!({"text": "   "})).unwrap_err().0,
-        answer(third, 0, json!({"text": "yes\u{202e}no"}))
+        answer(third, 0, json!({"picks": [2]})).unwrap_err().0,
+        answer(third, 0, json!({"picks": [0, 1]})).unwrap_err().0,
+        answer(third, 0, json!({"comment": "   "})).unwrap_err().0,
+        answer(third, 0, json!({"picks": [0], "comment": "yes\u{202e}no"}))
             .unwrap_err()
             .0,
     ];
     assert_eq!(
         refused,
         [
+            "questions_option_invalid",
             "questions_option_invalid",
             "questions_answer_invalid",
             "questions_text_invalid"
@@ -177,11 +190,24 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
             ),
         ]
     );
+    assert_eq!(
+        settled(answer(
+            third,
+            0,
+            json!({"picks": [1], "comment": "Not yet."})
+        )),
+        Settlement::Settled
+    );
+    assert_eq!(
+        listed(&root, None).items[0].answer.as_deref(),
+        Some("No\nComment: Not yet.")
+    );
     for code in &refused {
         assert!(QUESTIONS_CODES.contains(&code.as_str()), "{code}");
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_full_page_of_the_largest_questions_fits_one_owner_frame() {
     let (_tmp, root, project) = engine();
@@ -190,6 +216,7 @@ fn a_full_page_of_the_largest_questions_fits_one_owner_frame() {
     for n in 0..questions::PENDING_PER_PROJECT_MAX {
         let largest = Ask {
             question: format!("{n} {}", "\\".repeat(questions::QUESTION_BYTES_MAX - 4)),
+            kind: crate::questions::QuestionKind::Single,
             options: ["a", "b", "c", "d", "e", "f"]
                 .iter()
                 .map(|letter| letter.repeat(questions::OPTION_BYTES_MAX))
@@ -220,14 +247,20 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
     for body in [
         r#"{"questions":{"kind":"list"}}"#,
         r#"{"questions":{"kind":"list","project":"alpha","pending_only":true}}"#,
-        r#"{"questions":{"kind":"answer","id":1,"text":"x"}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"comment":"x"}}"#,
         r#"{"questions":{"kind":"list","project":"a b","after":null}}"#,
         r#"{"questions":{"kind":"dismiss","id":1,"version":-1}}"#,
         r#"{"questions":{"kind":"dismiss","id":1,"version":0,"force":true}}"#,
-        r#"{"questions":{"kind":"answer","id":1,"version":0,"option":256}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"picks":[256]}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"picks":0}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"option":1}}"#,
+        r#"{"questions":{"kind":"answer","id":1,"version":0,"text":"x"}}"#,
         r#"{"questions":{"kind":"ask","project":"alpha","question":"x"}}"#,
-        r#"{"questions":{"kind":"answer","id":"1","version":0,"text":"x"}}"#,
+        r#"{"questions":{"kind":"answer","id":"1","version":0,"comment":"x"}}"#,
         r#"{"questions":{"kind":"counts","project":"alpha"}}"#,
+        r#"{"questions":{"kind":"dismiss_many","items":[[1]]}}"#,
+        r#"{"questions":{"kind":"dismiss_many","items":[{"id":1,"version":0}]}}"#,
+        r#"{"questions":{"kind":"dismiss_many"}}"#,
     ] {
         assert_eq!(
             parse(body.as_bytes()).unwrap_err().0,
@@ -243,10 +276,58 @@ fn malformed_or_oversized_questions_requests_are_refused_before_the_log() {
         parse(long.as_bytes()).unwrap_err().0,
         "questions_request_bounds"
     );
-    let largest = json!({"questions": {"kind": "answer", "id": u64::MAX, "version": u64::MAX, "text": "\\".repeat(questions::ANSWER_BYTES_MAX)}});
+    let largest = json!({"questions": {"kind": "answer", "id": u64::MAX, "version": u64::MAX, "picks": [0, 1, 2, 3, 4, 5], "comment": "\\".repeat(questions::ANSWER_BYTES_MAX)}});
     let bytes = serde_json::to_vec(&largest).unwrap();
     assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
     assert!(parse(&bytes).is_ok());
+    let items = vec![[u64::MAX, u64::MAX]; questions::LISTED_MAX];
+    let widest = json!({"questions": {"kind": "dismiss_many", "items": items}});
+    let bytes = serde_json::to_vec(&widest).unwrap();
+    assert!(bytes.len() <= REQUEST_BYTES_MAX, "{}", bytes.len());
+    assert!(parse(&bytes).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_owner_dismisses_many_questions_in_one_request_and_hears_each_outcome() {
+    let (_tmp, root, project) = engine();
+    let db = questions::open(&root).unwrap();
+    let master = Asker::Master(41);
+    let first = questions::ask(&db, &project, &master, &asked("Ship on Friday?")).unwrap();
+    let second = questions::ask(&db, &project, &master, &asked("Rename the app?")).unwrap();
+    let dismiss_many = |items: serde_json::Value| {
+        send(
+            &root,
+            json!({"questions": {"kind": "dismiss_many", "items": items}}),
+        )
+    };
+    match dismiss_many(json!([[first, 0], [second, 3], [9999, 0]])).unwrap() {
+        Reply::Dismissed { outcome } => {
+            assert_eq!(outcome.settled, [first]);
+            assert_eq!(outcome.stale, [second]);
+            assert_eq!(outcome.refused, [(9999, "questions_not_found".to_owned())]);
+        }
+        other => panic!("expected the outcome of each, got {other:?}"),
+    }
+    let page = listed(&root, None);
+    let pending: Vec<u64> = page
+        .items
+        .iter()
+        .filter(|question| question.status == QuestionStatus::Pending)
+        .map(|question| question.id)
+        .collect();
+    assert_eq!(pending, [second]);
+    assert_eq!(
+        dismiss_many(json!([])).unwrap_err().0,
+        "questions_bulk_invalid"
+    );
+    let too_many: Vec<[u64; 2]> = (1..=questions::LISTED_MAX as u64 + 1)
+        .map(|id| [id, 0])
+        .collect();
+    assert_eq!(
+        dismiss_many(json!(too_many)).unwrap_err().0,
+        "questions_bulk_invalid"
+    );
 }
 
 #[test]

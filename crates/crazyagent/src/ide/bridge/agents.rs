@@ -40,10 +40,10 @@ pub fn agents(connection: &Connection, stored: &StoredSetup) -> Result<Vec<IdeAg
 
 /// Answers `ide.agent_message`: types the owner's text into one of the project's running
 /// sub-agents as one submission, as the team view's send does, and notes it for the
-/// master's next turn. Takes the connection, the terminal host, the project, the agent id,
-/// the text and the time. Returns the agent id, or the team's plain refusal code for blank
-/// or long text, an unknown, stopped or other project's agent, a master, or an unreachable
-/// terminal.
+/// master's next turn and as the owner's in the agent's Messages timeline. Takes the
+/// connection, the terminal host, the project, the agent id, the text and the time. Returns
+/// the agent id, or the team's plain refusal code for blank or long text, an unknown, stopped
+/// or other project's agent, a master, or an unreachable terminal.
 pub fn message(
     connection: &Connection,
     host: &dyn Host,
@@ -52,17 +52,11 @@ pub fn message(
     text: &str,
     now_ms: i64,
 ) -> Result<Result<i64, &'static str>, EngineError> {
-    let sent = crate::team::events::send_to_agent(
-        connection,
-        host,
-        project,
-        &format!("team-{agent}"),
-        text,
-    )?;
-    if let Ok(agent) = sent {
+    let sent = crate::team::events::send_to_id(connection, host, project, agent, text)?;
+    if sent.is_ok() {
         crate::team::direct::record(connection, agent, text, now_ms)?;
     }
-    Ok(sent)
+    Ok(sent.map(|()| agent))
 }
 
 /// Answers `ide.agents` from the engine database, read off the async runtime. Takes the

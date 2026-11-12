@@ -183,11 +183,17 @@ pub enum MasterReason {
     ApprovalRequired,
     RuntimeUnavailable,
     CaptureIncomplete,
+    NoReply,
+    StepLimit,
+    TimeLimit,
     OutputLimit,
     UnsupportedCapability,
     RepositoryMissing,
     RepositoryConfigRefused,
     InstructionsTooLarge,
+    ProtocolFault,
+    FrameLimit,
+    WorktreeUncertain,
     Cancelled,
     Unknown,
 }
@@ -269,8 +275,22 @@ impl MasterSessionView {
                 .any(|binding| &binding.config_id == config)
     }
 
-    /// Checks the stored rebindings: bounded, never on an RCLI master, well formed, made
-    /// after the Open in revision order up to the session's version, each a real change.
+    /// Whether settings a turn was prepared under belong to this session, by the rule of
+    /// [`Self::admits_attempt`]. Input: the config, source hash and whether the turn is
+    /// still live. Output: a live turn needs the current binding; a settled one any binding
+    /// the session has had.
+    pub(crate) fn admits_binding(&self, config: &ConfigId, source_hash: &str, live: bool) -> bool {
+        if live {
+            return self.binding() == (config, source_hash);
+        }
+        (&self.config_id, self.source_hash.as_str()) == (config, source_hash)
+            || self.rebound.iter().any(|binding| {
+                (&binding.config_id, binding.source_hash.as_str()) == (config, source_hash)
+            })
+    }
+
+    /// Checks the stored rebindings: bounded, well formed, made after the Open in
+    /// revision order up to the session's version, each a real change.
     /// Output: false when the record cannot have come from `rebind`.
     pub(crate) fn rebinds_valid(&self) -> bool {
         let mut previous = (
@@ -279,9 +299,7 @@ impl MasterSessionView {
             self.owner.engine_epoch.as_str(),
             self.owner.revision_after.value(),
         );
-        if self.rebound.len() > REBINDS_MAX
-            || (self.selection.backend == MasterBackend::Rcli && !self.rebound.is_empty())
-        {
+        if self.rebound.len() > REBINDS_MAX {
             return false;
         }
         for binding in &self.rebound {
@@ -309,11 +327,15 @@ impl MasterSessionView {
 }
 
 /// The part of the settings an open master runs on (DEC-092): every setting except the
-/// pools, connections, accounts and account approvals outside the session's own pool, and,
-/// when the route pins its target, destinations that are neither the master's targets, its
-/// pool's targets nor knowledge processing destinations.
-/// Input: a config and the session's selection. Output: the settings to compare.
-pub(crate) fn master_scope(config: &EffectiveConfig, selection: &MasterSelection) -> Settings {
+/// pools, connections, accounts and account approvals outside the session's own pool, the
+/// other projects its pool serves, and, when the route pins its target, destinations that
+/// are neither the master's targets, its pool's targets nor knowledge processing destinations.
+/// Input: a config, the session's project and its selection. Output: the settings to compare.
+pub(crate) fn master_scope(
+    config: &EffectiveConfig,
+    project: &ProjectId,
+    selection: &MasterSelection,
+) -> Settings {
     let mut settings = config.settings.clone();
     let mut destinations: Vec<CredentialRef> = [
         Some(&selection.target_profile_ref),
@@ -327,6 +349,10 @@ pub(crate) fn master_scope(config: &EffectiveConfig, selection: &MasterSelection
     .collect();
     if let Some(access) = settings.model_access.as_mut() {
         access.pools.retain(|pool| pool.id == selection.pool_ref);
+        for pool in &mut access.pools {
+            pool.projects
+                .retain(|held| held.as_str() == project.as_str());
+        }
         access.connections.retain(|connection| {
             access
                 .pools
@@ -426,6 +452,19 @@ pub struct MasterTurnView {
     pub changes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_request: Option<MasterEngineRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activity: Vec<MasterActivityLine>,
+}
+
+/// One line of what a running master turn is doing, as the engine words it from the
+/// harness's stream: a fixed phrase with at most one screened project-relative path, and
+/// when the engine last saw it. Held in the engine's memory while the turn runs and added
+/// when turns are read; never stored with the turn (OB-2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MasterActivityLine {
+    pub at_ms: u64,
+    pub text: String,
 }
 
 /// What the engine asked the master in a turn the owner started with Ask agent to update

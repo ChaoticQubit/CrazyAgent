@@ -206,6 +206,9 @@ fn card(
         about: about.into(),
         platforms: platforms.to_vec(),
         pool: pool.map(Into::into),
+        pool_id: pool.map(|name| {
+            CredentialRef::new(format!("pool-{}", name.replace(' ', "-").to_lowercase())).unwrap()
+        }),
         research,
         created_ms: Some(clock::now_ms() - age_ms),
         activity: Default::default(),
@@ -291,7 +294,10 @@ fn project_swaps(old: &str) -> Vec<(&'static str, String)> {
         ),
         ("Updated 4 min ago", "Created 4 min ago".into()),
         ("Updated yesterday", "Created yesterday".into()),
-        ("Updated Oct 19", format!("Created {old}")),
+        (
+            "Updated Oct 19",
+            format!("{:>1$}", format!("Created {old}"), "Updated Oct 19".len()),
+        ),
     ]
 }
 
@@ -849,6 +855,7 @@ fn accounts() -> Vec<super::seam::AccountRow> {
                 name,
                 provider: provider.into(),
                 status: status.into(),
+                no_window: None,
             }
         })
         .collect()
@@ -1228,4 +1235,25 @@ fn a_profile_read_failure_is_not_shown_as_a_stopped_engine() {
     assert!(text.contains("r Try again"));
     assert!(!text.contains("engine isn't running"));
     assert!(!text.contains("Engine not running"));
+}
+
+#[test]
+fn a_tab_in_a_classic_status_line_shows_as_spaces_so_later_text_keeps_its_column() {
+    let mut app = super::app::App::new();
+    app.notice("step\tdone");
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| super::views::draw(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| !cell.symbol().contains(char::is_control))
+    );
+    let rows: Vec<String> = (0..40u16)
+        .map(|y| (0..120u16).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert!(rows.iter().any(|row| row.contains("step    done")));
 }

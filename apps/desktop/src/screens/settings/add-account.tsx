@@ -25,7 +25,6 @@ const COMPANIES: { key: string; name: string; subscription: AccountProvider; key
 const METHOD_DETAILS: Record<string, string> = {
   "chatgpt:subscription": "Uses your ChatGPT plan.",
   "chatgpt:api_key": "Pay per use with an OpenAI key.",
-  "chatgpt:existing": "Reuses the account Codex is already signed in to.",
   "claude:subscription": "Uses your Pro or Max plan.",
   "claude:api_key": "Pay per use with an Anthropic key.",
   "openai_api:api_key": "Pay per use with an OpenAI key.",
@@ -44,8 +43,8 @@ export interface MethodOption {
   native?: NativeAuthMethod;
 }
 
-/** Lists a provider's sign-in methods in catalog order, the first marked Recommended. ChatGPT's
- * subscription also offers reusing the Codex sign-in on this Mac.
+/** Lists a provider's sign-in methods in catalog order, the first marked Recommended. Every
+ * subscription signs in fresh in the account's own profile; nothing on this Mac is imported.
  * Input: the provider entry. Output: the options. */
 export function methodOptions(provider: ProviderEntry): MethodOption[] {
   const options: MethodOption[] = [];
@@ -54,10 +53,6 @@ export function methodOptions(provider: ProviderEntry): MethodOption[] {
       : provider.provider === "chatgpt" ? "codex_device_code" : provider.provider === "claude" ? "claude_official" : undefined;
     options.push({ key: `${provider.provider}:${entry.method}`, provider, title: entry.label, detail: METHOD_DETAILS[`${provider.provider}:${entry.method}`] ?? "",
       recommended: options.length === 0 && provider.methods.length > 1, entry, native });
-    if (provider.provider === "chatgpt" && entry.method === "subscription") {
-      options.push({ key: "chatgpt:existing", provider, title: "Use the Codex sign-in on this Mac", detail: METHOD_DETAILS["chatgpt:existing"]!,
-        recommended: false, entry, native: "codex_existing" });
-    }
   }
   return options;
 }

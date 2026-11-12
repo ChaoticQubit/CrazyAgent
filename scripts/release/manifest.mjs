@@ -98,7 +98,7 @@ async function configuredPublicKey() {
 }
 
 async function main(args) {
-  const names = ["dir", "version", "channel", "commit", "base-url", "notes", "public-key-file"];
+  const names = ["dir", "version", "channel", "commit", "base-url", "notes", "public-key-file", "targets"];
   const given = {};
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index].replace(/^--/, "");
@@ -110,6 +110,7 @@ async function main(args) {
   const written = await writeManifests({
     dir: resolve(given.dir), version: given.version, channel: given.channel, commit: given.commit,
     baseUrl: given["base-url"], notes: given.notes ?? "", pubDate: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"), publicKey,
+    targets: given.targets?.split(","),
   });
   return written.join("\n");
 }

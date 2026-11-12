@@ -8,13 +8,22 @@ use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value, json};
 use std::cell::Cell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
+use std::sync::Arc;
 
 const EVENTS_MAX: usize = 128;
-const NATIVE_IDS_MAX: usize = 4096;
+/// The memory the native message ids one protocol remembers may take. A stream has no count
+/// limit (OB-5d): past this the oldest ids are forgotten, so a message sent twice is refused
+/// while its first copy is among the newest ids: never fewer than the 4,096 ids a protocol
+/// kept before, and about 13,000 of Claude Code's 36 byte ids.
+const SEEN_BYTES_MAX: usize = 4096 * (ID_BYTES_MAX + SEEN_ENTRY_BYTES);
+/// What one remembered id costs besides its text: the bookkeeping of its two entries.
+const SEEN_ENTRY_BYTES: usize = 64;
 const REQUESTS_MAX: usize = 128;
 const ID_BYTES_MAX: usize = 256;
+const _: () = assert!(SEEN_BYTES_MAX / (ID_BYTES_MAX + SEEN_ENTRY_BYTES) >= 4096);
+const _: () = assert!(SEEN_BYTES_MAX <= 2 * 1024 * 1024);
 /// What the events of one decode may serialize to. They copy text once from the lines it
 /// completes, the buffered line and one chunk, under two longest lines, and each of at most
 /// `EVENTS_MAX` events adds an envelope of identifiers under 8 KiB.
@@ -209,6 +218,55 @@ fn auth_status_string_bounds(value: &Value) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// The native ids a protocol has taken, oldest first, kept to refuse one sent twice: Claude
+/// message ids and Codex server request ids. Bounded by bytes, not by count: `insert`
+/// forgets the oldest ids once the kept ones cost more than `SEEN_BYTES_MAX`, so a long
+/// turn is never refused for how many it sent.
+#[derive(Default)]
+pub(super) struct SeenIds {
+    order: VecDeque<Arc<str>>,
+    known: BTreeSet<Arc<str>>,
+    bytes: usize,
+}
+
+impl SeenIds {
+    /// The longest id the store takes.
+    pub(super) const ID_BYTES_MAX: usize = ID_BYTES_MAX;
+
+    /// Whether an id is among the remembered ones. Input: the id. Output: the answer.
+    pub(super) fn contains(&self, id: &str) -> bool {
+        self.known.contains(id)
+    }
+
+    /// Asserts the store is within its byte bound and that its two views of the ids agree.
+    /// Input: the store. Output: none.
+    pub(super) fn check(&self) {
+        assert!(self.bytes <= SEEN_BYTES_MAX);
+        assert_eq!(self.order.len(), self.known.len());
+    }
+
+    /// Remembers one id and forgets the oldest ids past the byte bound. Input: the id, at
+    /// most `ID_BYTES_MAX` bytes. Output: none; an id already kept changes nothing.
+    pub(super) fn insert(&mut self, id: &str) {
+        assert!(!id.is_empty());
+        assert!(id.len() <= ID_BYTES_MAX);
+        let id: Arc<str> = Arc::from(id);
+        if !self.known.insert(Arc::clone(&id)) {
+            return;
+        }
+        self.bytes += id.len() + SEEN_ENTRY_BYTES;
+        self.order.push_back(id);
+        while self.bytes > SEEN_BYTES_MAX {
+            let oldest = self.order.pop_front().expect("a kept id past the bound");
+            self.bytes -= oldest.len() + SEEN_ENTRY_BYTES;
+            let forgotten = self.known.remove(&*oldest);
+            assert!(forgotten);
+        }
+        assert_eq!(self.order.len(), self.known.len());
+        assert!(self.bytes <= SEEN_BYTES_MAX);
+    }
+}
+
 /// Projects bounded Claude structured stream messages into shared observations.
 /// Inputs bind a launch action and account reference without executing either.
 /// Outputs preserve observed identity and never qualify native admission.
@@ -218,8 +276,9 @@ pub struct ClaudeProtocol {
     native_session_id: Option<String>,
     active_request: Option<RequestId>,
     seen_requests: BTreeSet<RequestId>,
-    seen_events: BTreeSet<String>,
+    seen_events: SeenIds,
     buffer: Vec<u8>,
+    frame_max: usize,
 }
 
 impl ClaudeProtocol {
@@ -245,11 +304,28 @@ impl ClaudeProtocol {
             native_session_id: None,
             active_request: None,
             seen_requests: BTreeSet::new(),
-            seen_events: BTreeSet::new(),
+            seen_events: SeenIds::default(),
             buffer: Vec::new(),
+            frame_max: FRAME_BYTES_MAX,
         };
         protocol.assert_consistent();
         Ok(protocol)
+    }
+
+    /// Bounds each prompt frame this protocol writes by the owner's master frame size limit
+    /// (F39) in place of the engine wire frame. Input: the bound in bytes, from
+    /// `FRAME_BYTES_MAX` to `master_frame_limit::BYTES_MAX`; another bound is a caller
+    /// fault. Output: the protocol with that bound.
+    pub fn with_frame_limit(mut self, bytes: usize) -> Self {
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&bytes));
+        self.frame_max = bytes;
+        self.assert_consistent();
+        self
+    }
+
+    /// The bound on each prompt frame this protocol writes. Input: none. Output: the bytes.
+    pub fn frame_limit(&self) -> usize {
+        self.frame_max
     }
 
     pub fn state(&self) -> State {
@@ -279,7 +355,7 @@ impl ClaudeProtocol {
         if text.trim().is_empty() || text.contains('\0') {
             return Err(ProtocolError::InvalidInput);
         }
-        if text.len() > FRAME_BYTES_MAX {
+        if text.len() > self.frame_max {
             return Err(ProtocolError::FrameTooLarge);
         }
         if self.seen_requests.contains(&request_id) {
@@ -296,10 +372,11 @@ impl ClaudeProtocol {
             value["session_id"] = json!(session_id);
         }
         let mut bytes = serde_json::to_vec(&value).map_err(|_| ProtocolError::InvalidInput)?;
-        if bytes.len() >= FRAME_BYTES_MAX {
+        if bytes.len() >= self.frame_max {
             return Err(ProtocolError::FrameTooLarge);
         }
         bytes.push(b'\n');
+        assert!(bytes.len() <= self.frame_max);
         self.seen_requests.insert(request_id.clone());
         self.active_request = Some(request_id);
         if self.native_session_id.is_some() {
@@ -338,7 +415,8 @@ impl ClaudeProtocol {
 
     fn assert_consistent(&self) {
         assert!(self.buffer.len() <= LINE_BYTES_MAX);
-        assert!(self.seen_events.len() <= NATIVE_IDS_MAX);
+        assert!((FRAME_BYTES_MAX..=crate::master_frame_limit::BYTES_MAX).contains(&self.frame_max));
+        self.seen_events.check();
         assert!(self.seen_requests.len() <= REQUESTS_MAX);
         assert_eq!(self.provenance.harness, NativeHarness::Claude);
         if let Some(request) = &self.active_request {
@@ -407,14 +485,11 @@ impl ClaudeProtocol {
         if self.seen_events.contains(uuid) {
             return Err(ProtocolError::StaleMessage);
         }
-        if self.seen_events.len() == NATIVE_IDS_MAX {
-            return Err(ProtocolError::Capacity);
-        }
         if message_type == "system"
             && subtype.as_deref() != Some("init")
             && self.native_session_id.is_none()
         {
-            self.seen_events.insert(uuid.to_owned());
+            self.seen_events.insert(uuid);
             assert_eq!(self.phase, State::AwaitingInit);
             return Ok(Vec::new());
         }
@@ -425,7 +500,7 @@ impl ClaudeProtocol {
                 if bound != session || self.phase != State::Active {
                     return Err(ProtocolError::StaleMessage);
                 }
-                self.seen_events.insert(uuid.to_owned());
+                self.seen_events.insert(uuid);
                 self.assert_consistent();
                 return Ok(Vec::new());
             }
@@ -480,7 +555,7 @@ impl ClaudeProtocol {
                 kind,
             })
             .collect();
-        self.seen_events.insert(uuid.to_owned());
+        self.seen_events.insert(uuid);
         if message_type == "result" {
             self.active_request = None;
             self.phase = State::Idle;

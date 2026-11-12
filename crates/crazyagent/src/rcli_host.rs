@@ -53,6 +53,7 @@ mod master_process {
 mod master_reply;
 
 pub use master::{RcliMasterCompletion, RcliMasterHost, RcliMasterObservation, RcliMasterStatus};
+pub(crate) use master_launch::INSTRUCTIONS_BYTES_MAX;
 pub(crate) use master_launch::checked_configured_profile;
 #[cfg(unix)]
 pub(crate) use master_launch::configured_sdk_connection;
@@ -189,6 +190,12 @@ enum EventBody {
     Completed {
         turn_id: RequestId,
         status: TurnStatus,
+        #[serde(
+            default,
+            deserialize_with = "named_failure",
+            skip_serializing_if = "Option::is_none"
+        )]
+        failure: Option<RcliProviderFailure>,
     },
     ToolObservation {
         scope: ToolScope,
@@ -923,6 +930,25 @@ enum TurnStatus {
     Failed,
 }
 
+/// A provider failure a failed rcli turn names: the model provider's rate limit, its spent
+/// quota or credit, or its refusal of the key (`PROVIDER_FAILURES` in host.codec.ts). The
+/// engine moves the master to the next pool account on each (PA-6, DEC-091).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RcliProviderFailure {
+    RateLimited,
+    QuotaExhausted,
+    InvalidAuthentication,
+}
+
+/// Reads a completion's named provider failure, refusing a null so only an absent field
+/// means none. Input: the field's value. Output: the failure or the decode error.
+fn named_failure<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<RcliProviderFailure>, D::Error> {
+    RcliProviderFailure::deserialize(deserializer).map(Some)
+}
+
 impl RawEvent {
     fn validate(&self) -> Result<(), ProtocolError> {
         if self.protocol_version != HOST_PROTOCOL_VERSION || self.sequence == 0 {
@@ -959,8 +985,16 @@ impl RawEvent {
             | EventBody::MessageStarted { .. }
             | EventBody::MessageReset { .. }
             | EventBody::MessageDiscarded { .. }
-            | EventBody::MessageFinished { .. }
-            | EventBody::Completed { .. } => {}
+            | EventBody::MessageFinished { .. } => {}
+            EventBody::Completed {
+                status, failure, ..
+            } => {
+                if failure.is_some() && *status != TurnStatus::Failed {
+                    return Err(ProtocolError(
+                        "host failure on a turn that did not fail".into(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1126,6 +1160,56 @@ mod tests {
             (vec![0; FRAME_BYTES_MAX + 1], FRAME_BYTES_MAX + 1),
         ] {
             assert!(std::panic::catch_unwind(|| decode_event_payload(&body, declared)).is_err());
+        }
+    }
+
+    /// PA-6 (DEC-091): a failed turn's completion may name the provider failure the host
+    /// saw, so the engine moves the master to the next pool account. Only a known failure on
+    /// a failed turn is accepted; a null, an unknown name or a failure on another status is
+    /// refused.
+    #[test]
+    fn a_failed_completion_names_only_a_known_provider_failure() {
+        let event = |body: Value| {
+            serde_json::from_value::<Event>(json!({
+                "protocol_version":1,"session_id":"session-a","instance_id":"instance-a",
+                "sequence":1,"event":body
+            }))
+        };
+        for (name, failure) in [
+            ("rate_limited", RcliProviderFailure::RateLimited),
+            ("quota_exhausted", RcliProviderFailure::QuotaExhausted),
+            (
+                "invalid_authentication",
+                RcliProviderFailure::InvalidAuthentication,
+            ),
+        ] {
+            let body =
+                json!({"kind":"completed","turn_id":"turn-a","status":"failed","failure":name});
+            let value = event(body.clone()).unwrap();
+            assert_eq!(
+                value.0.event,
+                EventBody::Completed {
+                    turn_id: RequestId::new("turn-a").unwrap(),
+                    status: TurnStatus::Failed,
+                    failure: Some(failure),
+                }
+            );
+            assert_eq!(serde_json::to_value(&value.0.event).unwrap(), body);
+        }
+        let plain = json!({"kind":"completed","turn_id":"turn-a","status":"failed"});
+        let value = event(plain.clone()).unwrap();
+        assert!(matches!(
+            value.0.event,
+            EventBody::Completed { failure: None, .. }
+        ));
+        assert_eq!(serde_json::to_value(&value.0.event).unwrap(), plain);
+        for body in [
+            json!({"kind":"completed","turn_id":"turn-a","status":"succeeded","failure":"rate_limited"}),
+            json!({"kind":"completed","turn_id":"turn-a","status":"cancelled","failure":"rate_limited"}),
+            json!({"kind":"completed","turn_id":"turn-a","status":"failed","failure":"overloaded"}),
+            json!({"kind":"completed","turn_id":"turn-a","status":"failed","failure":null}),
+        ] {
+            assert!(event(body.clone()).is_err(), "{body}");
         }
     }
 

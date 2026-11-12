@@ -20,7 +20,7 @@ export function rcliCommands({ bun, entry, work, output }) {
   const common = ["--packages=bundle", "--reject-unresolved", "--env=disable"];
   return [
     [bun, "build", entry, "--target=bun", "--format=esm", ...common, `--outdir=${join(work, "bundle")}`, "--entry-naming=entry.js"],
-    [bun, "build", join(work, "bundle", "entry.js"), "--compile", `--compile-executable-path=${bun}`, "--target=bun", ...common, `--outfile=${output}`],
+    [bun, "build", join(work, "bundle", "entry.js"), "--compile", `--compile-executable-path=${bun}`, "--target=bun", ...common, "--no-compile-autoload-dotenv", "--no-compile-autoload-bunfig", "--no-compile-autoload-tsconfig", "--no-compile-autoload-package-json", `--outfile=${output}`],
   ];
 }
 

@@ -80,8 +80,7 @@ fn quoted(path: &Path) -> String {
 }
 
 fn owner_home() -> PathBuf {
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-    home.canonicalize().unwrap_or(home)
+    ToolHomes::owner().unwrap().home().to_path_buf()
 }
 
 fn random_hex(bytes: usize) -> String {

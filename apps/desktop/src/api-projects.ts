@@ -1,10 +1,10 @@
-import { call, classifyFailure, knownError, namedFailure, plainError, type Result } from "./api";
+import { call, classifyFailure, closeProjectWalls, knownError, namedFailure, oneSelection, plainError, type Result } from "./api";
 import {
-  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterSessions, masterState, modelAccessPage,
+  allMasterTurns, closeMaster, deleteMasterSession, editModelAccess, masterInputs, masterMessages, masterSessions, masterState, modelAccessPage,
   newMasterSession, openMaster, openProject, projectList, resumeMasterSession, submitMaster,
 } from "./engine-client";
 import type {
-  AccountPool, AppTeamEvents, IntentReceipt, MasterInputs, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
+  AccountPool, AddFolderMode, AddOverride, AppTeamEvents, IntentReceipt, MasterInputs, MasterMessages, MasterSessions, MasterState, MasterTurn, ModelAccessRecord, ModelConnection, ProjectDetail, ProjectPage, TeamStatus,
   WakeRule, WakeRuleTarget,
 } from "./engine-client";
 
@@ -57,6 +57,7 @@ export interface ProjectCatalog {
   document_bytes_max: number;
   project_document_bytes_max: number;
   default_team: TeamPlan;
+  agent_access?: AccessLevel[];
 }
 
 export interface StoredSetup {
@@ -95,10 +96,52 @@ export interface ResearchJob {
   finished_ms: number | null;
 }
 
+export type ActivityKind =
+  | "created"
+  | "research_started"
+  | "research_saved"
+  | "research_stopped"
+  | "research_waiting"
+  | "task_started"
+  | "task_finished"
+  | "task_failed"
+  | "task_stopped"
+  | "changes_ready"
+  | "accepted"
+  | "discarded"
+  | "conflict"
+  | "sent_back"
+  | "lead_merged"
+  | "merged_into_main"
+  | "undone"
+  | "work_started"
+  | "work_review_ready"
+  | "work_complete"
+  | "work_closed"
+  | "phase"
+  | "test"
+  | "team_action";
+
+export interface ActivityItem {
+  id: number;
+  at_ms: number;
+  kind: ActivityKind;
+  actor: string;
+  goal: string | null;
+  text: string;
+  change_set: string | null;
+  undone: boolean;
+  branch?: string | null;
+  place?: "changes" | "ide" | null;
+}
+
+/** One file of a project's context. `linked` is true for a file linked from the owner's
+ * repository; its path then starts with "repo/" and the rest is the path in the repository. */
 export interface ContextItem {
   path: string;
   kind: "brief" | "document" | "research" | "plan";
   bytes: number;
+  linked?: boolean;
 }
 
 export interface ProjectContext {
@@ -118,34 +161,103 @@ export interface ContextChunk {
 /** How free a project's agents are: Sandboxed, Own branch or Full access (DEC-102). */
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
+/** One access level as the engine names it, with the reason it can't run agents on this
+ * computer, null when it runs. */
+export interface AccessLevel {
+  access: AgentAccess;
+  label: string;
+  unavailable: string | null;
+}
+
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
- * the whole network, https is port 443 only, none is nothing beyond the model. It does not
- * widen or narrow the live master, which always reaches the model's port only. */
+ * the whole network, https is port 443 only, none is the model alone: a hosted model's own
+ * hosts through the engine's model proxy, or only a local model's port on loopback. It does
+ * not widen or narrow the live master, which always reaches the model's port only. */
 export type AgentNetwork = "open" | "https" | "none";
+
+/** What the IDE may change in agent folders at Sandboxed and Own branch (DEC-124). */
+export type IdeAgentFiles = "allow_all" | "no_delete_or_rename" | "read_only";
 
 /** A toolchain family the engine detects in the owner's home folder and the project. */
 export type Toolchain = "rust" | "node" | "python";
 
+/** Who shares the uv cache and pnpm store a project's sandboxed agents write (T8): shared is
+ * one per access level and kind of folder, per_agent one per agent. */
+export type ToolCacheScope = "shared" | "per_agent";
+
+/** When a wider saved access reaches agents already running (F08): when_idle stops each at its
+ * next idle point so its next start has it, the live master resuming its own conversation;
+ * next_start leaves it until it next starts. Lowering or removing an extra always stops at once. */
+export type AccessApply = "when_idle" | "next_start";
+
+/** One narrow extra the owner allows a project's agents beyond their level (F08): connecting to
+ * one unix socket, connecting to one port on this computer, or the owner's own temp folder. */
+export type AccessGrant = { kind: "socket"; path: string } | { kind: "port"; port: number } | { kind: "temp_folder" };
+
+/** One row of a project's extras log, newest first: granted and revoked by an owner save,
+ * allowed and denied by an access request question (by is `owner` or `question <id>`). */
+export interface GrantLogRow {
+  at_ms: number;
+  action: "granted" | "revoked" | "allowed" | "denied";
+  grant: string;
+  by: string;
+}
+
+/** Which of the project folder's local folders agents see (DEC-147.9): all of them, gitignored
+ * ones included, only the top-level folders the owner picked, or none. */
+export type SharedScope = "all" | "chosen" | "none";
+
+/** Whether agents may change the shared top-level folders git does not track. */
+export type SharedAccess = "read_only" | "read_write";
+
+/** A project's shared local folders choice: which folders, how, the top-level folders picked
+ * for Chosen folders and the secret paths the owner shared back for reading. */
+export interface SharedFolders {
+  scope: SharedScope;
+  access: SharedAccess;
+  chosen: string[];
+  secrets: string[];
+}
+
 /** A project's saved agent policy: the level, the network choice, the toolchain switches
- * that differ from the project's own use, and whether git in the IDE runs the project's own
- * hooks. */
+ * that differ from the project's own use, whether git in the IDE runs the project's own
+ * hooks, what the IDE may change in agent folders, who shares the agents' tool cache,
+ * shared when it is left out, when wider access reaches running agents and the allowed
+ * extras, the saved ones kept when left out, and the shared local folders, All and
+ * Read-only when left out. */
 export interface AgentPolicy {
   access: AgentAccess;
   network: AgentNetwork;
   toolchains: { toolchain: Toolchain; allowed: boolean }[];
   ide_git_hooks: boolean;
+  tool_cache?: ToolCacheScope;
+  ide_agent_files: IdeAgentFiles;
+  apply_changes?: AccessApply;
+  grants?: AccessGrant[];
+  shared_folders?: SharedFolders;
 }
 
 /** The engine's view of a project's agent policy: the level, the levels this computer offers
- * with the reason one can't run, the network choices, every detected toolchain and the IDE
- * hooks switch. */
+ * with the reason one can't run, the network choices, every detected toolchain, the IDE
+ * hooks switch, the IDE agent folders choice, the tool cache choice with every choice, the
+ * shared local folders choice and the project folder's top-level folders to pick from. */
 export interface PolicyView {
   access: AgentAccess;
   network: AgentNetwork;
-  levels: { access: AgentAccess; label: string; unavailable: string | null }[];
+  levels: AccessLevel[];
   networks: { network: AgentNetwork; label: string }[];
   toolchains: { toolchain: Toolchain; label: string; installed: boolean; used: boolean; allowed: boolean }[];
   ide_git_hooks: boolean;
+  tool_cache: ToolCacheScope;
+  tool_caches: { scope: ToolCacheScope; label: string }[];
+  ide_agent_files: IdeAgentFiles;
+  apply_changes?: AccessApply;
+  apply_choices?: { apply: AccessApply; label: string }[];
+  grants?: { grant: AccessGrant; label: string }[];
+  temp_folder?: { path: string | null; unavailable: string | null };
+  grant_log?: GrantLogRow[];
+  shared_folders: SharedFolders;
+  local_folders: string[];
   version: number;
 }
 
@@ -190,6 +302,15 @@ const copy: Record<string, string> = {
   research_job_finished: "This research has already stopped.",
   research_job_not_retryable: "Only failed or stopped research can run again.",
   planning_busy: "A roadmap is already being planned for this project. Wait for it to finish.",
+  roadmap_status_off: "Roadmap status is off in Project settings.",
+  roadmap_status_unavailable: "The roadmap status could not be read or saved. Try again.",
+  roadmap_status_invalid: "That roadmap status request could not be read.",
+  roadmap_status_request_invalid: "That roadmap status request could not be read.",
+  roadmap_status_request_bounds: "That roadmap status request was too large for the engine. Try again.",
+  roadmap_status_reply_bounds: "The roadmap status was too large to show. Try again.",
+  roadmap_status_project_missing: "This project no longer exists.",
+  roadmap_status_changed: "The roadmap status changed while it was being read. Try again.",
+  roadmap_status_outcome_unknown: "The engine did not confirm that roadmap status request. Check the status and try again.",
   setup_unconfirmed: "Confirm this project's setup first. Its setup review has the roadmap switch.",
   invalid_pool: "That pool no longer exists. Choose another pool.",
   pool_missing: "That pool no longer exists. Choose another pool.",
@@ -224,6 +345,8 @@ const copy: Record<string, string> = {
   team_task_missing: "That task is gone already.",
   team_wake_cap_invalid: "Set the hourly limit between 0 and 500 wakes.",
   team_time_limits_invalid: "Pick a listed time limit; an agent session may not be shorter than a task.",
+  team_rounds_invalid: "Pick a listed number of sub-agent rounds, or Until the goal is done.",
+  team_run_time_invalid: "Pick a listed master run time, or No limit.",
   team_agent_not_found: "That agent is no longer part of this team.",
   team_notification_missing: "There is no such notification to mark as seen.",
   team_engine_not_ready: "The engine is still starting. Try again in a moment.",
@@ -243,7 +366,7 @@ const copy: Record<string, string> = {
   team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
   team_land_on_invalid: "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.",
   team_background_grace_invalid: "Pick a grace time from 10 to 3600 seconds.",
-  coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
+  coord_native_unsupported: "This harness has no native sub-agents, so its sub-agents are app-spawned.",
   coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
   coord_project_unknown: "This project was not found.",
   team_agent_unknown: "That agent is not running anymore.",
@@ -304,6 +427,17 @@ const copy: Record<string, string> = {
   conversation_text_bounds: "Messages can be up to 8192 bytes.",
   unavailable: "The engine couldn't do this right now. Try again.",
   rejected: "The engine refused this change.",
+  delete_shared_folder: "Another project uses one of its folders, so deleting it would delete that project's files too. Remove it from the dashboard instead.",
+  delete_research_running: "Its research is still queued or running. Cancel it or let it finish, then delete the project. Nothing was deleted.",
+  delete_platform_unqualified: "Delete everything is only on macOS for now. Remove the project from the dashboard instead.",
+  delete_outside_home: "Only a project whose folders are all inside your projects folder can be deleted here. Remove it from the dashboard instead.",
+  delete_name_mismatch: "Type the project's name exactly as shown to delete it.",
+  delete_agents_running: "Its agents didn't stop in time, so nothing was deleted. They stay stopped; try again.",
+  delete_trash_partial: "Some of its folders are in the Trash and the rest couldn't be moved. The project stays listed; try again.",
+  delete_unavailable: "The engine couldn't check the project's agents. Nothing was deleted.",
+  home_trash_failed: "The folder couldn't be moved to the Trash. Nothing was deleted.",
+  home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  project_delete_interrupted: "Deleting the project stopped part way. Check the Trash and the project list before trying again.",
 };
 
 /** Plain sentence for one engine failure, never opaque.
@@ -372,6 +506,10 @@ export function loadSetup(id: string): Promise<Result<StoredSetup | null>> {
 
 export function loadResearch(id: string): Promise<Result<{ project_id: string; jobs: ResearchJob[] }>> {
   return call<{ project_id: string; jobs: ResearchJob[] }>("desktop_research_jobs", { id });
+}
+
+export function loadActivity(id: string, limit: number): Promise<Result<{ project_id: string; items: ActivityItem[]; more: boolean }>> {
+  return call<{ project_id: string; items: ActivityItem[]; more: boolean }>("desktop_project_activity", { id, limit });
 }
 
 export function loadContext(id: string): Promise<Result<ProjectContext>> {
@@ -633,30 +771,69 @@ export function openLink(url: string): Promise<Result<void>> {
   return call<void>("desktop_open_link", { url });
 }
 
+/** One file the setup mapping found that the owner keeps linked, with the group it was found
+ * under: `research` is the research kind, null for a file found as the roadmap. */
+export interface KeptFile { path: string; research: JobKind | null }
+
 /** Changes a project's details, research, pool and team in one engine change. Inputs: project id,
- * the whole new setup (no documents), a generation, the new name or null to keep it, and the
- * setup revision the screen showed, so a change made elsewhere is refused. Output: the receipt. */
-export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation });
+ * the whole new setup (no documents), a generation, the new name or null to keep it, the setup
+ * revision the screen showed, so a change made elsewhere is refused, and the files the setup
+ * mapping found that the owner keeps linked, each with its group, null to leave the links alone.
+ * Output: the receipt. */
+export function updateProjectSetup(id: string, setup: ProjectSetup, generation: number, name: string | null, revision: number | null, kept: KeptFile[] | null = null): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_update_project_setup", { id, setup, name, revision, generation, kept });
 }
 
-/** Removes a project from CrazyAgent; its research stops and its folder stays on disk.
- * Inputs: project id and a generation. Output: the receipt. */
-export function removeProject(id: string, generation: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_remove_project", { id, generation });
+/** What removing a project would do, read before the owner picks how: its stored name, the folders
+ * Delete everything would move to the Trash and whether it may, its running agents, its open change
+ * sets and each agent whose work would be lost, with the plain code of what it holds. */
+export type RemovalPreview = {
+  name: string;
+  folders: string[];
+  can_delete: boolean;
+  blocked: string | null;
+  running: string[];
+  open_change_sets: number;
+  losses: { id: number; label: string; code: string }[];
+};
+
+/** Reads what removing a project would do. Input: the project id. Output: the preview. */
+export function loadRemovalPreview(id: string): Promise<Result<RemovalPreview>> {
+  return call<RemovalPreview>("desktop_project_removal", { id });
+}
+
+/** Removes a project from CrazyAgent. Without a name its folder stays on disk; with the name the
+ * owner typed, the engine stops its agents and moves its folders to the Trash, only when the name
+ * is the project's exact name. Either way, once the engine applied the removal, the project's
+ * terminal wall windows close; one that fails to close leaves the removal as it is. Inputs:
+ * project id, a generation and the typed name or null. Output: the receipt. */
+export async function removeProject(id: string, generation: number, deleteName: string | null = null): Promise<Result<IntentReceipt>> {
+  const result = await call<IntentReceipt>("desktop_remove_project", { id, generation, deleteName });
+  if (result.kind === "ok" && receiptState(result.value).kind === "applied") await closeProjectWalls(id);
+  return result;
+}
+
+/** Moves or copies a project kept where it is into the projects folder. The engine waits for
+ * its team to stop, moves the folder and points the project and its agents' copies at the new
+ * place. Inputs: the project id, move or copy, the soft refusals the owner chose to go past and a
+ * generation. Output: the receipt. */
+export function moveProjectHome(id: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_move_project_home", { id, mode, overrides, generation });
 }
 
 export const PAGES_MAX = 50;
 
-async function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
-  const records: ModelAccessRecord[] = [];
-  let page = await modelAccessPage(collection, false);
-  records.push(...page.items);
-  for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
-    page = await modelAccessPage(collection, true);
+function allRecords(collection: "pools" | "connections"): Promise<ModelAccessRecord[]> {
+  return oneSelection(async () => {
+    const records: ModelAccessRecord[] = [];
+    let page = await modelAccessPage(collection, false);
     records.push(...page.items);
-  }
-  return records;
+    for (let count = 1; page.has_more && count < PAGES_MAX; count += 1) {
+      page = await modelAccessPage(collection, true);
+      records.push(...page.items);
+    }
+    return records;
+  });
 }
 
 /** Reads every pool with its member connections.
@@ -694,9 +871,11 @@ export async function setProjectPool(projectId: string, poolId: string | null, g
   return wrap(async () => {
     const opened = await openProject(projectId);
     if (!opened.fresh || opened.project_id !== projectId) throw { code: "invalid_project" };
-    const page = await modelAccessPage("pools", false);
-    if (!page.writable) throw { code: "settings_read_only" };
-    const state = receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
+    const state = await oneSelection(async (): Promise<ReceiptState> => {
+      const page = await modelAccessPage("pools", false);
+      if (!page.writable) throw { code: "settings_read_only" };
+      return receiptState(await editModelAccess(page.ticket, { kind: "assign_project_pool", project: projectId, pool: poolId }, generation));
+    });
     if (state.kind !== "applied") return state;
     const saved = (await allRecords("pools")).flatMap((record) => record.kind === "pool" ? [record.pool] : []);
     return projectPoolIs(saved, projectId, poolId) ? state : { kind: "unconfirmed" } as ReceiptState;
@@ -726,6 +905,13 @@ export function endMaster(ticket: string, session: string, generation: number): 
 /** Lists the selected project's master sessions. Input: the master ticket. Output: the list. */
 export function readSessions(ticket: string): Promise<Result<MasterSessions>> {
   return wrap(() => masterSessions(ticket));
+}
+
+/** Reads one page of a session's stored messages, whatever master ran them. Inputs: the
+ * master ticket, the session id, the sequence number to read below or null for the newest,
+ * and the page size, 1 to 64. Output: the page. */
+export function readMessages(ticket: string, session: string, before: number | null, limit: number): Promise<Result<MasterMessages>> {
+  return wrap(() => masterMessages(ticket, session, before, limit));
 }
 
 /** Reads the owner messages behind some turns of a session. Inputs: the master ticket, the
@@ -761,4 +947,73 @@ export function cancelMasterTurn(ticket: string, session: string, turn: string, 
 
 export function sendToMaster(ticket: string, session: string, text: string, generation: number): Promise<Result<IntentReceipt>> {
   return wrap(() => submitMaster(ticket, session, text, generation));
+}
+
+/** The most roadmap items one status holds, the engine's `ITEMS_MAX`. */
+export const ROADMAP_ITEMS_MAX = 200;
+
+export type RoadmapItemStatus = "pending" | "in_progress" | "done" | "tested";
+export type RoadmapRefresh = "after_landing" | "refresh_only" | "off";
+
+/** One roadmap item with where it stands and the evidence line that decided it. */
+export interface RoadmapItemState {
+  item: { section: string; text: string };
+  status: RoadmapItemStatus;
+  evidence: string;
+}
+
+/** A project's roadmap status: the items of the last check, when it ran, whether one runs now
+ * or is due after a landing, the refresh setting, the roadmap file read and why the last check
+ * failed, if it did. */
+export interface RoadmapStatus {
+  items: RoadmapItemState[];
+  checked_ms: number | null;
+  running: boolean;
+  stale: boolean;
+  refresh: RoadmapRefresh;
+  source: string | null;
+  problem: string | null;
+}
+
+const ROADMAP_STATUSES: readonly string[] = ["pending", "in_progress", "done", "tested"];
+const ROADMAP_REFRESHES: readonly string[] = ["after_landing", "refresh_only", "off"];
+
+/** Whether a bridge reply is a roadmap status this window can show: every field of its type,
+ * known status and refresh names, at most `ROADMAP_ITEMS_MAX` items. Input: the reply.
+ * Output: the answer. */
+export function isRoadmapStatus(value: unknown): value is RoadmapStatus {
+  if (typeof value !== "object" || value === null) return false;
+  const status = value as Record<string, unknown>;
+  const text = (field: unknown) => field === null || typeof field === "string";
+  const items = status.items;
+  if (!Array.isArray(items) || items.length > ROADMAP_ITEMS_MAX) return false;
+  const listed = items.every((entry) => typeof entry === "object" && entry !== null
+    && typeof entry.item === "object" && entry.item !== null
+    && typeof entry.item.section === "string" && typeof entry.item.text === "string"
+    && ROADMAP_STATUSES.includes(entry.status) && typeof entry.evidence === "string");
+  return listed && (status.checked_ms === null || typeof status.checked_ms === "number")
+    && typeof status.running === "boolean" && typeof status.stale === "boolean"
+    && typeof status.refresh === "string" && ROADMAP_REFRESHES.includes(status.refresh)
+    && text(status.source) && text(status.problem);
+}
+
+/** Reads a project's roadmap status. Input: the project id. Output: the status, or
+ * `invalid_response` for a reply that is not one. */
+export async function roadmapStatus(id: string): Promise<Result<RoadmapStatus>> {
+  const result = await call<RoadmapStatus>("desktop_roadmap_status", { id });
+  if (result.kind !== "ok" || isRoadmapStatus(result.value)) return result;
+  return { kind: "error", code: "invalid_response", message: plainError("invalid_response") };
+}
+
+/** Asks the engine to check a project's roadmap status now, without the wait after a landing.
+ * Input: the project id. Output: done, or the engine's refusal, `roadmap_status_off` when the
+ * project's setting is Off. */
+export function refreshRoadmapStatus(id: string): Promise<Result<void>> {
+  return call<void>("desktop_refresh_roadmap_status", { id });
+}
+
+/** Saves when a project's roadmap status is checked. Inputs: the project id and the choice.
+ * Output: done, or the engine's refusal. */
+export function setRoadmapRefresh(id: string, refresh: RoadmapRefresh): Promise<Result<void>> {
+  return call<void>("desktop_set_roadmap_refresh", { id, refresh });
 }

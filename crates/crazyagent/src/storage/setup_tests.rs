@@ -1171,7 +1171,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
         )
         .unwrap();
     assert_eq!(noted, 1, "the removal notes the folder in the file trash");
-    crate::storage::trash::sweep(&connection, root).unwrap();
+    crate::storage::trash::sweep(&connection, root, None).unwrap();
     assert!(!folders[0].exists(), "{}", folders[0].display());
 }
 

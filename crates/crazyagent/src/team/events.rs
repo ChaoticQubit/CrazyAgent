@@ -1,7 +1,9 @@
+pub use super::agent_messages::Said;
 use super::{
-    AgentRole, AgentStatus, MessageAuthor, MessageState, append_message, bound_text, error,
-    make_room,
+    AgentRole, AgentStatus, MessageAuthor, MessageState, TaskStatus, append_message, bound_text,
+    error, make_room,
 };
+use crate::activity::ActivityKind;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::storage::versioned;
@@ -27,12 +29,30 @@ pub const SEND_BYTES_MAX: usize = crate::terminal::PROMPT_BYTES_MAX;
 pub const ESCALATION_BYTES_MAX: usize = 2000;
 pub const NOTIFICATIONS_PER_PROJECT_MAX: i64 = 200;
 pub const STATUS_EVENTS_MAX: i64 = 50;
+const LEFT_OUT_LINE_BYTES_MAX: usize = 64;
 pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
 pub const UNSEEN_PROJECTS_MAX: i64 = 200;
+/// The projects the working list names. At this bound it and a full unseen list still fit one
+/// reply at the longest legal project id, so a decoration cannot fail the whole read.
+pub const WORKING_PROJECTS_MAX: i64 = 100;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SCAN_EVERY: Duration = Duration::from_secs(2);
+pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
+pub(crate) const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
+pub(crate) const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
+pub(crate) const MASTER_STOPPED_AGENT: &str = "The master stopped it and its teammates. Its unfinished tasks failed. The master or the owner can wake it.";
+pub(crate) const LEAD_STOPPED_AGENT: &str = "Its lead stopped it and its teammates. Its unfinished tasks failed. Its lead, the master or the owner can wake it.";
+pub(crate) const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
+const OWNER_NOTICES: [&str; 6] = [
+    OWNER_RESTARTED,
+    OWNER_WOKE,
+    OWNER_STOPPED_AGENT,
+    MASTER_STOPPED_AGENT,
+    LEAD_STOPPED_AGENT,
+    INSTRUCTIONS_RESTARTED,
+];
 const SCREEN_ROWS_SCANNED: usize = 40;
 const QUESTION_ROWS_ABOVE: usize = 12;
 const OPTIONS_MAX: usize = 9;
@@ -42,10 +62,22 @@ const NOTIFICATION_HISTORY: &str = "1=1";
 const COLD_PAUSE: i64 = -1;
 const MARKERS: [char; 5] = ['❯', '›', '>', '▶', '→'];
 const BORDERS: [char; 4] = ['│', '|', '┃', '║'];
+const PROMPT_MARKS: [char; 3] = ['❯', '›', '>'];
+const COMPOSER_MARK: char = '›';
+const RULES: [char; 6] = ['─', '━', '╭', '╮', '╰', '╯'];
+const RULE_CHARS_MIN: usize = 3;
+const PROMPT_ROWS_BELOW_MAX: usize = 6;
+const COMPOSER_ROWS_BELOW_MAX: usize = 2;
 
 const _: () = assert!(EVENTS_QUEUED_MAX < EVENTS_PER_PROJECT_MAX);
 const _: () = assert!(EVENTS_QUEUED_PER_AGENT_MAX < EVENTS_QUEUED_MAX);
 const _: () = assert!(EVENTS_QUEUED_HARD_MAX < EVENTS_PER_PROJECT_MAX);
+const _: () = assert!(OWNER_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(OWNER_WOKE.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(OWNER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(MASTER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(LEAD_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(INSTRUCTIONS_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(COLD_WAKES_PER_HOUR_MAX <= HOURLY_CAP_DEFAULT);
 const _: () = assert!(EVENT_TEXT_BYTES_MAX + 256 < WAKE_BYTES_MAX);
 const _: () = assert!(HOURLY_CAP_DEFAULT <= HOURLY_CAP_MAX);
@@ -83,7 +115,7 @@ impl EventKind {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(super) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.name() == value)
     }
 
@@ -104,8 +136,9 @@ impl EventKind {
 
 /// Where an event is on its way to the master: waiting in the queue, typed into the master,
 /// muted by a wake rule that has its kind off, carried by the master's own results
-/// message because the master delegated that task, or dropped from a full queue for newer
-/// events.
+/// message because the master delegated that task, dropped from a full queue for newer
+/// events, or settled: a change set ready event whose set landed, was discarded or went back
+/// to its agent before the master heard of it (F20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventState {
@@ -114,15 +147,17 @@ pub enum EventState {
     Muted,
     Carried,
     Dropped,
+    Settled,
 }
 
 impl EventState {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Queued,
         Self::Delivered,
         Self::Muted,
         Self::Carried,
         Self::Dropped,
+        Self::Settled,
     ];
 
     fn name(self) -> &'static str {
@@ -132,10 +167,11 @@ impl EventState {
             Self::Muted => "muted",
             Self::Carried => "carried",
             Self::Dropped => "dropped",
+            Self::Settled => "settled",
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(super) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|state| state.name() == value)
     }
 }
@@ -284,22 +320,39 @@ pub struct AgentLine {
     pub waiting: Option<String>,
 }
 
-/// What the master's status tool shows: the project's live sub-agents, the finished ones it
-/// can wake, the newest events and whether auto-wake is paused at its cap.
+/// One task still waiting to start as the master's status reads it (F11): its number, the
+/// lead that handed it out, if any, and its line with why it waits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedLine {
+    pub task: i64,
+    pub parent: Option<i64>,
+    pub line: String,
+}
+
+/// What the master's status tool shows: the project's live sub-agents, the tasks still
+/// waiting with why each waits, the agent limits the owner set, read only (F11), the
+/// finished ones it can wake, the newest events and whether auto-wake is paused at its cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventsStatus {
     pub project_id: ProjectId,
     pub agents: Vec<AgentLine>,
     #[serde(default)]
+    pub queued: Vec<QueuedLine>,
+    #[serde(default)]
+    pub limits: Option<String>,
+    #[serde(default)]
     pub finished: Vec<String>,
+    #[serde(default)]
+    pub retired: Vec<String>,
     pub events: Vec<TeamEvent>,
     pub paused: bool,
 }
 
 impl EventsStatus {
-    /// Writes the status as plain lines for the master's tool reply. Takes the status.
-    /// Returns one line per running agent, the finished agents it can wake, newest first,
-    /// then the newest events, oldest first.
+    /// Writes the status as plain lines for the master's tool reply, within
+    /// `REPLY_TEXT_MAX`. Takes the status. Returns one line per running agent, the finished
+    /// agents it can wake, newest first, then the newest events that fit, oldest first,
+    /// after one line saying how many older events were left out to fit (WKC-3).
     pub fn text(&self) -> String {
         let mut text = String::new();
         if self.agents.is_empty() {
@@ -318,6 +371,17 @@ impl EventsStatus {
             }
             text.push('\n');
         }
+        if !self.queued.is_empty() {
+            text.push_str("Tasks waiting to start, oldest first:\n");
+            for queued in &self.queued {
+                text.push_str(&queued.line);
+                text.push('\n');
+            }
+        }
+        if let Some(limits) = &self.limits {
+            text.push_str(limits);
+            text.push('\n');
+        }
         if !self.finished.is_empty() {
             text.push_str(&format!(
                 "Finished sub-agents you can wake with {}(to, text), newest first:\n",
@@ -328,13 +392,39 @@ impl EventsStatus {
                 text.push('\n');
             }
         }
+        if !self.retired.is_empty() {
+            text.push_str(&format!(
+                "Retired sub-agents, whose worktrees are gone, so they cannot be woken; hand their work out with {}() instead: {}.\n",
+                super::tool::SPAWN_TOOL,
+                self.retired.join(", ")
+            ));
+        }
         if self.paused {
             text.push_str("Auto-wake is paused at its hourly cap.\n");
         }
-        for event in &self.events {
-            text.push_str(&line(event));
+        let budget =
+            super::tool::REPLY_TEXT_MAX.saturating_sub(text.len() + LEFT_OUT_LINE_BYTES_MAX);
+        let mut used = 0;
+        let mut kept = Vec::new();
+        for event in self.events.iter().rev() {
+            let line = line(event);
+            if used + line.len() + 1 > budget {
+                break;
+            }
+            used += line.len() + 1;
+            kept.push(line);
+        }
+        let left = self.events.len() - kept.len();
+        if left > 0 {
+            text.push_str(&format!(
+                "{left} older events left out to fit this reply.\n"
+            ));
+        }
+        for line in kept.iter().rev() {
+            text.push_str(line);
             text.push('\n');
         }
+        assert!(kept.is_empty() || text.len() <= super::tool::REPLY_TEXT_MAX);
         text
     }
 }
@@ -403,7 +493,7 @@ pub struct AgentQuestions {
 
 /// What the app shows across projects: the app-level wake rule, the rule in force without a
 /// project rule, the newest notifications of every project, how many are unseen and how many
-/// of them each project has.
+/// of them each project has, and how many agents each project has at work.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AppEvents {
     pub rule: Option<WakeRule>,
@@ -414,6 +504,16 @@ pub struct AppEvents {
     pub unseen: i64,
     #[serde(default)]
     pub projects: Vec<ProjectUnseen>,
+    #[serde(default)]
+    pub working: Vec<ProjectWorking>,
+}
+
+/// How many agents one project has at work, for its sidebar dot: team agents working plus
+/// research jobs running, the sum its project card shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectWorking {
+    pub project_id: ProjectId,
+    pub agents: i64,
 }
 
 /// How many of one project's owner notifications are unseen, for its sidebar count, and how
@@ -721,6 +821,17 @@ fn record_in(
     .map_err(error)?;
     let id = tx.last_insert_rowid();
     assert!(id > 0);
+    match kind {
+        EventKind::Finished | EventKind::Failed => {
+            let failed = kind == EventKind::Failed;
+            crate::activity::note_task_end(tx, project, agent, task, failed, now);
+        }
+        EventKind::ChangeSetReady => {
+            let shown = ActivityKind::ChangesReady;
+            crate::activity::note_agent(tx, project, agent, shown, &text, now);
+        }
+        EventKind::Question | EventKind::Progress => {}
+    }
     Ok(Some(id))
 }
 
@@ -1004,42 +1115,53 @@ fn by_id_form(
 
 /// Types a master's message or answer into one of its project's sub-agents' terminal as one
 /// submission, the way an owner prompt is typed: control keys are dropped, so the text
-/// cannot press keys. Clears the agent's waiting mark. Takes the connection, the terminal
-/// host, the project, the agent's name as `resolve` reads it and the text. Returns the agent
-/// id, or a plain refusal code for blank or long text, an unknown or stopped agent or an
-/// unreachable terminal.
+/// cannot press keys. Clears the agent's waiting mark and keeps what was typed for the
+/// agent's Messages timeline. Takes the connection, the terminal host, the project, the
+/// agent's name as `resolve` reads it, whether it is a message or an answer and the text.
+/// Returns the agent id, or a plain refusal code for blank or long text, an unknown or
+/// stopped agent or an unreachable terminal.
 pub fn send_to_agent(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
     agent: &str,
+    said: Said,
     text: &str,
 ) -> Result<Result<i64, &'static str>, EngineError> {
     let found = resolve(connection, project, agent)?;
-    send_to(connection, host, found, text)
+    send_to(connection, host, found, said, text)
 }
 
 /// Types a master's message or answer into the sub-agent [`resolve`] found, as
 /// [`send_to_agent`] does, so a caller that already resolved the name passes its id rather
-/// than a name to read again. Takes the connection, the terminal host, the agent or None
-/// when no agent was found, and the text. Returns the agent id, or the same plain refusal
-/// codes.
+/// than a name to read again. Only text the terminal took is kept, with the waiting mark
+/// cleared in the same transaction. Takes the connection, the terminal host, the agent or
+/// None when no agent was found, whether it is a message, an answer or an engine notice,
+/// and the text.
+/// Returns the agent id, or the same plain refusal codes.
 pub fn send_to(
     connection: &Connection,
     host: &dyn Host,
     found: Option<i64>,
+    said: Said,
     text: &str,
 ) -> Result<Result<i64, &'static str>, EngineError> {
+    assert!(
+        said != Said::Prompt,
+        "the master sends messages and answers, the engine notices"
+    );
     if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
         return Ok(Err("team_message_invalid"));
     }
     let Some(id) = found else {
         return Ok(Err("team_agent_not_found"));
     };
-    let status: String = connection
-        .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
-            row.get(0)
-        })
+    let (status, project): (String, String) = connection
+        .query_row(
+            "SELECT status,project FROM team_agents WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .map_err(error)?;
     if !AgentStatus::parse(&status).is_some_and(AgentStatus::live) {
         return Ok(Err("team_agent_not_running"));
@@ -1053,15 +1175,61 @@ pub fn send_to(
         }
         Err(_) => return Ok(Err("team_agent_unreachable")),
     }
-    clear_waiting(connection, id)?;
+    let project = ProjectId::new(project).map_err(|_| error("team_agent_project_invalid"))?;
+    let tx = immediate(connection)?;
+    super::agent_messages::record(&tx, &project, id, said, text, super::now_ms())?;
+    clear_waiting(&tx, id)?;
+    tx.commit().map_err(error)?;
     Ok(Ok(id))
 }
 
 /// Types text into the terminal of exactly one sub-agent of a project, chosen by its team
-/// agent id, as `send_to_agent` types it. Takes the connection, the terminal host, the
+/// agent id, as `send_to_agent` types it, and keeps nothing for its Messages timeline: the
+/// caller keeps the owner's words there itself. Takes the connection, the terminal host, the
 /// project, the team agent id and the text. Returns a plain refusal code for blank or long
 /// text, an id that is no sub-agent of the project, a stopped agent or an unreachable terminal.
 pub fn send_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Err(code) = type_to_id(connection, host, project, id, text)? {
+        return Ok(Err(code));
+    }
+    clear_waiting(connection, id)?;
+    Ok(Ok(()))
+}
+
+/// Types an engine notice into exactly one sub-agent of a project, chosen by its team agent
+/// id, as `send_to_id` types it, and keeps it in the agent's Messages timeline as the
+/// engine's, with the waiting mark cleared in the same transaction, as `send_to` keeps what
+/// the master says. Takes the connection, the terminal host, the project, the team agent id
+/// and the text. Returns the same plain refusal codes as `send_to_id`.
+pub fn send_notice_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Err(code) = type_to_id(connection, host, project, id, text)? {
+        return Ok(Err(code));
+    }
+    assert!(id > 0, "only a sub-agent row takes a notice");
+    let tx = immediate(connection)?;
+    super::agent_messages::record(&tx, project, id, Said::Notice, text, super::now_ms())?;
+    clear_waiting(&tx, id)?;
+    tx.commit().map_err(error)?;
+    Ok(Ok(()))
+}
+
+/// Admits and types text into one sub-agent of a project by its team agent id, writing
+/// nothing to the store. Takes the connection, the terminal host, the project, the team
+/// agent id and the text. Returns Ok once its terminal took the text, or the plain refusal
+/// code of `send_to_id`.
+fn type_to_id(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
@@ -1094,7 +1262,6 @@ pub fn send_to_id(
         }
         Err(_) => return Ok(Err("team_agent_unreachable")),
     }
-    clear_waiting(connection, id)?;
     Ok(Ok(()))
 }
 
@@ -1104,13 +1271,17 @@ pub const FORWARDED_PER_TICK_MAX: i64 = 64;
 /// Sends the queued events of a project's workers to each worker's own lead instead of
 /// the master, which hears only its leads' events (DEC-104 K2b): one coordination note per
 /// lead from the engine, holding the event lines up to the message body bound, under each
-/// worker's wake rule, so a muted kind stays muted. Events the layer refuses are dropped,
-/// never sent elsewhere. Takes the connection, the project and the time. Returns any failure.
+/// worker's wake rule, so a muted kind stays muted. The engine's notices of what the owner
+/// did to a worker go in a note of their own under `NOTICES_KEY` whatever the rule: it
+/// wakes no one, so the lead reads them at its next real turn. Events the layer refuses are
+/// dropped, never sent elsewhere. Takes the connection, the project and the time. Returns
+/// any failure.
 pub fn forward_to_parents(
     connection: &Connection,
     project: &ProjectId,
     now: i64,
 ) -> Result<(), EngineError> {
+    settle_landed(connection, project)?;
     let queued: Vec<(i64, i64, i64)> = {
         let mut statement = connection
             .prepare(
@@ -1131,16 +1302,18 @@ pub fn forward_to_parents(
             "SELECT {EVENT_COLUMNS} FROM team_events WHERE id=?1"
         ))
         .map_err(error)?;
-    let mut by_lead: BTreeMap<i64, Vec<TeamEvent>> = BTreeMap::new();
+    let mut by_lead: BTreeMap<(i64, bool), Vec<TeamEvent>> = BTreeMap::new();
     for (id, agent, lead) in queued {
         let event = full
             .query_row([id], |row| event_row(connection, row))
             .map_err(error)?;
-        if rule(connection, Some(project), Some(agent))?
-            .0
-            .wakes(event.kind)
+        let notice = owner_notice(&event);
+        if notice
+            || rule(connection, Some(project), Some(agent))?
+                .0
+                .wakes(event.kind)
         {
-            by_lead.entry(lead).or_default().push(event);
+            by_lead.entry((lead, notice)).or_default().push(event);
         } else {
             connection
                 .execute(
@@ -1150,7 +1323,8 @@ pub fn forward_to_parents(
                 .map_err(error)?;
         }
     }
-    for (lead, events) in by_lead {
+    for ((lead, notice), events) in by_lead {
+        assert!(events.iter().all(|event| owner_notice(event) == notice));
         let mut text = String::new();
         let mut carried = Vec::new();
         for event in &events {
@@ -1179,7 +1353,11 @@ pub fn forward_to_parents(
                 body: text,
                 idempotency_key: Some(format!(
                     "{}{}",
-                    crate::coord::delivery::EVENTS_KEY,
+                    if notice {
+                        crate::coord::delivery::NOTICES_KEY
+                    } else {
+                        crate::coord::delivery::EVENTS_KEY
+                    },
                     carried[0]
                 )),
             },
@@ -1204,26 +1382,55 @@ pub fn forward_to_parents(
     Ok(())
 }
 
+/// Tells whether an event is the engine's own notice that the owner woke, restarted or
+/// stopped the agent, or restarted it for the owner's changed instructions (run 5 task 73:
+/// a lead woken for one spent a turn on nothing). Takes the event. Returns the answer.
+fn owner_notice(event: &TeamEvent) -> bool {
+    event.kind == EventKind::Progress && OWNER_NOTICES.contains(&event.text.as_str())
+}
+
 /// The handlers the live master's `message`, `answer` and `status` tools call, set on the
 /// team runtime with `TeamRuntime::with_events`.
 pub const HANDLERS: super::master::TeamEvents = super::master::TeamEvents {
-    send_to_agent: tool_send,
-    answer: tool_send,
+    send_to_agent: tool_message,
+    answer: tool_answer,
     status: tool_status,
 };
 
-/// Types a live master's message or answer into one of its sub-agents for its team tools.
-/// Takes the connection, terminal host, project, the agent's name and the text.
-/// Returns the sentence the master reads, or the plain reason nothing was typed.
-fn tool_send(
+fn tool_message(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
     agent: &str,
     text: &str,
 ) -> Result<String, String> {
+    tool_send(connection, host, project, agent, Said::Message, text)
+}
+
+fn tool_answer(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    tool_send(connection, host, project, agent, Said::Answer, text)
+}
+
+/// Types a live master's message or answer into one of its sub-agents for its team tools.
+/// Takes the connection, terminal host, project, the agent's name, whether it is a message
+/// or an answer and the text. Returns the sentence the master reads, or the plain reason
+/// nothing was typed.
+fn tool_send(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    said: Said,
+    text: &str,
+) -> Result<String, String> {
     let refused = |reason: &str| Err(format!("Not sent: {reason}"));
-    match send_to_agent(connection, host, project, agent, text) {
+    match send_to_agent(connection, host, project, agent, said, text) {
         Ok(Ok(id)) => Ok(format!(
             "Typed into {}.",
             label(connection, id).map_err(|_| "Not sent: the team database is unavailable.")?
@@ -1330,16 +1537,56 @@ fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, Engin
     Ok(read)
 }
 
+/// Counts the agents at work in each project that has any, in one read for all projects, so
+/// the sidebar never asks project by project: team agents working plus research jobs running,
+/// the sum each project card shows. Takes the connection. Returns at most
+/// `WORKING_PROJECTS_MAX` projects by id, each with a count above zero.
+fn working_by_project(connection: &Connection) -> Result<Vec<ProjectWorking>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT project, SUM(agents) FROM (
+                 SELECT project, COUNT(*) AS agents FROM team_agents
+                 WHERE status = 'working' GROUP BY project
+                 UNION ALL
+                 SELECT project, COUNT(*) FROM research_jobs
+                 WHERE status = 'running' GROUP BY project
+             ) GROUP BY project ORDER BY project LIMIT ?1",
+        )
+        .map_err(error)?;
+    let rows: Vec<(String, i64)> = statement
+        .query_map([WORKING_PROJECTS_MAX], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    let working: Vec<ProjectWorking> = rows
+        .into_iter()
+        .filter_map(|(project, agents)| {
+            Some(ProjectWorking {
+                project_id: ProjectId::new(project).ok()?,
+                agents,
+            })
+        })
+        .collect();
+    assert!(working.len() as i64 <= WORKING_PROJECTS_MAX);
+    assert!(working.iter().all(|item| item.agents > 0));
+    Ok(working)
+}
+
 /// Counts the unseen notifications of each project that has any, and the questions-log
 /// notifications among them, by project id, so a project's count never depends on what fits
-/// in the app window. A question notification a work question raised, which
-/// `team_owner_alerts` records, stays out of the questions count. Takes the connection.
+/// in the app window. A work question's alert counts as a question only once its question is
+/// linked into the questions log (F12), where it is counted as pending. Takes the connection.
 /// Returns at most `UNSEEN_PROJECTS_MAX` projects, each with a count above zero.
 fn unseen_by_project(connection: &Connection) -> Result<Vec<ProjectUnseen>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT project, COUNT(*), SUM(kind = 'question' AND id NOT IN
-                 (SELECT notification FROM team_owner_alerts WHERE notification IS NOT NULL))
+            "SELECT project, COUNT(*), SUM(
+                 (kind = 'question' AND id NOT IN
+                     (SELECT notification FROM team_owner_alerts WHERE notification IS NOT NULL))
+                 OR (kind IN ('question','urgent_question') AND id IN
+                     (SELECT a.notification FROM team_owner_alerts a
+                      JOIN questions_log q ON q.coord_message = a.ref
+                      WHERE a.source = 'question' AND a.notification IS NOT NULL)))
              FROM team_notifications
              WHERE seen_ms IS NULL GROUP BY project ORDER BY project LIMIT ?1",
         )
@@ -1505,6 +1752,39 @@ pub(crate) fn finished_agents(
         .collect()
 }
 
+/// The most retired sub-agents a master is told about.
+pub(crate) const RETIRED_LISTED_MAX: usize = 20;
+
+/// Lists a project's retired sub-agents by label, newest first and at most
+/// `RETIRED_LISTED_MAX`: each stopped or failed sub-agent with no worktree on record, as
+/// cleanup leaves one it retired, so the master hands their work to a new agent instead
+/// of waking them (F10). Takes the database and the project. Returns the labels.
+pub(crate) fn retired_agents(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<String>, EngineError> {
+    let ids: Vec<i64> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT a.id FROM team_agents a
+                 WHERE a.project=?1 AND a.role='sub' AND a.status IN ('stopped','failed')
+                   AND NOT EXISTS(SELECT 1 FROM team_worktrees w WHERE w.agent=a.id AND w.project=a.project)
+                 ORDER BY COALESCE(a.stopped_ms,a.heartbeat_ms) DESC, a.id DESC LIMIT ?2",
+            )
+            .map_err(error)?;
+        statement
+            .query_map(
+                params![project.as_str(), RETIRED_LISTED_MAX as i64],
+                |row| row.get(0),
+            )
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    assert!(ids.len() <= RETIRED_LISTED_MAX);
+    ids.into_iter().map(|id| label(connection, id)).collect()
+}
+
 /// Says whether a sub-agent's persona or handle, ignoring case, is also the persona or handle
 /// of another running sub-agent of the project, so a message sent by that name reaches the
 /// running agent and the finished one is listed by its number only (DEC-111 Q19).
@@ -1619,13 +1899,102 @@ pub fn status(connection: &Connection, project: &ProjectId) -> Result<EventsStat
     Ok(EventsStatus {
         project_id: project.clone(),
         agents,
+        queued: queued_lines(connection, project)?,
+        limits: limits_line(connection, project)?,
         finished: finished_agents(connection, project, super::now_ms())?
             .into_iter()
             .map(|(_, line)| line)
             .collect(),
+        retired: retired_agents(connection, project)?,
         events: events(connection, project, STATUS_EVENTS_MAX)?,
         paused,
     })
+}
+
+/// The most waiting tasks the master's status lists (F11).
+pub const QUEUED_SHOWN_MAX: i64 = 16;
+/// How much of a waiting task's prompt its status line quotes.
+const QUEUED_PROMPT_BYTES_MAX: usize = 80;
+/// The wait line of a task no dispatch pass has looked at yet.
+pub const WAIT_UNSEEN: &str = "Waits for its turn in the queue";
+/// The wait line of a task that waits for this project to have an account pool.
+pub const WAIT_NEEDS_POOL: &str = "Waits for an account pool for this project";
+
+/// Reads the project's tasks still waiting to start for the master's status (F11), oldest
+/// first and at most `QUEUED_SHOWN_MAX`, each with the reason the engine stored for it.
+/// Takes the connection and the project. Returns the lines, or a SQLite failure.
+fn queued_lines(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<QueuedLine>, EngineError> {
+    type Row = (i64, Option<i64>, String, String, Option<String>);
+    let rows: Vec<Row> = connection
+        .prepare(
+            "SELECT id,parent,prompt,status,wait FROM team_tasks
+             WHERE project=?1 AND status IN ('queued','needs_pool') ORDER BY id LIMIT ?2",
+        )
+        .map_err(error)?
+        .query_map(params![project.as_str(), QUEUED_SHOWN_MAX], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    assert!(rows.len() <= QUEUED_SHOWN_MAX as usize);
+    Ok(rows
+        .into_iter()
+        .map(|(task, parent, prompt, status, wait)| {
+            let why = TaskStatus::parse(&status)
+                .and_then(|status| super::wait_line(status, wait.as_deref()))
+                .unwrap_or_else(|| WAIT_UNSEEN.to_owned());
+            QueuedLine {
+                task,
+                parent,
+                line: format!(
+                    "- task {task} \"{}\": {why}",
+                    one_line(&prompt, QUEUED_PROMPT_BYTES_MAX)
+                ),
+            }
+        })
+        .collect())
+}
+
+/// Writes the agent limits the owner set for a project as one read-only line for the
+/// master (F11): the team plan's sub-agents at once and per harness, Max harnesses per
+/// project and Max teammates per harness. Takes the connection and the project. Returns
+/// the line, None without a setup, or a SQLite failure.
+pub fn limits_line(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    let Some(stored) = crate::project_setup::load_setup(connection, project)? else {
+        return Ok(None);
+    };
+    let caps = super::caps::read(connection, project)?;
+    let plan = &stored.team;
+    let per_harness = if plan.sub_harnesses.is_empty() {
+        "any harness that can run".to_owned()
+    } else {
+        plan.sub_harnesses
+            .iter()
+            .take(super::TEAMMATES_SHOWN_MAX)
+            .map(|slot| format!("{} {}", one_line(&slot.harness, 64), slot.agents))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let cap = |value: Option<u8>| value.map_or_else(|| "No limit".to_owned(), |v| v.to_string());
+    Ok(Some(format!(
+        "Limits the owner sets (read only; ask the owner to change them): team plan {} sub-agents at once, per harness: {per_harness}; Max harnesses per project: {}; Max teammates per harness: {}.",
+        plan.max_agents.saturating_sub(1),
+        cap(caps.harnesses),
+        cap(caps.teammates)
+    )))
 }
 
 /// Writes one event as the master reads it: the agent's text goes through `agent_line`, so
@@ -1653,6 +2022,10 @@ const CLOSE_BRACKETS: [char; 16] = [
 ];
 
 const QUOTE: &str = "> ";
+const BIDI_CONTROLS: [char; 12] = [
+    '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
 
 /// Writes text a sub-agent wrote as the master reads it on lines of its own: made plain by
 /// `plain_agent_text`, and every line opened with `> `, so no line of it can start as the
@@ -1676,6 +2049,25 @@ pub(super) fn agent_text(text: &str) -> String {
     quoted
 }
 
+/// Writes text with every line opened by `> `, so no line of it can start as the owner, the
+/// engine or any other speaker, whichever break opens it. Keeps the square brackets
+/// `agent_text` rewrites, since agents pass each other code. Takes the text. Returns it.
+pub(crate) fn quoted_lines(text: &str) -> String {
+    let mut quoted = String::with_capacity(text.len() + QUOTE.len());
+    for line in text.split_inclusive(line_break) {
+        quoted.push_str(QUOTE);
+        quoted.push_str(line);
+    }
+    quoted
+}
+
+/// Writes text that follows an engine head on its first line: that line as written and
+/// every later one through `quoted_lines`. Takes the text. Returns it.
+pub(crate) fn quoted_after_first_line(text: &str) -> String {
+    let first = text.split_inclusive(line_break).next().unwrap_or_default();
+    format!("{first}{}", quoted_lines(&text[first.len()..]))
+}
+
 /// Writes text a sub-agent wrote as part of one engine line, such as an event or the
 /// question an agent waits on: made plain by `plain_agent_text` and every line break made a
 /// space, so it never starts a line of its own. Takes the text. Returns one line.
@@ -1688,21 +2080,24 @@ fn agent_line(text: &str) -> String {
     line
 }
 
-fn line_break(c: char) -> bool {
+/// Says whether a character breaks a line for some reader, the one rule for text an agent
+/// wrote. Takes the character. Returns whether it does.
+pub(crate) fn line_break(c: char) -> bool {
     matches!(
         c,
         '\n' | '\r' | '\u{0b}' | '\u{0c}' | '\u{85}' | '\u{2028}' | '\u{2029}'
     )
 }
 
-/// Makes agent text plain for the master: square brackets and the brackets that look like
-/// them, fullwidth, white, lenticular and tortoise shell ones among them, become parentheses,
-/// so agent text can never show a `[owner]` or `[team]` tag, and control characters other
-/// than line feed and tab are dropped, so one escape or carriage return never makes the
-/// master refuse a whole message; IDE review comments use it too. Takes the text. Returns it.
+/// Makes agent text plain for the master, the owner's timelines and IDE review comments:
+/// square brackets and the brackets that look like them, fullwidth, white, lenticular and
+/// tortoise shell ones among them, become parentheses, so agent text never shows a `[owner]`
+/// or `[team]` tag; control characters other than line feed and tab are dropped, so one escape
+/// or carriage return never makes the master refuse a whole message; and bidirectional controls
+/// are dropped, so no text reorders what is shown around it. Takes the text. Returns it.
 pub(crate) fn plain_agent_text(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .filter(|c| (!c.is_control() || matches!(c, '\n' | '\t')) && !BIDI_CONTROLS.contains(c))
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
                 '('
@@ -1778,10 +2173,10 @@ fn option(row: &str) -> Option<(usize, &str, Option<char>)> {
 }
 
 /// Finds a question an agent's app waits on in its screen: a numbered choice list with the
-/// app's selection marker on one option, such as Claude Code's permission and question
-/// prompts and Codex's approval prompts, with the question line above it. A plain numbered
-/// list without a marker is not a question. Takes the screen bytes. Returns one bounded line
-/// with the question and its options, or none.
+/// app's selection marker on exactly one option, such as Claude Code's permission and
+/// question prompts and Codex's approval prompts, with the question line above it. A plain
+/// list, or one quoted with `> ` on every line, is not a question. Takes the screen bytes.
+/// Returns one bounded line with the question and its options, or none.
 pub fn question(screen: &[u8]) -> Option<String> {
     choice(screen).map(|choice| choice.line())
 }
@@ -1816,23 +2211,19 @@ impl Choice {
     }
 }
 
-/// Finds the choice an agent's app waits on in its screen, as `question` describes. Takes
-/// the screen bytes. Returns the question line and at least two options, or none.
+/// Finds the choice an agent's app waits on in its screen, as `question` describes: a real
+/// selection list has one cursor, so a list with every option marked, such as a message the
+/// engine typed with each line quoted as `> `, is no choice (F16). Takes the screen bytes.
+/// Returns the question line and at least two options, or none.
 pub fn choice(screen: &[u8]) -> Option<Choice> {
-    let rows: Vec<String> = screen_rows(screen)
-        .into_iter()
-        .map(|row| {
-            row.trim_matches(|c: char| BORDERS.contains(&c) || c.is_whitespace())
-                .to_owned()
-        })
-        .filter(|row| !row.is_empty())
-        .collect();
+    let rows = shown_rows(screen);
     let rows = &rows[rows.len().saturating_sub(SCREEN_ROWS_SCANNED)..];
     let first = rows
         .iter()
         .rposition(|row| option(row).is_some_and(|(number, ..)| number == 1))?;
     let mut options = Vec::new();
     let mut marker = None;
+    let mut marked_options = 0_usize;
     let mut last = first;
     for (at, row) in rows.iter().enumerate().skip(first) {
         match option(row) {
@@ -1840,6 +2231,7 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
                 if number == options.len() + 1 && options.len() < OPTIONS_MAX =>
             {
                 marker = marker.or(marked);
+                marked_options += usize::from(marked.is_some());
                 last = at;
                 options.push(text.to_owned());
             }
@@ -1847,8 +2239,9 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
             None => {}
         }
     }
+    assert!(marked_options <= options.len() && options.len() <= OPTIONS_MAX);
     let marker = marker?;
-    if options.len() < 2 {
+    if options.len() < 2 || marked_options != 1 {
         return None;
     }
     let above = &rows[first.saturating_sub(QUESTION_ROWS_ABOVE)..first];
@@ -1863,6 +2256,51 @@ pub fn choice(screen: &[u8]) -> Option<Choice> {
         marker,
         below: rows[last + 1..].to_vec(),
     })
+}
+
+/// Reads a screen's rows that show something, each without its box borders and the spaces
+/// around it. Takes the screen bytes. Returns the rows in order.
+fn shown_rows(screen: &[u8]) -> Vec<String> {
+    screen_rows(screen)
+        .into_iter()
+        .map(|row| {
+            row.trim_matches(|c: char| BORDERS.contains(&c) || c.is_whitespace())
+                .to_owned()
+        })
+        .filter(|row| !row.is_empty())
+        .collect()
+}
+
+/// Says whether an agent's app shows its own input prompt at the bottom of its screen,
+/// empty or with a draft, so it waits for a message and for nothing else: Claude Code's
+/// prompt row between two rules with at most `PROMPT_ROWS_BELOW_MAX` rows below it, or
+/// Codex's composer row with at most `COMPOSER_ROWS_BELOW_MAX`. A dialog, a notice or a
+/// list drawn in its place is not one. Takes the screen bytes. Returns the answer.
+pub fn idle_prompt(screen: &[u8]) -> bool {
+    let rows = shown_rows(screen);
+    let Some(at) = rows.iter().rposition(|row| prompt_row(row)) else {
+        return false;
+    };
+    let below = &rows[at + 1..];
+    let boxed = at > 0 && ruled_row(&rows[at - 1]) && below.iter().any(|row| ruled_row(row));
+    let composer = rows[at].starts_with(COMPOSER_MARK);
+    (boxed && below.len() <= PROMPT_ROWS_BELOW_MAX)
+        || (composer && below.len() <= COMPOSER_ROWS_BELOW_MAX)
+}
+
+/// Says whether a shown row is an input prompt's first row: a prompt mark, then nothing or
+/// a space and a draft, and no numbered option. Takes the row. Returns the answer.
+fn prompt_row(row: &str) -> bool {
+    let mut rest = row.chars();
+    rest.next().is_some_and(|mark| PROMPT_MARKS.contains(&mark))
+        && matches!(rest.next(), None | Some(' '))
+        && option(row).is_none()
+}
+
+/// Says whether a shown row is a horizontal rule or a box's top or bottom edge. Takes the
+/// row. Returns the answer.
+fn ruled_row(row: &str) -> bool {
+    row.chars().count() >= RULE_CHARS_MIN && row.chars().all(|c| RULES.contains(&c))
 }
 
 /// Reads the wake rule in force for a project's agent: the agent's own, else the project's,
@@ -2041,7 +2479,8 @@ fn cleared_levels(
 
 /// Reads what the app shows across projects: the app wake rule and the newest notifications.
 /// Takes the connection. Returns the view fitted to one owner reply by `fit_app`, with the
-/// unseen count for the badge and the unseen count of each project for the sidebar.
+/// unseen count for the badge, the unseen count of each project for the sidebar and the
+/// agents at work in each project for its live dot.
 pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
     let rule = stored_rules(connection, "")?
         .into_iter()
@@ -2061,6 +2500,7 @@ pub fn app(connection: &Connection) -> Result<AppEvents, EngineError> {
         notifications: app_notifications(connection)?,
         unseen,
         projects: unseen_by_project(connection)?,
+        working: working_by_project(connection)?,
     })
 }
 
@@ -2086,8 +2526,8 @@ pub fn rule_version(connection: &Connection, target: &RuleTarget) -> Result<u64,
 
 /// Fits the app-wide view to one owner reply: the oldest seen notifications go first, then
 /// the texts are cut to one shared cap, halved until the view fits, then the oldest go. The
-/// unseen counts stay whole. Takes the view. Returns it, or `team_events_bounds` when even
-/// an empty list does not fit.
+/// unseen and working counts stay whole. Takes the view. Returns it, or
+/// `team_events_bounds` when even an empty list does not fit.
 fn fit_app(mut view: AppEvents) -> Result<AppEvents, EngineError> {
     let fits = |view: &AppEvents| -> Result<bool, EngineError> {
         Ok(super::encoded_len(view)? <= super::STATUS_REPLY_BYTES_MAX)
@@ -2223,6 +2663,7 @@ pub fn due(
     project: &ProjectId,
     now: i64,
 ) -> Result<Option<Wake>, EngineError> {
+    settle_landed(tx, project)?;
     let since = now.saturating_sub(HOUR_MS);
     tx.execute(
         "DELETE FROM team_event_wakes WHERE project=?1 AND at_ms<?2",
@@ -2371,6 +2812,36 @@ pub fn woke(tx: &Transaction<'_>, wake: &Wake, cold: bool, now: i64) -> Result<i
     )
     .map_err(error)?;
     Ok(id)
+}
+
+/// Settles a project's queued change set ready events that no longer say anything true
+/// (F20): the agent has no open change set, one neither accepted nor discarded, made at or
+/// before the event, because the set landed, was discarded or went back to its agent, or a
+/// newer set replaced it. A database without the change set table settles none. Takes the connection and the
+/// project. Returns how many it settled, or the SQLite failure.
+fn settle_landed(connection: &Connection, project: &ProjectId) -> Result<usize, EngineError> {
+    let landing: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='landing_change_sets')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !landing {
+        return Ok(0);
+    }
+    let settled = connection
+        .execute(
+            "UPDATE team_events SET state='settled' WHERE project=?1 AND state='queued'
+             AND kind='change_set_ready' AND NOT EXISTS (
+                 SELECT 1 FROM landing_change_sets c WHERE c.project=team_events.project
+                 AND c.agent_kind='sub' AND c.agent_id=CAST(team_events.agent AS TEXT)
+                 AND c.state NOT IN ('accepted','discarded') AND c.created_ms<=team_events.created_ms)",
+            [project.as_str()],
+        )
+        .map_err(error)?;
+    assert!(i64::try_from(settled).is_ok_and(|settled| settled <= EVENTS_PER_PROJECT_MAX));
+    Ok(settled)
 }
 
 /// Delivers due events through the engine-driven master: once nothing else waits for the

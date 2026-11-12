@@ -15,7 +15,7 @@ pub use transport::native_auth_channel::claude::ClaudeAuthInput;
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
-    NativeAuthScope, NativeAuthStart, ends_operation,
+    NativeAuthScope, NativeAuthStart, SignInWay, ends_operation,
 };
 
 pub use transport::accounts::{AccountCheck, AccountPage};
@@ -31,10 +31,12 @@ pub use transport::harness_settings::HARNESS_SETTINGS_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
+pub use transport::overview::OVERVIEW_CODES;
 pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
-    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionMode, InstructionRecord,
-    InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved, ProcessText, SavedText,
+    Adoption, AgentInstructions, AppInstructionSettings, ImportCommit, ImportFile, InstructionMode,
+    InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved,
+    ProcessText, Proposal, SavedText, UncommittedImport,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
@@ -42,6 +44,7 @@ pub use transport::recovery::{
     RecoveryBanner, RunShown,
 };
 pub use transport::scorecard::{SCORECARD_CODES, Saved as ScorecardSaved};
+pub use transport::roadmap::ROADMAP_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::tracker::{
     CustomBounds, SettingChoices, SettingsSaved, TRACKER_CODES, TRACKER_REPLY_BYTES_MAX,
@@ -202,9 +205,15 @@ pub enum OwnerMutation {
         expected_revision: u64,
         name: Option<String>,
         setup: crate::project_setup::ProjectSetup,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept: Option<Vec<crate::project_setup::KeptFile>>,
     },
     RemoveProject {
         project_id: ProjectId,
+    },
+    DeleteProject {
+        project_id: ProjectId,
+        name: String,
     },
     RunSetup {
         pack: Vec<String>,
@@ -228,6 +237,14 @@ pub enum OwnerMutation {
     AddExistingFolder {
         source: String,
         mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
+    },
+    MoveProjectHome {
+        project_id: ProjectId,
+        mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
     },
     DeleteProjectFolder {
         path: String,
@@ -257,6 +274,28 @@ pub enum OwnerMutation {
     },
     SaveOwnerProfile {
         profile: crate::owner_profile::OwnerProfile,
+    },
+    SetSandboxSettings {
+        settings: crate::sandbox_settings::SandboxSettings,
+    },
+    SetCleanupSettings {
+        settings: crate::cleanup_settings::CleanupSettings,
+    },
+    SetQuitSettings {
+        settings: crate::quit_settings::QuitSettings,
+    },
+    SetMasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    SetMasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
+    },
+    SetMasterFrameSettings {
+        settings: crate::master_frame_limit::MasterFrameSettings,
+    },
+    SetLearningMark {
+        step: crate::learning::MarkStep,
+        on: bool,
     },
     Memory {
         action: crate::memory::library::LibraryAction,
@@ -426,12 +465,14 @@ impl OwnerMutation {
                 expected_revision,
                 name,
                 setup,
+                kept,
             } => {
                 let action = crate::project_setup::SetupAction::Update {
                     project_id: project_id.clone(),
                     expected_revision: *expected_revision,
                     name: name.clone(),
                     setup: setup.clone(),
+                    kept: kept.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -441,6 +482,14 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                 },
             },
+            Self::DeleteProject { project_id, name } => {
+                let action = crate::project_setup::SetupAction::Delete {
+                    project_id: project_id.clone(),
+                    name: name.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
             Self::RunSetup { pack } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Run { pack: pack.clone() },
             },
@@ -478,10 +527,28 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectsHome { action }
             }
-            Self::AddExistingFolder { source, mode } => {
+            Self::AddExistingFolder {
+                source,
+                mode,
+                overrides,
+            } => {
                 let action = crate::projects_home::HomeAction::Added {
                     source: source.clone(),
                     mode: *mode,
+                    overrides: overrides.clone(),
+                };
+                action.validate()?;
+                Command::ProjectsHome { action }
+            }
+            Self::MoveProjectHome {
+                project_id,
+                mode,
+                overrides,
+            } => {
+                let action = crate::projects_home::HomeAction::MoveProject {
+                    project_id: project_id.clone(),
+                    mode: *mode,
+                    overrides: overrides.clone(),
                 };
                 action.validate()?;
                 Command::ProjectsHome { action }
@@ -544,6 +611,28 @@ impl OwnerMutation {
                     profile: profile.clone(),
                 }
             }
+            Self::SetSandboxSettings { settings } => Command::OwnerSandbox {
+                settings: *settings,
+            },
+            Self::SetCleanupSettings { settings } => Command::OwnerAgentCleanup {
+                settings: *settings,
+            },
+            Self::SetQuitSettings { settings } => Command::OwnerAgentQuit {
+                settings: *settings,
+            },
+            Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
+                settings: *settings,
+            },
+            Self::SetMasterTimeSettings { settings } => Command::OwnerMasterTime {
+                settings: *settings,
+            },
+            Self::SetMasterFrameSettings { settings } => Command::OwnerMasterFrames {
+                settings: *settings,
+            },
+            Self::SetLearningMark { step, on } => Command::OwnerLearningMark {
+                step: *step,
+                on: *on,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -644,6 +733,12 @@ pub enum OwnerRead {
     ProjectMasterSessions {
         project_id: ProjectId,
     },
+    ProjectMasterMessages {
+        project_id: ProjectId,
+        session_id: SessionId,
+        before: Option<u64>,
+        limit: u8,
+    },
     ProjectMasterInputs {
         project_id: ProjectId,
         session_id: SessionId,
@@ -695,6 +790,10 @@ pub enum OwnerRead {
     ResearchJobs {
         project_id: ProjectId,
     },
+    ProjectActivity {
+        project_id: ProjectId,
+        limit: usize,
+    },
     TeamStatus {
         project_id: ProjectId,
     },
@@ -703,6 +802,12 @@ pub enum OwnerRead {
     },
     IdeAsks {
         project_id: ProjectId,
+    },
+    TeamAgentMessages {
+        project_id: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+        limit: Option<u16>,
     },
     ProjectFiles {
         project_id: ProjectId,
@@ -726,8 +831,15 @@ pub enum OwnerRead {
         job: i64,
     },
     OwnerProfile,
+    SandboxSettings,
+    CleanupSettings,
+    QuitSettings,
+    MasterStepSettings,
+    MasterTimeSettings,
+    MasterFrameSettings,
     ProjectsHome,
     SetupStatus,
+    LearningProgress,
     FoundProjects,
     FolderSize {
         path: String,
@@ -801,6 +913,7 @@ impl OwnerRead {
             | Self::ProjectMaster { .. }
             | Self::ProjectMasterTurns { .. }
             | Self::ProjectMasterSessions { .. }
+            | Self::ProjectMasterMessages { .. }
             | Self::ProjectMasterInputs { .. }
             | Self::Settings
             | Self::ModelAccessPage { .. }
@@ -823,8 +936,15 @@ impl OwnerRead {
             | Self::CoordQuestions { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
+            | Self::SandboxSettings
+            | Self::CleanupSettings
+            | Self::QuitSettings
+            | Self::MasterStepSettings
+            | Self::MasterTimeSettings
+            | Self::MasterFrameSettings
             | Self::ProjectsHome
             | Self::SetupStatus
+            | Self::LearningProgress
             | Self::FoundProjects
             | Self::Onboarding { .. }
             | Self::Memory { .. }
@@ -843,8 +963,22 @@ impl OwnerRead {
                 return Ok(None);
             }
             Self::ProjectContextItem { path, .. } => {
-                if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
+                if path.is_empty()
+                    || path.len() > crate::project_setup::CONTEXT_PATH_BYTES_MAX
+                    || path.chars().any(char::is_control)
+                {
                     return Err(failure("context_path_invalid"));
+                }
+                return Ok(None);
+            }
+            Self::TeamAgentMessages { agent, limit, .. } => {
+                if *agent <= 0 {
+                    return Err(failure("team_agent_not_found"));
+                }
+                if limit.is_some_and(|limit| {
+                    limit == 0 || limit > crate::team::agent_messages::PAGE_MAX
+                }) {
+                    return Err(failure("team_messages_limit_invalid"));
                 }
                 return Ok(None);
             }
@@ -859,6 +993,12 @@ impl OwnerRead {
             Self::ResearchLog { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
+                }
+                return Ok(None);
+            }
+            Self::ProjectActivity { limit, .. } => {
+                if *limit == 0 || *limit > crate::activity::LIST_MAX {
+                    return Err(failure("activity_limit_invalid"));
                 }
                 return Ok(None);
             }
@@ -989,6 +1129,9 @@ impl OwnerRequest {
                 if let OwnerRead::ProjectMasterTurns { cursor, limit, .. } = query {
                     crate::master_session::validate_page(cursor.as_ref(), *limit)?;
                 }
+                if let OwnerRead::ProjectMasterMessages { before, limit, .. } = query {
+                    crate::master_sessions::validate_messages_page(*before, *limit)?;
+                }
                 if let OwnerRead::ModelAccessPage { limit, cursor, .. } = query {
                     if !(1..=16).contains(limit) {
                         return Err(failure("model_access_page_limit"));
@@ -1118,6 +1261,12 @@ pub enum OwnerSummary {
     },
 }
 
+/// True for a folder with no iCloud placeholders, whose `FolderSize` reply leaves the count
+/// out, so a client from before the count still reads it.
+fn no_placeholders(count: &u64) -> bool {
+    *count == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum OwnerData {
@@ -1129,6 +1278,9 @@ pub enum OwnerData {
     },
     ProjectMasterSessions {
         sessions: Vec<crate::master_sessions::MasterSessionSummary>,
+    },
+    ProjectMasterMessages {
+        page: crate::master_sessions::SessionMessagePage,
     },
     ProjectMasterInputs {
         entries: Vec<crate::conversation::ConversationEntry>,
@@ -1189,6 +1341,12 @@ pub enum OwnerData {
         project_id: ProjectId,
         jobs: Vec<crate::project_setup::ResearchJob>,
     },
+    ProjectActivity {
+        project_id: ProjectId,
+        items: Vec<crate::activity::ActivityItem>,
+        #[serde(default)]
+        more: bool,
+    },
     TeamStatus {
         status: Box<crate::team::TeamStatus>,
     },
@@ -1197,6 +1355,9 @@ pub enum OwnerData {
     },
     IdeAsks {
         asks: Vec<crate::ide::bridge::memory::IdeAsk>,
+    },
+    TeamAgentMessages {
+        messages: Box<crate::team::agent_messages::AgentMessages>,
     },
     ProjectFiles {
         project_id: ProjectId,
@@ -1222,8 +1383,29 @@ pub enum OwnerData {
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
     },
+    SandboxSettings {
+        settings: crate::sandbox_settings::SandboxSettings,
+    },
+    CleanupSettings {
+        settings: crate::cleanup_settings::CleanupSettings,
+    },
+    QuitSettings {
+        settings: crate::quit_settings::QuitSettings,
+    },
+    MasterStepSettings {
+        settings: crate::master_step_limit::MasterStepSettings,
+    },
+    MasterTimeSettings {
+        settings: crate::master_time_limit::MasterTimeSettings,
+    },
+    MasterFrameSettings {
+        settings: crate::master_frame_limit::MasterFrameSettings,
+    },
     SetupStatus {
         status: crate::setup::SetupStatus,
+    },
+    LearningProgress {
+        progress: crate::learning::LearningProgress,
     },
     ProjectsHome {
         home: crate::projects_home::ProjectsHome,
@@ -1233,6 +1415,8 @@ pub enum OwnerData {
     },
     FolderSize {
         bytes: u64,
+        #[serde(default, skip_serializing_if = "no_placeholders")]
+        placeholders: u64,
     },
     Onboarding {
         onboarding: Box<crate::onboarding::OnboardingView>,

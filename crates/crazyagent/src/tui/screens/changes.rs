@@ -1,6 +1,6 @@
 use super::intake::NOT_READY;
 use super::new_project_input::TextInput;
-use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
+use super::new_project_view::{Look, Row, columns, list_row, printable, spread, wrap_words};
 use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
@@ -8,15 +8,18 @@ use super::tests::SetChecks;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
-    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches, TurnOutcome,
+    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
 use crate::tui::client::checks::ChecksJob;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
+use std::cell::Cell;
 
 const LIST_POLL_MS: i64 = 5_000;
+const DIFF_HEADER: &str = "diff --git ";
+const QUOTED_HEADER: &str = "diff --git \"";
 const DIFF_LINES_MAX: usize = 20_000;
 const DIFF_AHEAD: usize = 40;
 const DIFF_PAGE_ROWS: usize = 20;
@@ -27,14 +30,14 @@ const CONFLICTS_SHOWN: usize = 5;
 const SHORT_COMMIT: usize = 7;
 const TAB_SPACES: &str = "    ";
 const AGENT_WIDTH: usize = 24;
-const STATE_WIDTH: usize = 30;
+const STATE_WIDTH: usize = 35;
 const NOT_READY_LINE: &str = "Landing changes isn't ready in this engine yet.";
 const MESSAGE_ROWS: usize = 6;
 const UPDATED_NOTICE: &str =
     "Your branch is merged into the agent's copy. The list shows when the agent picks it up.";
+const MOVED_NOTE: &str = "These changes moved on since you opened them. They are read again from the top: Accept and Discard come back once you scroll to the end.";
 const WAITING_NOTE: &str = "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.";
 const NO_FILE_SHOWN: &str = "Scroll the diff to a changed text file to open it in your editor.";
-const DIFF_HEADER: &str = "diff --git ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {
@@ -52,12 +55,18 @@ struct Diff {
     next: Option<u16>,
     truncated: bool,
     top: usize,
+    moved: bool,
+    complete: bool,
+    seen_all: Cell<bool>,
+    skip: usize,
+    width: Cell<usize>,
 }
 
 impl Diff {
-    /// Opens a change set's diff with nothing read yet. Inputs: the set's id and the head
-    /// shown. Output: the diff, waiting for its first page.
-    fn of(id: ChangeSetId, head: String) -> Self {
+    /// Starts reading a change set's diff from its first page at one head, with nothing
+    /// read yet. Inputs: the change set, the head and whether the set moved on since the
+    /// owner opened it. Output: the diff, waiting for its first page.
+    fn at(id: ChangeSetId, head: String, moved: bool) -> Self {
         Self {
             id,
             head,
@@ -68,7 +77,20 @@ impl Diff {
             next: Some(0),
             truncated: false,
             top: 0,
+            moved,
+            complete: false,
+            seen_all: Cell::new(false),
+            skip: 0,
+            width: Cell::new(0),
         }
+    }
+
+    /// Tells whether Accept and Discard may name this diff's head: always for the head
+    /// the owner opened, and after a move only once the last line of the new head's last
+    /// page was drawn on screen, not when that page arrived (RV-DS-79, RVA-1). Output: the
+    /// answer.
+    fn reviewed(&self) -> bool {
+        !self.moved || self.seen_all.get()
     }
 
     /// Whether the next page is wanted now: while the file list is not complete, so every
@@ -106,6 +128,72 @@ impl Diff {
         assert!(self.files.len() <= FILES_MAX);
         assert!(self.files_done || self.next.is_some());
     }
+
+    /// Whether a diff header line starts a file that carries the instruction file mark; a
+    /// quoted header, which git writes for unusual names, counts when any file is marked.
+    /// Input: the header line. Output: true for a marked file.
+    fn marked_header(&self, header: &str) -> bool {
+        let instructions = instruction_headers(&self.files);
+        instructions.iter().any(|known| known == header)
+            || (header.starts_with(QUOTED_HEADER) && !instructions.is_empty())
+    }
+
+    /// How many view rows one diff line takes: its wrapped rows at the width last drawn when
+    /// it belongs to a marked instruction file, which is shown in full, else one, as other
+    /// lines are cut. Input: the line index. Output: the rows, at least one.
+    fn rows_of(&self, index: usize) -> usize {
+        let width = self.width.get();
+        let Some(line) = self.lines.get(index) else {
+            return 1;
+        };
+        let marked = self.lines[..=index]
+            .iter()
+            .rev()
+            .find(|line| line.starts_with(DIFF_HEADER))
+            .is_some_and(|header| self.marked_header(header));
+        if width == 0 || !marked {
+            return 1;
+        }
+        crate::tui::text::wrap(&printable(line.clone()), width)
+            .len()
+            .max(1)
+    }
+
+    /// Moves the view down by rows: through the rest of a marked line's wrapped rows before
+    /// the next line, so a marked line taller than the view can be read to its end.
+    /// Input: the rows.
+    fn down(&mut self, rows: usize) {
+        let last = self.lines.len().saturating_sub(1);
+        self.skip = self.skip.min(self.rows_of(self.top) - 1);
+        for _ in 0..rows {
+            if self.skip + 1 < self.rows_of(self.top) {
+                self.skip += 1;
+            } else if self.top < last {
+                self.top += 1;
+                self.skip = 0;
+            } else {
+                break;
+            }
+        }
+        assert!(self.top <= last && self.skip < self.rows_of(self.top));
+    }
+
+    /// Moves the view up by rows: through a marked line's wrapped rows, entering a line
+    /// above at its last row. Input: the rows.
+    fn up(&mut self, rows: usize) {
+        self.skip = self.skip.min(self.rows_of(self.top) - 1);
+        for _ in 0..rows {
+            if self.skip > 0 {
+                self.skip -= 1;
+            } else if self.top > 0 {
+                self.top -= 1;
+                self.skip = self.rows_of(self.top) - 1;
+            } else {
+                break;
+            }
+        }
+        assert!(self.skip < self.rows_of(self.top));
+    }
 }
 
 /// One project's change sets: what each agent changed, waiting for the owner to accept,
@@ -136,6 +224,7 @@ pub(in crate::tui) struct ProjectChanges {
     edit: Option<String>,
     reveal: Option<RevealTarget>,
     pub checks: SetChecks,
+    painting: Cell<bool>,
 }
 
 impl ProjectChanges {
@@ -167,6 +256,7 @@ impl ProjectChanges {
             read_ms: 0,
             edit: None,
             reveal: None,
+            painting: Cell::new(false),
         }
     }
 
@@ -178,6 +268,14 @@ impl ProjectChanges {
             self.checks.want(&diff.id, now_ms);
         }
         self.checks.next_job()
+    }
+
+    /// Says whether the next drawings of this tab are painted on screen. Only a painted
+    /// drawing records that a moved diff's last line was seen, so a taller drawing that is
+    /// never shown cannot unlock Accept (RVA-1), and a drawing counts only when its caller says
+    /// so. Input: true around the drawing that reaches the screen, false after it. Output: none.
+    pub(in crate::tui) fn painting(&self, painted: bool) {
+        self.painting.set(painted);
     }
 
     /// Asks for a fresh list on the next `next_query`, as when the owner opens the tab.
@@ -200,6 +298,7 @@ impl ProjectChanges {
         } else if let Some(diff) = self.diff.as_ref().filter(|diff| diff.wants_more()) {
             ChangesQuery::Diff {
                 id: diff.id.clone(),
+                head: diff.head.clone(),
                 page: diff.next?,
             }
         } else if self.stale || (!self.not_ready && now_ms - self.read_ms >= LIST_POLL_MS) {
@@ -268,10 +367,18 @@ impl ProjectChanges {
                 self.sets = sets.clone();
                 self.loaded = true;
                 self.not_ready = false;
-                if let Some(diff) = &self.diff
-                    && !self.sets.iter().any(|set| set.id == diff.id)
-                {
-                    self.diff = None;
+                if let Some(diff) = self.diff.as_mut() {
+                    match self.sets.iter().find(|set| set.id == diff.id) {
+                        None => self.diff = None,
+                        Some(set)
+                            if set.head != diff.head
+                                || (diff.moved && !diff.complete && diff.next.is_none()) =>
+                        {
+                            *diff = Diff::at(set.id.clone(), set.head.clone(), true);
+                            self.notice = Some(Notice::problem(MOVED_NOTE));
+                        }
+                        Some(_) => {}
+                    }
                 }
             }
             (ChangesQuery::List { .. }, Err(code)) => {
@@ -280,11 +387,25 @@ impl ProjectChanges {
                     None,
                 );
             }
-            (ChangesQuery::Diff { id, page }, Ok(ChangesView::Diff(page_diff))) => {
-                if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id)
+            (ChangesQuery::Diff { id, head, page }, Ok(ChangesView::Diff(page_diff))) => {
+                if let Some(diff) = self
+                    .diff
+                    .as_mut()
+                    .filter(|diff| &diff.id == id && &diff.head == head)
                     && diff.next == Some(*page)
                 {
                     diff.add(page_diff);
+                    diff.complete = diff.next.is_none();
+                }
+            }
+            (ChangesQuery::Diff { id, .. }, Err(code)) if code == "changes_stale" => {
+                if let Some(diff) = self.diff.as_mut().filter(|diff| &diff.id == id) {
+                    *diff = Diff {
+                        next: None,
+                        ..Diff::at(diff.id.clone(), diff.head.clone(), true)
+                    };
+                    self.stale = true;
+                    self.notice = Some(Notice::problem(MOVED_NOTE));
                 }
             }
             (ChangesQuery::Diff { .. }, Err(code)) => {
@@ -407,6 +528,19 @@ impl ProjectChanges {
         self.sets.iter().find(|set| &set.id == id)
     }
 
+    /// The actions the chosen change set allows now, with Accept and Discard held back
+    /// while an open diff that moved on is not read to its last page (RV-DS-79).
+    /// Input: the time now. Output: the actions, or none when no set is chosen.
+    fn actions(&self, now_ms: i64) -> Option<Actions> {
+        let reviewed = self.diff.as_ref().is_none_or(Diff::reviewed);
+        self.chosen().map(|set| {
+            let mut actions = Actions::of(set, now_ms);
+            actions.accept &= reviewed;
+            actions.discard &= reviewed;
+            actions
+        })
+    }
+
     fn reviewed_head(&self) -> Option<String> {
         let set = self.chosen()?;
         Some(match &self.diff {
@@ -463,7 +597,7 @@ impl ProjectChanges {
         if self.not_ready || !self.loaded {
             return false;
         }
-        let actions = self.chosen().map(|set| Actions::of(set, now_ms));
+        let actions = self.actions(now_ms);
         let used = match (key.code, actions) {
             (KeyCode::Char('a'), Some(actions)) if actions.accept => {
                 let proposed = self.chosen().map(|set| set.message.clone());
@@ -582,8 +716,7 @@ impl ProjectChanges {
                 let Some(set) = self.chosen() else {
                     return true;
                 };
-                let diff = Diff::of(set.id.clone(), set.head.clone());
-                self.diff = Some(diff);
+                self.diff = Some(Diff::at(set.id.clone(), set.head.clone(), false));
             }
             _ => return false,
         }
@@ -594,14 +727,11 @@ impl ProjectChanges {
         let Some(diff) = self.diff.as_mut() else {
             return false;
         };
-        let last = diff.lines.len().saturating_sub(1);
         match code {
-            KeyCode::Up => diff.top = diff.top.saturating_sub(1),
-            KeyCode::Down => diff.top = (diff.top + 1).min(last),
-            KeyCode::PageUp => diff.top = diff.top.saturating_sub(DIFF_PAGE_ROWS),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                diff.top = (diff.top + DIFF_PAGE_ROWS).min(last)
-            }
+            KeyCode::Up => diff.up(1),
+            KeyCode::Down => diff.down(1),
+            KeyCode::PageUp => diff.up(DIFF_PAGE_ROWS),
+            KeyCode::PageDown | KeyCode::Char(' ') => diff.down(DIFF_PAGE_ROWS),
             KeyCode::Esc => self.diff = None,
             _ => return false,
         }
@@ -782,7 +912,7 @@ impl ProjectChanges {
         ];
         for (index, set) in self.sets.iter().enumerate().skip(first).take(shown) {
             let cells = vec![
-                Row::of(agent_name(set), look.fg),
+                Row::of(listed_name(set), look.fg),
                 state_row(set, look),
                 Row::of(size_line(set), look.muted),
             ];
@@ -807,6 +937,11 @@ impl ProjectChanges {
         lines
     }
 
+    /// Draws the open diff under the chosen set's details, from the line the owner
+    /// scrolled to, and records, in a painted drawing only, once the last line of a complete
+    /// diff was drawn whole on screen, which Accept and Discard wait for after a move
+    /// (RVA-1). Inputs: the diff, the content width, the rows available, the time now and the
+    /// look. Output: the rows.
     fn diff_rows(
         &self,
         diff: &Diff,
@@ -819,7 +954,7 @@ impl ProjectChanges {
         if let Some(set) = self.chosen() {
             lines.push(spread(
                 content,
-                Row::of(agent_name(set), look.heading),
+                Row::of(crate::landing::change_set_name(set), look.heading),
                 state_row(set, look),
             ));
             lines.extend(details(set, content, now_ms, look).into_iter().skip(1));
@@ -863,19 +998,67 @@ impl ProjectChanges {
         }
         lines.push(Row::default());
         if diff.lines.is_empty() {
-            let waiting = if diff.next.is_some() {
+            let waiting = if diff.next.is_some() || (diff.moved && !diff.complete) {
                 "Loading changes..."
             } else {
                 "No text changes to show."
             };
+            diff.seen_all
+                .set(diff.seen_all.get() || (self.painting.get() && diff.complete));
             lines.push(Row::of(waiting, look.muted));
             return lines;
         }
-        let text_rows = room.saturating_sub(lines.len()).max(1);
-        for line in diff.lines.iter().skip(diff.top).take(text_rows) {
-            lines.push(Row::of(line.clone(), diff_style(line, look)).pad(content));
+        let above = lines.len();
+        let text_rows = room.saturating_sub(above).max(1);
+        diff.width.set(content.max(1));
+        let mut inside = diff
+            .lines
+            .iter()
+            .take(diff.top)
+            .rev()
+            .find(|line| line.starts_with(DIFF_HEADER))
+            .is_some_and(|header| diff.marked_header(header));
+        let mut shown = 0;
+        let mut drawn_to = diff.top;
+        for (index, line) in diff.lines.iter().enumerate().skip(diff.top) {
+            if shown >= text_rows {
+                break;
+            }
+            if line.starts_with(DIFF_HEADER) {
+                inside = diff.marked_header(line);
+            }
+            let style = diff_style(line, look);
+            if inside {
+                let pieces = crate::tui::text::wrap(&printable(line.clone()), content.max(1));
+                let skip = match index == diff.top {
+                    true => diff.skip.min(pieces.len().saturating_sub(1)),
+                    false => 0,
+                };
+                let left = pieces.len() - skip;
+                let taken = left.min(text_rows - shown);
+                for piece in pieces.into_iter().skip(skip).take(taken) {
+                    lines.push(Row::of(piece, style).pad(content));
+                    shown += 1;
+                }
+                if line.is_empty() {
+                    lines.push(Row::of(String::new(), style).pad(content));
+                    shown += 1;
+                }
+                if taken == left {
+                    drawn_to = index + 1;
+                }
+            } else {
+                lines.push(Row::of(line.clone(), style).pad(content));
+                shown += 1;
+                drawn_to = index + 1;
+            }
         }
+        let whole = above + shown <= room.max(1);
         lines.truncate(room.max(1));
+        diff.seen_all.set(
+            diff.seen_all.get()
+                || (self.painting.get() && diff.complete && whole && drawn_to == diff.lines.len()),
+        );
         lines
     }
 
@@ -1002,7 +1185,7 @@ impl ProjectChanges {
         } else {
             vec![("\u{2191}\u{2193}", "Move"), ("Enter", "Show changes")]
         };
-        if let Some(actions) = self.chosen().map(|set| Actions::of(set, now_ms)) {
+        if let Some(actions) = self.actions(now_ms) {
             if actions.accept {
                 help.push(("a", "Accept"));
             }
@@ -1064,18 +1247,11 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
             look.muted,
         ));
     }
-    match set.last_outcome {
-        TurnOutcome::Failed => notes.push((
-            "The agent's last turn failed. These are the changes it made before it stopped."
-                .to_owned(),
-            look.warning,
-        )),
-        TurnOutcome::Cancelled => notes.push((
-            "The agent's last turn was stopped. These are the changes it made before it stopped."
-                .to_owned(),
-            look.warning,
-        )),
-        TurnOutcome::Succeeded => {}
+    if let Some(line) = crate::landing::turn_line(set) {
+        notes.push((line.to_owned(), look.warning));
+    }
+    if let Some(line) = crate::landing::landing_line(set) {
+        notes.push((line.to_owned(), look.warning));
     }
     match set.state {
         ChangeState::Conflict if !set.conflicts.is_empty() => {
@@ -1097,9 +1273,12 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
             look.fg,
         )),
         ChangeState::Discarded => notes.push((restore_note(set, now_ms), look.fg)),
+        ChangeState::Pending if !set.regenerated.is_empty() => {
+            notes.push((rebuilt_line(&set.regenerated), look.fg))
+        }
         _ => {}
     }
-    let mut rows = vec![Row::of(agent_name(set), look.heading)];
+    let mut rows = vec![Row::of(crate::landing::change_set_name(set), look.heading)];
     for (note, style) in notes {
         rows.extend(
             wrap_words(&note, content)
@@ -1120,6 +1299,15 @@ fn restore_note(set: &ChangeSetView, now_ms: i64) -> String {
             duration(until - now_ms)
         ),
         _ => "These changes can no longer be restored.".to_owned(),
+    }
+}
+
+/// A change set in the Changes list: its number before its agent once the engine
+/// numbered it. Input: the change set. Output: the cell text.
+fn listed_name(set: &ChangeSetView) -> String {
+    match set.number {
+        Some(number) => format!("#{number} {}", agent_name(set)),
+        None => agent_name(set),
     }
 }
 
@@ -1144,7 +1332,7 @@ fn landing_default(listed: &TargetBranches) -> Option<&String> {
 /// for the list read, which is about the whole page.
 fn about(query: &ChangesQuery) -> Option<&ChangeSetId> {
     match query {
-        ChangesQuery::List { .. } => None,
+        ChangesQuery::List { .. } | ChangesQuery::Waiting { .. } => None,
         ChangesQuery::Diff { id, .. }
         | ChangesQuery::Accept { id, .. }
         | ChangesQuery::AcceptInto { id, .. }
@@ -1160,6 +1348,7 @@ fn state_word(set: &ChangeSetView) -> &'static str {
         ChangeState::Pending => "Ready to review",
         ChangeState::Conflict => "Conflicts with your branch",
         ChangeState::Updating if set.waiting => "Updated, waiting for the agent",
+        ChangeState::Updating if !set.conflicts.is_empty() => "Agent is fixing conflicts with main",
         ChangeState::Updating => "Agent is updating",
         ChangeState::Accepted if set.outside => "Landed outside the app",
         ChangeState::Accepted => "Accepted",
@@ -1255,6 +1444,9 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
             FileMark::Mode => "File mode changed",
             FileMark::OwnerEdited => "Edited by you",
             FileMark::IdeConfig => "IDE settings: changes how the IDE behaves in this project",
+            FileMark::Instructions => {
+                "Instruction file: changes what every agent of this project is told"
+            }
         };
         if !marks.contains(&word) {
             marks.push(word);
@@ -1264,21 +1456,49 @@ fn file_marks(file: &ChangedFile) -> Vec<&'static str> {
 }
 
 fn conflict_line(files: &[String]) -> String {
+    format!(
+        "These files also changed on your branch: {}. Ask the agent to update, or discard.",
+        shown_files(files)
+    )
+}
+
+/// Says which lockfiles the project's own tools rebuilt on the agent's work. Input: the
+/// lockfiles. Output: the note.
+fn rebuilt_line(files: &[String]) -> String {
+    format!(
+        "Rebuilt with this project's own tools to fit your branch: {}. They ran on the agent's work, so review the result like the agent's own edits.",
+        shown_files(files)
+    )
+}
+
+/// The first `CONFLICTS_SHOWN` files, then how many more. Input: the files. Output: the
+/// words.
+fn shown_files(files: &[String]) -> String {
     let shown = files
         .iter()
         .take(CONFLICTS_SHOWN)
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(", ");
-    let more = files.len().saturating_sub(CONFLICTS_SHOWN);
-    let more = if more > 0 {
-        format!(" and {more} more")
-    } else {
-        String::new()
-    };
-    format!(
-        "These files also changed on your branch: {shown}{more}. Ask the agent to update, or discard."
-    )
+    match files.len().saturating_sub(CONFLICTS_SHOWN) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+/// The diff header lines of the changed files that carry the instruction file mark, as the
+/// engine's patch writes them, so the diff view shows those files' lines in full rather than
+/// cut. A quoted header, which git writes for unusual names, counts when any file is marked.
+/// Input: the files. Output: the headers.
+fn instruction_headers(files: &[ChangedFile]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|file| file.marks.contains(&FileMark::Instructions))
+        .map(|file| {
+            let old = file.old_path.as_deref().unwrap_or(&file.path);
+            format!("{DIFF_HEADER}a/{old} b/{}", file.path)
+        })
+        .collect()
 }
 
 fn diff_line(line: &str) -> String {
@@ -1313,7 +1533,10 @@ fn done(view: &ChangesView) -> Notice {
         }
         ChangesView::Restored => Notice::plain("Restored. The changes are ready to review again."),
         ChangesView::Updating => Notice::plain(UPDATED_NOTICE),
-        ChangesView::List(_) | ChangesView::Diff(_) | ChangesView::Branches(_) => Notice::plain(""),
+        ChangesView::List(_)
+        | ChangesView::Diff(_)
+        | ChangesView::Waiting(_)
+        | ChangesView::Branches(_) => Notice::plain(""),
     }
 }
 
@@ -1323,7 +1546,10 @@ fn done(view: &ChangesView) -> Notice {
 pub(in crate::tui) fn refusal(code: &str) -> String {
     match code {
         "changes_owner_dirty" => {
-            "Your project folder has uncommitted changes to tracked files. Commit or stash them, then accept again."
+            "Files in your project folder that these changes touch, or that you staged, have uncommitted changes. Commit or stash them, then accept again."
+        }
+        "changes_owner_untracked" => {
+            "Files in your project folder that Git doesn't track sit where these changes add files. Move or delete them, then accept again."
         }
         "changes_detached_head" => {
             "Your project folder isn't on a branch. Check out the branch these changes should land on, then accept again."
@@ -1337,6 +1563,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         "changes_stale" => {
             "These changes moved on since you opened them. Review them again, then accept."
         }
+        "move_project_in_progress" => {
+            "This project is being moved into your projects folder. Try again when the move is done."
+        }
         "changes_branch_moved" => {
             "Your branch moved while these changes were landing, so nothing changed. Review and accept again."
         }
@@ -1345,6 +1574,9 @@ pub(in crate::tui) fn refusal(code: &str) -> String {
         }
         "changes_git_unsupported" => {
             "The Git on this computer can't land changes. Update Git, then try again."
+        }
+        "changes_merge_unsafe" => {
+            "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again."
         }
         "changes_restore_expired" => {
             "These changes can no longer be restored. Discarded changes are kept for 7 days."

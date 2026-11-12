@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::plugins::{Scope, ServerSpec};
 use crazyagent_desktop::bridge::NativeBridge;

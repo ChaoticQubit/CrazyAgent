@@ -5,9 +5,9 @@ use super::project_markdown::sanitize;
 use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
-use crate::onboarding::{OnboardingView, Step};
+use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
-use crate::project_setup::{Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
+use crate::project_setup::{KeptFile, Platform, ResearchKind, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
@@ -28,6 +28,9 @@ const ABOUT_CHARS_MAX: usize = 2_000;
 const STACK_CHARS_MAX: usize = 1_000;
 const STACK_ITEMS_MAX: usize = 32;
 const PLATFORMS_PER_ROW: usize = 3;
+const LINKED_LABEL: &str = "Use these files";
+const LINKED_NOTE: &str = "CrazyAgent reads them from your repo; edits go to those files.";
+const ROADMAP_LINKED_NOTE: &str = "Not planned while the found roadmap is linked.";
 const GRAPH_OFF: &str = "Graphify is off in Setup, so no code graph is built.";
 const GRAPH_MISSING: &str =
     "Graphify isn't installed, so no code graph is built. Install it in Setup.";
@@ -39,16 +42,18 @@ enum Focus {
     Stack,
     Platforms,
     Roadmap,
+    Linked,
     Confirm,
 }
 
 impl Focus {
-    const ORDER: [Focus; 6] = [
+    const ORDER: [Focus; 7] = [
         Self::Name,
         Self::About,
         Self::Stack,
         Self::Platforms,
         Self::Roadmap,
+        Self::Linked,
         Self::Confirm,
     ];
 
@@ -76,6 +81,7 @@ struct Review {
     platforms: Vec<Platform>,
     platform: usize,
     roadmap: bool,
+    linked: bool,
     focus: Focus,
     revision: Load<u64>,
     move_left: bool,
@@ -90,7 +96,7 @@ impl Review {
         let mut stack = TextField::new("Tech stack", STACK_CHARS_MAX).note("Separate with commas.");
         stack.set(&onboarding.draft.tech_stack.join(", "));
         let platforms = onboarding.draft.platforms.clone();
-        let roadmap = !onboarding.finished
+        let roadmap = (!onboarding.finished && onboarding.facts.roadmap.is_empty())
             || onboarding
                 .draft
                 .research
@@ -103,21 +109,74 @@ impl Review {
             platforms,
             platform: 0,
             roadmap,
+            linked: true,
             focus: Focus::Name,
             revision: Load::Idle,
             move_left: false,
         }
     }
 
-    /// Moves the focus on, past the roadmap toggle once the setup is saved, since planning
-    /// after research belongs to the first setup. Takes the direction. Returns the focus.
+    /// Moves the focus on, past the roadmap and linked files toggles once the setup is
+    /// saved, since planning after research and linking belong to the first setup, past the
+    /// roadmap toggle while the found roadmap is linked, and past the linked files toggle
+    /// when the mapping found no file. Takes the direction. Returns the focus.
     fn step(&self, forward: bool) -> Focus {
-        let next = self.focus.step(forward);
-        if next == Focus::Roadmap && self.onboarding.finished {
-            next.step(forward)
-        } else {
-            next
+        let mut next = self.focus.step(forward);
+        while self.skipped(next) {
+            next = next.step(forward);
         }
+        next
+    }
+
+    fn skipped(&self, focus: Focus) -> bool {
+        match focus {
+            Focus::Roadmap => self.onboarding.finished || self.roadmap_linked(),
+            Focus::Linked => self.onboarding.finished || self.found().is_empty(),
+            _ => false,
+        }
+    }
+
+    /// Whether the found roadmap is linked on this confirm: the linked files toggle is on
+    /// and one of the found files is one the engine links as the roadmap, a roadmap file or
+    /// a roadmap planning file that the links store takes. The engine then plans no
+    /// roadmap, so the roadmap toggle shows off and is skipped. Returns the answer.
+    fn roadmap_linked(&self) -> bool {
+        !self.onboarding.finished
+            && self.linked
+            && self.found().iter().any(|file| {
+                matches!(file.research, None | Some(ResearchKind::RoadmapPlanning))
+                    && crate::project_setup::links::below_folder(&file.path)
+            })
+    }
+
+    /// Whether this confirm asks for a roadmap planned after research: the roadmap toggle
+    /// is on and no found roadmap is linked in its place. Returns the answer.
+    fn plans_roadmap(&self) -> bool {
+        self.roadmap && !self.roadmap_linked()
+    }
+
+    /// The repository files the mapping found to link, each with the group it was found
+    /// under, its roadmap files first, each once per group and at most
+    /// [`LINKS_MAX`](crate::project_setup::links::LINKS_MAX). Returns the files.
+    fn found(&self) -> Vec<KeptFile> {
+        let facts = &self.onboarding.facts;
+        let roadmap = facts.roadmap.iter().map(|path| (path, None));
+        let research = facts
+            .research
+            .iter()
+            .flat_map(|group| group.files.iter().map(move |path| (path, Some(group.kind))));
+        let mut found: Vec<KeptFile> = Vec::new();
+        for (path, research) in roadmap.chain(research) {
+            let file = KeptFile {
+                path: path.clone(),
+                research,
+            };
+            if found.len() < crate::project_setup::links::LINKS_MAX && !found.contains(&file) {
+                found.push(file);
+            }
+        }
+        assert!(found.len() <= crate::project_setup::links::LINKS_MAX);
+        found
     }
 
     fn stack(&self) -> Vec<String> {
@@ -172,14 +231,18 @@ impl Review {
         setup
             .research
             .retain(|kind| *kind != ResearchKind::RoadmapPlanning);
-        if self.roadmap {
+        if self.plans_roadmap() {
             setup.research.push(ResearchKind::RoadmapPlanning);
         }
+        let found = self.found();
+        let kept = (!self.onboarding.finished && !found.is_empty())
+            .then(|| if self.linked { found } else { Vec::new() });
         SetupAction::Update {
             project_id: self.onboarding.project_id.clone(),
             expected_revision: revision,
             name: (name != self.onboarding.name).then_some(name),
             setup,
+            kept,
         }
     }
 }
@@ -578,7 +641,7 @@ impl OnboardingPage {
         }
         if let Step::Failed { reason } = step {
             lines.extend(
-                wrap(reason, limit.saturating_sub(2))
+                wrap(&sanitize(reason), limit.saturating_sub(2))
                     .into_iter()
                     .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
             );
@@ -676,7 +739,7 @@ impl OnboardingPage {
             && !review.onboarding.finished
         {
             lines.extend(
-                wrap(&format!("Mapping failed: {reason}"), limit)
+                wrap(&format!("Mapping failed: {}", sanitize(reason)), limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Error, theme)),
             );
@@ -773,12 +836,19 @@ impl OnboardingPage {
         }
         lines.push(Line::default());
         if !review.onboarding.finished {
-            let text = checkbox(review.roadmap, ROADMAP_LABEL);
+            let text = checkbox(review.plans_roadmap(), ROADMAP_LABEL);
             lines.push(Line::from(if editing && review.focus == Focus::Roadmap {
                 Span::styled(text, theme.selection)
             } else {
                 Span::raw(text)
             }));
+            if review.roadmap_linked() {
+                lines.extend(
+                    wrap(ROADMAP_LINKED_NOTE, limit)
+                        .into_iter()
+                        .map(|line| styled(line, Role::Muted, theme)),
+                );
+            }
             lines.push(Line::default());
         }
         let facts = &review.onboarding.facts;
@@ -798,6 +868,54 @@ impl OnboardingPage {
                     .into_iter()
                     .map(|line| styled(line, Role::Muted, theme)),
             );
+        }
+        let linking = !review.onboarding.finished && review.linked;
+        let mut found_lines = Vec::new();
+        if !facts.roadmap.is_empty() {
+            found_lines.push(format!(
+                "Roadmap found: {}",
+                sanitize(&facts.roadmap.join(", "))
+            ));
+        }
+        for found in &facts.research {
+            let files = sanitize(&found.files.join(", "));
+            let held = if linking {
+                "Linked"
+            } else {
+                "Already in the repo"
+            };
+            found_lines.push(format!("{} - {held}: {files}", found.kind.label()));
+        }
+        for text in found_lines {
+            lines.extend(
+                wrap(&text, limit)
+                    .into_iter()
+                    .map(|line| styled(line, Role::Muted, theme)),
+            );
+        }
+        if !review.onboarding.finished && !review.found().is_empty() {
+            lines.extend(
+                wrap(LINKED_NOTE, limit)
+                    .into_iter()
+                    .map(|line| styled(line, Role::Muted, theme)),
+            );
+            let text = checkbox(review.linked, LINKED_LABEL);
+            lines.push(Line::from(if editing && review.focus == Focus::Linked {
+                Span::styled(text, theme.selection)
+            } else {
+                Span::raw(text)
+            }));
+        }
+        if !facts.documents.is_empty() {
+            lines.push(Line::default());
+            lines.push(styled("Project documents found:", Role::Heading, theme));
+            for path in &facts.documents {
+                lines.extend(
+                    wrap(&format!("- {}", sanitize(path)), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+            }
         }
         lines.push(Line::default());
         if confirming {
@@ -841,7 +959,7 @@ impl Screen for OnboardingPage {
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
                 ],
-                Focus::Roadmap => vec![
+                Focus::Roadmap | Focus::Linked => vec![
                     hint("Space", "Turn on or off"),
                     hint("Tab", "Next"),
                     hint("Esc", "Back"),
@@ -940,6 +1058,7 @@ impl Screen for OnboardingPage {
                     (_, Key::Tab | Key::Enter) => review.focus = review.step(true),
                     (_, Key::BackTab) => review.focus = review.step(false),
                     (Focus::Roadmap, Key::Char(' ')) => review.roadmap = !review.roadmap,
+                    (Focus::Linked, Key::Char(' ')) => review.linked = !review.linked,
                     (Focus::Platforms, Key::Left) => {
                         review.platform = review.platform.saturating_sub(1);
                     }
@@ -1035,6 +1154,18 @@ impl Screen for OnboardingPage {
                         limit,
                         ctx,
                     ));
+                    if let (Step::Running, Some(progress)) =
+                        (&onboarding.mapping, &onboarding.mapping_try)
+                    {
+                        lines.extend(
+                            wrap(
+                                &try_line(progress, crate::tui::clock::now_ms()),
+                                limit.saturating_sub(2),
+                            )
+                            .into_iter()
+                            .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+                        );
+                    }
                     lines.push(Line::default());
                     lines.push(styled(
                         "The setup draft shows here when both steps finish.",
@@ -1095,5 +1226,31 @@ impl Screen for OnboardingPage {
             name: self.name.clone(),
             project: self.project.clone(),
         })
+    }
+}
+
+/// The running mapping try as the setup screen says it, in the desktop review's words: its
+/// number of tries, how many whole minutes it has run and why the try before it failed.
+/// The earlier try's reason is engine text and goes through `sanitize`. Inputs: the try
+/// and the time now in ms. Output: one line, such as
+/// `Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time`.
+fn try_line(progress: &MappingTry, now_ms: i64) -> String {
+    let minutes = now_ms.saturating_sub(progress.started_ms).max(0) / 60_000;
+    let elapsed = if minutes < 1 {
+        "under 1 min".to_owned()
+    } else {
+        format!("{minutes} min")
+    };
+    let head = format!(
+        "Mapping, try {} of {}, {elapsed}.",
+        progress.number, progress.tries
+    );
+    match &progress.earlier {
+        Some(earlier) => format!(
+            "{head} Try {} failed: {}",
+            progress.number.saturating_sub(1),
+            sanitize(earlier)
+        ),
+        None => head,
     }
 }

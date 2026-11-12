@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
-import { saveProfile, type OwnerProfile } from "../../api";
-import { BrandMark, Button, ChipInput, Notice, Segmented, TextArea, TextField, navigate, type Route } from "../../ui";
+import { saveProfile, type OwnerProfile, type Result } from "../../api";
+import { setLearningMark } from "../../api-learning";
+import { BrandMark, Button, Checkbox, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
 import "../intake/intake.css";
@@ -68,27 +69,41 @@ export function validateProfile(draft: ProfileDraft): { profile: OwnerProfile } 
 }
 
 /** The profile fields shared by Welcome and Settings, Profile. Inputs: the draft, its change
- * handler and field errors. Output: the fields. */
-export function ProfileFields({ draft, onDraft, errors }: { draft: ProfileDraft; onDraft: (draft: ProfileDraft) => void; errors: ProfileErrors }) {
+ * handler, field errors and whether to draw them as setting rows. Output: the fields. */
+export function ProfileFields({ draft, onDraft, errors, rows = false }: { draft: ProfileDraft; onDraft: (draft: ProfileDraft) => void; errors: ProfileErrors; rows?: boolean }) {
   const set = (patch: Partial<ProfileDraft>) => onDraft({ ...draft, ...patch });
+  const name = <TextField id="profile-name" label="Name" labelOutside={rows} value={draft.name} onValue={(value) => set({ name: value })} maxLength={NAME_MAX} required
+    autoComplete="name" error={errors.name} />;
+  const role = <TextField id="profile-role" label="Role" labelOutside={rows} value={draft.role} onValue={(value) => set({ role: value })} maxLength={ROLE_MAX}
+    helper="For example: Founder, Full-stack engineer, Designer" error={errors.role} />;
+  const bio = <TextArea id="profile-bio" label="Short bio" labelOutside={rows} value={draft.bio} onValue={(value) => set({ bio: value })} rows={3} maxLength={BIO_MAX} counterAt={450}
+    helper="What you work on and what you care about." error={errors.bio} />;
+  const stack = <ChipInput id="profile-stack" label="Preferred stack" labelOutside={rows} values={draft.stack} onValues={(value) => set({ stack: value })}
+    suggestions={STACK_SUGGESTIONS} max={STACK_MAX} maxLength={STACK_ITEM_MAX} helper={errors.stack ?? "Agents use these unless a project says otherwise."} />;
+  const replies = <Segmented label="Replies" value={draft.detail} onValue={(detail) => set({ detail })}
+    options={[{ value: "terse", label: "Short" }, { value: "detailed", label: "Detailed" }]} />;
+  const acting = <Segmented label="Before acting" value={draft.initiative} onValue={(initiative) => set({ initiative })}
+    options={[{ value: "ask_first", label: "Ask first" }, { value: "act_first", label: "Act first" }]} />;
+  const style = errors.style && <p className="field-error" role="alert">{errors.style}</p>;
+  if (rows) return <>
+    <SettingLine label="Name" htmlFor="profile-name">{name}</SettingLine>
+    <SettingLine label="Role" htmlFor="profile-role">{role}</SettingLine>
+    <SettingLine label="Short bio" htmlFor="profile-bio" wide>{bio}</SettingLine>
+    <SettingLine label="Preferred stack" htmlFor="profile-stack" wide>{stack}</SettingLine>
+    <SettingLine label="Replies">{replies}</SettingLine>
+    <SettingLine label="Before acting">{acting}</SettingLine>
+    {style && <div className="set-body">{style}</div>}
+  </>;
   return <>
-    <TextField id="profile-name" label="Name" value={draft.name} onValue={(name) => set({ name })} maxLength={NAME_MAX} required
-      autoComplete="name" error={errors.name} />
-    <TextField id="profile-role" label="Role" value={draft.role} onValue={(role) => set({ role })} maxLength={ROLE_MAX}
-      helper="For example: Founder, Full-stack engineer, Designer" error={errors.role} />
-    <TextArea id="profile-bio" label="Short bio" value={draft.bio} onValue={(bio) => set({ bio })} rows={3} maxLength={BIO_MAX} counterAt={450}
-      helper="What you work on and what you care about." error={errors.bio} />
-    <ChipInput id="profile-stack" label="Preferred stack" values={draft.stack} onValues={(stack) => set({ stack })}
-      suggestions={STACK_SUGGESTIONS} max={STACK_MAX} maxLength={STACK_ITEM_MAX} helper={errors.stack ?? "Agents use these unless a project says otherwise."} />
+    {name}
+    {role}
+    {bio}
+    {stack}
     <div className="two">
-      <div className="field"><span className="field-label" id="profile-replies">Replies</span>
-        <Segmented label="Replies" value={draft.detail} onValue={(detail) => set({ detail })}
-          options={[{ value: "terse", label: "Short" }, { value: "detailed", label: "Detailed" }]} /></div>
-      <div className="field"><span className="field-label" id="profile-acting">Before acting</span>
-        <Segmented label="Before acting" value={draft.initiative} onValue={(initiative) => set({ initiative })}
-          options={[{ value: "ask_first", label: "Ask first" }, { value: "act_first", label: "Act first" }]} /></div>
+      <div className="field"><span className="field-label" id="profile-replies">Replies</span>{replies}</div>
+      <div className="field"><span className="field-label" id="profile-acting">Before acting</span>{acting}</div>
     </div>
-    {errors.style && <p className="field-error" role="alert">{errors.style}</p>}
+    {style}
   </>;
 }
 
@@ -107,7 +122,7 @@ export type FirstRunStep = "profile" | "home" | "tools" | "accounts";
 
 export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; intro: string }[] = [
   { id: "profile", label: "Profile", title: "Tell CrazyAgent about you",
-    intro: "Agents read this before they work for you. You can change it later in Settings, Profile." },
+    intro: "Agents read this before they work for you. You can change it later from Profile in the menu under your name." },
   { id: "home", label: "Projects folder", title: "Choose your projects folder",
     intro: "Every project lives in its own folder here. CrazyAgent keeps its own data in a private folder, not in this one." },
   { id: "tools", label: "Tools", title: "Set up tools",
@@ -116,13 +131,30 @@ export const FIRST_RUN_STEPS: { id: FirstRunStep; label: string; title: string; 
     intro: "Agents need a model account to work. Sign in with ChatGPT or Claude, or add an API key or a local model." },
 ];
 
+/** The Learn CrazyAgent offer on the last first-run page, in the same words as the TUI
+ * Accounts step: heading, two sentences and the label of its ticked box. */
+export const LEARN_OFFER = {
+  title: "Learn CrazyAgent",
+  text: "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.",
+  tick: "Show the guide on Home",
+};
+
+/** What the first run says after it tried to skip the guide. Input: the engine's answer to the
+ * skip. Output: nothing when it saved, else one plain sentence saying the guide stays on Home. */
+export function skipGuideNote(result: Result<void>): string | undefined {
+  if (result.kind === "ok") return undefined;
+  if (result.kind === "not_ready") return "Skipping the guide isn't ready in this build, so it stays on Home.";
+  return `Couldn't skip the guide, so it stays on Home. ${result.message}`;
+}
+
 /** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
- * to Home or to Add account. Inputs: the saved handler, an optional skip handler used when the
- * engine has no profile support yet, and the step to start on. */
+ * to Home or to Add account, first skipping the guide when its box is unticked; the handlers get
+ * the skip note when that did not save. Inputs: the saved handler, an optional skip handler used
+ * when the engine has no profile support yet, and the step to start on. */
 export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
-  onSaved: (profile: OwnerProfile, next?: Route) => void;
-  onSkip?: (next?: Route) => void;
+  onSaved: (profile: OwnerProfile, next?: Route, note?: string) => void;
+  onSkip?: (next?: Route, note?: string) => void;
   initialStep?: FirstRunStep;
 }) {
   const [step, setStep] = useState<FirstRunStep>(initialStep);
@@ -131,6 +163,8 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
   const [errors, setErrors] = useState<ProfileErrors>({});
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ message: string; notReady: boolean }>();
+  const [guide, setGuide] = useState(true);
+  const [leaving, setLeaving] = useState(false);
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (saving) return;
@@ -147,9 +181,12 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
     if ("failure" in result) setFailure({ message: result.failure, notReady: result.notReady });
     else { setSaved(result.saved); setStep("home"); }
   }
-  const finish = (next: Route) => {
-    if (saved) onSaved(saved, next);
-    else onSkip?.(next);
+  const finish = async (next: Route) => {
+    if (leaving) return;
+    setLeaving(true);
+    const note = guide ? undefined : skipGuideNote(await setLearningMark("skipped", true));
+    if (saved) onSaved(saved, next, note);
+    else onSkip?.(next, note);
   };
   const current = FIRST_RUN_STEPS.find((item) => item.id === step) ?? FIRST_RUN_STEPS[0];
   return <main id="main" className="welcome">
@@ -177,9 +214,14 @@ export function Welcome({ onSaved, onSkip, initialStep = "profile" }: {
     </section>}
     {step === "accounts" && <section className="form" aria-label="Accounts">
       <div className="row">
-        <Button variant="primary" size="large" icon="key-round" onClick={() => finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
-        <Button variant="quiet" onClick={() => finish({ name: "home" })}>Skip for now</Button>
+        <Button variant="primary" size="large" icon="key-round" disabled={leaving} onClick={() => void finish({ name: "settings", tab: "accounts", action: "add" })}>Add account</Button>
+        <Button variant="quiet" disabled={leaving} onClick={() => void finish({ name: "home" })}>Skip for now</Button>
       </div>
+      <section className="stack-small" aria-labelledby="learn-offer-title">
+        <h2 id="learn-offer-title">{LEARN_OFFER.title}</h2>
+        <p>{LEARN_OFFER.text}</p>
+        <Checkbox label={LEARN_OFFER.tick} checked={guide} onChecked={setGuide} disabled={leaving} />
+      </section>
     </section>}
   </main>;
 }

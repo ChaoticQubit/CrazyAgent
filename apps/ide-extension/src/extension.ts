@@ -7,12 +7,13 @@ import { remoteGit } from "./git.js";
 import { startLock } from "./lock.js";
 import { readonly } from "./readonly.js";
 import { reveal } from "./reveal.js";
+import { runCommand } from "./run-command.js";
 import { sidebarAgents } from "./sidebar/agents.js";
 import { sidebarChanges } from "./sidebar/changes.js";
 import { sidebarContext } from "./sidebar/context.js";
 import { sidebarMemories } from "./sidebar/memories.js";
 import { registerChanges } from "./scm.js";
-import { sandboxedTerminal } from "./terminal.js";
+import { sandboxedTerminal, terminalGit, terminalMenu } from "./terminal.js";
 import { registerTrust } from "./trust.js";
 
 /**
@@ -32,7 +33,10 @@ const features: Feature[] = [
   readonly,
   extensions,
   reveal,
+  runCommand,
   sandboxedTerminal,
+  terminalMenu,
+  terminalGit,
   registerTrust,
   remoteGit,
 ];

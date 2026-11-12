@@ -41,7 +41,7 @@ fn a_real_codex_research_run_is_signed_in_inside_the_research_sandbox() {
     let profile = signed_in.acquire(&format!("research-{}", place.name));
     let managed = profile.profile_path().unwrap();
     let (ending, _, output) = runner
-        .launch_leased(&jobs, &job, &account, place, Some((profile, None)))
+        .launch_leased(&jobs, &job, &account, place, Some((profile, None)), None)
         .unwrap();
     let report = fs::read_to_string(&output).unwrap_or_default();
     let errors = fs::read_to_string(agent.join("stderr.log")).unwrap_or_default();

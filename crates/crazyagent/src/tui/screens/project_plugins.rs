@@ -475,7 +475,7 @@ impl ProjectPlugins {
 
     fn ask_remove(&mut self) -> PluginsReply {
         let Some((id, name, global)) = self.chosen() else {
-            return PluginsReply::Handled;
+            return PluginsReply::Ignored;
         };
         if matches!(self.item(), Some(Item::Hook(_))) {
             self.notice = Some(Notice::plain(format!(
@@ -710,6 +710,9 @@ impl ProjectPlugins {
             lines.push(Row::default());
         }
         lines.extend(panel);
+        if !footer.is_empty() {
+            lines.truncate(room.saturating_sub(footer.len()));
+        }
         lines.extend(footer);
         assert!(lines.len() <= room.max(floor));
         (lines, self.help())
@@ -717,14 +720,18 @@ impl ProjectPlugins {
 
     fn heading(&self, name: &str, count: usize, content: usize, look: &Look) -> Row {
         let left = Row::of(name, look.heading).push(format!("  {count}"), look.muted);
-        if name == "Skills" {
-            spread(
+        match name {
+            "Skills" => spread(
                 content,
                 left,
                 Row::of("From Settings, plus this project", look.muted),
-            )
-        } else {
-            left
+            ),
+            "Hooks" => spread(
+                content,
+                left,
+                Row::of(crate::coord::settings::HOOKS_NONE_SHORT, look.muted),
+            ),
+            _ => left,
         }
     }
 
@@ -790,6 +797,22 @@ impl ProjectPlugins {
             }
         }
         rows
+    }
+
+    /// The fewest body rows the plugins section needs: a heading, a row of content and
+    /// its footer. The footer is the two-row remove question while one is open, otherwise
+    /// the one-row notice, otherwise nothing. Callers reserve this many rows so the footer
+    /// stays on screen.
+    pub fn floor(&self) -> usize {
+        6 + self.footer_len()
+    }
+
+    fn footer_len(&self) -> usize {
+        if self.removed().is_some() {
+            2
+        } else {
+            usize::from(self.notice.is_some())
+        }
     }
 
     fn footer(&self, look: &Look) -> Vec<Row> {

@@ -6,7 +6,7 @@ use crazyagent::engine::owner::{
     OwnerClientKind, OwnerData, OwnerMutation, OwnerRead, OwnerResponse, OwnerResult,
 };
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
-use crazyagent::projects_home::{AddMode, FoundProject, FoundState, ProjectsHome};
+use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, FoundState, ProjectsHome};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -150,7 +150,7 @@ impl Owner {
             .await
         {
             Ok(state) => match state.data {
-                OwnerData::FolderSize { bytes } => Ok(bytes),
+                OwnerData::FolderSize { bytes, .. } => Ok(bytes),
                 other => panic!("{other:?}"),
             },
             Err(e) => Err(e.0),
@@ -170,6 +170,7 @@ fn add(source: &Path, mode: AddMode) -> OwnerMutation {
     OwnerMutation::AddExistingFolder {
         source: source.to_str().unwrap().into(),
         mode,
+        overrides: Vec::new(),
     }
 }
 
@@ -456,7 +457,11 @@ async fn a_folder_added_through_a_link_is_recorded_at_its_real_name() {
         let source = format!("{}/", links.join(format!("{name}-link")).to_str().unwrap());
         assert_eq!(
             owner
-                .apply(OwnerMutation::AddExistingFolder { source, mode })
+                .apply(OwnerMutation::AddExistingFolder {
+                    source,
+                    mode,
+                    overrides: Vec::new(),
+                })
                 .await,
             OwnerResult::Applied,
             "{name}"
@@ -916,5 +921,139 @@ async fn a_folder_holding_a_repository_a_project_declares_is_neither_deleted_nor
         "a folder holding a declared repository stays where its master works"
     );
     assert!(library.is_dir() && linked.is_dir() && tool.is_dir());
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_anyway_lands_only_when_the_owner_asked_past_that_one_refusal() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let home = place.join("projects");
+    let repo = place.join("sources").join("linked");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir_all(repo.join(".git").join("worktrees").join("side")).unwrap();
+    fs::write(repo.join("main.rs"), "linked").unwrap();
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    assert_eq!(
+        owner
+            .apply(OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            })
+            .await,
+        OwnerResult::Applied
+    );
+    let anyway = |overrides: Vec<AddOverride>| OwnerMutation::AddExistingFolder {
+        source: repo.to_str().unwrap().into(),
+        mode: AddMode::Move,
+        overrides,
+    };
+    assert_eq!(
+        owner.apply(add(&repo, AddMode::Move)).await,
+        rejected("home_move_worktrees")
+    );
+    assert_eq!(
+        owner.apply(anyway(vec![AddOverride::TooLarge])).await,
+        rejected("home_move_worktrees")
+    );
+    assert!(repo.join("main.rs").is_file());
+    assert_eq!(
+        owner.apply(anyway(vec![AddOverride::Worktrees])).await,
+        OwnerResult::Applied
+    );
+    assert!(fs::symlink_metadata(&repo).is_err());
+    assert_eq!(
+        fs::read_to_string(home.join("linked").join("main.rs")).unwrap(),
+        "linked"
+    );
+    engine.stop().await;
+}
+
+/// A project left outside the projects home, after the owner picked another home, moves
+/// into it through the owner transport: the folder lands in the home, the setup and the
+/// declared repository point at it, no move stays pending, and a second ask is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_project_kept_outside_the_home_moves_into_it_through_the_owner_transport() {
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let first = place.join("first");
+    let second = place.join("second");
+    for folder in [&first, &second] {
+        fs::create_dir(folder).unwrap();
+    }
+    let engine = Engine::start().await;
+    let mut owner = Owner {
+        controller: engine.owner().await,
+        generation: 0,
+    };
+    let pick = |home: &Path| OwnerMutation::SetProjectsHome {
+        path: home.to_str().unwrap().into(),
+    };
+    assert_eq!(owner.apply(pick(&first)).await, OwnerResult::Applied);
+    let reading = ProjectId::new("reading").unwrap();
+    owner.generation += 1;
+    let made = owner
+        .controller
+        .setup_project(
+            reading.clone(),
+            ProjectSpec {
+                name: "Reading list".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Tracks reading lists.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Website],
+                research: vec![],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            owner.generation,
+        )
+        .await
+        .unwrap();
+    match made {
+        OwnerResponse::Applied { operation } => assert_eq!(operation.result, OwnerResult::Applied),
+        other => panic!("{other:?}"),
+    }
+    let origin = first.join("reading-list");
+    let target = second.join("reading-list");
+    ready_at(&mut owner, &reading, &origin).await;
+    fs::write(origin.join("notes.txt"), b"kept\n").unwrap();
+    assert_eq!(owner.apply(pick(&second)).await, OwnerResult::Applied);
+    let ask = || OwnerMutation::MoveProjectHome {
+        project_id: reading.clone(),
+        mode: AddMode::Move,
+        overrides: Vec::new(),
+    };
+    assert_eq!(owner.apply(ask()).await, OwnerResult::Applied);
+    assert!(!origin.exists());
+    assert_eq!(fs::read(target.join("notes.txt")).unwrap(), b"kept\n");
+    let database = engine.root.path().join("engine.db");
+    assert_eq!(
+        repositories(&database, &reading),
+        [target.to_str().unwrap()]
+    );
+    ready_at(&mut owner, &reading, &target).await;
+    let pending: i64 = {
+        let db = rusqlite::Connection::open(&database).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.query_row(
+            "SELECT COUNT(*) FROM projects_home_project_move",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(pending, 0);
+    assert_eq!(
+        owner.apply(ask()).await,
+        rejected("move_project_already_home")
+    );
+    assert!(target.join("notes.txt").is_file());
     engine.stop().await;
 }

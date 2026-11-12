@@ -13,9 +13,11 @@ export function windowRange(scrollTop: number, viewport: number, rowHeight: numb
 
 /** A fixed-row-height list that renders only visible rows plus overscan, so thousands of
  * accounts stay smooth. Rows keep their position in the set for screen readers.
- * Inputs: accessible label, row count, row height, overscan, row renderer, viewport height. */
-export function WindowedList({ label, count, rowHeight = 44, overscan = 10, viewport = 560, renderRow, className }: {
+ * Inputs: accessible label, a head drawn above the rows inside the scroller, row count, row
+ * height, overscan, row renderer, viewport height. */
+export function WindowedList({ label, head, count, rowHeight = 44, overscan = 10, viewport = 560, renderRow, className }: {
   label: string;
+  head?: ReactNode;
   count: number;
   rowHeight?: number;
   overscan?: number;
@@ -27,6 +29,7 @@ export function WindowedList({ label, count, rowHeight = 44, overscan = 10, view
   const { start, end } = windowRange(scroll.top, scroll.height, rowHeight, count, overscan);
   return <div className={`windowed${className ? ` ${className}` : ""}`} role="list" aria-label={label}
     onScroll={(event) => setScroll({ top: event.currentTarget.scrollTop, height: event.currentTarget.clientHeight })}>
+    {head}
     <div className="windowed-inner" style={{ height: count * rowHeight }}>
       {Array.from({ length: end - start }, (_, offset) => {
         const index = start + offset;

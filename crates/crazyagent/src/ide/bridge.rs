@@ -4,6 +4,7 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::landing::ChangeSetId;
 use crate::platform::unix_socket::UnixStream;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
+use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -19,6 +20,7 @@ pub mod agents;
 pub mod memory;
 pub(crate) mod owner_edit;
 pub mod reveal;
+pub mod run_command;
 
 /// The first four handshake bytes of an IDE capability connection on the owner socket.
 pub const MAGIC: &[u8; 4] = b"CAI1";
@@ -38,7 +40,7 @@ pub const EXTENSION: &str = "crazyagent.crazyagent-ide-0.1.0";
 /// The built-in extension's files by path inside its folder: its manifest, the
 /// JavaScript the repository's tsc compiled from `apps/ide-extension/src` and the two
 /// color themes its manifest contributes.
-pub const EXTENSION_FILES: [(&str, &[u8]); 28] = [
+pub const EXTENSION_FILES: [(&str, &[u8]); 30] = [
     (
         "package.json",
         include_bytes!("../../../../apps/ide-extension/package.json"),
@@ -151,6 +153,14 @@ pub const EXTENSION_FILES: [(&str, &[u8]); 28] = [
         "out/git-forward.js",
         include_bytes!("../../../../apps/ide-extension/out/git-forward.js"),
     ),
+    (
+        "out/run-command.js",
+        include_bytes!("../../../../apps/ide-extension/out/run-command.js"),
+    ),
+    (
+        "out/run-command-model.js",
+        include_bytes!("../../../../apps/ide-extension/out/run-command-model.js"),
+    ),
 ];
 
 const GRANTS_MAX: usize = 64;
@@ -212,22 +222,29 @@ pub enum IdeCall {
     #[serde(rename = "ide.change_sets")]
     ChangeSets {},
     #[serde(rename = "ide.change_diff")]
-    ChangeDiff { id: ChangeSetId, page: u16 },
+    ChangeDiff {
+        id: ChangeSetId,
+        head: String,
+        page: u16,
+    },
     #[serde(rename = "ide.base_blob")]
     BaseBlob {
         id: ChangeSetId,
+        head: String,
         path: String,
         page: u16,
     },
     #[serde(rename = "ide.config_blob")]
     ConfigBlob {
         id: ChangeSetId,
+        head: String,
         path: String,
         page: u16,
     },
     #[serde(rename = "ide.head_blob")]
     HeadBlob {
         id: ChangeSetId,
+        head: String,
         path: String,
         page: u16,
     },
@@ -277,12 +294,18 @@ pub enum IdeCall {
     },
     #[serde(rename = "ide.reveal_ack")]
     RevealAck { request: RequestId },
+    #[serde(rename = "ide.run_ack")]
+    RunAck { request: RequestId },
     #[serde(rename = "ide.events")]
     Events {},
     #[serde(rename = "ide.session")]
     Session {},
     #[serde(rename = "ide.terminal")]
-    Terminal { cols: u16, rows: u16 },
+    Terminal {
+        cols: u16,
+        rows: u16,
+        level: AgentAccess,
+    },
     #[serde(rename = "ide.git")]
     Git { args: Vec<String>, folder: String },
 }
@@ -318,8 +341,9 @@ pub enum IdeReply {
     },
 }
 
-/// An event the engine pushes to a project's IDE: something to refresh, or a file the
-/// owner asked to reveal from the TUI.
+/// An event the engine pushes to a project's IDE: something to refresh, a file the owner
+/// asked to reveal from the TUI, or one command the owner confirmed in the desktop to type
+/// into a new terminal, with or without Enter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "name", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IdeEvent {
@@ -327,7 +351,15 @@ pub enum IdeEvent {
     ChangeSetsChanged,
     AgentsChanged,
     MemoriesChanged,
-    Reveal { request: RequestId, path: String },
+    Reveal {
+        request: RequestId,
+        path: String,
+    },
+    RunCommand {
+        request: RequestId,
+        command: String,
+        press_enter: bool,
+    },
 }
 
 impl IdeRequest {
@@ -353,7 +385,7 @@ impl IdeRequest {
             }
             IdeCall::Accept { message, .. } => message.len() <= TEXT_BYTES_MAX,
             IdeCall::AgentMessage { text, .. } => text.len() <= TEXT_BYTES_MAX,
-            IdeCall::Terminal { cols, rows } => {
+            IdeCall::Terminal { cols, rows, .. } => {
                 (SIZE_MIN..=SIZE_MAX).contains(cols) && (SIZE_MIN..=SIZE_MAX).contains(rows)
             }
             IdeCall::ExtensionRequest { id, version }
@@ -380,6 +412,7 @@ impl IdeRequest {
             | IdeCall::Agents {}
             | IdeCall::Extensions {}
             | IdeCall::RevealAck { .. }
+            | IdeCall::RunAck { .. }
             | IdeCall::Events {}
             | IdeCall::Session {} => true,
         };
@@ -397,6 +430,34 @@ fn relative(path: &str) -> bool {
         && !path.starts_with('/')
         && !path.contains('\0')
         && path.split('/').all(|part| part != "..")
+}
+
+/// The most bytes of a path an engine-written line names, as the IDE comment frame and the
+/// owner-edit note show it.
+pub(super) const NOTE_PATH_BYTES_MAX: usize = 1024;
+
+/// Engine or agent text as one plain line inside an engine-written message: control
+/// characters become U+FFFD, square brackets and their look-alikes become parentheses so no
+/// `[owner]` tag can show, and it is cut to `max` bytes. Pure, so every platform's owner-edit
+/// note uses it. Inputs: the text and the bound. Output: the line.
+pub(super) fn shown(text: &str, max: usize) -> String {
+    let plain: String = text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let line = crate::team::bound_text(&crate::team::events::plain_agent_text(&plain), max);
+    assert!(
+        !line.chars().any(char::is_control),
+        "a shown line has no control character"
+    );
+    assert!(line.len() <= max, "a shown line keeps its bound");
+    line
 }
 
 /// Whether an extension id is `publisher.name`, each part 1 to `NAME_BYTES_MAX` ASCII
@@ -445,12 +506,16 @@ pub(crate) struct Grants {
     terminals: std::sync::Arc<Mutex<terminal::Terminals>>,
     #[cfg(unix)]
     git_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
+    #[cfg(unix)]
+    index_calls: std::sync::Arc<Mutex<remote_git::GitCalls>>,
+    #[cfg(unix)]
+    index_gates: remote_git::index::Gates,
 }
 
 /// One project's capability for one IDE server launch. Until `taken`, the token is the
 /// file's and admits only `ide.session`; after it, the token is the session's, the file
 /// is gone, every other call is admitted and `spent` keeps the file's token only to know
-/// a second try to take the session.
+/// a second try to take the session. Dropping `ended` wakes the grant's terminals.
 struct Grant {
     project: ProjectId,
     token: [u8; 32],
@@ -459,6 +524,8 @@ struct Grant {
     identity: (u64, u64),
     taken: bool,
     events: broadcast::Sender<IdeEvent>,
+    #[cfg(unix)]
+    ended: tokio::sync::watch::Sender<()>,
 }
 
 impl Grants {
@@ -498,6 +565,8 @@ impl Grants {
             identity,
             taken: false,
             events,
+            #[cfg(unix)]
+            ended: tokio::sync::watch::channel(()).0,
         });
         assert!(live.len() <= GRANTS_MAX);
         assert_eq!(
@@ -596,6 +665,20 @@ impl Grants {
             let receiver = grant.events.subscribe();
             assert!(grant.events.receiver_count() <= SUBSCRIBERS_MAX);
             Ok(receiver)
+        })
+    }
+
+    /// Watches the grant a handshake's session token names, for one of its terminals: the
+    /// receiver's `changed` ends once the grant is revoked, replaced or ended, so the
+    /// terminal stops then, not at its next grant check (V21-SEC-2-L1). Input: the packet.
+    /// Output: the receiver, `ide_session_required` or `ide_capability_refused`.
+    #[cfg(unix)]
+    fn watch(&self, packet: &[u8; 37]) -> Result<tokio::sync::watch::Receiver<()>, EngineError> {
+        self.find(packet, |grant| {
+            if !grant.taken {
+                return Err(failure("ide_session_required"));
+            }
+            Ok(grant.ended.subscribe())
         })
     }
 
@@ -882,8 +965,8 @@ async fn serve_within(
             return;
         }
         #[cfg(unix)]
-        Ok(Ok((project, IdeCall::Terminal { cols, rows }))) => {
-            terminal::serve(stream, packet, runtime, project, (cols, rows)).await;
+        Ok(Ok((project, IdeCall::Terminal { cols, rows, level }))) => {
+            terminal::serve(stream, packet, runtime, project, (cols, rows), level).await;
             return;
         }
         #[cfg(not(unix))]
@@ -1048,6 +1131,7 @@ async fn answer(
         | IdeCall::Restore { .. }
         | IdeCall::Comment { .. } => change_call(runtime, project, call).await?,
         IdeCall::RevealAck { request } => reveal::acked(runtime, project, &request)?,
+        IdeCall::RunAck { request } => run_command::acked(runtime, project, &request)?,
         IdeCall::Git { args, folder } => git_call(runtime, project, args, folder).await?,
         IdeCall::Events {} | IdeCall::Session {} | IdeCall::Terminal { .. } => {
             return Err(failure("ide_request_invalid"));
@@ -1083,7 +1167,9 @@ async fn change_call(
 
 /// Runs one git network command of the IDE in the project folder outside the IDE sandbox
 /// ([`remote_git::answer`]) once it has a place among the running ones
-/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable.
+/// ([`remote_git::place`]); where the engine has no IDE sandbox it is unavailable. The shim's
+/// [`remote_git::index::VERB`] call carries staged changes instead, with places of its own, so
+/// a long push cannot fail a stage.
 /// Inputs: the owner runtime, the project, git's arguments and the folder git ran in.
 /// Output: the reply data, or `ide_git_busy` when the places are taken.
 async fn git_call(
@@ -1095,6 +1181,13 @@ async fn git_call(
     #[cfg(unix)]
     {
         let root = runtime.ide()?.root;
+        if args.first().map(String::as_str) == Some(remote_git::index::VERB) {
+            let grants = runtime.ide_grants();
+            let place = remote_git::place(&grants.index_calls, project)?;
+            let gate = remote_git::index::gate(&grants.index_gates, project)?;
+            return remote_git::index::answer(root, project.clone(), args, folder, place, gate)
+                .await;
+        }
         let place = remote_git::place(&runtime.ide_grants().git_calls, project)?;
         remote_git::answer(root, project.clone(), args, folder, place).await
     }
@@ -1104,6 +1197,18 @@ async fn git_call(
         Err(failure("ide_request_unavailable"))
     }
 }
+
+/// The engine's index step for a row that plays the relay. Inputs: the private folder, the
+/// engine's folder, the project folder and the slot. Output: the exit code the shim reads.
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn carry_index(private: &Path, engine: &Path, project: &Path, slot: &str) -> i32 {
+    remote_git::index::carry(&Mutex::new(()), private, engine, project, slot)
+        .unwrap()
+        .code
+}
+
+/// The first argument of the shim's index call.
+pub(super) const INDEX_VERB: &str = "crazyagent-index";
 
 /// Writes the project's generated workspace file on a blocking thread, setting the
 /// show-all switch first when given. Inputs: the owner runtime, project and switch.
@@ -1288,6 +1393,8 @@ fn remove_capability(_path: &Path, _identity: (u64, u64)) -> Result<(), EngineEr
 mod changes;
 #[cfg(unix)]
 mod comments;
+#[cfg(all(test, unix))]
+pub(crate) mod engine_step;
 mod extensions;
 #[cfg(unix)]
 mod remote_git;

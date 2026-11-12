@@ -1,3 +1,4 @@
+use crate::file_lock::HeldLock;
 use crate::plugins::ServerSpec;
 use crate::setup::InstallError;
 use crate::setup::process::{private_folder, run_command, staging_folder};
@@ -317,7 +318,7 @@ fn finish(folder: &Path) {
         .retain(|held| held != folder);
 }
 
-fn lock(path: &Path) -> Result<File, InstallError> {
+fn lock(path: &Path) -> Result<HeldLock, InstallError> {
     let unavailable = InstallError("setup_store_unavailable");
     let file = File::from(
         rustix::fs::open(
@@ -330,8 +331,7 @@ fn lock(path: &Path) -> Result<File, InstallError> {
     if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
         return Err(unavailable);
     }
-    rustix::fs::flock(&file, FlockOperation::LockExclusive).map_err(|_| unavailable)?;
-    Ok(file)
+    HeldLock::take(file, FlockOperation::LockExclusive).map_err(|_| unavailable)
 }
 
 fn remove_staged(parent: &Path, prefix: &str) {

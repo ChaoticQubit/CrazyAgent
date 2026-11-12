@@ -1,11 +1,27 @@
 import { call } from "./api";
 import type { Failure, Result } from "./api";
 import { failureCopy } from "./api-projects";
+import type { RunMode } from "./screens/project/run-command";
 import { isMac } from "./ui/keys";
 
 /** How often a project page with its IDE loaded tells the engine the owner still uses it, in
  * milliseconds. */
 export const HEARTBEAT_MS = 60_000;
+
+/** What the owner reads when the IDE webview didn't move with its panel. */
+export const IDE_NOT_PLACED = "The IDE couldn't move to fit its panel. Resize the window to try again.";
+
+/** What the owner reads when the IDE webview didn't hide, so it may still cover the page. */
+export const IDE_NOT_HIDDEN = "The IDE couldn't be hidden, so it may still cover this page. Restart CrazyAgent if it stays.";
+
+/** What the owner reads when a project's IDE didn't close with its page. */
+export const IDE_NOT_CLOSED = "The IDE didn't close cleanly. Restart CrazyAgent if it stays on screen.";
+
+/** What the owner reads when the IDE couldn't move to a window of its own. */
+export const IDE_NOT_MOVED = "The IDE couldn't open in its own window. Try again.";
+
+/** What the owner reads when the IDE's own window didn't come forward. */
+export const IDE_NOT_FORWARD = "The IDE's window couldn't be brought forward. Try again.";
 
 /** Where the engine's pinned IDE build stands. */
 export type BuildState =
@@ -24,7 +40,7 @@ export type IdeTabState = { build: BuildState; unqualified: string | null };
 export type IdeView = { state: IdeTabState; platform: string };
 
 /** The panel the IDE webview covers, in the window's CSS pixels. */
-export type IdeBounds = { x: number; y: number; width: number; height: number };
+export type IdeBounds = { x: number; y: number; width: number; height: number; viewport: number };
 
 /** What the tab says about the build: its plain line, the one action it offers, and whether
  * the IDE can open now. */
@@ -53,6 +69,8 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_platform_unqualified: UNQUALIFIED,
   ide_build_not_ready: "The IDE isn't ready yet. Wait for the download to finish.",
   ide_servers_full: "Too many project IDEs are open. Close another project, then try again.",
+  ide_settings_unavailable: "CrazyAgent's settings couldn't be read, so the IDE didn't start. Fix them, then try again.",
+  ide_project_deleting: "This project is being deleted, so the IDE can't open.",
   ide_server_start_timeout: "The IDE took too long to start. Try again.",
   ide_server_start_failed: "The IDE couldn't start. Try again.",
   ide_entropy_unavailable: "The IDE couldn't start. Try again.",
@@ -64,6 +82,18 @@ const OPEN_FAILURES: Record<string, string> = {
   ide_token_unreadable: "The IDE's sign-in file couldn't be read. Try again.",
   ide_project_folder_invalid: "The IDE can't open this project's folder: it's missing or unreadable, or its path holds a colon (:), which the IDE's git can't use. Check the folder is still there; for a colon, add the project again from a folder whose path has none.",
   git_exclude_invalid: "The IDE didn't start: it couldn't add the agents folder to the project's .git/info/exclude, which keeps agent files out of your commits. Make .git/info a plain folder and .git/info/exclude a plain file under 1 MiB, not links, then open the IDE again.",
+};
+
+const RUN_FAILURES: Record<string, string> = {
+  ide_run_off: "Run in project terminal is off for this project. Copy the command, or turn it on in the project's settings.",
+  ide_run_chained: "This line has shell syntax CrazyAgent won't type for you, so it wasn't run. Copy it and run it yourself.",
+  ide_run_not_one_line: "This is more than one line, so it wasn't run. Copy it and run it yourself.",
+  ide_run_control_character: "This line holds a hidden character, so it wasn't run. Copy it and run it yourself.",
+  ide_run_too_long: "This line is too long to run from here. Copy it and run it yourself.",
+  ide_run_empty: "There is no command to run.",
+  ide_run_unanswered: "The IDE didn't answer in time, so the command may not have been typed. Check the IDE tab before you run it again.",
+  ide_not_running: "This project's IDE isn't open. Open the IDE tab, then choose Run again.",
+  ide_reveal_busy: "The IDE is busy. Try again in a moment.",
 };
 
 /** Says what the IDE tab shows for the engine's IDE state. Input: the state. Output: the
@@ -146,19 +176,20 @@ export function openFailure(code: string): string {
   return OPEN_FAILURES[code] ?? failureCopy(code);
 }
 
-/** Rounds a panel's on-screen box to whole pixels for the IDE webview. Input: the box, as
- * `getBoundingClientRect` gives it. Output: the bounds, or null while the panel is hidden. */
-export function bounds(box: { left: number; top: number; width: number; height: number }): IdeBounds | null {
+/** Rounds a panel's on-screen box to whole pixels for the IDE webview. Inputs: the box, as
+ * `getBoundingClientRect` gives it, and the height of the page's view, which the app needs to
+ * place the box in its window. Output: the bounds, or null while the panel is hidden. */
+export function bounds(box: { left: number; top: number; width: number; height: number }, viewport: number): IdeBounds | null {
   const width = Math.round(box.width);
   const height = Math.round(box.height);
   if (width < 1 || height < 1) return null;
-  return { x: Math.max(0, Math.round(box.left)), y: Math.max(0, Math.round(box.top)), width, height };
+  return { x: Math.max(0, Math.round(box.left)), y: Math.max(0, Math.round(box.top)), width, height, viewport: Math.round(viewport) };
 }
 
 /** Whether the panel kept the box the IDE webview was last placed at. Inputs: the box now
  * and the one last placed, null before the first. Output: true when nothing moved. */
 export function sameBounds(box: IdeBounds, last: IdeBounds | null): boolean {
-  return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height;
+  return last !== null && box.x === last.x && box.y === last.y && box.width === last.width && box.height === last.height && box.viewport === last.viewport;
 }
 
 /** Reads what the project page shows for the IDE; with `retry` the engine first starts the
@@ -167,10 +198,31 @@ export function ideView(retry = false): Promise<Result<IdeView>> {
   return call<IdeView>("desktop_ide_state", { retry });
 }
 
+/** What an open tells the tab: whether the IDE stays in its own window, and what the
+ * project's last Full access IDE left running after it stopped, named once. */
+export type IdeOpened = { ownWindow: boolean; left: string | null };
+
 /** Opens a project's IDE and shows it over the panel. Inputs: the project and the panel.
- * Output: done, or the refusal. */
-export function openIde(projectId: string, panel: IdeBounds): Promise<Result<null>> {
-  return call<null>("desktop_ide_open", { projectId, bounds: panel });
+ * Output: whether the IDE stays in its own window instead and what the last one left
+ * running, or the refusal. */
+export function openIde(projectId: string, panel: IdeBounds): Promise<Result<IdeOpened | null>> {
+  return call<IdeOpened | null>("desktop_ide_open", { projectId, bounds: panel });
+}
+
+/** Moves a project's loaded IDE into a window of its own. Input: the project. Output: done, or
+ * the refusal. */
+export function openIdeWindow(projectId: string): Promise<Result<null>> {
+  return call<null>("desktop_ide_window_open", { projectId });
+}
+
+/** Brings a project's own IDE window forward. Input: the project. Output: done, or the refusal. */
+export function focusIdeWindow(projectId: string): Promise<Result<null>> {
+  return call<null>("desktop_ide_window_focus", { projectId });
+}
+
+/** Asks whether a project's IDE sits in its own window. Input: the project. Output: true then. */
+export function ideWindowOut(projectId: string): Promise<Result<boolean>> {
+  return call<boolean>("desktop_ide_window_out", { projectId });
 }
 
 /** Moves the shown IDE over its panel. Inputs: the project and the panel. */
@@ -192,4 +244,32 @@ export function closeIde(projectId: string): Promise<Result<null>> {
  * whether its server still runs. */
 export function touchIde(projectId: string): Promise<Result<boolean>> {
   return call<boolean>("desktop_ide_touch", { projectId });
+}
+
+/** Says why a command wasn't typed into the project terminal; every run refusal has its own
+ * sentence. Input: the refusal code, or the failure with the engine cause behind it.
+ * Output: the plain sentence. */
+export function runCopy(failure: string | { code: string; cause?: string }): string {
+  const code = typeof failure === "string" ? failure : failure.code;
+  return Object.hasOwn(RUN_FAILURES, code) ? RUN_FAILURES[code] : failureCopy(failure);
+}
+
+/** Reads a project's "Run in project terminal" setting. Input: the project. Output: the
+ * mode, Type and run when the owner saved none. */
+export function loadRunMode(projectId: string): Promise<Result<RunMode>> {
+  return call<RunMode>("desktop_ide_run_mode", { projectId });
+}
+
+/** Saves a project's "Run in project terminal" setting. Inputs: the project and the mode.
+ * Output: the mode as saved. */
+export function setRunMode(projectId: string, mode: RunMode): Promise<Result<RunMode>> {
+  return call<RunMode>("desktop_ide_set_run_mode", { projectId, mode });
+}
+
+/** Types one confirmed command into a new terminal of the project's open IDE; the engine
+ * checks the single-command rule and the project's Run setting again. Inputs: the project and
+ * the command as the owner confirmed it. Output: done, or the refusal. */
+export async function runInProjectTerminal(projectId: string, command: string): Promise<Result<void>> {
+  const result = await call<null>("desktop_ide_run", { projectId, command });
+  return result.kind === "ok" ? { kind: "ok", value: undefined } : result;
 }

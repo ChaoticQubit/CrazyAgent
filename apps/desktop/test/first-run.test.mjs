@@ -4,7 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const { validateProfile, emptyProfileDraft, draftFromProfile, Welcome } = await import("../src/screens/first-run/index.tsx");
+const { validateProfile, emptyProfileDraft, draftFromProfile, Welcome, skipGuideNote } = await import("../src/screens/first-run/index.tsx");
 
 const draft = (patch = {}) => ({ ...emptyProfileDraft(), name: "Mira Okafor", ...patch });
 
@@ -53,4 +53,25 @@ test("Welcome renders the first-run form with real labels, defaults and no sideb
   assert.match(markup, /<button type="submit" class="btn primary large"[^>]*>Save and continue<\/button>/);
   assert.doesNotMatch(markup, /class="sidebar"/);
   assert.doesNotMatch(markup, /role="alert"/);
+});
+
+test("the last first-run page offers Learn CrazyAgent, ticked, under Add account and Skip for now", () => {
+  const markup = renderToStaticMarkup(createElement(Welcome, { onSaved: () => {}, initialStep: "accounts" }));
+  assert.match(markup, /<h1>Add an account<\/h1>/);
+  assert.match(markup, /<p>Agents need a model account to work\. Sign in with ChatGPT or Claude, or add an API key or a local model\.<\/p>/);
+  const add = markup.indexOf("Add account</button>");
+  const skip = markup.indexOf("Skip for now</button>");
+  const offer = markup.indexOf('<h2 id="learn-offer-title">Learn CrazyAgent</h2>');
+  assert.ok(add > 0 && skip > add && offer > skip, markup);
+  assert.match(markup, /aria-labelledby="learn-offer-title"/);
+  assert.match(markup, /<p>A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets\. Its first step is an optional demo project\.<\/p>/);
+  assert.match(markup, /<label class="checkbox"><input type="checkbox" checked=""\/><span>Show the guide on Home<\/span><\/label>/);
+  assert.doesNotMatch(markup, /role="alert"/);
+});
+
+test("skipping the guide says nothing when saved and says it stays on Home when it did not save", () => {
+  assert.equal(skipGuideNote({ kind: "ok", value: undefined }), undefined);
+  assert.equal(skipGuideNote({ kind: "not_ready" }), "Skipping the guide isn't ready in this build, so it stays on Home.");
+  assert.equal(skipGuideNote({ kind: "error", code: "uncertain", message: "CrazyAgent did not answer in time. Try again." }),
+    "Couldn't skip the guide, so it stays on Home. CrazyAgent did not answer in time. Try again.");
 });

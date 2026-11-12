@@ -55,6 +55,7 @@ impl Asked {
             &EngineSource::Planning,
             &Ask {
                 question: QUESTION.into(),
+                kind: crazyagent::questions::QuestionKind::Single,
                 options: vec![ALARMS.into(), MAP.into()],
                 recommended: Some(ALARMS.into()),
                 context: Some("An open point of the roadmap.".into()),
@@ -97,7 +98,7 @@ impl Asked {
         .unwrap();
         let (status, answer, message): (String, Option<String>, Option<i64>) = db
             .query_row(
-                "SELECT status, answer, message FROM owner_questions WHERE id=?1",
+                "SELECT status, answer, message FROM questions_log WHERE id=?1",
                 params![i64::try_from(self.id).unwrap()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -147,7 +148,14 @@ async fn question_answered_by_option_settles_it_and_tells_the_planner_that_optio
     let settled = case
         .owner
         .controller
-        .questions_answer(case.id, version, Answer::Option(1))
+        .questions_answer(
+            case.id,
+            version,
+            Answer {
+                picks: vec![1],
+                comment: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(settled, Settlement::Settled);
@@ -170,7 +178,14 @@ async fn question_answered_by_option_settles_it_and_tells_the_planner_that_optio
     let again = case
         .owner
         .controller
-        .questions_answer(case.id, version, Answer::Option(0))
+        .questions_answer(
+            case.id,
+            version,
+            Answer {
+                picks: vec![0],
+                comment: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -189,7 +204,14 @@ async fn question_answered_by_typed_text_tells_the_planner_the_owner_words() {
     let settled = case
         .owner
         .controller
-        .questions_answer(case.id, version, Answer::Text(TYPED.into()))
+        .questions_answer(
+            case.id,
+            version,
+            Answer {
+                picks: Vec::new(),
+                comment: Some(TYPED.into()),
+            },
+        )
         .await
         .unwrap();
     assert_eq!(settled, Settlement::Settled);
@@ -236,7 +258,14 @@ async fn question_dismissed_settles_it_with_no_answer_and_tells_the_planner_none
     let late = case
         .owner
         .controller
-        .questions_answer(case.id, version, Answer::Option(0))
+        .questions_answer(
+            case.id,
+            version,
+            Answer {
+                picks: vec![0],
+                comment: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(

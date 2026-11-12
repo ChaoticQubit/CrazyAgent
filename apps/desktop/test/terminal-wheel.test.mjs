@@ -9,6 +9,8 @@ const PAGE_MS_MAX = 15000;
 const INPUT_BYTES_MAX = 4096;
 const FULL_SCREEN = "\x1b[?1049h\x1b[?1002h\x1b[?1006h\x1b[H\x1b[2Jfull screen";
 const WHEEL_DOWN = /\x1b\[<65;\d+;\d+M/g;
+const NO_MOUSE_SCREEN = "\x1b[?2004h\x1b[?1004h\x1b[?1049h\x1b[?1007h\x1b[H\x1b[2Jfull screen, no mouse";
+const FOCUS_REPORTS = /\x1b\[[IO]/g;
 
 async function wheel(send, at, count) {
   for (let notch = 0; notch < count; notch += 1) {
@@ -67,6 +69,27 @@ test("keys typed between wheel events keep their place among the scrolling", asy
     const shape = done.text.replace(WHEEL_DOWN, "w");
     assert.equal(shape, "wwwwwwqwwwww", "scrolling never jumps ahead of a key typed after it, nor behind one typed before it");
     assert.equal(done.stats.stopped, 0);
+    assert.deepEqual(done.lanes.filter((lane) => lane.startsWith("keys:")), ["keys:q"], "only the typed key goes as the owner's keys");
+  });
+});
+
+test("a full-screen app that reads no mouse gets the wheel as arrow keys sent as wheel, never as the owner's keys", async () => {
+  await withPage(async ({ evaluate, send }) => {
+    await send("Emulation.setDeviceMetricsOverride", { width: 1200, height: 800, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mount(24, 80, true)");
+    await evaluate(`Fixture.write(${JSON.stringify(NO_MOUSE_SCREEN)})`);
+    await evaluate("Fixture.frames()");
+    const at = await evaluate("Fixture.view()");
+    assert.deepEqual([at.kind, at.mouse], ["alternate", "none"], "the app is full screen and reads no mouse, as Codex does");
+    await wheel(send, at, 3);
+    await evaluate("Fixture.focus()");
+    await send("Input.dispatchKeyEvent", { type: "char", text: "q" });
+    await wheel(send, at, 2);
+    const done = await settled(evaluate);
+    const lane = (name) => done.lanes.filter((sent) => sent.startsWith(`${name}:`)).map((sent) => sent.slice(name.length + 1)).join("");
+    assert.equal(lane("wheel"), "\x1b[B".repeat(5), "every wheel turn reached the app as an arrow key on the wheel lane");
+    assert.equal(lane("keys").replace(FOCUS_REPORTS, ""), "q", "the owner's lane holds the typed key and the view's focus reports only");
   });
 });
 

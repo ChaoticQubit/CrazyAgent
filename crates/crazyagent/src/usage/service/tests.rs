@@ -98,10 +98,10 @@ fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
     let db = crate::usage::open(&root).unwrap();
     db.execute_batch(
         "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
-            connection TEXT, status TEXT, stopped_ms INTEGER);
-         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL);
-         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL);
-         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0);",
+            connection TEXT, status TEXT, stopped_ms INTEGER, hookless INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL,0);
+         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','opencode',NULL,'working',NULL,0);
+         INSERT INTO team_agents VALUES (3,'beta','sub_agent','gemini-cli',NULL,'stopped',0,0);",
     )
     .unwrap();
     append(
@@ -111,7 +111,7 @@ fn a_live_agent_on_a_harness_without_a_reader_is_marked_not_reported() {
     let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
     usage.step(NOW).unwrap();
     usage.step(NOW + 1).unwrap();
-    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 2, &[]).unwrap();
     assert_eq!(report.total.input, 50);
     assert_eq!(report.not_reported_by, ["OpenCode"]);
     assert_eq!(
@@ -268,10 +268,10 @@ fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restar
     );
     assert_eq!(
         usage.doing,
-        UsageStep::Runs,
+        UsageStep::Recount,
         "a whole step ends in its last part"
     );
-    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000).unwrap();
+    let report = crate::usage::report::report(&db, None, None, 0, NOW + 11_000, &[]).unwrap();
     assert_eq!(
         report.health,
         [crate::usage::health::StepHealth {
@@ -324,4 +324,171 @@ fn a_panicking_step_kind_is_counted_marked_working_again_and_forgotten_on_restar
         crate::usage::health::health(&db).unwrap().is_empty(),
         "a new engine run starts with no counted panics"
     );
+}
+
+#[test]
+fn a_recount_panic_is_charged_to_the_recount_and_the_live_step_goes_on() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    let mut usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    usage
+        .guarded_recount(|_| panic!("the recount broke an invariant"), NOW)
+        .unwrap();
+    assert_eq!(usage.doing, UsageStep::Recount);
+    let health = crate::usage::health::health(&db).unwrap();
+    assert_eq!(
+        (health[0].step, health[0].panics, health[0].recovered_ms),
+        (UsageStep::Recount, 1, None)
+    );
+    usage.guarded_recount(|_| Ok(()), NOW + 5_000).unwrap();
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].recovered_ms,
+        Some(NOW + 5_000)
+    );
+}
+
+#[test]
+fn an_older_health_table_takes_the_recount_step_after_an_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    let db = crate::usage::open(root.path()).unwrap();
+    db.execute_batch(
+        "DROP TABLE usage_health;
+         CREATE TABLE usage_health (step TEXT PRIMARY KEY CHECK(step IN ('poll','team','runs')),
+            panics INTEGER NOT NULL CHECK(panics >= 1), last_ms INTEGER NOT NULL,
+            recovered_ms INTEGER CHECK(recovered_ms IS NULL OR recovered_ms >= last_ms));",
+    )
+    .unwrap();
+    drop(db);
+    let db = crate::usage::open(root.path()).unwrap();
+    record_panic(&db, UsageStep::Recount, NOW).unwrap();
+    assert_eq!(
+        crate::usage::health::health(&db).unwrap()[0].step,
+        UsageStep::Recount
+    );
+}
+
+fn no_access() -> ModelAccess {
+    ModelAccess {
+        accounts: Vec::new(),
+        connections: Vec::new(),
+        pools: Vec::new(),
+    }
+}
+
+#[test]
+fn a_removed_projects_research_run_is_recounted_under_its_removed_name() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    let home = root.join("research/run-1/home");
+    append(&home.join("projects/f/s1.jsonl"), &assistant("m1", 30));
+    db.execute(
+        "INSERT INTO usage_runs (home,kind,project,account,agent,harness,started_ms)
+         VALUES (?1,'research','alpha','acct','research-1','claude-code',?2)",
+        rusqlite::params![home.to_string_lossy(), NOW],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO usage_tokens(hour_ms,kind,project,pool,account,agent,harness,session,input,output,cache_read,cache_write)
+         VALUES (3600000,'research','alpha','','acct','research-1','claude-code','s1',400,1,0,0)",
+        [],
+    )
+    .unwrap();
+    crate::usage::forget_project(&db, "alpha").unwrap();
+    let usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    for _ in 0..16 {
+        usage.recount(&no_access(), NOW).unwrap();
+    }
+    let status = recount::status(&db).unwrap().unwrap();
+    assert_eq!((status.old.input, status.new.input), (400, 30));
+    assert_eq!(
+        (status.sessions_recounted, status.sessions_kept_old),
+        (1, 0)
+    );
+}
+
+#[test]
+fn a_team_table_that_cannot_be_read_does_not_start_the_recount() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    let db = crate::usage::open(&root).unwrap();
+    db.execute_batch("CREATE TABLE team_agents (id INTEGER PRIMARY KEY);")
+        .unwrap();
+    let usage = Usage::open(&database, &team, Box::new(|| None), BTreeMap::new()).unwrap();
+    assert!(usage.recount(&no_access(), NOW).is_err());
+    assert!(!recount::started(&db).unwrap());
+}
+
+/// A limit an agent reports asks for one confirm poll (SECAUDIT-RATELIMIT-FORGE, design row
+/// 3): the next step polls every account although ten minutes have not passed, an ask within
+/// the minute after it adds no poll, and an ask a minute later polls again.
+#[test]
+fn a_confirm_ask_makes_the_next_step_poll_and_asks_within_the_minute_add_none() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let mut usage = Usage::open(
+        &root.join("engine.db"),
+        &root.join("team"),
+        Box::new(|| None),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    usage.step(NOW).unwrap();
+    assert_eq!(usage.polled_ms, Some(NOW));
+    usage.step(NOW + 5_000).unwrap();
+    assert_eq!(
+        usage.polled_ms,
+        Some(NOW),
+        "no ask, no poll inside ten minutes"
+    );
+    assert!(request_confirm(&usage.db, NOW + 6_000).unwrap());
+    usage.step(NOW + 10_000).unwrap();
+    assert_eq!(
+        usage.polled_ms,
+        Some(NOW + 10_000),
+        "the ask makes the next step poll"
+    );
+    assert!(!request_confirm(&usage.db, NOW + 20_000).unwrap());
+    usage.step(NOW + 25_000).unwrap();
+    assert_eq!(
+        usage.polled_ms,
+        Some(NOW + 10_000),
+        "an ask within the minute adds no poll"
+    );
+    assert!(request_confirm(&usage.db, NOW + 6_000 + CONFIRM_EVERY_MS).unwrap());
+    usage.step(NOW + 70_000).unwrap();
+    assert_eq!(usage.polled_ms, Some(NOW + 70_000));
+}
+
+#[test]
+fn a_harness_installed_after_engine_start_is_found_only_through_the_engines_lookup() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let database = root.join("engine.db");
+    let team = root.join("team");
+    drop(crate::usage::open(&root).unwrap());
+    let codex = root.join("bin").join("codex");
+    let given = root.join("given-claude");
+    let usage = Usage::open(
+        &database,
+        &team,
+        Box::new(|| None),
+        BTreeMap::from([("claude-code", given.clone())]),
+    )
+    .unwrap();
+    assert_eq!(usage.harness("codex"), None);
+    assert_eq!(usage.harness("claude-code"), Some(given.clone()));
+    let pinned = codex.clone();
+    let usage = usage.with_harness_lookup(Arc::new(move |harness: &str| {
+        (harness == "codex").then(|| pinned.clone())
+    }));
+    assert_eq!(usage.harness("codex"), Some(codex));
+    assert_eq!(usage.harness("claude-code"), Some(given));
 }

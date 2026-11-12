@@ -13,17 +13,17 @@ const BRIEF: &str = "context/brief.md";
 
 /// A real engine service with its owner server, a TUI and a desktop owner client, and
 /// projects `alpha` and `beta` whose folders hold a context brief.
-struct Desk {
+pub(in crate::ide::bridge) struct Desk {
     _root: tempfile::TempDir,
     service: EngineService,
     _shutdown: tokio::sync::watch::Sender<bool>,
-    tui: Arc<OwnerClient>,
-    desktop: OwnerClient,
+    pub(in crate::ide::bridge) tui: Arc<OwnerClient>,
+    pub(in crate::ide::bridge) desktop: Arc<OwnerClient>,
     folders: Vec<PathBuf>,
 }
 
 impl Desk {
-    async fn start() -> Self {
+    pub(in crate::ide::bridge) async fn start() -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-reveal-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -55,7 +55,7 @@ impl Desk {
         }
         let discover = |kind| OwnerClient::discover(root.path(), kind, Duration::from_secs(20));
         let tui = discover(OwnerClientKind::Tui).await.unwrap().0;
-        let desktop = discover(OwnerClientKind::Desktop).await.unwrap().0;
+        let desktop = Arc::new(discover(OwnerClientKind::Desktop).await.unwrap().0);
         Self {
             _root: root,
             service,
@@ -66,14 +66,14 @@ impl Desk {
         }
     }
 
-    fn runtime(&self) -> &OwnerRuntimeHandle {
+    pub(in crate::ide::bridge) fn runtime(&self) -> &OwnerRuntimeHandle {
         self.service.owner_runtime().unwrap()
     }
 
     /// Issues a project's IDE capability the way an IDE server launch does and swaps its
     /// one-time file token for a session, as the built-in extension does before any other
     /// call. Input: the project. Output: the owner socket and the session's handshake packet.
-    async fn capability(&self, project: &str) -> (PathBuf, [u8; 37]) {
+    pub(in crate::ide::bridge) async fn capability(&self, project: &str) -> (PathBuf, [u8; 37]) {
         let path = issue(self.runtime(), &ProjectId::new(project).unwrap()).unwrap();
         let env = launch_env(self.runtime(), &path).unwrap();
         let socket = PathBuf::from(&env[1].1);
@@ -95,7 +95,7 @@ impl Desk {
         tokio::spawn(async move { tui.ide_reveal(project, target).await })
     }
 
-    async fn stop(mut self) {
+    pub(in crate::ide::bridge) async fn stop(mut self) {
         drop(self.desktop);
         drop(self.tui);
         tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
@@ -110,7 +110,7 @@ fn brief() -> RevealTarget {
 }
 
 /// Sends one IDE request frame for a project and call after the handshake.
-async fn send(
+pub(in crate::ide::bridge) async fn send(
     socket: &Path,
     packet: [u8; 37],
     project: &str,
@@ -126,7 +126,7 @@ async fn send(
 }
 
 /// Reads one reply frame, or none once the engine closed the connection.
-async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
+pub(in crate::ide::bridge) async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
     let length = stream.read_u32().await.ok()? as usize;
     assert!(length > 0 && length <= FRAME_BYTES_MAX);
     let mut body = vec![0; length];
@@ -135,7 +135,11 @@ async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
 }
 
 /// Opens a project's event subscription, as the extension does, and waits for its `ok`.
-async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> UnixStream {
+pub(in crate::ide::bridge) async fn subscribe(
+    socket: &Path,
+    packet: [u8; 37],
+    project: &str,
+) -> UnixStream {
     let events = json!({ "name": "ide.events", "args": {} });
     let mut stream = send(socket, packet, project, events).await;
     assert_eq!(

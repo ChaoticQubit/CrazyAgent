@@ -9,7 +9,7 @@ use crate::project_setup::StoredSetup;
 use crate::protocol::CredentialRef;
 use crate::recovery::{self, HeldItem, Interrupted, RunState};
 use crate::team::master::{self, InputRefused};
-use crate::team::{AgentRole, AgentStatus, launch_harness, now_ms};
+use crate::team::{AgentRole, AgentStatus, launch_harness, names, now_ms};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use std::collections::BTreeSet;
@@ -31,6 +31,8 @@ const LET_GO: &str = "Its task or message was let go, so it is never typed twice
 const RETRY_ONCE: &str =
     "Its task or message waits for the owner's retry; if the retry fails too, it is let go";
 const RETRY_LATER: &str = "Its task or message waits until a retry resumes it";
+const UNCONFIRMED: &str =
+    "its old terminal was not confirmed stopped (launch_adopt_cleanup_uncertain)";
 
 /// Where the work an interrupted run was doing stands: still waiting for the resume to
 /// hand it back, already handed to the resumed agent, or no longer the run's to finish.
@@ -68,7 +70,8 @@ pub(super) fn conversation(run: &Interrupted) -> Result<Resume, &'static str> {
 /// Writes the note an interrupted agent resumes with: when it was cut short, each command
 /// its session record started without a result, and that it verifies before it goes on,
 /// then finishes the task or answers the message it had, quoted whole, since its session
-/// may not show it when the stop came as it was handed over. The commands may name secrets
+/// may not show it when the stop came as it was handed over; a wake task reads as
+/// `WAKE_DELIVERED`, since the note carries no messages. The commands may name secrets
 /// the agent itself used, so the note goes only to that agent and is never logged or
 /// stored. Takes the run and the task's prompt or the message's text, when it still waits.
 /// Returns the note, plain text.
@@ -95,7 +98,12 @@ pub(super) fn note(run: &Interrupted, item: Option<&str>) -> String {
     };
     let then = match (run.last_turn.task, run.last_turn.message, item) {
         (Some(_), _, Some(prompt)) => format!(
-            " Then finish the task you were given and reply with a short summary of what you did. The task, in case your session does not show it:\n{prompt}"
+            " Then finish the task you were given and reply with a short summary of what you did. The task, in case your session does not show it:\n{}",
+            if prompt == master::WAKE_TASK {
+                master::WAKE_DELIVERED
+            } else {
+                prompt
+            }
         ),
         (Some(_), _, None) => {
             " Then finish the task you were given and reply with a short summary of what you did."
@@ -166,15 +174,18 @@ impl TeamRuntime {
         if !worker.live || !worker.briefed || worker.stopping {
             return Ok(());
         }
+        let line = note(run, None);
         let typed = master::master_input(
             &self.connection,
             host.as_ref(),
             self.agents.as_deref().map(Agents::typing),
             project,
-            &note(run, None),
+            &line,
         );
         match typed {
             Ok(()) => {
+                self.workers.get_mut(&id).expect("master worker exists").fed =
+                    Some(crate::master_sessions::Fed::Engine(line));
                 recovery::mark(
                     &self.connection,
                     run.id,
@@ -194,7 +205,12 @@ impl TeamRuntime {
                 RunState::Interrupted,
                 &format!("its note could not be typed into the master: {code}"),
             ),
-            Err(InputRefused::NoMaster | InputRefused::Busy | InputRefused::OwnerTyping) => Ok(()),
+            Err(
+                InputRefused::NoMaster
+                | InputRefused::Busy
+                | InputRefused::Unready
+                | InputRefused::OwnerTyping,
+            ) => Ok(()),
         }
     }
 
@@ -359,9 +375,14 @@ impl TeamRuntime {
 
     /// Hands an interrupted sub-agent that runs again in the pane this engine took over the
     /// task its run holds, with the note, typed as one turn into the session it never left,
-    /// once its worker is free and its account not paused; the session is already running,
-    /// so the run is resumed once the turn goes out. A task no longer waiting gives the run
-    /// up. Any other agent that runs again keeps the run waiting until it stops.
+    /// once the takeover settled (its worker is ready), its worker is free and runs no turn
+    /// of its own, a kept native lead has its signed-in account again (it is briefed), and
+    /// its account is not paused; the session is already running, so the run is resumed
+    /// once the turn goes out.
+    /// A takeover that fails ends the worker with nothing handed, so the run restarts
+    /// in a new pane once the old pane's processes were confirmed gone; otherwise it waits
+    /// for the owner's retry (see [`Self::hold_unconfirmed`]). A task no longer waiting gives
+    /// the run up. Any other agent that runs again keeps the run waiting until it stops.
     /// Takes the paused accounts and the run. Returns any SQLite or ledger failure.
     fn resume_in_pane(
         &mut self,
@@ -369,8 +390,11 @@ impl TeamRuntime {
         run: &Interrupted,
     ) -> Result<(), EngineError> {
         let worker = &self.workers[&run.agent];
+        let handed = worker.kept_session && worker.briefed;
         if run.kind != AgentRole::Sub
-            || worker.managed
+            || !worker.ready
+            || (worker.managed && !handed)
+            || worker.own_turn.is_some()
             || worker.stopping
             || worker.busy.is_some()
             || paused.contains(&worker.connection)
@@ -455,6 +479,7 @@ impl TeamRuntime {
         worker.bound = bound.map(|(_, by)| by);
         match busy {
             Busy::Task(task) => {
+                let now = now_ms();
                 let taken = self
                     .connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -463,7 +488,7 @@ impl TeamRuntime {
                     .execute(
                         "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL
                          WHERE id=?1 AND status='queued'",
-                        params![task, run.agent, now_ms()],
+                        params![task, run.agent, now],
                     )
                     .map_err(error)?;
                 assert!(started <= 1);
@@ -473,10 +498,20 @@ impl TeamRuntime {
                         &run.project,
                         task,
                         run.agent,
-                        now_ms(),
+                        now,
                     )?;
                 }
                 taken.commit().map_err(error)?;
+                if started == 1 {
+                    let project = &run.project;
+                    let named = names::name(&self.connection, run.agent)?
+                        .and_then(|name| name.handle)
+                        .is_some();
+                    if !named {
+                        names::assign_task_role(&self.connection, project, run.agent, task)?;
+                    }
+                    crate::activity::note_task(&self.connection, project, run.agent, task, now);
+                }
                 self.mark_agent(run.agent, AgentStatus::Working, Some(task))?;
             }
             Busy::Message(message) => {
@@ -536,8 +571,9 @@ impl TeamRuntime {
         };
         let worker = self.workers.get_mut(&id).expect("worker exists");
         let held = worker.held;
+        let pin = worker.narrowed.is_none().then_some(id);
         if let Some(busy) = worker.busy.take() {
-            self.release(id, busy)?;
+            self.release(pin, busy)?;
         }
         if held {
             recovery::mark(
@@ -554,6 +590,20 @@ impl TeamRuntime {
             cause.unwrap_or("its harness stopped")
         );
         self.fail(&run, RunState::Resuming, &reason)
+    }
+
+    /// Holds the interrupted run of an agent whose kept pane could not be taken over and
+    /// whose processes were not confirmed gone: failed for now with that reason, its task or
+    /// message kept, so no new pane starts beside them before the owner's retry.
+    /// Takes the agent. Returns any SQLite failure.
+    pub(super) fn hold_unconfirmed(&mut self, id: i64) -> Result<(), EngineError> {
+        let project = self.workers[&id].project.clone();
+        for run in recovery::open_runs(&self.connection, &project)? {
+            if run.agent == id && run.state == RunState::Interrupted {
+                self.fail_for_now(&run, RunState::Interrupted, UNCONFIRMED)?;
+            }
+        }
+        Ok(())
     }
 
     /// Reads where the run's task or message stands. Takes the run. Returns it.
@@ -601,7 +651,7 @@ impl TeamRuntime {
     fn stop(&mut self, id: i64) {
         let worker = self.workers.get_mut(&id).expect("worker exists");
         worker.busy = None;
-        worker.stopping = true;
+        worker.stop_for("engine_stop:recovery");
         let _ = worker.orders.send(Order::Stop);
     }
 

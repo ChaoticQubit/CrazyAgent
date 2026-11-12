@@ -1,13 +1,14 @@
 import { classifyFailure, namedFailure, nextGeneration, plainError, type Result } from "./api";
+import { formatBytes } from "./screens/new-project/wizard";
 import { failureCopy } from "./api-projects";
 import {
   addExistingFolder as addFolder, cloneRepo as clone, folderSize, foundProjects, githubRepos, githubSignIn, githubSignOut, githubStatus, githubToken,
-  githubUseCli, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
+  githubUseCli, icloudCancel, icloudDownload, icloudProgress, moveProjectsHome as moveHome, onboarding, projectsHome, removePackEntry as removeEntry, runSetup as startSetup, setPackEntry as switchEntry,
   setProjectsHome as saveHome, setupStatus, startOnboarding as startMapping,
 } from "./engine-client";
 import type {
-  AddFolderMode, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IntentReceipt, OnboardingView, ProjectsHome,
-  SetupStatus,
+  AddFolderMode, AddOverride, CloneReceipt, FolderSize, FoundProject, GitHubDeviceCode, GitHubRepoPage, GitHubStatus, IcloudProgress, IntentReceipt, OnboardingView,
+  ProjectsHome, SetupStatus,
 } from "./engine-client";
 
 export const FOUND_PROJECTS_MAX = 500;
@@ -46,11 +47,25 @@ const COPY: Record<string, string> = {
   home_move_interrupted: "Moving your projects stopped part way. Check both folders before trying again.",
   home_move_too_many: "Your projects folder holds more than 512 folders, more than CrazyAgent moves at once. Move some out, then try again. Nothing was moved.",
   home_move_in_progress: "Your projects folder is still being moved. Try again when it finishes.",
+  home_move_delete_in_progress: "A project in your projects folder is being deleted. Try again when it finishes. Nothing was moved.",
+  home_move_agent_work: "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved.",
+  home_move_changes_restorable: "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved.",
+  home_move_research_running: "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved.",
   home_folder_name_invalid: "Give the project a name with letters or digits, and no folder by that name.",
   home_new_project_failed: "The project folder couldn't be created. Nothing was kept.",
   home_add_unverified: "The folder didn't arrive in your projects folder. Check it and try again.",
   home_add_interrupted: "Adding the folder stopped part way. Check your projects folder before trying again.",
+  home_override_invalid: "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.",
   home_record_invalid: "CrazyAgent's record of your projects folder can't be read.",
+  home_icloud_not_downloaded: "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.",
+  home_permission_denied: "macOS didn't let CrazyAgent read or move this folder. Allow CrazyAgent in System Settings > Privacy & Security > Files and Folders, check the folder's permissions, then try again. Nothing was removed.",
+  icloud_download_busy: "Another iCloud download is running. Wait for it to finish.",
+  icloud_folder_missing: "That folder isn't there anymore. Choose it again.",
+  icloud_folder_unsafe: "That folder can't be downloaded.",
+  icloud_folder_unreadable: "Some files in that folder can't be read.",
+  icloud_path_invalid: "Choose the folder again with Choose folder.",
+  icloud_outcome_unknown: "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again.",
+  icloud_owner_unavailable: "CrazyAgent couldn't confirm the iCloud download. Nothing was moved or copied. Try again.",
   folder_size_path_invalid: "Choose the folder again with Choose folder.",
   folder_size_unsafe: "That folder can't be measured.",
   folder_size_unreadable: "Some files in that folder can't be read.",
@@ -139,6 +154,34 @@ const COPY: Record<string, string> = {
   owner_outcome_unknown_reconcile_same_identity: "CrazyAgent didn't answer in time. Try again.",
 };
 
+/** The warnings the Move anyway and Copy anyway question shows, one per issue, in the owner's
+ * words (DEC-115). Data loss lines come first wherever they are shown. */
+export const ADD_WARNINGS = {
+  close_apps: "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost.",
+  old_place: "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working.",
+  across_disks: "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills while it copies, your original stays whole and a part copy may be left in your projects folder to delete. If it stops while it removes the original, the full copy stays in your projects folder (keep it) and part of the original is left.",
+  same_disk: "This is a rename on the same disk; it is quick.",
+  copy_all: "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete.",
+  large: "This folder is very large.",
+  unmeasured: "CrazyAgent couldn't measure it.",
+  too_many: "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time.",
+  unreadable: "Some files can't be read. They can't be copied, so a move across disks keeps the original in place and fails rather than leave them behind.",
+  unreadable_copy: "Some files can't be read. They can't be copied, so the copy fails rather than leave them behind.",
+  worktrees: "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired.",
+  linked_checkout: "The copy keeps this folder's link to another repository's git data. Where that link still reaches it, the copy and this folder share one index and current branch: switching branches, staging or resetting in either one changes the other, and uncommitted work in either can be lost. Where it does not, git fails in the copy.",
+  linked_worktree: "This folder is a git worktree of another repository, and that repository keeps this folder's staged changes and branch link. Right after the move, go to that repository and run git worktree repair with the moved folder's path. Until then git here may fail or seem to work, and a git worktree prune or git gc there drops those staged changes and the branch link for good; commits here that are on no branch can be lost too. The files stay.",
+  submodule: "This folder is a submodule of another repository. After the move, git here fails and the parent repository no longer finds it. Its git data stays in the parent repository, so moving the folder back brings git here back.",
+  git_data_unread: "CrazyAgent could not read this folder's git data, so it cannot tell what a move breaks.",
+  no_git: "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here.",
+  git_unread: "CrazyAgent couldn't read this folder's git setup, so it can't tell what moving or copying it breaks.",
+} as const;
+
+/** The size line of the very large warning once the folder was measured. Input: its bytes.
+ * Output: one sentence, such as "It is about 42 GB.". */
+export function measuredLine(bytes: number): string {
+  return `It is about ${formatBytes(bytes)}.`;
+}
+
 /** Plain sentence for one intake, GitHub or setup failure.
  * Input: the code, or the failure with the engine cause behind it. Output: the intake copy, then
  * the project and app copy, then the fallback naming the code; a different cause is named after. */
@@ -197,10 +240,29 @@ export function loadFolderSize(path: string): Promise<Result<FolderSize>> {
   return wrap(() => folderSize(path));
 }
 
+/** Downloads every file of a folder that is only in iCloud, so it can then be moved or copied.
+ * Input: the absolute folder. Output: how many files it downloaded, or home_icloud_not_downloaded
+ * after a stop, a stall or the time limit. */
+export function downloadFromIcloud(path: string): Promise<Result<number>> {
+  return wrap(() => icloudDownload(path));
+}
+
+/** Reads how far the running iCloud download has come. Output: the counts, or null when none runs. */
+export function loadIcloudProgress(): Promise<Result<IcloudProgress | null>> {
+  return wrap(icloudProgress);
+}
+
+/** Stops the running iCloud download; its download call then ends with home_icloud_not_downloaded.
+ * Output: whether one was running. */
+export function cancelIcloudDownload(): Promise<Result<boolean>> {
+  return wrap(icloudCancel);
+}
+
 /** Moves or copies a folder into the projects folder, where it then shows as found.
- * Inputs: the absolute source folder, move or copy, and a generation. Output: the receipt. */
-export function addExistingFolder(source: string, mode: AddFolderMode, generation: number): Promise<Result<IntentReceipt>> {
-  return wrap(() => addFolder(source, mode, generation));
+ * Inputs: the absolute source folder, move or copy, the soft refusals the owner chose to go past
+ * and a generation. Output: the receipt. */
+export function addExistingFolder(source: string, mode: AddFolderMode, overrides: AddOverride[], generation: number): Promise<Result<IntentReceipt>> {
+  return wrap(() => addFolder(source, mode, overrides, generation));
 }
 
 /** Starts setting up a found folder: the graph builds, then a mapping agent on the pool fills in

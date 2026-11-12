@@ -1,5 +1,5 @@
 use super::master_reply::TurnCapture;
-use super::{Event, EventSequence, RcliMasterStatus};
+use super::{Event, EventSequence, RcliMasterStatus, RcliProviderFailure};
 use crate::protocol::RequestId;
 use crate::usage::capture::{LINE_TOKENS_MAX, Tokens};
 use serde_json::{Value, json};
@@ -81,6 +81,7 @@ fn rcli_usage_frames_count_each_provider_call_once() {
     );
     let completion = turn.accept(&failed, bytes).unwrap().unwrap();
     assert_eq!(completion.status, RcliMasterStatus::Failed);
+    assert_eq!(completion.failure, None);
     assert_eq!(turn.take_usage(), Tokens::default());
 
     let (ready, _) = frame(1, json!({"kind": "ready"}));
@@ -123,10 +124,37 @@ fn rcli_usage_counts_are_bounded_and_input_never_goes_below_zero() {
         }
     );
 
-    let (ready, _) = frame(1, json!({"kind": "ready"}));
-    let (beyond, _) = usage(2, json!({"inputTokens": 9_007_199_254_740_992_u64}));
-    assert!(
-        stream(&ready).accept(&beyond).is_err(),
+    let beyond = json!({
+        "protocol_version": 1, "session_id": "session-a", "instance_id": "instance-a",
+        "sequence": 2, "event": {
+            "kind": "usage_observation", "scope": "turn_unattributed",
+            "provenance": "sdk_reported", "accounting": "UNKNOWN",
+            "usage": {"inputTokens": 9_007_199_254_740_992_u64}
+        }
+    });
+    assert_eq!(
+        serde_json::from_value::<Event>(beyond)
+            .unwrap_err()
+            .to_string(),
+        "invalid host observation",
         "a count past the SDK's safe integers is refused before any capture counts it"
     );
+}
+
+/// PA-6 (DEC-091): a failed turn's capture keeps the provider failure the host named, so the
+/// engine can move the master to the next pool account.
+#[test]
+fn a_failed_turn_capture_keeps_the_provider_failure() {
+    let mut turn = TurnCapture::new(RequestId::new("turn-a").unwrap());
+    let (failed, bytes) = frame(
+        1,
+        json!({"kind": "completed", "turn_id": "turn-a", "status": "failed", "failure": "quota_exhausted"}),
+    );
+    let completion = turn.accept(&failed, bytes).unwrap().unwrap();
+    assert_eq!(completion.status, RcliMasterStatus::Failed);
+    assert_eq!(
+        completion.failure,
+        Some(RcliProviderFailure::QuotaExhausted)
+    );
+    assert_eq!(completion.reply, None);
 }

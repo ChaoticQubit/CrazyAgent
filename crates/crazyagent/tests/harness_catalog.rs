@@ -212,10 +212,11 @@ fn only_harnesses_whose_replies_the_engine_reads_are_offered_for_team_agents() {
             "{id}"
         );
     }
-    assert!(matches!(
-        entry(&entries, "rcli").team,
-        TeamUse::Unavailable { .. }
-    ));
+    assert_eq!(
+        serde_json::to_value(&entry(&entries, "rcli").team).unwrap(),
+        serde_json::json!({ "kind": "master_only", "reason": "runs only as a CrazyAgent master" }),
+        "RCLI is offered as the project master only, never as a team agent"
+    );
     for found in &entries {
         let runs = launch_harness(&found.id).is_some();
         assert_eq!(found.team == TeamUse::Available, runs, "{}", found.id);

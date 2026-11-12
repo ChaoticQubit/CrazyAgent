@@ -38,6 +38,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_path_unreadable",
     "ide_platform_unqualified",
     "ide_port_unavailable",
+    "ide_project_deleting",
     "ide_project_folder_invalid",
     "ide_project_invalid",
     "ide_project_unknown",
@@ -52,6 +53,7 @@ pub const IDE_TAB_CODES: &[&str] = &[
     "ide_servers_closed",
     "ide_servers_full",
     "ide_settings_invalid",
+    "ide_settings_unavailable",
     "ide_settings_unwritable",
     "ide_state_unavailable",
     "ide_tab_outcome_unknown",
@@ -86,7 +88,8 @@ pub struct IdeTabState {
 
 /// Where one project's IDE is reached: the workbench URL on 127.0.0.1, the port its
 /// webview hosts answer on, the per-launch token file the desktop reads the session token
-/// from, and the workspace file the workbench opens.
+/// from, the workspace file the workbench opens, and what the project's last Full access
+/// server left running after its stop, handed out once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdeTabServer {
@@ -94,6 +97,8 @@ pub struct IdeTabServer {
     pub webview_port: u16,
     pub token_path: PathBuf,
     pub workspace: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -120,6 +125,15 @@ enum Reply {
     Touched { running: bool },
     Stopped { stopped: bool },
     Rejected { code: String },
+}
+
+/// Names the requests that only read, for the log of replies this client could not read.
+/// Input: the request. Output: its name, None for a request that changes something.
+fn read_kind(action: &Action) -> Option<&'static str> {
+    match action {
+        Action::State => Some("ide_tab.state"),
+        _ => None,
+    }
 }
 
 fn unknown() -> EngineError {
@@ -175,6 +189,7 @@ impl OwnerClient {
 
     async fn ide_tab_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(IDE_TAB_TIMEOUT), async {
+            let read = read_kind(&action);
             let frame = encode_frame(&Envelope { ide_tab: action })
                 .map_err(|_| failure("ide_tab_request_bounds"))?;
             self.root.verify()?;
@@ -196,7 +211,9 @@ impl OwnerClient {
             stream.write_all(&packet).await.map_err(unavailable)?;
             stream.write_all(&frame).await.map_err(unavailable)?;
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
-            match serde_json::from_slice(&frame[4..]).map_err(|_| unknown())? {
+            match serde_json::from_slice(&frame[4..])
+                .map_err(|error| self.skewed_reply(&error, read, unknown))?
+            {
                 Reply::Rejected { code } => Err(EngineError(code)),
                 reply => Ok(reply),
             }
@@ -302,15 +319,17 @@ async fn open(
     if unqualified().is_some() {
         return Err(failure("ide_platform_unqualified"));
     }
-    let (build, written, folder, hooks) = tokio::task::spawn_blocking({
+    if authority.ide_servers.deleting(&project) {
+        return Err(failure("ide_project_deleting"));
+    }
+    let (build, written, folder) = tokio::task::spawn_blocking({
         let project = project.clone();
         move || match fetch::state(&root) {
             BuildState::Ready { root: build, .. } => {
                 let written = crate::ide::workspace::write(&root, &project)?;
                 let folder = crate::ide::workspace::folder(&root, &project)?;
                 crate::projects_home::exclude_agents(&folder)?;
-                let hooks = crate::ide::workspace::project_hooks(&root, &project)?;
-                Ok((build, written, folder, hooks))
+                Ok((build, written, folder))
             }
             _ => Err(failure("ide_build_not_ready")),
         }
@@ -319,7 +338,7 @@ async fn open(
     .map_err(|_| unknown())??;
     let info = authority
         .ide_servers
-        .open(&project, &folder, &build, hooks)
+        .open(&project, &folder, &build)
         .await?;
     if !info.url.starts_with("http://127.0.0.1:") {
         return Err(failure("ide_server_not_loopback"));
@@ -330,6 +349,7 @@ async fn open(
             webview_port: info.port,
             token_path: info.token_path,
             workspace: written.path,
+            left: authority.ide_servers.left(&project),
         },
     })
 }

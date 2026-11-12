@@ -12,6 +12,33 @@ use crate::engine::owner::transport::native_auth_channel::{
 /// the sign-in an earlier run proved.
 const UNRUN_CHECKS_MAX: i64 = 16;
 
+/// The codes an existing-account check settles with when it ended before the provider
+/// answered: an engine stop or a custodian that ended unnamed, a custody session the engine
+/// lost, a status command or bootstrap past its bound. None of them says the account is
+/// signed out, so a restart re-proof looks past them ([`never_ran`]).
+const UNANSWERED_CHECK_CODES: [&str; 5] = [
+    "native_auth_interrupted",
+    "native_auth_recovery_required",
+    "native_auth_claude_deadline",
+    "native_auth_codex_deadline",
+    "native_auth_bootstrap_timeout",
+];
+
+/// The failure codes a sign-in custodian may name that its settled attempt records (OP-7):
+/// each tells the owner something a plain retry does not, and the app has a sentence for
+/// each. Any other cause a custodian names settles the attempt as `native_auth_interrupted`.
+pub(crate) const CUSTODIAN_CODES: [&str; 9] = [
+    "native_auth_bootstrap_timeout",
+    "native_auth_cancelled",
+    "native_auth_codex_deadline",
+    "native_auth_codex_exited_before_observation",
+    "native_auth_host_executable_changed",
+    "native_auth_host_executable_unsafe",
+    "native_profile_custody_unsafe",
+    "native_profile_identity_changed",
+    "native_profile_in_use",
+];
+
 impl Clone for Command {
     fn clone(&self) -> Self {
         match self {
@@ -263,7 +290,13 @@ fn validate_dispatch(
 ) -> Result<NativeAuthFact, EngineError> {
     dispatch.work.physical.verify()?;
     let admission = dispatch.admission();
-    validate_scope(tx, config, sources, admission, &dispatch.work.command)?;
+    let command = &dispatch.work.command;
+    if let Err(refused) = validate_scope(tx, config, sources, admission, command)
+        && (refused.0 != "native_profile_source_conflict"
+            || held_scope(tx, config, sources, command).is_none())
+    {
+        return Err(refused);
+    }
     let fact = validate_continuation(
         tx,
         config,
@@ -291,14 +324,18 @@ fn validate_dispatch(
 /// Settles the sign-in that holds the native fence once no custodian holds its profile, so
 /// a crash, a killed custodian or an old engine run never blocks every later sign-in. A
 /// fence of this engine run is settled only for a dispatch known to have ended, which the
-/// caller names again on later calls while a renewal still held the profile.
-/// Inputs: the database, the profile custody, this engine's host and the fact of the
-/// last dispatch that ended. Output: the settled fact, or `None` when nothing was released.
+/// caller names again on later calls while a renewal still held the profile. An attempt of
+/// that ended dispatch settles Failed with the code its custodian named, when that code is
+/// one of `CUSTODIAN_CODES`, and as `native_auth_interrupted` otherwise.
+/// Inputs: the database, the profile custody, this engine's host, the fact of the last
+/// dispatch that ended and its custodian's code. Output: the settled fact, or `None` when
+/// nothing was released.
 pub(crate) fn recover_native_auth(
     db: &mut Connection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
     host: &HostStamp,
     ended: Option<&NativeAuthFact>,
+    named: Option<&str>,
 ) -> Result<Option<NativeAuthFact>, EngineError> {
     let custody = custody.as_ref().map_err(|error| error.clone())?;
     settings::ensure_clear(db)?;
@@ -324,10 +361,10 @@ pub(crate) fn recover_native_auth(
     {
         return Err(error("native_auth_fact_invalid"));
     }
-    let eligible = epoch != host.engine_epoch
-        || ended.is_some_and(|ended| {
-            ended.operation_id == fact.operation_id && ended.generation == fact.generation
-        });
+    let own = ended.is_some_and(|ended| {
+        ended.operation_id == fact.operation_id && ended.generation == fact.generation
+    });
+    let eligible = epoch != host.engine_epoch || own;
     if !eligible {
         return Ok(None);
     }
@@ -344,7 +381,10 @@ pub(crate) fn recover_native_auth(
         fact.code = None;
     } else if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain {
         fact.phase = NativeAuthPhase::Failed;
-        fact.code = Some("native_auth_interrupted".into());
+        let code = named
+            .filter(|code| own && CUSTODIAN_CODES.contains(code))
+            .unwrap_or("native_auth_interrupted");
+        fact.code = Some(code.into());
     }
     store_fact(&tx, &fact)?;
     let deleted = tx
@@ -445,14 +485,26 @@ fn commit_native_auth_custody(
     } else {
         matches!(
             fact.phase,
-            NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+            NativeAuthPhase::Starting
+                | NativeAuthPhase::Cancelling
+                | NativeAuthPhase::Failed
+                | NativeAuthPhase::Cancelled
         )
     };
     if !valid {
         return Err(error("native_auth_recovery_required"));
     }
     if !retirement.after_child_reaped() {
-        apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+        match fact.phase {
+            NativeAuthPhase::Starting => {
+                apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+            }
+            NativeAuthPhase::Cancelling => {
+                fact.phase = NativeAuthPhase::Cancelled;
+                fact.code = None;
+            }
+            _ => {}
+        }
     }
     store_fact(&tx, &fact)?;
     validate_dispatch(&tx, config, sources, dispatch)?;
@@ -522,19 +574,22 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 
 /// Runs one owner sign-in command, first settling a stale fence: one of an old engine run,
 /// or the one of `ended`, the last dispatch whose custodian this run saw end.
-/// Inputs: the database, settings, profile custody, that dispatch, the owner and the
-/// command. Output: the reply and, for a new operation, its work.
+/// Inputs: the database, settings, profile custody, that dispatch and the code its
+/// custodian named, the owner and the command. Output: the reply and, for a new
+/// operation, its work.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute(
     db: &mut Connection,
     config: &EffectiveConfig,
     sources: Option<&settings::SettingsSources>,
     custody: &mut Result<NativeProfileCustody, EngineError>,
     ended: Option<&NativeAuthFact>,
+    named: Option<&str>,
     admission: &Admission,
     command: Command,
 ) -> Result<NativeAuthBegin, EngineError> {
     #[cfg(not(unix))]
-    let _ = ended;
+    let _ = (ended, named);
     let reply = match command {
         Command::Read(request) => {
             #[cfg(unix)]
@@ -546,6 +601,7 @@ pub(crate) fn execute(
                     engine_epoch: admission.engine_epoch.clone(),
                 },
                 ended,
+                named,
             )?;
             read_native_auth(db, config, sources, admission, &request)?
         }
@@ -574,6 +630,7 @@ pub(crate) fn execute(
                         engine_epoch: admission.engine_epoch.clone(),
                     },
                     ended,
+                    named,
                 )?;
             }
             return begin_native_auth(db, config, sources, custody, admission, command);
@@ -596,7 +653,7 @@ pub(crate) fn begin_native_auth(
         engine_epoch: admission.engine_epoch.clone(),
     };
     #[cfg(unix)]
-    recover_native_auth(db, custody, &host, None)?;
+    recover_native_auth(db, custody, &host, None, None)?;
     settings::ensure_clear(db)?;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -694,11 +751,74 @@ pub(crate) fn read_native_auth(
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
-    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    let connection = match validate_scope(&tx, config, sources, admission, &command) {
+        Err(refused) if refused.0 == "native_profile_source_conflict" => {
+            match held_scope(&tx, config, sources, &command) {
+                Some(connection) => connection,
+                None => return Err(stale_read(&tx, request)),
+            }
+        }
+        checked => checked?,
+    };
     let fact = existing(&tx, connection, admission, &command)?
         .ok_or_else(|| error("native_auth_operation_missing"))?;
     tx.commit().map_err(error)?;
     Ok(reply(admission, &command, fact))
+}
+
+/// Finds the connection of an operation whose settings moved on in a way that left its own
+/// connection entry as it was, so the sign-in goes on: it is bound to that entry, not to the
+/// whole settings file. The request must name the operation with the scope it started with.
+/// Inputs: the transaction, the settings and the request. Output: the current connection, or
+/// None when that entry changed or the operation is unknown.
+fn held_scope<'a>(
+    tx: &Transaction<'_>,
+    config: &'a EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    command: &Command,
+) -> Option<&'a crate::config::ModelConnection> {
+    settings::verified_source_hash(config, sources).ok()?;
+    let scope = command.scope();
+    let fact = load_fact(tx, command.operation_id()).ok()?;
+    let current = native_profile_connection(config, &scope.connection).ok()?;
+    (fact.binding.database_instance == scope.expected_database_instance
+        && fact.binding.config_id == scope.expected_config_id
+        && fact.binding.source_hash == scope.expected_source_hash
+        && &fact.binding.connection == current)
+        .then_some(current)
+}
+
+/// Answers a read whose settings changed after its operation started, without the
+/// operation's content: `native_auth_not_active` once the engine no longer runs it or holds
+/// its profile, else the settings conflict, so a client never forgets a sign-in the engine
+/// may still finish. Inputs: the transaction and the read. Output: the refusal to send.
+fn stale_read(tx: &Transaction<'_>, request: &NativeAuthQuery) -> EngineError {
+    let conflict = || error("native_profile_source_conflict");
+    let fact = match load_fact(tx, &request.operation_id) {
+        Ok(fact) => fact,
+        Err(refused) => return refused,
+    };
+    let scope = &request.scope;
+    if fact.binding.database_instance != scope.expected_database_instance
+        || fact.binding.connection.id != scope.connection
+        || fact.binding.config_id != scope.expected_config_id
+        || fact.binding.source_hash != scope.expected_source_hash
+    {
+        return conflict();
+    }
+    let fenced = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE operation_id=?1)",
+        [fact.operation_id.as_str()],
+        |row| row.get::<_, bool>(0),
+    );
+    match fenced {
+        Err(failed) => error(failed),
+        Ok(true) => conflict(),
+        Ok(false) if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain => {
+            conflict()
+        }
+        Ok(false) => error("native_auth_not_active"),
+    }
 }
 
 pub(crate) fn cancel_native_auth(
@@ -715,7 +835,12 @@ pub(crate) fn cancel_native_auth(
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
-    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    let connection = match validate_scope(&tx, config, sources, admission, &command) {
+        Err(refused) if refused.0 == "native_profile_source_conflict" => {
+            held_scope(&tx, config, sources, &command).ok_or(refused)?
+        }
+        checked => checked?,
+    };
     if command.operation_id() != &expected.operation_id
         || connection != &expected.binding.connection
     {
@@ -863,13 +988,9 @@ fn validate_continuation(
     {
         return Err(error("native_auth_operation_scope_conflict"));
     }
-    let source_hash = settings::verified_source_hash(config, sources)
+    settings::verified_source_hash(config, sources)
         .map_err(|_| error("native_profile_source_conflict"))?;
-    if fact.binding.config_id != config.id
-        || fact.binding.source_hash != source_hash
-        || native_profile_connection(config, &fact.binding.connection.id)?
-            != &fact.binding.connection
-    {
+    if native_profile_connection(config, &fact.binding.connection.id)? != &fact.binding.connection {
         return Err(error("native_profile_source_conflict"));
     }
     let origin: Option<(String, i64)> = tx.query_row(
@@ -1174,6 +1295,23 @@ pub(crate) fn sign_in_rechecking(
     Ok(running || reproof_due(tx, connection, host)?)
 }
 
+/// Tells whether an account check or sign-in of this engine run holds its profile now: a
+/// fence stamped with the active engine's database and run. One flow runs at a time and its
+/// fence goes when it ends, so the answer turns false within that flow's own bound; a fence
+/// an earlier engine run left counts as none. Input: the engine connection. Output: the
+/// answer, false when the tables cannot be read.
+#[cfg(unix)]
+pub(crate) fn account_check_running(db: &Connection) -> bool {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences AS fence JOIN owner_meta AS meta
+           ON meta.singleton=1 AND meta.schema_version=1 AND meta.runtime_state='active'
+           AND fence.db_instance=meta.db_instance AND fence.engine_epoch=meta.engine_epoch)",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
+}
+
 /// The earlier engine run a connection's newest sign-in was proved under, when it finished
 /// authenticated in this database under another run, looking past newer account checks
 /// the host never ran (LB-26). Inputs: the transaction, the connection and the running
@@ -1198,7 +1336,7 @@ fn earlier_run(
         .map_err(error)?;
     for bytes in rows {
         let fact = decode_fact(&bytes)?;
-        if never_ran(&fact) {
+        if never_ran(&fact, host) {
             continue;
         }
         if fact.phase != NativeAuthPhase::AuthenticatedObserved
@@ -1218,12 +1356,26 @@ fn earlier_run(
     Ok(None)
 }
 
-/// Tells whether an operation was an account check the host never ran, which says nothing
-/// about the sign-in it would have checked. Input: the operation's fact. Output: true for
-/// an existing-account check that ended unavailable because the host could not run it.
-fn never_ran(fact: &NativeAuthFact) -> bool {
-    fact.phase == NativeAuthPhase::Unavailable
-        && fact.code.as_deref() == Some("native_auth_host_unavailable")
+/// Tells whether an operation was an account check that got no answer from the provider,
+/// which says nothing about the sign-in it would have checked: the host could not run it,
+/// or an earlier run's check ended unanswered, cut by an engine stop, a lost custody session
+/// or its time bound. A check cut in the running host stays, so it is not retried each turn.
+/// Inputs: the operation's fact and the running host. Output: true for such a check.
+fn never_ran(fact: &NativeAuthFact, host: &HostStamp) -> bool {
+    let unanswered = match fact.phase {
+        NativeAuthPhase::Unavailable => {
+            fact.code.as_deref() == Some("native_auth_host_unavailable")
+        }
+        NativeAuthPhase::Failed | NativeAuthPhase::Uncertain => {
+            fact.binding.engine_epoch != host.engine_epoch
+                && fact
+                    .code
+                    .as_deref()
+                    .is_some_and(|code| UNANSWERED_CHECK_CODES.contains(&code))
+        }
+        _ => false,
+    };
+    unanswered
         && matches!(
             fact.action,
             NativeAuthAction::SignIn {

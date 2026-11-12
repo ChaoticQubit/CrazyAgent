@@ -127,7 +127,11 @@ mod tests {
         }
     }
 
+    /// Every TUI accounts request reaches a real engine and back, with a local account whose
+    /// models, check and rename come from a running Ollama. It is a live row: it needs Ollama
+    /// at 127.0.0.1:11434 serving qwen2.5:0.5b, which hosted CI runners do not have.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "live qualification: needs a local Ollama at 127.0.0.1:11434 serving qwen2.5:0.5b"]
     async fn tui_accounts_requests_reach_the_real_engine() {
         let root = tempfile::Builder::new()
             .prefix("ca-tacct-")

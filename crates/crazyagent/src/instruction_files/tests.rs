@@ -10,6 +10,7 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
             mode: Mode::Both,
             transcripts: true,
             edits: EditDelivery::NextMessage,
+            ..Default::default()
         },
         "a database that never stored settings gets the defaults"
     );
@@ -21,6 +22,7 @@ fn settings_default_to_both_texts_with_transcripts_and_store_every_option() {
                 mode,
                 transcripts,
                 edits: EditDelivery::NextMessage,
+                ..Default::default()
             };
             save(&connection, &project, settings).unwrap();
             assert_eq!(load(&connection, &project).unwrap(), settings);
@@ -80,6 +82,7 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
                 mode: Mode::Both,
                 transcripts,
                 edits: EditDelivery::NextMessage,
+                ..Default::default()
             },
             "{project}"
         );
@@ -89,6 +92,7 @@ fn a_settings_table_from_before_dec_106_reads_every_stored_files_choice_as_both(
         mode: Mode::AppOnly,
         transcripts: true,
         edits: EditDelivery::NextMessage,
+        ..Default::default()
     };
     save(&connection, &project, chosen).unwrap();
     initialize(&connection).unwrap();
@@ -118,6 +122,7 @@ fn every_edit_delivery_is_stored_and_a_project_that_never_chose_gets_next_messag
             mode: Mode::AppOnly,
             transcripts: false,
             edits,
+            ..Default::default()
         };
         save(&connection, &project, settings).unwrap();
         assert_eq!(load(&connection, &project).unwrap(), settings);
@@ -163,6 +168,7 @@ fn a_settings_table_from_before_edit_delivery_reads_next_message_and_stores_a_ch
             mode: Mode::AppOnly,
             transcripts: false,
             edits: EditDelivery::NextMessage,
+            ..Default::default()
         }
     );
     let chosen = Settings {
@@ -171,6 +177,196 @@ fn a_settings_table_from_before_edit_delivery_reads_next_message_and_stores_a_ch
     };
     save(&connection, &project, chosen).unwrap();
     assert_eq!(load(&connection, &project).unwrap(), chosen);
+}
+
+#[test]
+fn the_repeated_lines_choice_is_stored_and_a_table_from_before_it_reads_leave_out() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE agent_instruction_settings (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                transcripts INTEGER NOT NULL,
+                edits TEXT NOT NULL DEFAULT 'next_message'
+            );
+            INSERT INTO agent_instruction_settings VALUES ('kept', 'both', 1, 'badge');",
+        )
+        .unwrap();
+    let project = ProjectId::new("kept").unwrap();
+    assert_eq!(Settings::default().repeated, Repeated::LeaveOut);
+    assert_eq!(
+        load(&connection, &project).unwrap().repeated,
+        Repeated::LeaveOut,
+        "a read-only reader of a table made before the column"
+    );
+    initialize(&connection).unwrap();
+    initialize(&connection).unwrap();
+    let stored = load(&connection, &project).unwrap();
+    assert_eq!(stored.edits, EditDelivery::Badge);
+    assert_eq!(stored.repeated, Repeated::LeaveOut);
+    for repeated in [Repeated::Keep, Repeated::LeaveOut] {
+        assert_eq!(Repeated::parse(repeated.as_str()), Some(repeated));
+        let chosen = Settings { repeated, ..stored };
+        save(&connection, &project, chosen).unwrap();
+        assert_eq!(load(&connection, &project).unwrap(), chosen);
+    }
+    assert_eq!(Repeated::parse("sometimes"), None);
+    connection
+        .execute(
+            "UPDATE agent_instruction_settings SET repeated='sometimes' WHERE project=?1",
+            [project.as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        load(&connection, &project).unwrap_err(),
+        "instruction_settings_invalid"
+    );
+    let wire: Settings =
+        serde_json::from_str(r#"{"mode":"both","transcripts":true,"edits":"badge"}"#).unwrap();
+    assert_eq!(wire.repeated, Repeated::LeaveOut, "an older client's save");
+    assert_eq!(
+        serde_json::to_string(&Settings {
+            repeated: Repeated::Keep,
+            ..Settings::default()
+        })
+        .unwrap(),
+        r#"{"mode":"both","transcripts":true,"edits":"next_message","repeated":"keep","edit_with_ai":true}"#
+    );
+}
+
+#[test]
+fn the_edit_with_ai_choice_is_stored_per_project_and_a_table_from_before_it_reads_on() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE agent_instruction_settings (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL,
+                transcripts INTEGER NOT NULL,
+                edits TEXT NOT NULL DEFAULT 'next_message',
+                repeated TEXT NOT NULL DEFAULT 'leave_out'
+            );
+            INSERT INTO agent_instruction_settings VALUES ('kept', 'app_only', 0, 'badge', 'keep');",
+        )
+        .unwrap();
+    let project = ProjectId::new("kept").unwrap();
+    assert!(Settings::default().edit_with_ai);
+    assert!(
+        load(&connection, &project).unwrap().edit_with_ai,
+        "a read-only reader of a table made before the column"
+    );
+    initialize(&connection).unwrap();
+    initialize(&connection).unwrap();
+    let stored = load(&connection, &project).unwrap();
+    assert_eq!(
+        stored,
+        Settings {
+            mode: Mode::AppOnly,
+            transcripts: false,
+            edits: EditDelivery::Badge,
+            repeated: Repeated::Keep,
+            edit_with_ai: true,
+        },
+        "adding the column keeps every stored choice"
+    );
+    for edit_with_ai in [false, true] {
+        let chosen = Settings {
+            edit_with_ai,
+            ..stored
+        };
+        save(&connection, &project, chosen).unwrap();
+        assert_eq!(load(&connection, &project).unwrap(), chosen);
+    }
+    let other = ProjectId::new("other").unwrap();
+    save(
+        &connection,
+        &project,
+        Settings {
+            edit_with_ai: false,
+            ..stored
+        },
+    )
+    .unwrap();
+    assert!(
+        load(&connection, &other).unwrap().edit_with_ai,
+        "one project's Off never turns another project off"
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE agent_instruction_settings SET edit_with_ai=2 WHERE project=?1",
+                [project.as_str()],
+            )
+            .is_err(),
+        "the table refuses a value that is neither on nor off"
+    );
+    let wire: Settings = serde_json::from_str(
+        r#"{"mode":"both","transcripts":true,"edits":"badge","repeated":"keep"}"#,
+    )
+    .unwrap();
+    assert!(wire.edit_with_ai, "an older client's save leaves it on");
+    let off: Settings =
+        serde_json::from_str(r#"{"mode":"both","transcripts":true,"edit_with_ai":false}"#).unwrap();
+    assert!(!off.edit_with_ai);
+}
+
+#[test]
+fn the_app_wide_edit_with_ai_choice_is_on_until_stored_off_and_is_its_own_row() {
+    let connection = Connection::open_in_memory().unwrap();
+    assert_eq!(
+        load_app(&connection).unwrap(),
+        AppSettings { edit_with_ai: true },
+        "a database from before the table"
+    );
+    initialize(&connection).unwrap();
+    assert!(load_app(&connection).unwrap().edit_with_ai, "never stored");
+    let project = ProjectId::new("kept").unwrap();
+    for edit_with_ai in [false, true, false] {
+        save_app(&connection, AppSettings { edit_with_ai }).unwrap();
+        assert_eq!(load_app(&connection).unwrap(), AppSettings { edit_with_ai });
+        assert!(
+            load(&connection, &project).unwrap().edit_with_ai,
+            "the app-wide choice never changes a project's"
+        );
+    }
+    let rows: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM agent_instruction_app_settings",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
+    save(
+        &connection,
+        &project,
+        Settings {
+            edit_with_ai: true,
+            ..Settings::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        !load_app(&connection).unwrap().edit_with_ai,
+        "a project's On never turns the app-wide Off back on"
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE agent_instruction_app_settings SET edit_with_ai=2",
+                []
+            )
+            .is_err()
+    );
+    assert_eq!(
+        serde_json::to_string(&AppSettings {
+            edit_with_ai: false
+        })
+        .unwrap(),
+        r#"{"edit_with_ai":false}"#
+    );
+    assert!(serde_json::from_str::<AppSettings>(r#"{"edit_with_ai":true,"more":1}"#).is_err());
 }
 
 #[test]
@@ -478,6 +674,7 @@ mod launch {
                     mode: Mode::Both,
                     transcripts,
                     edits: EditDelivery::NextMessage,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -590,9 +787,18 @@ mod launch {
         crate::agent_home::save_app(&case.data, &app).unwrap();
         crate::agent_home::save_project(&case.checkout, &own).unwrap();
         let options = [
-            (Mode::ProjectOnly, crate::agent_home::render("", &own)),
-            (Mode::AppOnly, crate::agent_home::render(&app, "")),
-            (Mode::Both, crate::agent_home::render(&app, &own)),
+            (
+                Mode::ProjectOnly,
+                crate::agent_home::render("", &own, crate::agent_home::Repeated::LeaveOut),
+            ),
+            (
+                Mode::AppOnly,
+                crate::agent_home::render(&app, "", crate::agent_home::Repeated::LeaveOut),
+            ),
+            (
+                Mode::Both,
+                crate::agent_home::render(&app, &own, crate::agent_home::Repeated::LeaveOut),
+            ),
         ];
         for (mode, expected) in options {
             save(
@@ -602,6 +808,7 @@ mod launch {
                     mode,
                     transcripts: true,
                     edits: EditDelivery::NextMessage,
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -645,13 +852,13 @@ mod launch {
                 }
             }
         }
-        let both = crate::agent_home::render(&app, &own);
+        let both = crate::agent_home::render(&app, &own, crate::agent_home::Repeated::LeaveOut);
         assert!(both.find(APP_RULE).unwrap() < both.find(PROJECT_RULE).unwrap());
         crate::agent_home::save_project(&case.checkout, "").unwrap();
         let handed = launch_all(&case, &connection, &project, "empty-project");
         assert_eq!(
             handed.claude,
-            crate::agent_home::render(&app, ""),
+            crate::agent_home::render(&app, "", crate::agent_home::Repeated::LeaveOut),
             "Both with an empty project text gives the app text as it is"
         );
         crate::agent_home::save_app(&case.data, "").unwrap();
@@ -925,6 +1132,232 @@ mod import {
             "process_commit_none"
         );
         assert_eq!(checkout.tip(), start);
+    }
+
+    #[test]
+    fn the_uncommitted_import_names_the_checked_out_branch_while_a_move_waits() {
+        let checkout = Checkout::new();
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            UncommittedImport {
+                files: Vec::new(),
+                branch: None,
+                checked_out: Some("main".to_owned())
+            },
+            "no move waits, so no branch is named for a refusal, and the head still reads it"
+        );
+        import(&checkout.folder).unwrap();
+        let waiting = |branch: Option<&str>| UncommittedImport {
+            files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
+            branch: branch.map(str::to_owned),
+            checked_out: branch.map(str::to_owned),
+        };
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(Some("main"))
+        );
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(Some("release/2.0"))
+        );
+        let long = "a/".repeat(crate::landing::BRANCH_BYTES_MAX / 2 + 1) + "b";
+        assert!(long.len() > crate::landing::BRANCH_BYTES_MAX);
+        checkout.git(&["checkout", "-q", "-b", &long]);
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(None),
+            "a name over the bound is not shown"
+        );
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(None),
+            "a detached HEAD has no branch to name"
+        );
+    }
+
+    #[test]
+    fn the_head_branch_is_read_again_only_when_the_checkout_head_changes() {
+        let checkout = Checkout::new();
+        let root = std::fs::canonicalize(&checkout.folder).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&root)
+        };
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(reads.get(), 1, "an unchanged HEAD is not read again");
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        let release = Some("release/2.0".to_owned());
+        assert_eq!(branch_of(&root, read), release);
+        assert_eq!(branch_of(&root, read), release);
+        assert_eq!(reads.get(), 2, "a branch switch is read once");
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(branch_of(&root, read), None);
+        assert_eq!(branch_of(&root, read), None);
+        assert_eq!(reads.get(), 3, "a detached HEAD is read once");
+        checkout.git(&["checkout", "-q", "main"]);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(reads.get(), 4, "back on main is read again");
+        let other = Checkout::new();
+        let other_root = std::fs::canonicalize(&other.folder).unwrap();
+        let failing = || {
+            reads.set(reads.get() + 1);
+            Err(failure("process_commit_failed"))
+        };
+        assert_eq!(branch_of(&other_root, failing), None);
+        assert_eq!(
+            branch_of(&other_root, || crate::landing::checked_out_branch(
+                &other_root
+            )),
+            main,
+            "a failed read is not kept"
+        );
+        assert_eq!(reads.get(), 5);
+    }
+
+    /// A files checkout holding a stray `.git/reftable/tables.list`, a file no switch touches,
+    /// still stamps its branch by `.git/HEAD`, so a switch is read again and the label never
+    /// stays on the old branch (UI-9-L1).
+    #[test]
+    fn a_stray_reftable_list_in_a_files_checkout_never_keeps_an_old_branch() {
+        let checkout = Checkout::new();
+        let root = fs::canonicalize(&checkout.folder).unwrap();
+        let store = root.join(".git").join("reftable");
+        fs::create_dir(&store).unwrap();
+        fs::write(
+            store.join("tables.list"),
+            "0x000000000001-0x000000000001-00000000.ref\n",
+        )
+        .unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&root)
+        };
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(branch_of(&root, read), main);
+        assert_eq!(reads.get(), 1, "an unchanged HEAD is still kept");
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        assert_eq!(
+            branch_of(&root, read),
+            Some("release/2.0".to_owned()),
+            "the switch rewrote .git/HEAD, which the stamp follows, not the stray list"
+        );
+        assert_eq!(reads.get(), 2, "a branch switch is read once");
+    }
+
+    #[test]
+    fn a_reftable_checkout_names_the_branch_it_switched_to() {
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-reftable-")
+            .tempdir_in(fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap();
+        let (home, folder) = (root.join("home"), root.join("repo"));
+        for made in [&home, &folder] {
+            fs::create_dir(made).unwrap();
+        }
+        let engine_git = crate::research::runner::setup_git();
+        let run = |args: &[&str]| {
+            crate::spawn_gate::output(
+                Command::new(engine_git)
+                    .env_clear()
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("HOME", &home)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("LC_ALL", "C")
+                    .arg("-C")
+                    .arg(&folder)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap()
+        };
+        let made = run(&[
+            "init",
+            "-q",
+            "--template=",
+            "--ref-format=reftable",
+            "-b",
+            "main",
+        ]);
+        if !made.status.success() {
+            panic!(
+                "UNAVAILABLE: {} cannot make a reftable checkout: {}",
+                engine_git.display(),
+                String::from_utf8_lossy(&made.stderr)
+            );
+        }
+        assert!(folder.join(".git").join("reftable").is_dir());
+        for args in [
+            &["config", "user.name", "Repo Owner"][..],
+            &["config", "user.email", "repo@example.invalid"],
+            &["config", "commit.gpgSign", "false"],
+            &["commit", "-q", "--allow-empty", "-m", "start"],
+        ] {
+            assert!(run(args).status.success(), "git {args:?}");
+        }
+        let checked_out = || uncommitted_import(&folder).unwrap().checked_out;
+        assert_eq!(checked_out(), Some("main".to_owned()));
+        assert!(
+            run(&["checkout", "-q", "-b", "release/2.0"])
+                .status
+                .success()
+        );
+        assert_eq!(
+            checked_out(),
+            Some("release/2.0".to_owned()),
+            "a reftable checkout's .git/HEAD stub stays the same across a switch, so the branch is read again"
+        );
+        assert!(run(&["checkout", "-q", "--detach"]).status.success());
+        assert_eq!(checked_out(), None);
+        let canonical = fs::canonicalize(&folder).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let read = || {
+            reads.set(reads.get() + 1);
+            crate::landing::checked_out_branch(&canonical)
+        };
+        assert!(run(&["checkout", "-q", "main"]).status.success());
+        let main = Some("main".to_owned());
+        assert_eq!(branch_of(&canonical, read), main);
+        assert_eq!(branch_of(&canonical, read), main);
+        assert_eq!(reads.get(), 1, "an unchanged ref table is not read again");
+        assert!(run(&["checkout", "-q", "release/2.0"]).status.success());
+        let release = Some("release/2.0".to_owned());
+        assert_eq!(branch_of(&canonical, read), release);
+        assert_eq!(branch_of(&canonical, read), release);
+        assert_eq!(
+            reads.get(),
+            2,
+            "a switch rewrites the ref table, so it is read once"
+        );
+    }
+
+    #[test]
+    fn a_branch_name_the_engine_cannot_read_keeps_the_waiting_move_with_no_branch() {
+        let checkout = Checkout::new();
+        import(&checkout.folder).unwrap();
+        let git = checkout.folder.join(".git");
+        let mut packed = format!("{} refs/heads/", checkout.tip()).into_bytes();
+        packed.extend_from_slice(b"\xffname\n");
+        fs::write(git.join("packed-refs"), packed).unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/\xffname\n").unwrap();
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            UncommittedImport {
+                files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
+                branch: None,
+                checked_out: None
+            },
+            "a branch that is not UTF-8 is not named, and the move still waits"
+        );
     }
 
     #[test]
@@ -1205,6 +1638,33 @@ mod import {
         assert_eq!(
             read_picked(&folder.join("CLAUDE.local.md")).unwrap_err().0,
             "process_import_unsafe"
+        );
+    }
+}
+
+#[test]
+fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
+    for path in [
+        "AGENT\u{17F}.md",
+        "web/agent\u{17F}.md",
+        "AGENTS.overr\u{131}de.md",
+        "docs/CLAUDE\u{200D}.md",
+        "CLA\u{FEFF}UDE.local.md",
+        ".codex\u{200C}/config.toml",
+        "notes/.CLAUDE\u{202E}/x.md",
+    ] {
+        assert!(instruction_file(path), "{path:?} is an instruction file");
+    }
+    for path in [
+        "AGENTS\u{FF33}.md",
+        "\u{FF21}GENTS.md",
+        "notes.md",
+        "docs/AGENTS.md.txt",
+        "codex/config.toml",
+    ] {
+        assert!(
+            !instruction_file(path),
+            "{path:?} is not an instruction file"
         );
     }
 }

@@ -1,16 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { knownError, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
-  nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
-  type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
+  CHECK_SIGN_IN, nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth,
+  signInMethodFor, signInWay, signInWayUnavailable, validateClaudeAuthCode,
+  type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView, type SignInWay,
 } from "../../native-auth";
+import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField } from "../../ui";
+import { HarnessFile } from "./harnesses";
 
 type Challenge = NonNullable<NativeAuthView["challenge"]>;
 type Account = NonNullable<NativeAuthView["account"]>;
 export type SubscriptionProvider = "chatgpt" | "claude";
-export type FailureHint = "retry" | "check" | "expired" | "missing";
+export type FailureHint = "retry" | "check" | "expired" | "missing" | "sign_in";
+export const CHECK_LINE = "Checking the sign-in this account already has in CrazyAgent. Nothing else on this Mac is read.";
+export const CHECK_SIGNED_OUT = "This account isn't signed in. Choose Sign in again.";
+
+/** Names the harness that signs a subscription provider in. Input: the provider. Output: the
+ * engine harness name the sign-in ways are keyed by. */
+export function signInHarness(provider: SubscriptionProvider): "codex" | "claude" {
+  return provider === "chatgpt" ? "codex" : "claude";
+}
+
+/** The method a fresh sign-in of this provider starts with: a code where the harness has one,
+ * else the browser. Input: the provider. Output: the method. */
+export function freshSignIn(provider: SubscriptionProvider): NativeAuthMethod {
+  const harness = signInHarness(provider);
+  const way: SignInWay = signInMethodFor(harness, "code") ? "code" : "browser";
+  const method = signInMethodFor(harness, way);
+  if (!method) throw new Error(`no fresh sign-in for ${harness}`);
+  return method;
+}
 
 /** What the sign-in panel shows for one native sign-in state. */
 export type SignInStage =
@@ -22,28 +43,70 @@ export type SignInStage =
   | { kind: "failed"; text: string; hint: FailureHint };
 
 const ACTIVE_PHASES = ["starting", "awaiting_owner", "checking_account", "cancelling"];
-const EXPIRED = ["native_auth_sign_in_expired", "native_auth_claude_deadline", "native_auth_bootstrap_timeout"];
+const EXPIRED = ["native_auth_sign_in_expired", "native_auth_claude_deadline"];
 const UNFINISHED = ["native_auth_interrupted", "native_auth_login_failed", "native_auth_native_request_failed", "native_auth_not_active"];
 const CHECK = ["native_auth_outcome_unknown_read_same_operation", "native_auth_claude_input_outcome_unknown"];
+const SIGN_IN_TEXT: Record<string, string> = {
+  native_auth_bootstrap_timeout: "CrazyAgent's account helper didn't start in time. Try again.",
+  native_auth_claude_native_exit: "Claude Code stopped before it finished. Try again.",
+  native_auth_claude_status_invalid: "Claude Code's account check didn't give an answer CrazyAgent could use. Update Claude Code, then try again.",
+  native_auth_claude_output_invalid: "Claude Code didn't finish because of a problem CrazyAgent couldn't handle. Try again, and update Claude Code if it keeps happening.",
+  native_auth_claude_subscription_unsupported: "This account isn't signed in with a Claude subscription. Sign in with a Claude Pro or Max account, or use an API key instead.",
+  native_auth_claude_profile_mismatch: "Claude Code's settings folder for this account didn't match the one CrazyAgent set up. Try again, and update Claude Code if it keeps happening.",
+  native_auth_claude_launch_failed: "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again.",
+  native_auth_claude_keychain_unavailable: "CrazyAgent couldn't set up this account's own keychain for Claude Code. Try again. If it keeps failing, delete the account, then add it again.",
+  native_auth_claude_destination_unsupported: "Claude Code gave a sign-in page address CrazyAgent doesn't recognize. Update CrazyAgent and Claude Code, then try again.",
+  native_auth_claude_credential_expiring: "Claude Code couldn't renew this account's sign-in before it expires. Try again.",
+  native_auth_codex_exited_before_observation: "Codex stopped before it finished. Try again.",
+  native_auth_codex_deadline: "Codex didn't answer in time. Try again.",
+  native_auth_codex_protocol_invalid: "Codex gave an answer CrazyAgent couldn't use. Update Codex, then try again.",
+  native_auth_codex_io_failed: "CrazyAgent lost contact with Codex. Try again.",
+  native_profile_custody_unsafe: "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
+  native_profile_identity_changed: "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again.",
+};
 export const POLL_MS = 2000;
 
 /** Turns a sign-in failure code into one plain sentence and the action that fits it.
- * Inputs: the code and the provider. Output: the copy and its hint. */
-export function signInFailure(code: string, provider: SubscriptionProvider): { text: string; hint: FailureHint } {
-  if (code === "native_auth_host_unavailable") {
-    const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
-    return { text: `${harness} isn't installed on this Mac, so ${name} sign-in isn't available. Install ${harness}, then check again in Settings, Harnesses.`, hint: "missing" };
+ * Inputs: the code, the provider and, for a sign-in refused because another still runs, that
+ * account's name when known. Output: the copy and its hint. */
+export function signInFailure(code: string, provider: SubscriptionProvider, running?: string): { text: string; hint: FailureHint } {
+  const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
+  if (code === "native_auth_sign_in_running") {
+    return { text: running ? `${running}'s sign-in is still running. Wait for it to finish, or open ${running} and cancel its sign-in, then try again.`
+      : plainError(code), hint: "retry" };
   }
+  if (code === "native_auth_host_unavailable") {
+    return { text: `CrazyAgent didn't find a ${harness} it can run on this Mac, so ${name} sign-in isn't available. Install ${harness}, then choose Check again, or choose its file.`, hint: "missing" };
+  }
+  if (code === "native_auth_host_executable_unsafe") {
+    return { text: `${harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall ${harness}, then try again.`, hint: "retry" };
+  }
+  if (code === "native_auth_host_executable_changed") return { text: `${harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.`, hint: "retry" };
   if (EXPIRED.includes(code)) return { text: "This code expired.", hint: "expired" };
+  if (code === "native_auth_sign_in_page_timed_out") {
+    return { text: "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.", hint: "retry" };
+  }
+  if (code === "native_auth_sign_in_timed_out") {
+    return { text: "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.", hint: "expired" };
+  }
   if (CHECK.includes(code)) return { text: plainError(code), hint: "check" };
   if (code === "native_auth_cancelled") return { text: "Sign-in cancelled.", hint: "retry" };
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
   if (UNFINISHED.includes(code)) return { text: "Sign-in didn't finish. Try again.", hint: "retry" };
-  return { text: knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
+  const text = Object.hasOwn(SIGN_IN_TEXT, code) ? SIGN_IN_TEXT[code] : undefined;
+  return { text: text ?? knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
 }
 
-const GONE = new Set(["native_auth_operation_missing", "native_profile_source_conflict"]);
-const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
+/** The line under a ChatGPT device code that says how long it still works, in whole minutes
+ * rounded up. Input: the seconds the engine said the code has left. Output: the line. */
+export function codeLeftLine(leftS: number): string {
+  const minutes = Math.ceil(leftS / 60);
+  if (minutes <= 0) return "This code ran out.";
+  return `This code works for ${minutes} more ${minutes === 1 ? "minute" : "minutes"}.`;
+}
+
+const GONE = new Set(["native_auth_operation_missing"]);
+const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required", "native_profile_source_conflict"]);
 
 /** The sentence when a sign-in could not be cancelled. Input: the refusal code. Output: the
  * sentence, or undefined when the sign-in had already stopped. */
@@ -59,9 +122,13 @@ const SETTLE_MS = 500;
 
 /** Cancels the running sign-in of one account, outside any open sign-in panel: reads its
  * sign-in record, asks the engine to cancel that operation and waits up to 10 s for it to
- * stop, since the app refuses other changes until it has. Input: the account id. Output: ok
+ * stop, holding the bridge's one selection throughout. Input: the account id. Output: ok
  * once stopped or already stopped, otherwise the refusal in plain words. */
-export async function cancelSignIn(accountId: string): Promise<Result<void>> {
+export function cancelSignIn(accountId: string): Promise<Result<void>> {
+  return oneSelection(() => cancelSelected(accountId));
+}
+
+async function cancelSelected(accountId: string): Promise<Result<void>> {
   const record = await signInRecord(accountId);
   if (record.kind !== "ok") return record;
   try {
@@ -82,10 +149,14 @@ export async function cancelSignIn(accountId: string): Promise<Result<void>> {
 }
 
 /** Signs one subscription account out: reads its sign-in record, asks the engine to log the
- * harness out and waits up to 10 s for the engine to see it signed out. Input: the account
- * id. Output: ok once signed out, otherwise the refusal in plain words, such as
- * `native_profile_in_use` while an agent uses the account. */
-export async function signOut(accountId: string): Promise<Result<void>> {
+ * harness out and waits up to 10 s for it to read signed out, holding the bridge's one
+ * selection throughout. Input: the account id. Output: ok once signed out, otherwise the
+ * refusal in plain words, such as `native_profile_in_use` while an agent uses the account. */
+export function signOut(accountId: string): Promise<Result<void>> {
+  return oneSelection(() => signOutSelected(accountId));
+}
+
+async function signOutSelected(accountId: string): Promise<Result<void>> {
   const record = await signInRecord(accountId);
   if (record.kind !== "ok") return record;
   try {
@@ -140,18 +211,21 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
   if (state.claude_input?.status === "sending") return { kind: "working", text: "Sending the code..." };
   const flight = state.in_flight?.action;
   if (flight) {
-    const text = flight === "codex_device_code" ? "Getting a sign-in code..." : flight === "read" ? "Checking..."
+    const checking = flight === "read" || flight !== "cancel" && flight !== "logout" && signInWay(flight) === "check";
+    const text = flight === "codex_device_code" ? "Getting a sign-in code..." : checking ? "Checking..."
       : flight === "cancel" ? "Cancelling sign-in..." : flight === "logout" ? "Signing out..." : "Starting sign-in...";
     return { kind: "working", text };
   }
   if (state.error) {
-    const failure = signInFailure(state.error, provider);
+    const failure = signInFailure(state.error, provider, state.running_account_name);
     return { kind: "failed", text: failure.text, hint: state.recover ? "check" : failure.hint };
   }
   const operation = state.operation;
   if (!operation) return state.recover ? { kind: "failed", ...signInFailure(CHECK[0]!, provider) } : { kind: "start" };
+  const check = operation.action.kind === "sign_in" && signInWay(operation.action.method) === "check";
+  if (check && operation.phase === "unauthenticated_observed") return { kind: "failed", text: CHECK_SIGNED_OUT, hint: "sign_in" };
   switch (operation.phase) {
-    case "starting": return { kind: "working", text: "Starting sign-in..." };
+    case "starting": return { kind: "working", text: check ? "Checking..." : "Starting sign-in..." };
     case "checking_account": return { kind: "working", text: "Checking your account..." };
     case "cancelling": return { kind: "working", text: "Cancelling sign-in..." };
     case "awaiting_owner": return { kind: "waiting", challenge: state.presentation?.challenge ?? null,
@@ -170,13 +244,27 @@ export function signInRunning(state: NativeAuthState | undefined): boolean {
   return Boolean(state?.in_flight || state?.operation && ACTIVE_PHASES.includes(state.operation.phase));
 }
 
+/** Names the account a refusal says still runs a sign-in, from the account list.
+ * Input: the rejection value. Output: the account's name, or undefined when the refusal names
+ * none or the list does not have it. */
+async function runningAccountName(failure: unknown): Promise<string | undefined> {
+  const id = nativeAuthRunningAccount(failure);
+  if (id === undefined) return undefined;
+  const accounts = await listAccounts();
+  return accounts.kind === "ok" ? accounts.value.find((account) => account.id === id)?.name : undefined;
+}
+
 /** Runs managed sign-in for one subscription account: reads its sign-in record, starts,
- * polls, cancels and sends the Claude code through the native-auth reducer.
- * Input: the account id. Output: the state and the actions. */
+ * polls, cancels and sends the Claude code through the native-auth reducer, and hands every
+ * failure to the session, so a stuck sign-in raises Clear stuck sign-in at the top of the
+ * window. Input: the account id. Output: the state and the actions. */
 export function useSignIn(accountId: string | undefined) {
   const [state, setState] = useState<NativeAuthState>();
   const current = useRef<NativeAuthState | undefined>(undefined);
   const navigation = useRef(0);
+  const session = useAppSession();
+  const note = useRef(session.noteResult);
+  note.current = session.noteResult;
   const update = useCallback((event: Parameters<typeof reduceNativeAuth>[1]) => {
     current.current = reduceNativeAuth(current.current, event);
     setState(current.current);
@@ -195,14 +283,16 @@ export function useSignIn(accountId: string | undefined) {
         : await startNativeAuth(ticket, action);
       update({ kind: "reply", navigation: turn, request, reply });
     } catch (failure) {
-      update({ kind: "failure", navigation: turn, request, code: nativeAuthFailureCode(failure) });
+      const code = nativeAuthFailureCode(failure);
+      note.current({ kind: "error", code, message: plainError(code) });
+      update({ kind: "failure", navigation: turn, request, code, account: await runningAccountName(failure) });
     }
   }, [update]);
 
   const open = useCallback(async () => {
     if (!accountId) return;
     const turn = navigation.current;
-    const record = await signInRecord(accountId);
+    const record = note.current(await signInRecord(accountId));
     if (turn !== navigation.current) return;
     if (record.kind !== "ok") {
       current.current = { open: true, valid: false, confirming_logout: false, error: record.kind === "not_ready" ? "unavailable" : record.code,
@@ -229,7 +319,7 @@ export function useSignIn(accountId: string | undefined) {
   }, [state, act]);
 
   const start = useCallback(async (method: NativeAuthMethod) => {
-    if (!current.current?.valid) await open();
+    await open();
     await act(method);
   }, [act, open]);
 
@@ -278,6 +368,7 @@ function ChallengeView({ challenge }: { challenge: Challenge }) {
       <p>Enter this code on the sign-in page:</p>
       <div className="device-code" aria-label="Sign-in code">{nativeAuthText(challenge.user_code)}</div>
       <span><CopyButton text={challenge.user_code} label="Copy code" /></span>
+      {typeof challenge.left_s === "number" && <p className="small secondary">{codeLeftLine(challenge.left_s)}</p>}
     </>}
     <p className="small secondary">{challenge.kind === "codex_device_code" ? "Sign-in page" : "Open this page in your browser to sign in"}</p>
     <p className="mono small sign-in-url">{nativeAuthText(url)}</p>
@@ -337,21 +428,31 @@ export function SignInPanel({ provider, method, state, onStart, onCancel, onChec
   </div>;
   if (stage.kind === "signed_in") return <div className="success" role="status"><Icon name="circle-check" size={24} /><p>{stage.line}</p></div>;
   if (stage.kind === "failed") {
-    const retry = stage.hint === "expired" ? "Get a new code" : stage.hint === "check" ? "Check again" : "Try again";
+    const checkMethod = signInMethodFor(signInHarness(provider), "check");
+    const retry = stage.hint === "expired" ? "Get a new code" : stage.hint === "check" ? "Check again" : stage.hint === "sign_in" ? "Sign in again" : "Try again";
+    if (stage.hint === "missing") return <div className="stack-small">
+      <Notice tone="danger" alert>{stage.text}</Notice>
+      <HarnessFile id={provider === "chatgpt" ? "codex" : "claude-code"} name={provider === "chatgpt" ? "Codex" : "Claude Code"} onFound={() => onStart(method)} readyLabel="Try again" />
+      {onUseKey && <span><Button onClick={onUseKey}>Use an API key instead</Button></span>}
+    </div>;
     return <div className="stack-small">
       <Notice tone="danger" alert>{stage.text}</Notice>
       <div className="row">
-        {stage.hint === "missing" ? onUseKey && <Button variant="primary" onClick={onUseKey}>Use an API key instead</Button>
-          : <Button variant="primary" onClick={() => stage.hint === "check" ? onCheck() : onStart(method)}>{retry}</Button>}
+        <Button variant="primary" onClick={() => stage.hint === "check" ? onCheck() : onStart(stage.hint === "sign_in" ? freshSignIn(provider) : method)}>{retry}</Button>
+        {(stage.hint === "retry" || stage.hint === "expired") && checkMethod && signInWay(method) !== "check" && state?.operation && !state.error &&
+          <Button variant="quiet" onClick={() => onStart(checkMethod)}>{CHECK_SIGN_IN}</Button>}
       </div>
     </div>;
   }
   if (stage.kind === "start") {
-    if (method === "codex_existing") return <div className="stack-small">
-      <p>CrazyAgent copies this sign-in into its own private folder for this account. Codex itself is not changed.</p>
-      <span><Button variant="primary" icon="log-in" onClick={() => onStart("codex_existing")}>Use this sign-in</Button></span>
+    if (signInWay(method) === "check") return <div className="stack-small">
+      <p>{CHECK_LINE}</p>
+      <span><Button variant="primary" icon="refresh-cw" onClick={() => onStart(method)}>{CHECK_SIGN_IN}</Button></span>
     </div>;
-    if (provider === "claude") return <span><Button variant="primary" icon="log-in" onClick={() => onStart("claude_official")}>Open Claude sign-in</Button></span>;
+    if (provider === "claude") return <div className="stack-small">
+      <span><Button variant="primary" icon="log-in" onClick={() => onStart("claude_official")}>Open Claude sign-in</Button></span>
+      <p className="small secondary">{signInWayUnavailable("claude", "code")}</p>
+    </div>;
     return <div className="stack-small">
       <span><Button variant="primary" icon="key-round" onClick={() => onStart("codex_device_code")}>Get sign-in code</Button></span>
       <span><Button variant="quiet" onClick={() => onStart("codex_browser")}>Sign in in this browser instead</Button></span>

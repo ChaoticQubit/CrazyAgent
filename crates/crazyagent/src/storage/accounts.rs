@@ -24,6 +24,7 @@ pub(crate) enum Command {
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
     KeyReplaced(CredentialRef),
+    Held,
 }
 
 pub(crate) struct Listed {
@@ -38,6 +39,7 @@ pub(crate) enum ResultValue {
     Account(Box<Listed>),
     Removed(Box<ModelConnection>),
     Page(Vec<Listed>, Option<CredentialRef>),
+    Held(Vec<CredentialRef>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +51,7 @@ struct Record {
 
 /// The folder beside the engine database that holds account keys, one 0600 file per key
 /// named by its credential reference.
+#[cfg(unix)]
 pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
@@ -58,7 +61,23 @@ pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 /// directory.
 #[cfg(unix)]
 pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
-    use rustix::fs::{AtFlags, Mode, OFlags};
+    use rustix::fs::AtFlags;
+    let Some(directory) = key_folder(root, name)? else {
+        return Ok(());
+    };
+    match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
+
+/// Opens the engine root's key folder for one key name, refusing a name that is not a plain
+/// credential reference. Inputs: the engine root and the key name. Output: the folder, none
+/// when it does not exist, `account_key_reference_invalid`, or `account_key_store_unsafe`
+/// for a folder that is not this user's 0700 directory.
+#[cfg(unix)]
+fn key_folder(root: &Path, name: &str) -> Result<Option<std::fs::File>, EngineError> {
+    use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
     if CredentialRef::new(name).is_err() || name.starts_with('.') {
         return Err(error("account_key_reference_invalid"));
@@ -69,7 +88,7 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
         Mode::empty(),
     ) {
         Ok(fd) => std::fs::File::from(fd),
-        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
         Err(_) => return Err(error("account_key_store_unavailable")),
     };
     let metadata = directory.metadata().map_err(error)?;
@@ -79,19 +98,71 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
     {
         return Err(error("account_key_store_unsafe"));
     }
-    match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(_) => Err(error("account_key_store_unavailable")),
-    }
+    Ok(Some(directory))
 }
 
-/// Refuses to delete an account key where the Unix owner-only key folder does not exist.
-/// Takes the engine root and the reference, both unused. Returns
-/// `account_key_store_unavailable`.
+/// The longest account key the store holds, as the owner transport writes it.
+#[cfg(unix)]
+const KEY_BYTES_MAX: u64 = 8192;
+
+/// Reads one saved account key so the engine can hand it to its key relay, never to an agent
+/// (DEC-141 PA-4). Inputs: the engine root and the key's credential reference. Output: the
+/// key, none when it was never saved, or `account_key_store_unsafe` for a key file that is not
+/// this user's single-link 0600 file; a link in its place is `account_key_store_unavailable`.
+#[cfg(unix)]
+pub(crate) fn read_key_file(
+    root: &Path,
+    credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+    let Some(directory) = key_folder(root, credential.as_str())? else {
+        return Ok(None);
+    };
+    let file = match rustix::fs::openat(
+        &directory,
+        credential.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => std::fs::File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    };
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.len() > KEY_BYTES_MAX
+    {
+        return Err(error("account_key_store_unsafe"));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
+        bytes.fill(0);
+        return Err(error("account_key_store_unavailable"));
+    }
+    crate::credentials::SecretString::new(bytes)
+        .map(Some)
+        .map_err(|_| error("account_key_store_unsafe"))
+}
+
+/// Refuses to read an account key where the Unix owner-only key folder does not exist.
+/// Inputs: the engine root and credential, both unused. Output: `account_key_store_unavailable`.
 #[cfg(not(unix))]
-pub(crate) fn remove_key_file(_root: &Path, _name: &str) -> Result<(), EngineError> {
+pub(crate) fn read_key_file(
+    _root: &Path,
+    _credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
     Err(error("account_key_store_unavailable"))
 }
+
+#[cfg(all(test, unix))]
+#[path = "account_key_tests.rs"]
+mod account_key_tests;
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
     let body = serde_json::to_vec(record).map_err(error)?;
@@ -178,6 +249,17 @@ pub(super) fn execute(
     initialize(db)?;
     match command {
         Command::List(after, limit) => list(db, config, admission, after.as_ref(), limit),
+        Command::Held => {
+            let tx = db.transaction().map_err(error)?;
+            check_owner_admission(&tx, admission)?;
+            let held = config
+                .settings
+                .model_access
+                .as_ref()
+                .map(|catalog| catalog.connections.iter().map(|c| c.id.clone()).collect())
+                .unwrap_or_default();
+            Ok(ResultValue::Held(held))
+        }
         Command::Get(id) => {
             let tx = db.transaction().map_err(error)?;
             check_owner_admission(&tx, admission)?;
@@ -288,12 +370,59 @@ pub(super) fn execute(
             check_owner_admission(&tx, admission)?;
             tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
                 .map_err(error)?;
+            crate::usage::forget_limits(&tx, &id)?;
             if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
                 super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
             }
+            #[cfg(unix)]
+            let left = account_files(&connection.auth);
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                super::trash::put(&tx, kind, name)?;
+            }
             tx.commit().map_err(error)?;
+            #[cfg(unix)]
+            if let Some((kind, name)) = left {
+                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
+            }
             Ok(ResultValue::Removed(Box::new(connection)))
         }
+    }
+}
+
+/// Names the files a removed account leaves to delete beside its key: a native account's
+/// sign-in or an API key account's generated SDK home. Input: the account's authentication.
+/// Output: the trash kind and reference, none for an account with neither.
+#[cfg(unix)]
+fn account_files(auth: &ModelAuthentication) -> Option<(&'static str, &str)> {
+    match auth {
+        ModelAuthentication::ApiKey { credential_ref } => {
+            Some((super::trash::GENERATED_HOME, credential_ref.as_str()))
+        }
+        ModelAuthentication::NativeManaged { profile_ref } => {
+            Some((super::trash::NATIVE_SIGN_IN, profile_ref.as_str()))
+        }
+        _ => None,
+    }
+}
+
+/// Deletes a removed account's files straight after its removal commits; what cannot go
+/// now stays noted for the next start. Inputs: the connection, the catalog left after the
+/// removal, the kind and the reference.
+#[cfg(unix)]
+fn settle_removed(
+    db: &Connection,
+    catalog: Option<&crate::config::ModelAccess>,
+    kind: &str,
+    name: &str,
+) {
+    let settled = db
+        .path()
+        .and_then(|path| std::path::Path::new(path).parent())
+        .ok_or_else(|| error("account_file_root_unknown"))
+        .and_then(|root| super::trash::settle(db, root, catalog, kind, name));
+    if let Err(problem) = settled {
+        eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0);
     }
 }
 

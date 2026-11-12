@@ -201,3 +201,69 @@ fn the_view_keeps_within_its_bounds() {
     let reply = serde_json::to_vec(&(&seen.loaded, &seen.used)).unwrap();
     assert!(reply.len() <= VIEW_BYTES_MAX, "{} bytes", reply.len());
 }
+
+fn instructions(path: &str) -> serde_json::Value {
+    serde_json::json!({"type": "attachment", "attachment": {"type": "instructions", "files": [
+        {"path": path, "type": "Project", "content": "x"},
+    ]}})
+}
+
+/// The main session record is read before Claude Code's own sub-agent records, so newer
+/// sub-agent records never push out the record that names the loaded files (LV-R3).
+#[test]
+fn a_claude_session_record_is_read_before_newer_sub_agent_records() {
+    let (_directory, home) = home();
+    let main = home.join("projects/-work-agents-agent-3/5f0c.jsonl");
+    write_record(&main, &[instructions("/work/agents/agent-3/CLAUDE.md")]);
+    let older = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    fs::File::options()
+        .write(true)
+        .open(&main)
+        .unwrap()
+        .set_modified(older)
+        .unwrap();
+    for n in 1..=RECORDS_READ_MAX {
+        write_record(
+            &home.join(format!(
+                "projects/-work-agents-agent-3/5f0c/subagents/agent-a{n}.jsonl"
+            )),
+            &[claude_skill(&format!("s{n}"), &format!("sub-skill-{n}"))],
+        );
+    }
+    let seen = observed(&home, Harness::Claude);
+    assert_eq!(seen.records, RECORDS_READ_MAX);
+    assert_eq!(
+        seen.loaded,
+        vec![file("CLAUDE.md", "/work/agents/agent-3/CLAUDE.md")],
+        "the main session record was read"
+    );
+    assert_eq!(
+        seen.used.len(),
+        RECORDS_READ_MAX - 1,
+        "the newest sub-agent records fill the rest of the read"
+    );
+}
+
+/// A record longer than `RECORD_BYTES_MAX` is read at its start and at its end, so a skill
+/// the agent invoked late in a long session is reported beside the files it loaded first
+/// (LV-R3).
+#[test]
+fn a_skill_invoked_late_in_a_long_record_is_reported() {
+    let (_directory, home) = home();
+    let main = home.join("projects/-work-agents-agent-3/5f0c.jsonl");
+    let filler = serde_json::json!({"type": "user", "message": {"role": "user",
+        "content": "x".repeat(64 * 1024)}});
+    let fillers = usize::try_from(2 * RECORD_BYTES_MAX / (64 * 1024)).unwrap();
+    let mut lines = vec![instructions("/work/agents/agent-3/CLAUDE.md")];
+    lines.extend((0..fillers).map(|_| filler.clone()));
+    lines.push(claude_skill("late", "late-skill"));
+    write_record(&main, &lines);
+    assert!(fs::metadata(&main).unwrap().len() > 2 * RECORD_BYTES_MAX);
+    let seen = observed(&home, Harness::Claude);
+    assert_eq!(seen.records, 1);
+    assert_eq!(
+        seen.loaded,
+        vec![file("CLAUDE.md", "/work/agents/agent-3/CLAUDE.md")]
+    );
+    assert_eq!(seen.used, vec!["late-skill"], "the late skill was read");
+}

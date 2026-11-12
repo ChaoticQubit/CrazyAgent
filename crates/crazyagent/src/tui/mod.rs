@@ -298,6 +298,9 @@ fn event_loop(
             } else if let Some(job) = app.take_conversation_job() {
                 connection.conversation(job).map_err(TuiError)?;
                 dirty = true;
+            } else if let Some(job) = app.take_accounts_job() {
+                connection.settings(job).map_err(TuiError)?;
+                dirty = true;
             } else if let Some(job) = app.master_request().map_err(TuiError)? {
                 connection.master(job).map_err(TuiError)?;
                 dirty = true;

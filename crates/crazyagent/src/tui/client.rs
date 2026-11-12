@@ -32,10 +32,12 @@ pub(super) mod editor;
 pub(super) mod harness_settings;
 pub(super) mod ide;
 pub(super) mod intake;
+pub(super) mod learning;
 pub(super) mod process;
 mod project_setup;
 pub(super) mod questions;
 pub(super) mod recovery;
+pub(super) mod roadmap;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
@@ -68,9 +70,11 @@ enum Job {
     Changes(Box<changes::ChangesQuery>),
     Process(Box<process::ProcessQuery>),
     Recovery(Box<recovery::RecoveryQuery>),
+    Roadmap(Box<roadmap::RoadmapQuery>),
     Questions(Box<questions::QuestionsQuery>),
     Cleanup(Box<cleanup::CleanupQuery>),
     Reveal(Box<ide::RevealQuery>),
+    Learning(Box<learning::LearningQuery>),
     Evidence {
         project: ProjectId,
         generation: u64,
@@ -193,9 +197,11 @@ pub(super) enum OwnerEvent {
     Changes(Box<changes::ChangesEvent>),
     Process(Box<process::ProcessEvent>),
     Recovery(Box<recovery::RecoveryEvent>),
+    Roadmap(Box<roadmap::RoadmapEvent>),
     Questions(Box<questions::QuestionsEvent>),
     Cleanup(Box<cleanup::CleanupEvent>),
     Reveal(Box<ide::RevealEvent>),
+    Learning(Box<learning::LearningEvent>),
     Access {
         ready: bool,
         problem: String,
@@ -653,7 +659,13 @@ impl Connection {
                             let event = match native.as_mut() {
                                 Some(native) => {
                                     let was_ready = native.ready;
-                                    let event = runtime.block_on(native.intake(*job));
+                                    let progress = |event| {
+                                        let _ = owner_replies.try_send(OwnerReply {
+                                            finished: false,
+                                            event: OwnerEvent::Intake(Box::new(event)),
+                                        });
+                                    };
+                                    let event = runtime.block_on(native.intake(*job, progress));
                                     let problem = None;
                                     if !report_loss(
                                         was_ready,
@@ -762,6 +774,34 @@ impl Connection {
                                 break;
                             }
                         }
+                        Job::Roadmap(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.roadmap(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => roadmap::RoadmapEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Roadmap(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
                         Job::Questions(query) => {
                             let event = match native.as_mut() {
                                 Some(native) => {
@@ -812,6 +852,34 @@ impl Connection {
                                 .send(OwnerReply {
                                     finished: true,
                                     event: OwnerEvent::Cleanup(Box::new(event)),
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Job::Learning(query) => {
+                            let event = match native.as_mut() {
+                                Some(native) => {
+                                    let was_ready = native.ready;
+                                    let event = runtime.block_on(native.learning(*query));
+                                    if !report_loss(
+                                        was_ready,
+                                        native,
+                                        None,
+                                        &mut client,
+                                        &owner_replies,
+                                    ) {
+                                        break;
+                                    }
+                                    event
+                                }
+                                None => learning::LearningEvent::unavailable(*query),
+                            };
+                            if owner_replies
+                                .send(OwnerReply {
+                                    finished: true,
+                                    event: OwnerEvent::Learning(Box::new(event)),
                                 })
                                 .is_err()
                             {
@@ -1166,7 +1234,7 @@ impl NativeOwner {
                     self.ordinary(),
                     OwnerEvent::Access {
                         ready: false,
-                        problem: bounded_problem(&error.0),
+                        problem: access_problem(&error.0),
                         identity: None,
                     },
                 )
@@ -1249,6 +1317,8 @@ impl NativeOwner {
                 confirmation,
                 sessions,
                 known,
+                before,
+                opened,
             } => {
                 let result = match self.master_controller(&context.identity) {
                     Ok(controller) => tokio::time::timeout(Duration::from_secs(4), async {
@@ -1261,6 +1331,8 @@ impl NativeOwner {
                                 confirmation.as_deref(),
                                 sessions,
                                 &known,
+                                before,
+                                opened.as_ref(),
                             )
                             .await
                             {
@@ -1951,7 +2023,8 @@ impl NativeOwner {
         let operation = self.creation_operation.clone();
         assert!(!retained || operation.is_some());
         self.creation_retry_allowed = retained
-            && matches!(&result, Ok(response) if matches!(response.as_ref(), OwnerResponse::NotRecordedAtBarrier { .. }));
+            && (self.creation_retry_allowed
+                || matches!(&result, Ok(response) if matches!(response.as_ref(), OwnerResponse::NotRecordedAtBarrier { .. })));
         if !retained {
             self.creation_pending = None;
             self.creation_operation = None;
@@ -2056,21 +2129,28 @@ impl NativeOwner {
         self.deliver_creation(delivery).await
     }
 
+    /// Sends the retained creation with this delivery. The Retry gate closes for the send and
+    /// opens again only if it was open and the engine answered `owner_busy`, which changed
+    /// nothing, so the same Retry can go out once the engine has room.
+    /// Takes the delivery. Returns the engine's response or a bounded problem code.
     async fn deliver_creation(
         &mut self,
         delivery: MutationDelivery,
     ) -> Result<OwnerResponse, String> {
-        self.creation_retry_allowed = false;
+        let allowed = std::mem::replace(&mut self.creation_retry_allowed, false);
         let controller = self
             .controller
             .as_mut()
             .ok_or("trusted_connection_unavailable")?;
-        match delivery {
+        let response = match delivery {
             MutationDelivery::Submit => controller.send_pending().await,
             MutationDelivery::Reconcile => controller.reconcile_pending().await,
             MutationDelivery::Retry => controller.retry_pending().await,
         }
-        .map_err(|e| bounded_problem(&e.0))
+        .map_err(|e| bounded_problem(&e.0));
+        self.creation_retry_allowed = allowed
+            && matches!(&response, Ok(OwnerResponse::Rejected { code }) if code == super::seam::OWNER_BUSY);
+        response
     }
 
     async fn step(
@@ -2260,6 +2340,17 @@ fn report_loss(
         .is_ok()
 }
 
+/// The connection problem the TUI shows when it cannot attach: the plain line for a
+/// locator an engine that stopped left behind, with its code (F35), else the bounded code.
+/// Input: the connect failure. Output: the problem text.
+fn access_problem(problem: &str) -> String {
+    let code = bounded_problem(problem);
+    match crate::engine::bootstrap::stale_engine_text(&code) {
+        Some(text) => format!("{text} ({code})"),
+        None => code,
+    }
+}
+
 fn bounded_problem(problem: &str) -> String {
     if !problem.is_empty()
         && problem.len() <= 96
@@ -2446,6 +2537,97 @@ mod creation_recovery_tests {
             matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { operation })
             if operation.result == OwnerResult::Applied)
         );
+        h.close().await;
+    }
+
+    #[tokio::test]
+    async fn actual_barrier_retry_the_engine_refuses_busy_stays_allowed_and_applies_once_served() {
+        let mut h = RealNative::new().await;
+        let submission = h.submission();
+        h.native.prepare_creation(&submission).await.unwrap();
+        h.control(OwnerDecision::Revoke, "revoke-before-busy-retry")
+            .await;
+        let result = h
+            .native
+            .deliver_creation(MutationDelivery::Submit)
+            .await
+            .map(Box::new);
+        let event = h.native.creation_event(submission.clone(), result);
+        assert!(event.result.is_err());
+        assert!(event.retained);
+        h.control(OwnerDecision::Reactivate, "reactivate-before-busy-retry")
+            .await;
+        let (_, access) = h.native.attach().await;
+        assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+        let barrier = h
+            .native
+            .creation(CreationJob {
+                submission: submission.clone(),
+                delivery: MutationDelivery::Reconcile,
+            })
+            .await;
+        assert!(matches!(
+            barrier.result.as_deref(),
+            Ok(OwnerResponse::NotRecordedAtBarrier { .. })
+        ));
+
+        let owner_socket = std::fs::read_dir(h.root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("owner.sock"))
+            .find(|path| path.exists())
+            .expect("the engine serves its owner socket in a generation under the root");
+        let mut silent = Vec::new();
+        for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
+            silent.push(
+                crate::spawn_gate::connect_unix(&owner_socket)
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let busy = h
+            .native
+            .creation(CreationJob {
+                submission: submission.clone(),
+                delivery: MutationDelivery::Retry,
+            })
+            .await;
+        assert!(
+            matches!(busy.result.as_deref(), Ok(OwnerResponse::Rejected { code }) if code == "owner_busy"),
+            "the engine refuses the retry while its owner queue is full: {:?}",
+            busy.result
+        );
+        assert!(
+            busy.retained,
+            "the busy retry changed nothing, so the submission is kept"
+        );
+        drop(silent);
+
+        let mut applied = None;
+        for _ in 0..50 {
+            let event = h
+                .native
+                .creation(CreationJob {
+                    submission: submission.clone(),
+                    delivery: MutationDelivery::Retry,
+                })
+                .await;
+            if !matches!(event.result.as_deref(), Ok(OwnerResponse::Rejected { code }) if code == "owner_busy")
+            {
+                applied = Some(event);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let applied = applied.expect("the engine serves again once the queue empties");
+        assert!(
+            matches!(applied.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+                if operation.result == OwnerResult::Applied),
+            "the same retry applies once the engine has room: {:?}",
+            applied.result
+        );
+        assert!(!applied.retained);
+        assert!(h.native.creation_pending.is_none());
         h.close().await;
     }
 
@@ -2692,7 +2874,7 @@ mod creation_recovery_tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert!(names.len() <= 128);
+        assert!(names.len() <= 256);
         names
             .into_iter()
             .map(|name| {
@@ -2896,7 +3078,7 @@ mod creation_recovery_tests {
         )
         .unwrap();
         let mut expected = creation_table_counts(&db);
-        for table in ["projects", "events", "owner_operations"] {
+        for table in ["projects", "events", "owner_operations", "project_activity"] {
             assert_eq!(expected[table], 0);
             *expected.get_mut(table).unwrap() += 1;
         }
@@ -2924,6 +3106,8 @@ mod creation_recovery_tests {
         assert_exact_uncertain_creation(&h.native, &submission, &request, &hash);
         assert_eq!(creation_table_counts(&db), expected);
         restart_creation_service(&mut h).await;
+        *expected.get_mut("project_activity_backfill").unwrap() += 1;
+        assert_eq!(creation_table_counts(&db), expected);
         assert_exact_uncertain_creation(&h.native, &submission, &request, &hash);
         assert_eq!(
             read_committed_creation(&db, &request.request_id),
@@ -2943,6 +3127,25 @@ mod creation_recovery_tests {
 mod tests {
     use super::*;
     use crate::engine::{Engine, Server};
+
+    #[test]
+    fn a_tui_that_cannot_attach_to_a_stopped_engine_says_so_plainly() {
+        assert_eq!(
+            access_problem("owner_locator_database_mismatch"),
+            format!(
+                "{} (owner_locator_database_mismatch)",
+                crate::engine::bootstrap::STALE_ENGINE_TEXT
+            )
+        );
+        assert_eq!(
+            access_problem("owner_locator_missing"),
+            "owner_locator_missing"
+        );
+        assert_eq!(
+            access_problem("raw text with /a/path"),
+            "trusted_owner_connection_failed"
+        );
+    }
     use crate::protocol::{Outcome, ProjectId, ProjectSpec};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;

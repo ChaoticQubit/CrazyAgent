@@ -5,20 +5,19 @@
   Project settings
 
   Name      Fieldnotes Mobile   g Edit details
-  Folder    ~/projects/fieldnotes-mobile   x Remove project
+  Folder    ~/projects/fieldnotes-mobile   x Remove project   m Move into Crazy…
   Pool      No pool yet   Enter Pick a pool
   Accounts  Loading...   u Change order
-  Team      Codex leads. Codex x3. Tools on.   h Harness settings
+  Team      Codex leads. Any harness, up to 63 agents. Tools on.   h Harness se…
   Folders   Loading...   f Edit read-only folders
-  Hidden    Loading...   d Edit hidden folders
+  Hidden    Loading...   k Edit hidden folders
   Access    Loading...   c Agent access
-  Trust     Loading...   k Repository trust
+  Trust     Loading...   w Repository trust
   Process   Instructions for this project's agents   i Edit
   Roadmap   Not planned   p Plan roadmap now
-
+  Status    Loading...
   Skills  0                                   From Settings, plus this project
     Loading...
-
 
 
 

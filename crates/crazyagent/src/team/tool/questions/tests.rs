@@ -89,9 +89,11 @@ fn shipping() -> Value {
 fn shipped() -> Call {
     Call::Ask {
         question: "Ship the release on Friday?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Friday".into(), "Monday".into()],
         recommended: Some("Friday".into()),
         context: Some("Every check passes today.".into()),
+        replaces: None,
     }
 }
 
@@ -119,6 +121,8 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
         ]),
         &mut output,
         &drop,
+        None,
+        &[],
     )
     .unwrap();
     let answered = answers(&output);
@@ -128,11 +132,25 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, [super::super::TOOL_NAME, ASK_TOOL, RECORD_TOOL]);
+    assert_eq!(
+        names,
+        [
+            super::super::TOOL_NAME,
+            ASK_TOOL,
+            RECORD_TOOL,
+            WITHDRAW_TOOL,
+            REQUEST_ACCESS_TOOL,
+            super::super::WAKE_TOOL
+        ]
+    );
     assert_eq!(answered[0]["result"]["tools"][1], super::super::ask_tool());
     assert_eq!(
         answered[0]["result"]["tools"][2],
         super::super::record_tool()
+    );
+    assert_eq!(
+        answered[0]["result"]["tools"][3],
+        super::super::withdraw_tool()
     );
     assert_eq!(text(&answered[1]), (ASK_LOGGED, false));
     let (refused, error) = text(&answered[2]);
@@ -187,15 +205,17 @@ fn one_reply_records_at_most_eight_question_calls() {
 fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
     let case = Case::new();
     let drop = case.drop_file();
-    let mut planted = serde_json::to_vec(&Call::InspectWork).unwrap();
+    let mut planted = serde_json::to_vec(&Call::InspectWork { task: None }).unwrap();
     planted.extend(b"\nnot json\n");
     planted.extend(serde_json::to_vec(&shipped()).unwrap());
     planted.push(b'\n');
     let unchecked = Call::Ask {
         question: "Which day?".into(),
+        kind: crate::questions::QuestionKind::Single,
         options: vec!["Friday".into()],
         recommended: Some("Sunday".into()),
         context: None,
+        replaces: None,
     };
     planted.extend(serde_json::to_vec(&unchecked).unwrap());
     planted.push(b'\n');
@@ -221,22 +241,23 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
 }
 
 #[test]
-fn a_sub_agent_server_lists_ask_but_not_record_answer_and_logs_its_question_as_the_agent() {
-    let sub_agent = [RECORD_TOOL.to_owned()];
+fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
+    let sub_agent = super::super::MASTER_QUESTION_TOOLS.map(str::to_owned);
     let listed = super::super::team_tools(&sub_agent);
     let tools: Vec<&Value> = listed["tools"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|tool| {
-            !tool["name"]
-                .as_str()
-                .unwrap()
-                .starts_with(super::super::tracker::TOOL_PREFIX)
+            let name = tool["name"].as_str().unwrap();
+            !name.starts_with(super::super::tracker::TOOL_PREFIX)
+                && !super::super::CHECKS_TOOLS.contains(&name)
         })
         .collect();
-    assert_eq!(tools.last(), Some(&&super::super::ask_tool()));
+    assert!(tools.contains(&&super::super::ask_tool()));
+    assert_eq!(tools.last(), Some(&&super::super::request_access_tool()));
     assert!(tools.iter().all(|tool| tool["name"] != RECORD_TOOL));
+    assert!(tools.iter().all(|tool| tool["name"] != WITHDRAW_TOOL));
     assert!(super::super::known_tools(&sub_agent));
 
     let case = Case::new();
@@ -261,6 +282,7 @@ fn a_sub_agent_hears_why_its_question_was_not_logged() {
     let asker = Asker::Agent(AGENT);
     let ask = crate::questions::Ask {
         question: "Ship the release on Friday?".into(),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: None,
@@ -311,15 +333,20 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
     );
     assert_eq!(carried, [3, 5]);
 
+    let half = NOTES_BYTES_MAX / 2 - NOTE_PREFIX.len() - 2;
     let long: Vec<Note> = (1..=3)
         .map(|question| Note {
             question,
-            text: "a".repeat(crate::questions::ANSWER_BYTES_MAX),
+            text: "a".repeat(half),
         })
         .collect();
     let (lines, carried) = note_lines(&long);
     assert_eq!(carried, [1, 2], "the third waits for a later turn");
-    assert!(lines.len() <= NOTES_BYTES_MAX);
+    assert_eq!(
+        lines.len(),
+        NOTES_BYTES_MAX,
+        "two notes fill the budget exactly"
+    );
     assert_eq!(lines.matches("Engine: ").count(), 2);
 }
 
@@ -327,6 +354,7 @@ fn note_lines_carry_the_oldest_notes_that_fit_and_name_them() {
 fn asked(case: &Case, asker: &Asker, question: &str) -> u64 {
     let ask = crate::questions::Ask {
         question: question.into(),
+        kind: crate::questions::QuestionKind::Text,
         options: Vec::new(),
         recommended: None,
         context: None,
@@ -356,16 +384,21 @@ fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owne
     let master = Asker::Master(41);
     let renamed = asked(&case, &master, "Rename the app?");
     let tx = case.db.unchecked_transaction().unwrap();
-    let owner = crate::team::append_message(
-        &tx,
-        &case.project,
-        crate::team::MessageAuthor::Owner,
-        "Yes, rename it.",
-        crate::team::MessageState::Answered,
-        crate::team::now_ms(),
-    )
-    .unwrap()
-    .unwrap();
+    let typed = crate::team::TeamAction::Message {
+        project_id: case.project.clone(),
+        text: "Yes, rename it.".into(),
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &crate::config::ModelAccess::default(), &typed).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    let owner: i64 = tx
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1",
+            [case.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
     tx.commit().unwrap();
 
     called(&drop, ASK_TOOL, shipping());
@@ -400,6 +433,26 @@ fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owne
         ]
     );
     assert!(apply_master_calls(&case.db, &case.project, 41, &drop).is_empty());
+}
+
+#[test]
+fn a_question_outside_the_kind_rules_hears_those_rules_and_is_not_logged() {
+    let case = Case::new();
+    let call = Call::Ask {
+        question: "Which database?".into(),
+        kind: crate::questions::QuestionKind::Single,
+        options: vec!["Postgres".into()],
+        recommended: Some("Postgres".into()),
+        context: None,
+        replaces: None,
+    };
+    assert_eq!(
+        logged_ask(&case.db, &case.project, &Asker::Master(41), call).as_deref(),
+        Some(
+            "Your question \"Which database?\" was not logged for the owner: it is not one plain question of kind single or multi with 2 to 6 one-line options and one of them recommended, or of kind text with no options."
+        )
+    );
+    assert!(open_ids(&case).is_empty());
 }
 
 #[test]
@@ -524,4 +577,240 @@ fn the_open_line_names_only_the_askers_open_questions_and_the_message_to_record_
     let line = open_line(&pending, &crowded, Some(u64::MAX));
     assert!(line.len() <= OPEN_LINE_BYTES_MAX, "{}", line.len());
     assert_eq!(line.matches("; ").count(), 7);
+}
+
+/// F08 (L2): a drop-file master's access request is recorded during its reply and raised
+/// as an engine question when the reply ends; a refused grant comes back as one line for
+/// its next turn and raises nothing.
+#[test]
+fn a_drop_file_master_s_access_request_is_raised_when_its_reply_ends() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let params = json!({"name": REQUEST_ACCESS_TOOL, "arguments": {"kind": "port", "port": 5432, "reason": "the local database"}});
+    let (said, refused) = drop_call(Some(&params), &drop).unwrap();
+    assert!(!refused, "{said}");
+    assert_eq!(said, REQUEST_TAKEN);
+    called(
+        &drop,
+        REQUEST_ACCESS_TOOL,
+        json!({"kind": "port", "port": 11434, "reason": "the model"}),
+    );
+    let refused = apply_master_calls(&case.db, &case.project, 41, &drop);
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert!(
+        refused[0]
+            .starts_with("Your access request for Port 11434 on this computer was not raised"),
+        "{}",
+        refused[0]
+    );
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    assert_eq!(open.len(), 1);
+    assert!(
+        open[0]
+            .asker
+            .starts_with(crate::sandbox::grants::ASKER_PREFIX)
+    );
+    assert!(
+        open[0].question.contains("Port 5432 on this computer"),
+        "{}",
+        open[0].question
+    );
+    assert!(take_asks(&drop).is_empty());
+}
+
+/// F08 (L2): a sub-agent's access request is raised at once and it hears the question
+/// number; one the project already allows asks nothing, and a refused one says why.
+#[test]
+fn a_sub_agent_s_access_request_is_raised_at_once_or_refused_plainly() {
+    let case = Case::new();
+    let request = |port: u16| Call::RequestAccess {
+        grant: AccessGrant::Port { port },
+        reason: "the local database".into(),
+    };
+    let (raised, error) = agent_ask(&case.db, &case.project, AGENT, request(5432));
+    assert!(!error, "{raised}");
+    assert!(
+        raised.starts_with("Access request raised as question "),
+        "{raised}"
+    );
+    let (refused, error) = agent_ask(&case.db, &case.project, AGENT, request(60_000));
+    assert!(error);
+    assert!(
+        refused.starts_with("Not requested: Ports from 49152 up"),
+        "{refused}"
+    );
+    let held = crate::sandbox::policy::AgentPolicy {
+        grants: vec![AccessGrant::Port { port: 6379 }],
+        ..Default::default()
+    };
+    crate::sandbox::policy::save(&case.db, PROJECT, &held).unwrap();
+    assert_eq!(
+        agent_ask(&case.db, &case.project, AGENT, request(6379)),
+        (REQUEST_HELD.to_owned(), false)
+    );
+    assert_eq!(
+        crate::questions::pending(&case.db, &case.project)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Calls one question tool on the drop-file server and returns what the master reads.
+fn said(drop: &Path, name: &str, arguments: Value) -> (String, bool) {
+    let params = json!({"name": name, "arguments": arguments});
+    drop_call(Some(&params), drop).unwrap()
+}
+
+fn choice(question: &str, replaces: u64) -> Value {
+    json!({
+        "question": question,
+        "kind": "single",
+        "options": ["Yes", "No"],
+        "recommended": "Yes",
+        "replaces": replaces
+    })
+}
+
+#[test]
+fn a_drop_file_master_withdraws_and_asks_again_but_never_records_an_answer_in_its_own_words() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let master = Asker::Master(41);
+    let own = asked(&case, &master, "Rename the app?");
+    let sub = asked(&case, &Asker::Agent(AGENT), "Which port?");
+    let boxed = asked(&case, &Asker::Terminal(AGENT), "Allow the edit?");
+
+    assert_eq!(
+        said(
+            &drop,
+            RECORD_TOOL,
+            json!({"question": own, "version": 0, "answer": "Yes"})
+        ),
+        (RELAY_LIVE_ONLY.to_owned(), true)
+    );
+    assert_eq!(
+        said(&drop, WITHDRAW_TOOL, json!({"question": sub, "version": 0})),
+        (WITHDRAW_TAKEN.to_owned(), false)
+    );
+    assert!(
+        said(&drop, WITHDRAW_TOOL, json!({"question": sub})).1,
+        "a withdrawal names the version it read"
+    );
+    called(&drop, ASK_TOOL, choice("Rename the app to Crazy?", own));
+    called(
+        &drop,
+        WITHDRAW_TOOL,
+        json!({"question": boxed, "version": 0}),
+    );
+    assert_eq!(
+        apply_master_calls(&case.db, &case.project, 41, &drop),
+        [format!(
+            "Your withdrawal of question {boxed} was not taken: it is not an open question of this project asked by you or by a sub-agent."
+        )]
+    );
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    let asked_again: Vec<_> = open
+        .iter()
+        .filter(|question| question.id != boxed)
+        .collect();
+    assert_eq!(asked_again.len(), 1, "{open:#?}");
+    assert_eq!(asked_again[0].question, "Rename the app to Crazy?");
+    assert_eq!(asked_again[0].asker, master.name());
+    assert_eq!(asked_again[0].kind, crate::questions::QuestionKind::Single);
+    assert!(open.iter().any(|question| question.id == boxed));
+    assert!(
+        !open
+            .iter()
+            .any(|question| question.id == own || question.id == sub)
+    );
+
+    called(&drop, ASK_TOOL, choice("Rename it twice?", own));
+    assert_eq!(
+        apply_master_calls(&case.db, &case.project, 41, &drop),
+        [
+            "Your question \"Rename it twice?\" was not logged for the owner: the question it replaces is not an open free-text question of this project asked by you or by an engine step, or the new one is not of kind single or multi."
+        ]
+    );
+}
+
+#[test]
+fn a_conversation_master_withdraws_its_own_question_on_any_turn() {
+    let case = Case::new();
+    let drop = case.drop_file();
+    let session = SessionId::new("session-1").unwrap();
+    let own = asked(&case, &Asker::Session(session.clone()), "Rename the app?");
+    let other = asked(&case, &Asker::Master(41), "Ship on Friday?");
+    called(&drop, WITHDRAW_TOOL, json!({"question": own, "version": 0}));
+    called(
+        &drop,
+        WITHDRAW_TOOL,
+        json!({"question": other, "version": 0}),
+    );
+    assert_eq!(
+        apply_session_calls(&case.db, &case.project, &session, None, &drop),
+        [format!(
+            "Your withdrawal of question {other} was not taken: it is not an open question of this project asked by you or by a sub-agent."
+        )]
+    );
+    assert_eq!(open_ids(&case), [other]);
+}
+
+#[test]
+fn a_sub_agent_asks_its_own_question_again_but_never_withdraws_or_records_one() {
+    let case = Case::new();
+    let agent = Asker::Agent(AGENT);
+    let own = asked(&case, &agent, "Which port?");
+    let master = asked(&case, &Asker::Master(41), "Rename the app?");
+    let call = |name: &str, arguments: Value| {
+        super::super::live_call(name, Some(&arguments))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(
+        agent_ask(
+            &case.db,
+            &case.project,
+            AGENT,
+            call(WITHDRAW_TOOL, json!({"question": own, "version": 0}))
+        ),
+        (AGENT_WITHDRAW_REFUSED.to_owned(), true)
+    );
+    assert_eq!(
+        agent_ask(
+            &case.db,
+            &case.project,
+            AGENT,
+            call(
+                RECORD_TOOL,
+                json!({"question": own, "version": 0, "answer": "8080"})
+            )
+        ),
+        (AGENT_ASKS_ONLY.to_owned(), true)
+    );
+    let (refused, error) = agent_ask(
+        &case.db,
+        &case.project,
+        AGENT,
+        call(ASK_TOOL, choice("Rename it to Crazy?", master)),
+    );
+    assert!(error, "{refused}");
+    assert!(
+        refused.contains("not an open free-text question you asked"),
+        "{refused}"
+    );
+    let (logged, error) = agent_ask(
+        &case.db,
+        &case.project,
+        AGENT,
+        call(ASK_TOOL, choice("Use port 8080?", own)),
+    );
+    assert!(!error, "{logged}");
+    let open = crate::questions::pending(&case.db, &case.project).unwrap();
+    assert!(!open.iter().any(|question| question.id == own));
+    assert!(open.iter().any(|question| question.id == master));
+    assert!(
+        open.iter()
+            .any(|question| question.question == "Use port 8080?" && question.asker == agent.name())
+    );
 }

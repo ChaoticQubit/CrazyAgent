@@ -1,5 +1,5 @@
-use super::agent_copy::{Harness, Record, account_record, place};
-use super::{HeldLock, NativeProfileUse, failure};
+use super::agent_copy::{AgentKeychain, Harness, Placed, Record, account_record, place};
+use super::{HeldLock, Manifest, NativeProfileUse, failure, take_lock};
 use crate::adapters::claude::{REFRESH_WINDOW, RENEWAL_TURN};
 use crate::adapters::codex::CodexProtocol;
 use crate::engine::EngineError;
@@ -77,13 +77,16 @@ fn hold_unless(
 }
 
 /// What one account renewal needs, detached from the lease so the keeper thread of a
-/// running turn can renew while the caller still holds that lease.
+/// running turn can renew while the caller still holds that lease. Holds its own shared
+/// lease on the profile (CA-SEC-003), so once the caller's lease ended a sign-out or
+/// sign-in still waits for every renewal that could write the account's record.
 pub(super) struct Renewal {
     harness: Harness,
     executable: PathBuf,
     managed: PathBuf,
     home: File,
     profile: File,
+    _lease: Option<HeldLock>,
 }
 
 impl NativeProfileUse {
@@ -109,12 +112,20 @@ impl NativeProfileUse {
             file.try_clone()
                 .map_err(|_| failure("native_profile_credential_unavailable"))
         };
+        let unavailable = |_| failure("native_profile_credential_unavailable");
+        let lease = Manifest::open(&self.profile.file, false).map_err(unavailable)?;
+        if lease.identity != self.manifest.identity {
+            return Err(failure("native_profile_credential_unavailable"));
+        }
+        take_lock(&lease.file, FlockOperation::NonBlockingLockShared).map_err(unavailable)?;
+        let lease = HeldLock(lease.file);
         Ok(Renewal {
             harness,
             executable: executable.to_path_buf(),
             managed: self.profile_path()?,
             home: clone(&self.home.file)?,
             profile: clone(&self.profile.file)?,
+            _lease: Some(lease),
         })
     }
 }
@@ -141,6 +152,7 @@ impl Renewal {
             managed: profile.join("home"),
             home: open(&profile.join("home")),
             profile: open(profile),
+            _lease: None,
         }
     }
 
@@ -191,14 +203,18 @@ impl Renewal {
 
 /// Builds a harness command that runs in the managed home with nothing of the engine's
 /// own environment, the way the sign-in custodian runs it, in its own process group.
-/// Inputs: the executable and the managed home. Output: the command.
-fn managed_command(executable: &Path, managed: &Path) -> Command {
-    let mut command = Command::new(executable);
+/// Inputs: the harness entry and the managed home. Output: the command for the install
+/// the entry leads to now, or the error when the harness is not installed.
+fn managed_command(executable: &Path, managed: &Path) -> Result<Command, EngineError> {
+    let program = crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
+        .map_err(crate::engine::io_error)?;
+    let path = crate::engine::native_auth_host::sign_in_path(&program);
+    let mut command = Command::new(program);
     command
         .env_clear()
         .env("HOME", managed)
         .env("TMPDIR", managed)
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", path)
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(managed)
@@ -206,7 +222,7 @@ fn managed_command(executable: &Path, managed: &Path) -> Command {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
-    command
+    Ok(command)
 }
 
 /// Starts a renewal child that also holds the account's renewal lock, so the lock outlives
@@ -249,7 +265,7 @@ fn settle(child: &mut Child, deadline: Instant) -> bool {
 /// Output: whether it succeeded within a minute, which outlasts Claude Code's own refresh
 /// request bound.
 fn claude_turn(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
-    let mut command = managed_command(executable, managed);
+    let mut command = managed_command(executable, managed)?;
     command.args(RENEWAL_TURN).env("CLAUDE_CONFIG_DIR", managed);
     let mut child = spawn_locked(&mut command, lock)?;
     Ok(settle(&mut child, Instant::now() + CLAUDE_RUN_TIME))
@@ -260,7 +276,7 @@ fn claude_turn(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<boo
 /// otherwise ignored. Inputs: the executable, the managed home and the renewal lock.
 /// Output: whether the reply arrived in time.
 fn codex_refresh(executable: &Path, managed: &Path, lock: &HeldLock) -> Result<bool, EngineError> {
-    let mut command = managed_command(executable, managed);
+    let mut command = managed_command(executable, managed)?;
     command
         .args([
             "-c",
@@ -379,28 +395,40 @@ fn exchange(
 
 /// Keeps one agent's copy fresh for the rest of its turn: wakes four minutes before the
 /// copy lapses (inside Claude Code's refresh window), renews, and replaces the copy when
-/// the account's record is newer; retries every 30 seconds. Stopped on drop, after which
-/// it writes no copy; `open` is false once stopped and is held while a copy is written.
+/// the account's record is newer, then deletes any stale record of it from the agent's own
+/// keychain, so the harness reads the new copy; retries every 30 seconds. Stopped on drop,
+/// after which it writes no copy; `open` is false once stopped and is held while a copy is
+/// written.
 pub(super) struct Keeper {
     stop: Option<Sender<()>>,
     open: Arc<Mutex<bool>>,
 }
 
 impl Keeper {
-    /// Starts the keeper. Inputs: the renewal, the agent home, the copy's file name and
-    /// its expiry. Output: the running keeper, or unavailable when no thread starts.
+    /// Starts the keeper. Inputs: the renewal, the agent home, the copy's file name, the
+    /// slot its placed identity is recorded in, the agent's keychain when its harness keeps
+    /// one, and the copy's expiry. Output: the running keeper, or unavailable when no thread
+    /// starts.
     pub(super) fn start(
         renewal: Renewal,
         agent: File,
         name: &'static str,
+        placed: Placed,
+        keychain: Option<AgentKeychain>,
         expires: Duration,
     ) -> Result<Self, EngineError> {
         let (stop, stopped) = channel();
         let open = Arc::new(Mutex::new(true));
         let gate = Arc::clone(&open);
+        let copy = KeptCopy {
+            agent,
+            name,
+            placed,
+            keychain,
+        };
         std::thread::Builder::new()
             .name("credential-keeper".into())
-            .spawn(move || keep(&renewal, &agent, name, expires, &stopped, &gate))
+            .spawn(move || keep(&renewal, &copy, expires, &stopped, &gate))
             .map_err(|_| failure("native_profile_credential_unavailable"))?;
         Ok(Self {
             stop: Some(stop),
@@ -425,13 +453,21 @@ fn idle(stopped: &Receiver<()>, wait: Duration) -> bool {
     matches!(stopped.recv_timeout(wait), Err(RecvTimeoutError::Timeout))
 }
 
-/// The keeper's loop. Inputs: the renewal, the agent home, the copy's name, its expiry,
-/// the stop channel and the gate a copy is written under. Output: none; it returns when
+/// The copy a keeper renews: the agent home, the copy's name, the slot that records the
+/// device and inode of the file last placed there, and the agent's keychain or none.
+struct KeptCopy {
+    agent: File,
+    name: &'static str,
+    placed: Placed,
+    keychain: Option<AgentKeychain>,
+}
+
+/// The keeper's loop. Inputs: the renewal, the copy, its expiry, the stop channel and the
+/// gate a copy is written and its identity recorded under. Output: none; it returns when
 /// stopped.
 fn keep(
     renewal: &Renewal,
-    agent: &File,
-    name: &'static str,
+    copy: &KeptCopy,
     mut expires: Duration,
     stopped: &Receiver<()>,
     gate: &Mutex<bool>,
@@ -450,9 +486,16 @@ fn keep(
             if !*open {
                 return;
             }
-            if place(agent, name, &record.copy).is_ok() {
-                expires = record.expires;
-                continue;
+            if let Ok(placed) = place(&copy.agent, copy.name, &record.copy) {
+                *copy.placed.lock().unwrap_or_else(PoisonError::into_inner) = placed;
+                if copy
+                    .keychain
+                    .as_ref()
+                    .is_none_or(|keychain| keychain.forget().is_ok())
+                {
+                    expires = record.expires;
+                    continue;
+                }
             }
         }
         if !idle(stopped, RETRY) {

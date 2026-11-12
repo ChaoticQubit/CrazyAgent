@@ -7,7 +7,7 @@
                                                                                 
   ▌ Sign in with your Claude subscription                                       
   ▌   Recommended. Uses your Claude Pro or Max plan. Claude opens in your       
-  ▌   browser.                                                                  
+  ▌   browser. Claude Code has no sign-in code.                                 
                                                                                 
     Use an API key                                                              
       Pay per use with an Anthropic key.                                        

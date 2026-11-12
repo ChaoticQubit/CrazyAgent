@@ -20,6 +20,8 @@ use tokio::sync::oneshot;
 pub mod bootstrap;
 pub(crate) mod claude_host;
 pub mod codex_host;
+#[cfg(target_os = "macos")]
+pub(crate) mod keychain;
 #[cfg(all(test, unix))]
 mod master_host_fixture;
 #[cfg(unix)]
@@ -36,7 +38,7 @@ pub use native_auth_host::{
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
-pub(crate) use native_auth_host::RegisteredNativeAuthHost;
+pub(crate) use native_auth_host::{RegisteredNativeAuthHost, pinnable};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,6 +351,20 @@ fn io_error(error: impl std::fmt::Display) -> EngineError {
     EngineError(error.to_string())
 }
 
+/// Runs blocking work, such as an account renewal of up to two minutes or a harness hash of
+/// hundreds of MB, so it never stalls the async runtime: on a multi-thread tokio runtime the
+/// worker first hands its other tasks to another thread; anywhere else the work runs in place.
+/// Input: the work. Output: its result.
+#[cfg(unix)]
+fn off_worker<R>(work: impl FnOnce() -> R) -> R {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(work)
+        }
+        _ => work(),
+    }
+}
+
 #[cfg(unix)]
 fn verify_directory(path: &Path) -> Result<(), EngineError> {
     let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
@@ -459,6 +475,7 @@ async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, ti
 
 /// The terminal host the engine serves agent terminals through, once one is made: the tmux
 /// program it was made for, none when tmux was not found, and the host.
+#[cfg(unix)]
 type TerminalHost = (
     Option<std::path::PathBuf>,
     std::sync::Arc<dyn crate::terminal::Host>,
@@ -471,9 +488,12 @@ pub struct Engine {
     owner_egress: std::sync::Arc<tokio::sync::RwLock<()>>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
+    #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
+    harness_updates: std::sync::Arc<crate::harnesses::update::Updates>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    master_activity: owner::transport::master_activity::Board,
 }
 
 const HARNESS_PROBE_FRESH: Duration = Duration::from_secs(10);
@@ -535,16 +555,22 @@ impl Engine {
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
+    /// The engine's two settings files, global then project, for what reads them itself at
+    /// each launch. Output: the paths, or none for an engine opened without them.
+    pub(crate) fn settings_files(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        self.settings_files.clone()
+    }
+
     /// The loopback ports of the owner's configured local model endpoints, read from the
     /// engine's settings files at each call, for a sandbox the engine starts to keep free
-    /// of the listeners of what it runs. Output: the ports; none when the engine has no
-    /// settings files or they do not read, as for team and research launches.
-    pub(crate) fn owner_ports(&self) -> Vec<u16> {
-        self.settings_files
-            .as_ref()
-            .and_then(|(global, project)| crate::config::resolve_config(global, project).ok())
-            .and_then(|config| config.settings.model_access)
-            .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
+    /// of the listeners of what it runs. Output: the ports, none when the engine has no
+    /// settings files, or [`crate::sandbox::OWNER_PORTS_UNREADABLE`] when they do not read,
+    /// so that sandbox does not start (OWNER-PORTS-FAIL-OPEN).
+    pub(crate) fn owner_ports(&self) -> Result<Vec<u16>, &'static str> {
+        match &self.settings_files {
+            Some((global, project)) => crate::sandbox::settings_owner_ports(global, project),
+            None => Ok(Vec::new()),
+        }
     }
 
     pub async fn open_with_settings_sources(
@@ -570,9 +596,12 @@ impl Engine {
                 owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
+                #[cfg(unix)]
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+                harness_updates: crate::harnesses::update::Updates::new(),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
+                master_activity: Default::default(),
             },
             config,
         ))
@@ -588,9 +617,12 @@ impl Engine {
             owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
+            master_activity: Default::default(),
         })
     }
 
@@ -604,9 +636,12 @@ impl Engine {
             owner_egress: std::sync::Arc::new(tokio::sync::RwLock::new(())),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
+            master_activity: Default::default(),
         })
     }
 

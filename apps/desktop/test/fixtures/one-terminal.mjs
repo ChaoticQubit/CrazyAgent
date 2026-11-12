@@ -1,0 +1,442 @@
+import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
+import { createElement } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
+import styles from "../../src/style.css?inline";
+import projectStyles from "../../src/screens/project/projects.css?inline";
+import teamStyles from "../../src/screens/team/team-graph.css?inline";
+import { AgentsTab } from "../../src/screens/project/agents.tsx";
+import { LiveMasterView } from "../../src/screens/project/live-master.tsx";
+import { TeamActivity } from "../../src/screens/project/team-activity.tsx";
+import { WallGrid } from "../../src/screens/terminals/index.tsx";
+import { teamStatus } from "./team-status.mjs";
+
+let root = null;
+let shownData = null;
+const kept = new Map();
+const engine = { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], prompts: [], callbacks: new Map(), next: new Map(), delayMs: 0, graph: "ok", questions: [], release: () => {} };
+
+/** One open question Brook put to the owner, most urgent first as the engine lists them.
+ * Inputs: its id, its urgency and its text. Output: the question. */
+export function question(id, severity, text) {
+  return { id, agent: 2, label: "Brook", severity, asked_for: "me", for_label: "Me", text, assumption: null, created_ms: 0, terminal: "team-2" };
+}
+
+/** One team task the team status lists, running on Ada. Input: its id. Output: the task. */
+export function runningTask(id) {
+  return {
+    id, source: "master", harness: "codex", tools: true, prompt: "Calendar API endpoints", status: "running", status_label: "Running", agent: 1,
+    attempts: 1, result: null, problem: null, delivered: false, output_bytes: 0, created_ms: 0, started_ms: 0, finished_ms: null,
+  };
+}
+
+const node = (id, kind, extra = {}) => ({
+  id, kind, parent: null, label: id, harness: "codex", status: "working", status_label: "Working", account: null, terminal: null, ...extra,
+});
+
+/** The team the engine reports: a master leading three sub-agents, each with its own terminal. */
+const TEAM = {
+  project_id: "alpha",
+  nodes: [
+    node("m", "master", { label: "Master", status: "idle", terminal: "team-9", agent: 9 }),
+    node("team-1", "sub", { parent: "m", label: "Ada", terminal: "team-1", agent: 1 }),
+    node("team-2", "sub", { parent: "m", label: "Brook", terminal: "team-2", agent: 2 }),
+    node("team-3", "sub", { parent: "m", label: "Cove", terminal: "team-3", agent: 3 }),
+  ],
+  edges: [],
+};
+
+/** The team mid-handoff: the master hands Ada a task whose first line is longer than a card,
+ * Brook waits on the owner's answer, and Cove has a branch. */
+const LIVE_TEAM = {
+  ...TEAM,
+  nodes: TEAM.nodes.map((item) => item.id === "team-2" ? { ...item, waiting: "question", account: "Pool A, Codex 2" }
+    : item.id === "team-3" ? { ...item, branch: "crazyagent/calendar-api", account: "Pool A, Codex 3" } : item),
+  edges: [{ from: "m", to: "team-1", task_id: 7, source: "master", text: "Write the label notes for the shop", state: "running", reply: null }],
+  relations: [
+    { from: "m", to: "team-1", relation: "delegated_to", live: { action: "handing_off", task: "Write the label notes for the shop" } },
+    { from: "m", to: "team-2", relation: "delegated_to", live: null },
+    { from: "m", to: "team-3", relation: "delegated_to", live: null },
+  ],
+};
+
+/** The owner's Questions inbox: Ada waits on a permission prompt in its terminal, and so does
+ * Dune, an agent the graph does not draw. A mount may add open questions to it. */
+const INBOX = {
+  project_id: "alpha", questions: [], more: 0,
+  waiting: [
+    { agent: 1, label: "Ada", waiting: "permission", since_ms: 0, terminal: "team-1" },
+    { agent: 5, label: "Dune", waiting: "question", since_ms: 0, terminal: "team-5" },
+  ],
+};
+
+/** Sends one message down a terminal channel as the bridge does, in order. Inputs: the
+ * channel id and the message. */
+function deliver(channel, message) {
+  const callback = engine.callbacks.get(channel);
+  if (!callback) return;
+  const index = engine.next.get(channel) ?? 0;
+  engine.next.set(channel, index + 1);
+  callback({ index, message });
+}
+
+/** The team graph read the engine gives for a graph mode: the team ("ok"), a team with no
+ * agents ("empty"), a read that never answers ("pending"), the team once `release` is called
+ * ("late"), a failed read ("error") or a build without the graph ("not_ready"). Input: the
+ * mode. Output: the read's answer. */
+function graphRead(mode) {
+  if (mode === "pending") return new Promise(() => {});
+  if (mode === "late") return new Promise((done) => { engine.release = () => done(TEAM); });
+  if (mode === "error") return Promise.reject({ code: "engine_unreachable", message: "The engine isn't running." });
+  if (mode === "not_ready") return Promise.reject("Command desktop_team_graph not found");
+  if (mode === "live") return Promise.resolve(LIVE_TEAM);
+  return Promise.resolve(mode === "empty" ? { ...TEAM, nodes: [] } : TEAM);
+}
+
+/** Answers the bridge calls the Agents tab and its terminal panels make: the team graph as
+ * its mode reads, the Questions inbox, and terminal attach and detach, which the engine counts
+ * as attached terminal clients. An attach answers after `delayMs`, as the engine does once
+ * tmux attached, and its channel then says attached. Every other call is refused, as an
+ * engine without it would. */
+function bridge() {
+  window.__TAURI_INTERNALS__ = {
+    invoke: async (command, args) => {
+      if (command === "desktop_team_graph") return graphRead(engine.graph);
+      if (command === "desktop_coord_questions") return { ...INBOX, questions: engine.questions };
+      if (command === "desktop_terminal_attach") {
+        engine.attaches.push(args.agent);
+        await new Promise((done) => setTimeout(done, engine.delayMs));
+        engine.serial += 1;
+        const serial = engine.serial;
+        engine.clients.set(serial, args.agent);
+        deliver(args.output.id, { kind: "attached", cols: 80, rows: 24 });
+        return serial;
+      }
+      if (command === "desktop_terminal_detach") {
+        engine.detaches.push(args.agent);
+        engine.clients.delete(args.serial);
+        return null;
+      }
+      if (command === "desktop_terminal_resize") return null;
+      if (command === "desktop_terminal_prompt") {
+        engine.prompts.push(args.text);
+        return null;
+      }
+      if (command === "desktop_team_cancel") {
+        engine.cancels.push(args.task);
+        return { generation: args.generation, outcome: "applied", pending: false, rejection: null };
+      }
+      throw { code: "unknown", message: command };
+    },
+    transformCallback: (callback) => {
+      const id = engine.callbacks.size + 1;
+      engine.callbacks.set(id, callback);
+      return id;
+    },
+  };
+}
+
+/** Mounts the Agents tab of project alpha on a fresh page, as the project page shows it, with
+ * Pool A assigned, the engine answering each terminal attach after the given delay, the team
+ * graph read as the given mode and the team status listing the given tasks, with any other
+ * status fields changed; `view` gives the route's section, open questions for the inbox and
+ * the assigned pool's name.
+ * Inputs: the delay in ms, the graph mode, the tasks, the changes and the view. */
+export function mount(delayMs = 0, graph = "ok", tasks = [], patch = {}, view = {}) {
+  root?.unmount();
+  Object.assign(engine, { serial: 0, clients: new Map(), attaches: [], detaches: [], cancels: [], notes: [], prompts: [], callbacks: new Map(), next: new Map(), delayMs, graph, questions: view.questions ?? [] });
+  bridge();
+  document.head.innerHTML = "";
+  for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
+    const style = document.createElement("style");
+    style.textContent = text;
+    document.head.append(style);
+  }
+  document.body.innerHTML = '<div id="root"><main class="main"><div class="pj pj-project"><div class="pj-tab-panel" id="panel"></div></div></main></div>';
+  root = createRoot(document.getElementById("panel"));
+  const data = {
+    id: "alpha", name: "Alpha", setup: undefined, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
+    assigned: { pool: { id: "pool-a", name: view.pool ?? "Pool A", members: [] } }, now: 0, navigate: () => {}, notify: (note) => engine.notes.push(note), reload: () => {}, reloadPools: () => {},
+    team: { result: { kind: "ok", value: teamStatus({ tasks, ...patch }) }, at: 1 }, reloadTeam: () => {},
+  };
+  shownData = data;
+  flushSync(() => root.render(createElement(AgentsTab, { data, section: view.section })));
+}
+
+/** Waits until a check holds or the time runs out. Inputs: the check and the limit in ms.
+ * Output: whether it held. */
+export async function until(check, limitMs = 5000) {
+  const end = Date.now() + limitMs;
+  while (Date.now() < end) {
+    if (check()) return true;
+    await new Promise((done) => setTimeout(done, 20));
+  }
+  return check();
+}
+
+/** Clicks the graph card of the agent with the given name. Input: the name. Output: whether
+ * the card was there. */
+export function click(name) {
+  const card = [...document.querySelectorAll(".tg-card-open")].find((button) => button.querySelector(".tg-card-title")?.textContent.includes(name));
+  if (!card) return false;
+  card.click();
+  return true;
+}
+
+/** Clicks Open terminal on the agent's row under "Waiting on you in their terminal", opening
+ * the drawer behind the toolbar's "N ask you" first when the rows are not on the page. Input:
+ * the name. Output: whether the row and its button were there. */
+export async function openWaiting(name) {
+  const list = '[aria-label="Waiting on you in their terminal"]';
+  if (!document.querySelector(list)) {
+    document.querySelector(".tg-asks")?.click();
+    await until(() => document.querySelector(list) !== null);
+  }
+  const rows = document.querySelector(list);
+  const row = [...(rows?.querySelectorAll("li") ?? [])].find((item) => item.textContent.includes(name));
+  const button = [...(row?.querySelectorAll("button") ?? [])].find((item) => item.textContent.includes("Open terminal"));
+  if (!button) return false;
+  button.click();
+  return true;
+}
+
+/** Answers the team graph read held by the "late" mode, as the engine does once it reads. */
+export function release() {
+  engine.release();
+}
+
+/** Types a draft into the open terminal panel's message box, as the owner does. Input: the
+ * text. Output: whether the box was there. */
+export function type(text) {
+  const box = document.querySelector(".tg-composer-input");
+  if (!box) return false;
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(box, text);
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
+}
+
+/** Clicks the button named `name`, by its text or its label, inside the first element the
+ * selector finds. Inputs: the selector and the name. Output: whether the button was there. */
+export function press(selector, name) {
+  const scope = document.querySelector(selector);
+  const button = [...(scope?.querySelectorAll("button") ?? [])].find((item) => item.textContent.trim() === name || item.getAttribute("aria-label") === name);
+  if (!button) return false;
+  button.click();
+  return true;
+}
+
+/** What the owner sees around the panel: the names of the graph head's own buttons in order,
+ * where the cursor is, the open dialog's title and text, the pause calls the engine took and
+ * the notes the page left. */
+export function around() {
+  const dialog = document.querySelector("dialog[open]");
+  return {
+    head: [...(document.querySelector(".tg-head")?.querySelectorAll(":scope > button") ?? [])].map((item) => item.textContent.trim()),
+    headGaps: [...(document.querySelector(".tg-head")?.querySelectorAll(":scope > button") ?? [])].map((item, index, all) =>
+      index === 0 ? 0 : Math.round(item.getBoundingClientRect().left - all[index - 1].getBoundingClientRect().right)),
+    focused: document.activeElement?.getAttribute("placeholder") ?? document.activeElement?.tagName ?? null,
+    dialog: dialog ? { title: dialog.querySelector("h2")?.textContent ?? "", text: dialog.textContent } : null,
+    cancels: [...engine.cancels],
+    notes: [...engine.notes],
+  };
+}
+
+/** What the page and the engine show now: the terminal panels and their names, the xterm
+ * views on the page, the panels whose terminal is live, and the engine's attached terminal
+ * clients with every attach and detach. */
+export function shown() {
+  const panels = [...document.querySelectorAll("section.tg-terminal")];
+  return {
+    panels: panels.map((panel) => panel.getAttribute("aria-label")),
+    draft: document.querySelector(".tg-composer-input")?.value ?? null,
+    xterms: document.querySelectorAll(".xterm").length,
+    live: panels.filter((panel) => panel.querySelector(".tg-terminal-note")).length,
+    clients: [...engine.clients.values()],
+    attaches: [...engine.attaches],
+    detaches: [...engine.detaches],
+  };
+}
+
+/** The graph's cards as drawn, unzoomed: each card's title, size, the classes of its lines in
+ * order and whether its lines fit inside it; and the live label's words, width, the width of
+ * its badge row and whether its words are cut. */
+export function cards() {
+  const live = document.querySelector(".tg-edge-label.live");
+  const clip = live?.querySelector(".tg-clip");
+  return {
+    cards: [...document.querySelectorAll(".tg-card")].map((card) => {
+      const open = card.querySelector(".tg-card-open");
+      return {
+        title: card.querySelector(".tg-card-title .tg-clip")?.textContent ?? "",
+        w: card.offsetWidth,
+        h: card.offsetHeight,
+        lines: [...open.children].map((line) => line.className.split(" ")[0]),
+        fits: open.scrollHeight <= open.clientHeight,
+      };
+    }),
+    live: live ? { text: clip.textContent, w: live.offsetWidth, row: live.parentElement.offsetWidth, cut: clip.scrollWidth > clip.clientWidth } : null,
+  };
+}
+
+/** Opens Agent settings from the view switch, waits for its settings, and reads the Agents
+ * toolbar row there as the owner reads it: every button and the team line in the row, how
+ * many rows they take, and the drawer's title once the row's "N ask you" is clicked. */
+export async function settingsBar() {
+  [...document.querySelectorAll("#panel button")].find((item) => item.textContent.trim() === "Agent settings")?.click();
+  await until(() => document.querySelector("#panel .tg-split") === null && document.querySelector("#panel .tg-head") !== null);
+  const items = [...document.querySelectorAll("#panel .tg-head button, #panel .tg-head .tg-summary")]
+    .filter((item) => item.offsetParent !== null && !item.parentElement.closest(".tg-summary"));
+  const middles = items.map((item) => item.getBoundingClientRect()).map((box) => box.top + box.height / 2).sort((a, b) => a - b);
+  document.querySelector("#panel .tg-head .tg-asks")?.click();
+  await until(() => document.querySelector("dialog[open]") !== null);
+  return {
+    names: items.map((item) => item.textContent.replace(/\s+/gu, " ").trim() || item.getAttribute("aria-label")),
+    rows: middles.filter((middle, index) => index === 0 || middle - middles[index - 1] > 8).length,
+    settings: document.querySelector("#panel .tg-split") === null,
+    drawer: document.querySelector("dialog[open] h2")?.textContent ?? null,
+  };
+}
+
+/** How the Agents toolbar fits its window: how far .main, the page's scroller, scrolls
+ * sideways and which of the row's parts reach past the row's own edge. Output: `sideways` in
+ * pixels and `past`, the words of each part that overflows. */
+export function toolbarFit() {
+  const scroller = document.querySelector(".main");
+  const head = document.querySelector("#panel .tg-head");
+  const edge = head.getBoundingClientRect();
+  return {
+    sideways: scroller.scrollWidth - scroller.clientWidth,
+    past: [...head.querySelectorAll("*")].filter((part) => {
+      const box = part.getBoundingClientRect();
+      return box.width > 1 && (box.right > edge.right + 0.5 || box.left < edge.left - 0.5);
+    }).map((part) => part.textContent.trim()),
+    rows: new Set([...head.children].map((part) => Math.round(part.getBoundingClientRect().top))).size,
+  };
+}
+
+/** The Agents toolbar as the owner reads it, left to right: every button and the team line
+ * above the graph, outside dialogs, with how many rows they take, how far apart their centres
+ * sit, the space between the lowest of them and the graph, and whether a Questions for you
+ * section shows on the page. */
+export function toolbar() {
+  const split = document.querySelector(".tg-split");
+  const above = (item) => split !== null && (item.compareDocumentPosition(split) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  const items = [...document.querySelectorAll("#panel button, #panel .tg-summary")]
+    .filter((item) => above(item) && item.offsetParent !== null && !item.closest("dialog") && !item.parentElement.closest(".tg-summary"));
+  const boxes = items.map((item) => item.getBoundingClientRect());
+  const middles = boxes.map((box) => box.top + box.height / 2).sort((a, b) => a - b);
+  const rows = middles.filter((middle, index) => index === 0 || middle - middles[index - 1] > 8).length;
+  return {
+    names: items.map((item) => item.textContent.replace(/\s+/gu, " ").trim() || item.getAttribute("aria-label")),
+    rows,
+    spread: Math.round((middles[middles.length - 1] - middles[0]) * 10) / 10,
+    gap: split === null || boxes.length === 0 ? null : Math.round(split.getBoundingClientRect().top - Math.max(...boxes.map((box) => box.bottom))),
+    questions: [...document.querySelectorAll("#panel section")].some((item) => !item.closest("dialog") && /^Questions for you/u.test(item.getAttribute("aria-label") ?? item.querySelector("h3")?.textContent ?? "")),
+  };
+}
+
+/** The Team view's folds under the graph and where each team part sits: Stop all, Start all
+ * again and the stopped team's line, the Hand a task form, the team table, the task list, the
+ * wake rules and the Usage card, each as the label of the fold it is in, "page" when outside
+ * every fold, or null when it is not on the page; and whether Start all again comes before
+ * the graph. */
+export function folds() {
+  const heading = (text) => [...document.querySelectorAll("#panel h2, #panel h3, #panel h4")].find((item) => item.textContent.trim() === text) ?? null;
+  const button = (text) => [...document.querySelectorAll("#panel button")].find((item) => item.textContent.trim() === text) ?? null;
+  const start = button("Start all again");
+  const graph = document.querySelector("#panel section.tg");
+  const parts = {
+    "Stop all": button("Stop all"),
+    "Start all again": start,
+    "Team stopped": [...document.querySelectorAll("#panel [role=status]")].find((item) => item.textContent.startsWith("Every agent of this project is stopped")) ?? null,
+    "Hand a task": document.querySelector("#panel form.tg-hand"),
+    "Team agents": document.querySelector("#pj-team-title"),
+    "Team tasks": document.querySelector('#panel [aria-label="Team tasks"]'),
+    "Wake rules": heading("Wake the master for this project"),
+    "Usage": heading("Usage"),
+  };
+  return {
+    folds: [...document.querySelectorAll("#panel details")].map((item) => ({ label: item.getAttribute("aria-label"), open: item.open })),
+    parts: Object.fromEntries(Object.entries(parts).map(([name, item]) => [name, item === null ? null : item.closest("details")?.getAttribute("aria-label") ?? "page"])),
+    stopped: parts["Team stopped"]?.textContent ?? null,
+    startAboveGraph: start !== null && graph !== null && (start.compareDocumentPosition(graph) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+  };
+}
+
+/** Where the keyboard is: the text of the drawer row that holds the focus, or null when the
+ * focus is outside every row of an open drawer; and the page's location hash. */
+export function focused() {
+  const row = document.activeElement?.closest("dialog.drawer[open] li") ?? null;
+  return { row: row?.textContent ?? null, hash: location.hash };
+}
+
+/** The open drawer: its title and the labels of its sections, or null when none is open. */
+export function drawer() {
+  const open = document.querySelector("dialog.drawer[open]");
+  if (!open) return null;
+  return {
+    title: open.querySelector("h2")?.textContent ?? "",
+    sections: [...open.querySelectorAll("section")].map((item) => item.getAttribute("aria-label") ?? item.querySelector("h3")?.textContent ?? ""),
+  };
+}
+
+/** Gives the page the app's local storage, which this blank test page lacks, holding a
+ * saved input choice under a key, or nothing for an app that never saved one. Inputs: the
+ * choice, or null, and the key, by default the Terminal input setting's own. */
+export function saveInput(choice, key = "crazyagent.terminal-input") {
+  kept.clear();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => kept.set(key, value) },
+  });
+  if (choice !== null) kept.set(key, choice);
+}
+
+/** The prompts the owner sent from a message box, as the engine got them. Output: their texts. */
+export function sentPrompts() {
+  return engine.prompts;
+}
+
+/** Opens one agent's terminal through one real door of the app: "agents" clicks its graph
+ * card, "wall" draws the wall window's tiles, "activity" clicks its Team activity row and
+ * "master" draws the running Master tab. Inputs: the door and the agent's name. */
+export async function openDoor(door, name) {
+  mount(0);
+  if (door === "agents") {
+    await until(() => document.querySelectorAll(".tg-card-open").length === 4);
+    click(name);
+  } else if (door === "wall") {
+    flushSync(() => root.render(createElement(WallGrid, { projectId: "alpha", tiles: TEAM.nodes, nodes: TEAM.nodes, perWindow: 4, onStop: () => {} })));
+  } else if (door === "activity") {
+    flushSync(() => root.render(createElement(TeamActivity, { data: shownData, children: null })));
+    await until(() => document.querySelector(".ta-row") !== null);
+    [...document.querySelectorAll(".ta-row")].find((row) => row.textContent.includes(name))?.click();
+  } else {
+    flushSync(() => root.render(createElement(LiveMasterView, { data: shownData, harness: "codex", live: { kind: "running", node: TEAM.nodes[0] }, onStart: async () => {} })));
+  }
+}
+
+/** The Team activity rows as the owner reads them, once they are drawn. Output: their labels. */
+export async function activityNames() {
+  await until(() => document.querySelector(".ta-row") !== null);
+  return [...document.querySelectorAll(".ta-row")].map((row) => row.getAttribute("aria-label"));
+}
+
+/** What one agent's terminal offers once it is live: how many message boxes and Send buttons
+ * it has, the Message buttons in its head, or null with no head, its status line and how many
+ * text areas the whole page shows besides the terminals' own.
+ * Input: the agent's name. Output: those, or null when no such terminal is on the page. */
+export async function doorShown(name) {
+  const panel = () => [...document.querySelectorAll("section.tg-terminal")].find((item) => item.getAttribute("aria-label") === `${name} terminal`);
+  await until(() => Boolean(panel()?.querySelector(".tg-terminal-note [role=status]")));
+  const found = panel();
+  if (!found) return null;
+  const head = found.querySelector(".tg-terminal-head");
+  return {
+    boxes: found.querySelectorAll("textarea.tg-composer-input").length,
+    sends: found.querySelectorAll("button[type=submit]").length,
+    messages: head ? [...head.querySelectorAll("button")].filter((item) => item.textContent.trim() === "Message" || item.getAttribute("aria-label") === `Message ${name}`).length : null,
+    onPage: [...document.querySelectorAll("textarea:not(.xterm-helper-textarea)")].filter((item) => item.getClientRects().length > 0).length,
+    note: found.querySelector(".tg-terminal-note [role=status]")?.textContent ?? null,
+  };
+}

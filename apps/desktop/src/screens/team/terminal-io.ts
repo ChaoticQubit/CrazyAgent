@@ -6,8 +6,8 @@ export const SIZE_MIN = 2;
 export const SIZE_MAX = 1000;
 export const QUEUED_CHUNKS_MAX = 256;
 
-/** Where the owner types to a live master: straight into its terminal, only in the message
- * box under it, or in both. */
+/** Where the owner types to a master or an agent: straight into its terminal, only in the
+ * message box under it, or in both. */
 export type InputChoice = "terminal" | "box" | "both";
 export const INPUT_DEFAULT: InputChoice = "terminal";
 export const INPUT_CHOICES: { value: InputChoice; label: string }[] = [
@@ -16,8 +16,8 @@ export const INPUT_CHOICES: { value: InputChoice; label: string }[] = [
   { value: "both", label: "Both" },
 ];
 
-/** Reads a stored master input choice. Input: the stored text, if any. Output: the choice,
- * or `INPUT_DEFAULT` for anything else. */
+/** Reads the stored Terminal input choice, which every terminal follows. Input: the stored
+ * text, if any. Output: the choice, or `INPUT_DEFAULT` for anything else. */
 export function inputChoice(stored: string | null): InputChoice {
   const known = INPUT_CHOICES.find((choice) => choice.value === stored);
   return known ? known.value : INPUT_DEFAULT;
@@ -161,16 +161,21 @@ export function keyQueue(run: (job: () => Promise<boolean>) => boolean, send: (c
  * reports that arrive while earlier input is still being sent wait as one batch that later
  * reports join, so a fast scroll costs a few sends rather than one per wheel event and never
  * fills the queue. Typed bytes close the batch, so keys and scrolling keep their order.
- * Inputs: the queue and the send call for one chunk. Output: the two lanes. */
-export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[]) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
-  const keys = keyQueue(run, send);
+ * Inputs: the queue and the send call for one chunk, told whether the wheel made it.
+ * Output: the two lanes. */
+export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: (chunk: number[], wheel: boolean) => Promise<boolean>): { typed: (bytes: Uint8Array) => void; wheel: (bytes: Uint8Array) => void } {
+  const keys = keyQueue(run, (chunk) => send(chunk, false));
+  const scrolls = keyQueue(run, (chunk) => send(chunk, true));
   let batch: number[] | null = null;
   const typed = (bytes: Uint8Array) => {
     batch = null;
     keys(bytes);
   };
   const wheel = (bytes: Uint8Array) => {
-    if (bytes.length > INPUT_BYTES_MAX) return typed(bytes);
+    if (bytes.length > INPUT_BYTES_MAX) {
+      batch = null;
+      return scrolls(bytes);
+    }
     if (batch && batch.length + bytes.length <= INPUT_BYTES_MAX) {
       batch.push(...bytes);
       return;
@@ -178,7 +183,7 @@ export function inputLanes(run: (job: () => Promise<boolean>) => boolean, send: 
     const waiting = Array.from(bytes);
     batch = run(() => {
       if (batch === waiting) batch = null;
-      return send(waiting);
+      return send(waiting, true);
     }) ? waiting : null;
   };
   return { typed, wheel };
@@ -260,6 +265,20 @@ export function pasteText(text: string): string {
   return kept;
 }
 
+/** The key that makes a drag select text while the app in a terminal reads the mouse: xterm
+ * then sends a plain drag to the app, and only a drag with this key held selects. Input:
+ * whether this is a Mac. Output: Option on a Mac, Shift elsewhere. */
+export function dragKey(mac: boolean): "Option" | "Shift" {
+  return mac ? "Option" : "Shift";
+}
+
+/** What a live terminal says while the app in it reads the mouse, as an agent in its
+ * Fullscreen display does, so the owner can still select and copy. Input: whether this is a
+ * Mac. Output: the sentence. */
+export function selectNote(mac: boolean): string {
+  return `Hold ${dragKey(mac)} and drag to select text; the app in this terminal reads the mouse.`;
+}
+
 /** What one terminal channel message means for the view. */
 export type TerminalEvent =
   | { kind: "output"; bytes: Uint8Array }
@@ -270,7 +289,7 @@ const END_COPY: Record<string, string> = {
   terminal_agent_unknown: "This agent's terminal isn't running. It may have finished or not started yet.",
   terminal_ended: "This run finished. Its last screen stays above.",
   terminal_unavailable: "Terminals need tmux, and it isn't ready on this Mac. Run setup again from Settings.",
-  terminal_viewers_full: "Too many terminals are open. Close one and try again.",
+  terminal_viewers_full: "Terminal limit reached. Close a terminal or a terminal window, then open this one again.",
   terminal_agent_mismatch: "The engine opened a different agent's terminal, so the view closed.",
   terminal_connection_lost: "Lost the connection to this terminal. Open it again to reconnect.",
   terminal_connection_closed: "The engine closed this terminal view. Open it again to reconnect.",
