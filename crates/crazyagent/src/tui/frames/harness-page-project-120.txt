@@ -1,16 +1,21 @@
  [◆▪◆▪] CrazyAgent  /  Fieldnotes Mobile  /  Harnesses  /  Codex                                                        
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Codex settings for Fieldnotes Mobile                                                         Codex 0.51.0, qualified  
-  Only Fieldnotes Mobile gets the values set here; App and Default rows follow Settings > Harnesses. A change applies   
-  the next time Codex starts.                                                                                           
+  Codex                                                                                                                 
+                                                                                                                        
+  Codex 0.51.0 is qualified. You can change the settings below.                                                         
+  Changes apply the next time a master or agent starts with this harness. Running ones keep their settings. A value     
+  set here wins over the app value for this project only.                                                               
                                                                                                                         
     Setting                           Value                             From                                            
+  Settings (2)                                                                                                          
   > Hide agent reasoning              On                                Project                                         
     Reasoning effort                  low                               Project                                         
+  Set by CrazyAgent (3)                                                                                                 
     Project doc limit                 0                                 ⊘ Locked                                        
-    Status label                      Empty                             ⊘ Read-only                                     
     Sandbox                           Not set                           ⊘ Locked                                        
     Approvals                         never                             ⊘ Locked                                        
+  Read-only (1)                                                                                                         
+    Status label                      Empty                             ⊘ Read-only                                     
                                                                                                                         
   Hide agent reasoning                                                                            hide_agent_reasoning  
   Fixture: hides reasoning events in the agent's output.                                                                
@@ -28,9 +33,4 @@
                                                                                                                         
                                                                                                                         
                                                                                                                         
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
-                                                                                                                        
- Space Turn on or off   x Reset   ↑↓ Move   r Read again   Esc Back                                              ? Help 
+ Space Turn on or off   x Reset   ↑↓ Move   r Read again   Esc All harnesses                                     ? Help 
