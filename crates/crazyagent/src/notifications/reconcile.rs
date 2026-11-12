@@ -62,6 +62,7 @@ impl Ticker {
 /// One open item of an Action kind as `sync` compares it.
 struct Open {
     id: i64,
+    project: Option<String>,
     text: String,
     target: String,
     dismissed: bool,
@@ -95,12 +96,12 @@ fn open_items(
     let mut open = BTreeMap::new();
     let mut statement = connection
         .prepare(
-            "SELECT id, subject, text, target, dismissed_ms IS NOT NULL FROM owner_notices
+            "SELECT id, subject, text, target, dismissed_ms IS NOT NULL, project FROM owner_notices
              WHERE kind=?1 AND resolved_ms IS NULL ORDER BY id LIMIT ?2",
         )
         .map_err(error)?;
     for kind in kinds {
-        let rows: Vec<(i64, String, String, String, bool)> = statement
+        let rows: Vec<(i64, String, String, String, bool, Option<String>)> = statement
             .query_map(params![kind.name(), super::ROWS_MAX], |row| {
                 Ok((
                     row.get(0)?,
@@ -108,14 +109,16 @@ fn open_items(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             })
             .map_err(error)?
             .collect::<Result<_, _>>()
             .map_err(error)?;
-        for (id, subject, text, target, dismissed) in rows {
+        for (id, subject, text, target, dismissed, project) in rows {
             let item = Open {
                 id,
+                project,
                 text,
                 target,
                 dismissed,
@@ -126,17 +129,34 @@ fn open_items(
     Ok(open)
 }
 
+/// Whether a source's cap kept an open item from being read: its whole kind, or its kind in
+/// its project, was read only in part. Inputs: the parts read in part, the item's kind and
+/// project. Output: true when the item must stay as it is.
+fn held(
+    partial: &[(NoticeKind, Option<ProjectId>)],
+    kind: NoticeKind,
+    project: Option<&str>,
+) -> bool {
+    partial.iter().any(|(held_kind, held_project)| {
+        *held_kind == kind
+            && match held_project {
+                None => true,
+                Some(held_project) => Some(held_project.as_str()) == project,
+            }
+    })
+}
+
 /// Compares the live conditions with the open items. Inputs: the kinds whose sources were
-/// read, those of them read only in part, the conditions and the open items. Output: the
-/// plan, which resolves and deletes nothing of a kind read only in part.
+/// read, the parts of them read only in part, the conditions and the open items. Output:
+/// the plan, which resolves and deletes nothing in a part read only in part.
 fn plan<'a>(
     kinds: &[NoticeKind],
-    partial: &[NoticeKind],
+    partial: &[(NoticeKind, Option<ProjectId>)],
     live: &'a [Condition],
     open: &BTreeMap<(NoticeKind, String), Open>,
 ) -> Result<Plan<'a>, EngineError> {
     assert!(kinds.iter().all(|kind| kind.class() == NoticeClass::Action));
-    assert!(partial.iter().all(|kind| kinds.contains(kind)));
+    assert!(partial.iter().all(|(kind, _)| kinds.contains(kind)));
     assert!(live.iter().all(|condition| kinds.contains(&condition.kind)));
     let mut keys = BTreeSet::new();
     let mut plan = Plan::default();
@@ -159,7 +179,10 @@ fn plan<'a>(
         }
     }
     for (key, item) in open {
-        if keys.contains(key) || !kinds.contains(&key.0) || partial.contains(&key.0) {
+        if keys.contains(key) || !kinds.contains(&key.0) {
+            continue;
+        }
+        if held(partial, key.0, item.project.as_deref()) {
             continue;
         }
         if item.dismissed {
@@ -175,13 +198,13 @@ fn plan<'a>(
 /// condition opens a pending unread item, a changed one takes the new text and page, and an
 /// item whose condition is gone is resolved and read, or deleted when the owner had hidden
 /// it. Kinds not listed are left alone, so a source that could not be read resolves nothing,
-/// and a kind read only in part opens and updates items but resolves none. Inputs: the
-/// transaction, the kinds, those read in part, the conditions and the time. Output: Ok, or
-/// the SQLite failure.
+/// and a part read only in part (a whole kind, or one project of it) opens and updates items
+/// but resolves none. Inputs: the transaction, the kinds, the parts read in part, the
+/// conditions and the time. Output: Ok, or the SQLite failure.
 pub(crate) fn sync(
     tx: &Transaction<'_>,
     kinds: &[NoticeKind],
-    partial: &[NoticeKind],
+    partial: &[(NoticeKind, Option<ProjectId>)],
     live: &[Condition],
     now: i64,
 ) -> Result<(), EngineError> {
@@ -344,8 +367,12 @@ fn activity_import(connection: &Connection, now: i64) -> Result<Option<Import>, 
     let to = rows.last().map_or(last, |row| row.0);
     let mut items = Vec::new();
     for (id, project, at_ms, kind, text, change_set) in rows {
-        let (Ok(project_id), Some(kind)) = (ProjectId::new(project), ActivityKind::parse(&kind))
-        else {
+        let (Ok(project_id), Some(kind)) = (
+            ProjectId::new(project),
+            ActivityKind::ALL
+                .into_iter()
+                .find(|known| known.name() == kind),
+        ) else {
             continue;
         };
         if now - at_ms > IMPORT_AGE_MS_MAX {

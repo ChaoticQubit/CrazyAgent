@@ -22,7 +22,7 @@ pub const ACTION_IDS_MAX: usize = 256;
 pub const RETENTION_DAYS_MIN: u16 = 1;
 pub const RETENTION_DAYS_MAX: u16 = 365;
 pub const RETENTION_DAYS_DEFAULT: u16 = 30;
-pub const ROWS_MAX: i64 = 5_000;
+pub const ROWS_MAX: i64 = 10_000;
 pub const COUNT_MAX: u32 = 9_999;
 pub const LISTED_BYTES_MAX: usize = 48 * 1024;
 pub const TICK_MS: i64 = 2_000;
@@ -455,18 +455,55 @@ pub enum NoticeReport {
     EngineLost,
 }
 
+/// One folded row as a client listed it: its kind, its project, the filter it was listed
+/// under and its newest id, so a change reaches every item the row holds and none newer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NoticeFold {
+    pub kind: NoticeKind,
+    pub project_id: Option<ProjectId>,
+    pub filter: NoticeFilter,
+    pub newest: i64,
+}
+
+/// What a fold change does to every item of its folds: mark read, mark unread or delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FoldChange {
+    Read,
+    Unread,
+    Delete,
+}
+
 /// What a client changes in the store: marks items read or unread, deletes them (a pending
-/// Action is hidden until its state clears), marks every item of one project or all read,
-/// saves the settings, or reports a client event.
+/// Action is hidden until its state clears), does one of those to every item of folded
+/// rows, marks every item of one project or all read, saves the settings, or reports a
+/// client event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum NoticeAction {
-    Read { ids: Vec<i64> },
-    Unread { ids: Vec<i64> },
-    Delete { ids: Vec<i64> },
-    ReadAll { project_id: Option<ProjectId> },
-    SaveSettings { settings: NoticeSettings },
-    Report { report: NoticeReport },
+    Read {
+        ids: Vec<i64>,
+    },
+    Unread {
+        ids: Vec<i64>,
+    },
+    Delete {
+        ids: Vec<i64>,
+    },
+    Folds {
+        folds: Vec<NoticeFold>,
+        change: FoldChange,
+    },
+    ReadAll {
+        project_id: Option<ProjectId>,
+    },
+    SaveSettings {
+        settings: NoticeSettings,
+    },
+    Report {
+        report: NoticeReport,
+    },
 }
 
 /// One Info event an engine producer records: its kind, project, a key that makes the same
@@ -904,7 +941,8 @@ fn save(tx: &Transaction<'_>, settings: &NoticeSettings) -> Result<Outcome, Engi
 
 /// Applies one owner change to the store. Inputs: the transaction, the change and the
 /// time. Output: Applied, or a rejection that changes nothing: `notification_ids_invalid`
-/// for no ids or more than `ACTION_IDS_MAX`, `notification_settings_invalid`, or
+/// for no ids or more than `ACTION_IDS_MAX`, `notification_folds_invalid` for no folds,
+/// more than `PAGE_MAX` or a negative newest id, `notification_settings_invalid`, or
 /// `notification_report_invalid`.
 pub(crate) fn apply(
     tx: &Transaction<'_>,
@@ -934,6 +972,15 @@ pub(crate) fn apply(
             None,
         )?,
         NoticeAction::Delete { ids } => delete(tx, ids, now)?,
+        NoticeAction::Folds { folds, change } => {
+            let bounded = !folds.is_empty() && folds.len() <= usize::from(PAGE_MAX);
+            if !bounded || folds.iter().any(|fold| fold.newest < 0) {
+                return Ok(rejected("notification_folds_invalid"));
+            }
+            for fold in folds {
+                fold_change(tx, fold, *change, now)?;
+            }
+        }
         NoticeAction::ReadAll { project_id } => {
             tx.execute(
                 "UPDATE owner_notices SET read_ms=?2 WHERE read_ms IS NULL AND dismissed_ms IS NULL
@@ -960,6 +1007,63 @@ fn each(tx: &Transaction<'_>, ids: &[i64], sql: &str, now: Option<i64>) -> Resul
             None => statement.execute(params![id]),
         }
         .map_err(error)?;
+    }
+    Ok(())
+}
+
+/// Does one change to every visible item of one fold: its kind and project, in its filter,
+/// at or below its newest id; a delete removes Info items and resolved Actions and hides
+/// pending Actions (decision 2). The store's `ROWS_MAX` bounds the rows it reaches. Inputs:
+/// the transaction, the fold, the change and the time. Output: Ok, or the SQLite failure.
+fn fold_change(
+    tx: &Transaction<'_>,
+    fold: &NoticeFold,
+    change: FoldChange,
+    now: i64,
+) -> Result<(), EngineError> {
+    assert!(fold.newest >= 0);
+    assert!(now >= 0);
+    let scope = format!(
+        "dismissed_ms IS NULL AND ({}) AND kind=?1 AND project IS ?2 AND id<=?3",
+        filter_sql(fold.filter)
+    );
+    let kind = fold.kind.name();
+    let project = fold.project_id.as_ref().map(ProjectId::as_str);
+    let run = |sql: String, timed: bool| -> Result<usize, EngineError> {
+        let ran = if timed {
+            tx.execute(&sql, params![kind, project, fold.newest, now])
+        } else {
+            tx.execute(&sql, params![kind, project, fold.newest])
+        };
+        ran.map_err(error)
+    };
+    match change {
+        FoldChange::Read => {
+            run(
+                format!("UPDATE owner_notices SET read_ms=?4 WHERE {scope} AND read_ms IS NULL"),
+                true,
+            )?;
+        }
+        FoldChange::Unread => {
+            run(
+                format!("UPDATE owner_notices SET read_ms=NULL WHERE {scope}"),
+                false,
+            )?;
+        }
+        FoldChange::Delete => {
+            run(
+                format!(
+                    "DELETE FROM owner_notices WHERE {scope} AND NOT (action=1 AND resolved_ms IS NULL)"
+                ),
+                false,
+            )?;
+            run(
+                format!(
+                    "UPDATE owner_notices SET dismissed_ms=?4 WHERE {scope} AND action=1 AND resolved_ms IS NULL"
+                ),
+                true,
+            )?;
+        }
     }
     Ok(())
 }

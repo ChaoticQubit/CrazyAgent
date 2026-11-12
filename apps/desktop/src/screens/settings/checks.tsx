@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import type { Result } from "../../api";
 import {
   approveProfile, checkRows, checksBelowLabel, checksChanged, checksKeyText, checksOptionText, checksRefusal, checksValues, holdoutFiles,
@@ -7,7 +7,7 @@ import {
 } from "../../api-checks";
 import type { CheckSpec, ChecksKey, ChecksSettingRow, ChecksSettingsPage, ChecksValue, ProfileRow, StoredProfile } from "../../api-checks";
 import { useLoad, type Loaded } from "../../state";
-import { Button, ConfirmDialog, LoadError, NotReady, Notice, Panel, RadioCard, Skeleton, TextArea } from "../../ui";
+import { Button, ConfirmDialog, LoadError, NotReady, Notice, RadioCard, SettingLine, SettingSection, Skeleton, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import "../project/tests.css";
 
@@ -24,24 +24,26 @@ function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-/** One checks setting: its label and help, then the layer below and every option, each with
- * one line saying what it does. Inputs: the row, the scope, the current pick and the change
- * handler. Output: the fieldset. */
-export function ChecksKeyField({ row, scope, picked, onPick }: { row: ChecksSettingRow; scope: ChecksScope; picked: ChecksPicked; onPick: (value: ChecksValue | null) => void }) {
+/** One checks setting as a Settings line: its label, marked when the choice differs from the
+ * layer below, and help, then the layer below and every option, each with one line saying
+ * what it does. Inputs: the row, the scope, the current pick, whether a save is running and
+ * the change handler. Output: the line. */
+export function ChecksKeyField({ row, scope, picked, busy, onPick }: { row: ChecksSettingRow; scope: ChecksScope; picked: ChecksPicked; busy: boolean; onPick: (value: ChecksValue | null) => void }) {
   const name = `cs-${row.key}`;
   const text = checksKeyText(row.key);
   const chosen = Object.hasOwn(picked, row.key) ? picked[row.key] ?? null : row.here;
-  return <fieldset className="stack-small tt-key" aria-describedby={`${name}-help`}>
-    <legend className="tt-label">{text.label}</legend>
-    <p id={`${name}-help`} className="helper">{text.help}</p>
-    <RadioCard name={name} value="below" checked={chosen === null} onChecked={() => onPick(null)}
-      title={checksBelowLabel(row, scope)} details={[checksOptionText(row.key, row.below).line]} />
-    {row.options.map((option) => {
-      const words = checksOptionText(row.key, option);
-      return <RadioCard key={String(option)} name={name} value={String(option)} checked={chosen === option}
-        onChecked={() => onPick(option)} title={words.label} details={[words.line]} />;
-    })}
-  </fieldset>;
+  return <SettingLine wide label={text.label} help={<span id={`${name}-help`}>{text.help}</span>} changed={chosen !== null && chosen !== row.below}>
+    <fieldset className="field" disabled={busy} aria-describedby={`${name}-help`}>
+      <legend className="visually-hidden">{text.label}</legend>
+      <RadioCard name={name} value="below" checked={chosen === null} onChecked={() => onPick(null)}
+        title={checksBelowLabel(row, scope)} details={[checksOptionText(row.key, row.below).line]} />
+      {row.options.map((option) => {
+        const words = checksOptionText(row.key, option);
+        return <RadioCard key={String(option)} name={name} value={String(option)} checked={chosen === option}
+          onChecked={() => onPick(option)} title={words.label} details={[words.line]} />;
+      })}
+    </fieldset>
+  </SettingLine>;
 }
 
 /** Everything a checks settings page shows and the actions it offers, without engine calls. */
@@ -58,26 +60,35 @@ export interface ChecksSettingsViewProps {
   onRetry: () => void;
 }
 
-/** One scope's checks settings as a pure view of the read: when changes apply, every setting
- * with every option, Save once something changed and, on a project page that sets a key,
- * "Use app default". Input: the view props. Output: the page body. */
+/** One scope's checks settings as a pure view of the read, in the Settings section parts: the
+ * Check rules section saying when changes apply, every setting with every option, then Save
+ * changes, enabled once something changed, and, on a project page that sets a key, "Use app
+ * default". Input: the view props. Output: the page body. */
 export function ChecksSettingsView(props: ChecksSettingsViewProps) {
   const { page, scope, projectId, picked, busy, note } = props;
-  if (page.kind === "loading") return <Skeleton shape="card" />;
-  if (page.kind === "not_ready") return <NotReady what="Check settings" compact />;
+  if (page.kind === "loading") return <Skeleton shape="line" count={4} />;
+  if (page.kind === "not_ready") return <NotReady what="Check settings" />;
   if (page.kind === "error") return <LoadError message={checksRefusal(page)} onRetry={props.onRetry} />;
   assert((scope === "app") === (projectId === null), "only a project page names a project");
   assert(page.value.project_id === projectId, "the page is for the scope shown");
   const rows = page.value.keys;
-  return <div className="stack tt-page">
-    <p className="small muted">{EFFECT_LINE}{scope === "project" ? " A value set here wins over the app value for this project only." : ""}</p>
-    {rows.map((row) => <ChecksKeyField key={row.key} row={row} scope={scope} picked={picked} onPick={(value) => props.onPick(row.key, value)} />)}
-    <span className="row">
-      {checksChanged(rows, picked) && <Button variant="primary" size="small" pending={busy} pendingLabel="Saving..." onClick={props.onSave}>Save</Button>}
-      {scope === "project" && rows.some((row) => row.here !== null) && <Button variant="quiet" size="small" disabled={busy} onClick={props.onUseAppDefault}>Use app default</Button>}
-    </span>
-    {note && <p className="helper tt-note" role="status">{note}</p>}
-  </div>;
+  const changed = checksChanged(rows, picked);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (changed && !busy) props.onSave();
+  }
+  return <form className="pj set-groups" aria-label="Check settings" noValidate onSubmit={submit}>
+    <SettingSection title="Check rules" about={`${EFFECT_LINE}${scope === "project" ? " A value set here wins over the app value for this project only." : ""}`}>
+      {rows.map((row) => <ChecksKeyField key={row.key} row={row} scope={scope} picked={picked} busy={busy} onPick={(value) => props.onPick(row.key, value)} />)}
+      <div className="set-body">
+        {note && <p className="helper" role="status">{note}</p>}
+        <span className="row">
+          <Button type="submit" variant="primary" disabled={!changed} pending={busy} pendingLabel="Saving...">Save changes</Button>
+          {scope === "project" && rows.some((row) => row.here !== null) && <Button variant="quiet" disabled={busy} onClick={props.onUseAppDefault}>Use app default</Button>}
+        </span>
+      </div>
+    </SettingSection>
+  </form>;
 }
 
 /** The note after a save: "Saved.", or the refusal in plain words. Input: the result. Output:
@@ -118,12 +129,18 @@ export function ChecksSettingsPanel({ projectId }: { projectId: string | null })
     onSave={save} onUseAppDefault={useAppDefault} onRetry={reload} />;
 }
 
-/** Settings, Checks: the check settings every project starts from. Output: the panel. */
+const CHECKS_TOP = <div className="settings-top"><div>
+  <h2>Checks</h2>
+  <p>The check settings every project starts from, until a project sets its own in Project Settings, Checks.</p>
+</div></div>;
+
+/** Settings, Checks: the title in every state, then the check settings every project starts
+ * from. Output: the tab. */
 export function ChecksSettings() {
-  return <Panel title="Checks">
-    <p className="secondary">These values apply to every project's checks until a project sets its own in Project Settings, Checks.</p>
+  return <div className="stack">
+    {CHECKS_TOP}
     <ChecksSettingsPanel projectId={null} />
-  </Panel>;
+  </div>;
 }
 
 /** The project's stored profiles newest first, one selectable row each with its state, who

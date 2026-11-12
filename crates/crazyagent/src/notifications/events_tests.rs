@@ -241,3 +241,46 @@ fn an_unknown_harness_or_a_version_that_is_not_plain_records_nothing() {
     harness_update(&connection, "claude", "1.0.0; rm", NOW_MS);
     assert!(items(&connection).is_empty());
 }
+
+#[test]
+fn readings_whose_reset_time_drifts_by_seconds_count_as_one_window() {
+    let (_folder, connection) = store();
+    let relative_ms = 10 * 60 * 1000;
+    polled(&connection, 40.0, 10.0, NOW_MS + relative_ms, NOW_MS);
+    polled(
+        &connection,
+        92.0,
+        10.0,
+        NOW_MS + 30_000 + relative_ms,
+        NOW_MS + 30_000,
+    );
+    polled(
+        &connection,
+        93.0,
+        10.0,
+        NOW_MS + 60_000 + relative_ms,
+        NOW_MS + 60_000,
+    );
+    assert_eq!(
+        texts(&connection),
+        [(
+            NoticeKind::AccountNearLimit,
+            "An account is near its 5-hour limit: 92% used.".to_owned()
+        )]
+    );
+    let later = NOW_MS + 5 * 60 * 60 * 1000;
+    polled(&connection, 95.0, 10.0, later + relative_ms, later);
+    assert_eq!(
+        texts(&connection),
+        [
+            (
+                NoticeKind::AccountNearLimit,
+                "An account is near its 5-hour limit: 95% used.".to_owned()
+            ),
+            (
+                NoticeKind::AccountNearLimit,
+                "An account is near its 5-hour limit: 92% used.".to_owned()
+            ),
+        ]
+    );
+}

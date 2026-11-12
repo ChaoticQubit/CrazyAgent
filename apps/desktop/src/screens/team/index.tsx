@@ -19,6 +19,7 @@ import { openAllHint, wallPages, type PerWindow } from "../terminals/pages";
 import { AgentSide } from "./agent-instructions";
 import { NodeMessages } from "./agent-messages";
 import "./team-graph.css";
+import { markLearned } from "../dashboard/learn";
 
 export { TerminalPanel } from "./terminal-panel";
 
@@ -271,7 +272,9 @@ export function AgentsToolbar({ projectId, name, perWindow, team, line, lead, as
       if (plan.note !== null) setNote(plan.note);
       return;
     }
-    setNote(wallNote(await openTerminalWindows(projectId, name, plan.windows, true)));
+    const opened = await openTerminalWindows(projectId, name, plan.windows, true);
+    if (opened.kind === "ok") markLearned("terminal");
+    setNote(wallNote(opened));
   }
 
   const working = line !== null && team !== null && team.nodes.some((node) => node.kind !== "master") ? graphSummary(team) : null;

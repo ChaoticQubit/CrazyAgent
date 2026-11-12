@@ -709,6 +709,35 @@ async fn an_untrusted_project_ide_opens_in_restricted_mode_with_git_hooks_off() 
     engine.stop().await;
 }
 
+/// CU-1: an IDE server started while the repository was Reviewed runs with VS Code workspace
+/// trust on, so lowering the repository to Untrusted must make its launch policy stop holding
+/// the saved one, also with hooks off, where no other part of the policy changes; the next
+/// open or the trust save's follow then stops it.
+#[tokio::test]
+async fn lowering_trust_makes_an_open_ide_policy_stop_holding_with_hooks_off() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = create_project(&mut owner, "ide-hold", 2).await;
+    let root = engine.root.path();
+    let started = crate::ide::workspace::ide_policy(root, &project).unwrap();
+    assert_eq!(started.access, AgentAccess::Sandboxed);
+    assert!(!started.hooks);
+    assert!(started.holds(started));
+    let lowered = owner
+        .set_project_trust(project.clone(), 0, Trust::Untrusted, false, 3)
+        .await
+        .unwrap();
+    assert_eq!(result(lowered), OwnerResult::Applied);
+    let saved = crate::ide::workspace::ide_policy(root, &project).unwrap();
+    assert_eq!((saved.access, saved.hooks), (started.access, started.hooks));
+    assert!(
+        !started.holds(saved),
+        "a server launched as trusted must not hold for an untrusted repository"
+    );
+    assert!(saved.holds(saved));
+    engine.stop().await;
+}
+
 #[tokio::test]
 async fn a_memory_suggestion_from_an_untrusted_project_is_project_scoped() {
     let engine = Engine::start().await;

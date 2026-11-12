@@ -1121,9 +1121,13 @@ fn an_untrusted_codex_launch_writes_the_folder_untrusted_and_turns_project_docs_
         let mut request = case.request("codex", case.subscription(), tools);
         request.trust = crate::trust::Trust::Untrusted;
         let built = command(&request, None, &run(None)).unwrap();
-        let untrusted = format!(
-            "projects={{\"{}\"={{trust_level=\"untrusted\"}}}}",
-            built.cwd.display()
+        let untrusted = crate::harnesses::codex_folder::untrusted(&built.cwd).unwrap();
+        assert!(
+            untrusted.contains(&format!(
+                "\"{}\"={{trust_level=\"untrusted\"}}",
+                built.cwd.display()
+            )),
+            "{untrusted}"
         );
         let settings: Vec<&[String]> = built.argv.windows(2).collect();
         assert!(

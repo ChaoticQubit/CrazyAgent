@@ -143,26 +143,30 @@ pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> 
 
 /// What a project's IDE server starts from, as the owner saved it in the project's agent
 /// policy: the access level, the network choice an Own branch IDE follows, whether git
-/// in the IDE runs the project's own hooks in its Project section and what the IDE may do to
-/// agent files (DEC-124).
+/// in the IDE runs the project's own hooks in its Project section, what the IDE may do to
+/// agent files (DEC-124) and whether the repository's trust lets VS Code trust the workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdePolicy {
     pub access: AgentAccess,
     pub network: AgentNetwork,
     pub hooks: bool,
     pub agent_files: IdeAgentFiles,
+    pub trusted: bool,
 }
 
 impl IdePolicy {
     /// Tells whether a server launched under this policy still honours the saved one: the
     /// same level, at Own branch the same network choice, which no other level reads, and
-    /// below Full access the same hooks switch and agent folders choice, which have no effect
-    /// at Full. Input: the saved policy. Output: true when the server may keep running.
+    /// below Full access the same hooks switch, agent folders choice and workspace trust,
+    /// which have no effect at Full. Input: the saved policy. Output: true when the server
+    /// may keep running.
     pub fn holds(self, saved: Self) -> bool {
         self.access == saved.access
             && (saved.access != AgentAccess::OwnBranch || self.network == saved.network)
             && (saved.access == AgentAccess::Full
-                || (self.hooks == saved.hooks && self.agent_files == saved.agent_files))
+                || (self.hooks == saved.hooks
+                    && self.agent_files == saved.agent_files
+                    && self.trusted == saved.trusted))
     }
 }
 
@@ -183,10 +187,10 @@ pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, Eng
 }
 
 /// A project's [`IdePolicy`]; the default, Sandboxed with hooks off and the Open network no
-/// Sandboxed IDE reads, when none is saved, and hooks always off for an untrusted repository.
-/// Inputs: the engine root and the project. Output: the policy, or `ide_workspace_unavailable`
-/// for a policy or trust level that cannot be read, so a tampered one never widens the IDE or
-/// turns its hooks on.
+/// Sandboxed IDE reads, when none is saved, and hooks and workspace trust always off for an
+/// untrusted repository. Inputs: the engine root and the project. Output: the policy, or
+/// `ide_workspace_unavailable` for a policy or trust level that cannot be read, so a tampered
+/// one never widens the IDE, turns its hooks on or trusts its workspace.
 pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
     let trust = project_trust(root, project)?;
     let db = open(root)?;
@@ -196,6 +200,7 @@ pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineE
             network: policy.network,
             hooks: policy.ide_git_hooks_under(trust),
             agent_files: policy.ide_agent_files,
+            trusted: crate::trust::Enforcement::for_level(trust).ide_workspace_trust,
         })
         .map_err(unavailable)
 }

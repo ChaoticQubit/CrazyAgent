@@ -108,7 +108,7 @@ fn waiting(connection: &Connection, project_id: &str, agent: i64) {
     connection
         .execute(
             "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
-             VALUES (?1,?2,'sub','codex',0,'running',?3,?3)",
+             VALUES (?1,?2,'sub','codex',0,'working',?3,?3)",
             params![agent, project_id, NOW_MS],
         )
         .unwrap();
@@ -120,11 +120,31 @@ fn waiting(connection: &Connection, project_id: &str, agent: i64) {
         .unwrap();
 }
 
+fn team_agent(connection: &Connection, project_id: &str, agent: i64) {
+    connection
+        .execute(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,?2,'sub','codex',0,'idle',?3,?3)",
+            params![agent, project_id, NOW_MS],
+        )
+        .unwrap();
+}
+
 fn open_in(connection: &Connection, project_id: &str) -> Vec<Notice> {
-    all(connection)
-        .into_iter()
-        .filter(|item| item.project_id == Some(project(project_id)) && item.resolved_ms.is_none())
-        .collect()
+    page(
+        connection,
+        &NoticeQuery {
+            filter: NoticeFilter::Pending,
+            project_id: Some(project(project_id)),
+            kind: None,
+            fold: false,
+            before: None,
+            after: None,
+            limit: PAGE_MAX,
+        },
+    )
+    .unwrap()
+    .items
 }
 
 fn research(connection: &Connection, project_id: &str, status: &str) -> i64 {
@@ -275,6 +295,28 @@ fn a_pending_question_past_the_source_cap_stays_pending_while_the_cap_hides_it()
     reconcile(&mut connection, &nobody(), NOW_MS + 2).unwrap();
     assert!(open_in(&connection, "p2").is_empty());
     assert_eq!(open_in(&connection, "p1")[0].id, before[0].id);
+}
+
+#[test]
+fn many_team_projects_with_nothing_open_never_hold_back_an_answered_question() {
+    let (_folder, mut connection) = engine();
+    for agent in 1..=65 {
+        team_agent(&connection, &format!("p{agent:02}"), agent);
+    }
+    let id = ask(&connection, "p01", None, "Which database should we use?");
+    reconcile(&mut connection, &nobody(), NOW_MS).unwrap();
+    assert_eq!(open_in(&connection, "p01").len(), 1);
+    connection
+        .execute(
+            "UPDATE questions_log SET status='answered' WHERE id=?1",
+            [id],
+        )
+        .unwrap();
+    reconcile(&mut connection, &nobody(), NOW_MS + 1).unwrap();
+    assert!(
+        open_in(&connection, "p01").is_empty(),
+        "the answered question resolves"
+    );
 }
 
 #[test]

@@ -25,6 +25,7 @@ pub mod checks;
 mod cleanup;
 mod coord;
 mod coord_questions;
+mod demo;
 pub mod harness_settings;
 mod harnesses;
 pub mod ide;
@@ -659,6 +660,9 @@ impl NativeBridge {
             }
             OwnerMutation::SetupProject { project_id, .. } => {
                 ("setup_project", Some(project_id.as_str().to_owned()), None)
+            }
+            OwnerMutation::CreateDemo { project_id, .. } => {
+                ("create_demo", Some(project_id.as_str().to_owned()), None)
             }
             OwnerMutation::SaveResearchToMemory { project_id, .. } => (
                 "research_memory",

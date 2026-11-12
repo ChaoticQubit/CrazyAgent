@@ -29,9 +29,10 @@ use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
+use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ChecksReply,
-    ModelAccessCollection, NativeAuthMethod, TrackedProject,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
+    ChecksReply, ModelAccessCollection, NativeAuthMethod, TrackedProject,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -68,6 +69,7 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
+use crazyagent::usage::spend::SpendSettings;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -2231,6 +2233,26 @@ async fn desktop_remove_project(
 }
 
 #[tauri::command]
+async fn desktop_project_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<DemoView, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.project_demo().await
+}
+
+#[tauri::command]
+async fn desktop_create_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    pool: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.create_demo(pool, generation).await
+}
+
+#[tauri::command]
 async fn desktop_project_removal(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3650,6 +3672,17 @@ async fn desktop_usage_metrics(
 }
 
 #[tauri::command]
+async fn desktop_usage_extras(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    detail: bool,
+) -> Result<Vec<AccountExtras>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_extras(detail)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_refresh(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -3673,6 +3706,29 @@ async fn desktop_usage_set_money(
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     let call = lock(&state).await?.usage_set_money(settings)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    account: String,
+    confirmed: bool,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_spend(account, confirmed)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_set_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: SpendSettings,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_set_spend(settings)?;
     call.await
 }
 
@@ -5063,6 +5119,8 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_project_demo,
+    desktop_create_demo,
     desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
@@ -5251,10 +5309,13 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_extras,
     desktop_usage_notices,
     desktop_usage_set_money,
     desktop_usage_decide_recount,
     desktop_usage_set_reset,
+    desktop_usage_spend,
+    desktop_usage_set_spend,
     desktop_scorecard,
     desktop_scorecard_set,
     desktop_tests_read,
@@ -5529,5 +5590,46 @@ mod tests {
             assert_eq!(ask(wall.as_ref(), command, json!({})), Ok(()), "{command}");
         }
         assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
+    }
+
+    #[test]
+    fn every_native_command_is_granted_in_some_capability_file() {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+        let mut granted = std::collections::BTreeSet::new();
+        let mut files = 0;
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            files += 1;
+            let capability: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let permissions = capability["permissions"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} lists no permissions", path.display()));
+            for permission in permissions {
+                if let Some(name) = permission
+                    .as_str()
+                    .and_then(|name| name.strip_prefix("allow-"))
+                {
+                    granted.insert(name.replace('-', "_"));
+                }
+            }
+        }
+        assert!(
+            files >= 2,
+            "main-window.json and terminal-wall.json are read"
+        );
+        let missing: Vec<&str> = NATIVE_COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| !granted.contains(*command))
+            .collect();
+        assert_eq!(
+            missing,
+            Vec::<&str>::new(),
+            "a native command no capability file allows is refused by the real app",
+        );
     }
 }

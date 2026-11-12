@@ -35,6 +35,7 @@ fn ctx(width: u16, height: u16) -> Ctx {
     ctx.width = width;
     ctx.height = height;
     ctx.tick = 4;
+    ctx.store.learning = Load::NotReady;
     ctx
 }
 
@@ -979,6 +980,7 @@ fn styled(
     ctx.store.pools = Load::Ready(pools());
     ctx.store.profile = Load::Ready(Some(profile()));
     ctx.store.setup = Load::Ready(tools(&[]));
+    ctx.store.learning = Load::NotReady;
     ctx
 }
 

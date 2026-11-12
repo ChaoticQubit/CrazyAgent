@@ -7,7 +7,8 @@ import {
 } from "../../api-harness-settings";
 import type { HarnessSetting, HarnessSettingsPage, SettingDraft, SettingScope } from "../../api-harness-settings";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Icon, LoadError, Notice, NotReady, SearchField, Select, Skeleton, Switch } from "../../ui";
+import { Button, Icon, LoadError, Notice, NotReady, SearchField, Select, SettingSection, Skeleton, Switch } from "../../ui";
+import { SettingRow } from "../../ui/setting";
 import { displayText } from "../conversation";
 import "./harness-page.css";
 
@@ -17,7 +18,7 @@ function assert(condition: boolean, message: string): asserts condition {
 
 /** What one row needs from its page: the scope, the row's draft (null for a key the owner
  * can't change), whether it is saving, its note and the row actions. */
-export interface SettingRowProps {
+export interface HarnessSettingRowProps {
   setting: HarnessSetting;
   scope: SettingScope;
   draft: SettingDraft | null;
@@ -63,7 +64,7 @@ function ReadOnly({ setting, id, reason, scope, busy, note, onReset }: { setting
   const locked = setting.access.kind === "locked";
   assert(!locked || setting.source === "engine", "a locked key shows the engine's value");
   const stored = storedLine(setting);
-  return <div className="hs-control">
+  return <div className="set-ctl hs-control">
     <span className="hs-value">{locked && <Icon name="lock" size={14} label="Locked" />}<span className="mono">{shownValue(setting)}</span></span>
     <p id={`${id}-reason`} className="helper">{displayText(reason)}</p>
     {stored && <p className="helper hs-stored">{stored}</p>}
@@ -72,23 +73,25 @@ function ReadOnly({ setting, id, reason, scope, busy, note, onReset }: { setting
   </div>;
 }
 
-/** One setting: its label, key and help, then a switch, select or field with Save and the
- * scope's reset when the owner can change it, or the value with the engine's reason (and a
- * lock for a key CrazyAgent sets itself) when they can't. A saved value that is not in force
- * says so, with the reset that clears it. Input: the row props. Output: the row. */
-export function SettingRow({ setting, scope, draft, busy, note, onDraft, onSave, onReset }: SettingRowProps) {
+/** One setting as a Settings row: its label, then its key and help under it, and at the right a
+ * switch, select or field with Save and the scope's reset when the owner can change it, or the
+ * value with the engine's reason (and a lock for a key CrazyAgent sets itself) when they
+ * can't. A saved value that is not in force says so, with the reset that clears it. Input:
+ * the row props. Output: the row. */
+export function HarnessSettingRow({ setting, scope, draft, busy, note, onDraft, onSave, onReset }: HarnessSettingRowProps) {
   const id = rowId(setting.key);
   const access = setting.access;
   assert((access.kind === "editable") === (draft !== null), "only an editable key has a draft");
   const stored = storedLine(setting);
-  return <div className="hs-row" role="group" aria-labelledby={`${id}-label`}>
-    <div className="hs-text">
-      <span id={`${id}-label`} className="hs-label">{displayText(setting.label)}</span>
-      <span className="mono muted">{displayText(setting.key)}</span>
-      {setting.help && <p id={`${id}-help`} className="helper">{displayText(setting.help)}</p>}
-    </div>
+  const label = displayText(setting.label);
+  return <SettingRow label={label}>
+    <span id={`${id}-label`} className="set-label">{label}</span>
+    <span className="set-help">
+      <span className="mono">{displayText(setting.key)}</span>
+      {setting.help && <span id={`${id}-help`}>{displayText(setting.help)}</span>}
+    </span>
     {access.kind !== "editable" || draft === null ? <ReadOnly setting={setting} id={id} reason={access.kind === "editable" ? "" : access.reason} scope={scope} busy={busy} note={note} onReset={onReset} />
-      : <div className="hs-control">
+      : <div className="set-ctl hs-control">
         <Control setting={setting} id={id} draft={draft} onDraft={onDraft} />
         <span className="small muted">{sourceLine(setting, scope)}</span>
         {stored && <p className="helper hs-stored">{stored}</p>}
@@ -98,7 +101,7 @@ export function SettingRow({ setting, scope, draft, busy, note, onDraft, onSave,
         </span>
         {note && <p className="helper hs-note" role="status">{note}</p>}
       </div>}
-  </div>;
+  </SettingRow>;
 }
 
 /** Everything the page view shows and the actions it offers, without engine calls. */
@@ -117,8 +120,9 @@ export interface HarnessSettingsViewProps {
 }
 
 /** One harness's settings as a pure view of the page read: the version line, when changes
- * apply, a filter, then the editable, locked and read-only groups. A harness with no settings
- * list says so. Input: the view props. Output: the page body. */
+ * apply, a filter, then the editable, locked and read-only groups, each a Settings section
+ * with its count. A harness with no settings list says so. Input: the view props. Output: the
+ * page body. */
 export function HarnessSettingsView(props: HarnessSettingsViewProps) {
   const { page, scope, query, drafts, busy, notes } = props;
   if (page.kind === "loading") return <Skeleton shape="row" count={6} />;
@@ -128,17 +132,16 @@ export function HarnessSettingsView(props: HarnessSettingsViewProps) {
   const value = page.value;
   assert((scope === "project") === (value.project_id !== null), "a project page names its project");
   const groups = settingGroups(value.keys, query);
-  return <div className="stack hs-page">
+  return <div className="stack">
     <p className="secondary">{versionLine(value)}</p>
     <p className="small muted">{EFFECT_LINE}{scope === "project" ? " A value set here wins over the app value for this project only." : ""}</p>
     <SearchField label="Filter settings" value={query} onValue={props.onQuery} />
     {groups.length === 0 && <p className="muted">{value.keys.length === 0 ? "This harness lists no settings." : "No setting matches the filter."}</p>}
-    {groups.map((group) => <section key={group.kind} aria-label={group.title} className="hs-group">
-      <h3 className="group-title">{group.kind === "locked" && <Icon name="lock" size={13} />} {group.title} ({group.keys.length})</h3>
-      <div className="rows">{group.keys.map((setting) => <SettingRow key={setting.key} setting={setting} scope={scope}
+    {groups.length > 0 && <div className="pj set-groups">{groups.map((group) => <SettingSection key={group.kind} title={`${group.title} (${group.keys.length})`}>
+      {group.keys.map((setting) => <HarnessSettingRow key={setting.key} setting={setting} scope={scope}
         draft={setting.access.kind === "editable" ? drafts[setting.key] ?? draftOf(setting) : null} busy={busy === setting.key} note={notes[setting.key] ?? ""}
-        onDraft={(draft) => props.onDraft(setting.key, draft)} onSave={() => props.onSave(setting)} onReset={() => props.onReset(setting)} />)}</div>
-    </section>)}
+        onDraft={(draft) => props.onDraft(setting.key, draft)} onSave={() => props.onSave(setting)} onReset={() => props.onReset(setting)} />)}
+    </SettingSection>)}</div>}
   </div>;
 }
 
