@@ -94,6 +94,28 @@ test("runs that share one prepared CRAZYAGENT_E2E_HOME each get a new projects f
   assert.doesNotMatch(conf, /join\(home, "\.codex"\)/);
 });
 
+test("clearing a prepared home's web store never reaches through a linked Library, and a linked WebKit loses only its link", () => {
+  withHomes((paths) => {
+    const elsewhere = join(paths.real, "Library", "WebKit", "kept");
+    mkdirSync(dirname(elsewhere), { recursive: true, mode: 0o700 });
+    writeFileSync(elsewhere, "the real web store");
+    symlinkSync(join(paths.real, "Library"), join(paths.prepared, "Library"));
+    assert.throws(() => clearWebStore(paths.prepared), /refusing to clear .*Library: not a plain folder/);
+    assert.equal(readFileSync(elsewhere, "utf8"), "the real web store", "the folder the link names keeps its web store");
+    rmSync(join(paths.prepared, "Library"));
+    writeFileSync(join(paths.prepared, "Library"), "");
+    assert.throws(() => clearWebStore(paths.prepared), /refusing to clear .*Library: not a plain folder/);
+    rmSync(join(paths.prepared, "Library"));
+    mkdirSync(join(paths.prepared, "Library"), { mode: 0o700 });
+    symlinkSync(join(paths.real, "Library", "WebKit"), join(paths.prepared, "Library", "WebKit"));
+    clearWebStore(paths.prepared);
+    assert.equal(existsSync(join(paths.prepared, "Library", "WebKit")), false);
+    assert.equal(readFileSync(elsewhere, "utf8"), "the real web store", "a linked WebKit loses only its link");
+    rmSync(join(paths.prepared, "Library"), { recursive: true });
+    clearWebStore(paths.prepared);
+  });
+});
+
 test("shared runner creates private owned home tmp and webdriver under umask 0022", () => {
   const mask = process.umask(0o022);
   const evidence = mkdtempSync(join(tmpdir(), "ca-run-layout-"));
