@@ -26,6 +26,7 @@ use crazyagent::cleanup_settings::CleanupSettings;
 use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
+use crazyagent::demo::DemoView;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
     NativeAuthMethod,
@@ -2197,6 +2198,26 @@ async fn desktop_remove_project(
         .await?
         .remove_project(&id, generation, delete_name)
         .await
+}
+
+#[tauri::command]
+async fn desktop_project_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+) -> Result<DemoView, BridgeError> {
+    main_window(&webview)?;
+    read(&state).await?.project_demo().await
+}
+
+#[tauri::command]
+async fn desktop_create_demo(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    pool: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state).await?.create_demo(pool, generation).await
 }
 
 #[tauri::command]
@@ -4830,6 +4851,8 @@ native_commands! {
     desktop_close_project_walls,
     desktop_update_project_setup,
     desktop_remove_project,
+    desktop_project_demo,
+    desktop_create_demo,
     desktop_move_project_home,
     desktop_cancel_research,
     desktop_retry_research,
