@@ -1872,3 +1872,76 @@ fn a_harness_settings_page_opens_from_settings_harnesses_with_the_desktop_words(
     drop(pty);
     engine.stop();
 }
+
+/// DEC-155 step 3: on a real engine a project's own V3 pages are reached from its tabs on the
+/// 2.4.0 shell: s on the Tests tab opens the project's check settings in the desktop's words
+/// and Esc comes back, and w on the Settings tab opens the Repository trust box.
+#[test]
+fn a_project_s_check_settings_and_repository_trust_open_from_its_tabs() {
+    let engine = Engine::start("ca-e2e-project-v3-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-v3-tabs", PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let mut engine = engine;
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, PROJECT));
+    setup_checked(&pty);
+    tab_until_enter(&pty, "Open");
+    pick_card(&pty, PROJECT);
+    pty.keys(&["Enter"]);
+    pty.until("the project screen opens with its tabs", |screen| {
+        screen.contains("Tabs") && in_project(screen, PROJECT)
+    });
+
+    to_tab(&pty, PROJECT, "Tests", &SHIFT_RIGHT);
+    pty.until("the Tests tab offers its settings", |screen| {
+        screen.contains("s Settings")
+    });
+    pty.keys(&["s"]);
+    let screen = pty.until("s opens the project's check settings", |screen| {
+        screen.contains("Check rules") && screen.contains("Check profiles")
+    });
+    for words in [
+        "wins over the app value for this project only.",
+        "A check runs only under a profile you approved.",
+        "a App values",
+        "Esc Back",
+    ] {
+        assert!(screen.contains(words), "{words}:\n{screen}");
+    }
+    assert!(
+        !screen.contains("The check settings every project starts from"),
+        "the app purpose stays on the app page:\n{screen}"
+    );
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to the Tests tab", |screen| {
+        tab_shown(screen, PROJECT).as_deref() == Some("Tests")
+    });
+
+    to_tab(&pty, PROJECT, "Settings", &SHIFT_RIGHT);
+    pty.until("the Settings tab names Repository trust", |screen| {
+        screen.contains("w Repository trust")
+    });
+    pty.keys(&["w"]);
+    pty.until("w opens the Repository trust box", |screen| {
+        screen.contains("How far you trust this repository's code and files.")
+            && screen.contains("Level ")
+    });
+    drop(pty);
+    engine.stop();
+}
