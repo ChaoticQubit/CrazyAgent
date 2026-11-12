@@ -679,7 +679,7 @@ fn the_xcode_select_link_names_only_an_xcode_app_developer_folder() {
         None
     );
     assert_eq!(
-        xcode_from_link(&link("tools", Path::new(DEVELOPER_TOOLS))),
+        xcode_from_link(&link("command-line-tools", Path::new(DEVELOPER_TOOLS))),
         None
     );
 }
