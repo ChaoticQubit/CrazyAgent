@@ -78,6 +78,11 @@ pub(in crate::tui) enum SettingsJob {
     AgentScope {
         set: Option<(AgentScope, u64)>,
     },
+    MoveMemory {
+        memory: RequestId,
+        project: ProjectId,
+        generation: u64,
+    },
     AddMemory {
         scope: MemoryScope,
         text: String,
@@ -226,6 +231,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::ApproveMemory { .. } => "ApproveMemory",
             Self::AgentWrites { .. } => "AgentWrites",
             Self::AgentScope { .. } => "AgentScope",
+            Self::MoveMemory { .. } => "MoveMemory",
             Self::AddMemory { .. } => "AddMemory",
             Self::ImportMemory { .. } => "ImportMemory",
             Self::Suggestions { .. } => "Suggestions",
@@ -349,6 +355,7 @@ pub(in crate::tui) enum SettingsEvent {
     MemoryApproved(Result<(), String>),
     AgentWrites(Result<AgentWrites, String>),
     AgentScope(Result<AgentScope, String>),
+    MemoryMoved(Result<(), String>),
     MemoryAdded(Result<(), String>),
     MemoryImported(Result<crate::memory::import::ImportReport, String>),
     Suggestions(Result<Vec<Suggestion>, String>),
@@ -407,6 +414,7 @@ impl SettingsEvent {
             SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
             SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
             SettingsJob::AgentScope { .. } => Self::AgentScope(Err(problem)),
+            SettingsJob::MoveMemory { .. } => Self::MemoryMoved(Err(problem)),
             SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
             SettingsJob::ImportMemory { .. } => Self::MemoryImported(Err(problem)),
             SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
@@ -835,6 +843,24 @@ impl NativeOwner {
             }
             SettingsJob::AgentScope { set } => {
                 SettingsEvent::AgentScope(self.agent_scope(set, lost).await)
+            }
+            SettingsJob::MoveMemory {
+                memory,
+                project,
+                generation,
+            } => {
+                let action = LibraryAction::MoveToProject {
+                    memory_id: memory,
+                    project_id: project,
+                };
+                SettingsEvent::MemoryMoved(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.change_memory(action, generation).await,
+                        "memory_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
             }
         }
     }

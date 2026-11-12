@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import {
-  addMemory, approveMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryScope, setAgentMemoryWrites,
+  addMemory, approveMemory, deleteMemory, dismissSuggestion, importMemory, memoryEdit, memorySuggestions, pickFolder, moveMemory, saveEditedSuggestion, saveSuggestion, savedMemories, setAgentMemoryScope, setAgentMemoryWrites,
   MEMORY_TEXT_BYTES_MAX, type AgentMemoryScope, type AgentMemoryWrites, type Result, type SavedMemory, type SavedMemoryPage, type Suggestion,
 } from "../../api";
 import { useAppSession, useHeld, useLoad, type Loaded } from "../../state";
@@ -156,15 +156,23 @@ function SuggestedSection({ suggested, busy, onSave, onSaveEdited, onDismiss }: 
 /** What Saved memories lists: skeletons, a not-ready or failed read, the empty lines, or one row
  * per memory with who saved it, Approve while it waits, Delete and Show older. Inputs: the read,
  * the search, project names by id, the action running and the handlers. */
-function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onApprove }: {
+/** Tells whether the owner may move a memory into one project: an app-wide memory an agent
+ * saved or asked to save. Input: the memory. Output: true when it can move. */
+export function movable(memory: SavedMemory): boolean {
+  return memory.scope === "global" && (memory.origin === "agent" || memory.origin === "requested");
+}
+
+function SavedList({ saved, search, names, projects, busy, onDelete, onMore, onRetry, onApprove, onMove }: {
   saved: Loaded<SavedMemoryPage>;
   search: string;
   names: Map<string, string>;
+  projects: { id: string; name: string }[];
   busy: string | null;
   onDelete: (memory: SavedMemory) => void;
   onMore: () => void;
   onRetry: () => void;
   onApprove?: (memory: SavedMemory) => void;
+  onMove?: (memory: SavedMemory, project: string) => void;
 }) {
   if (saved.kind === "loading") return <div className="set-body"><Skeleton shape="row" count={4} /></div>;
   if (saved.kind === "not_ready") return <NotReady what="Memory" compact />;
@@ -179,6 +187,9 @@ function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onAp
       <span className="set-help">{displayText(memorySource(memory, names))}</span>
       <div className="set-ctl set-line-ctl">
         {memory.origin === "requested" && onApprove && <Button variant="primary" size="small" icon="brain" pending={busy === memory.id} pendingLabel="Approving..." onClick={() => onApprove(memory)}>Approve</Button>}
+        {movable(memory) && onMove && projects.length > 0 && <Select id={`memory-move-${memory.id}`} label="Move to a project" hideLabel value=""
+          options={[{ value: "", label: "Move to a project" }, ...projects.map((project) => ({ value: project.id, label: project.name }))]}
+          onValue={(project) => { if (project) onMove(memory, project); }} />}
         <Button variant="danger-text" size="small" icon="trash" onClick={() => onDelete(memory)}>Delete</Button>
       </div>
     </div>)}
@@ -191,7 +202,7 @@ function SavedList({ saved, search, names, busy, onDelete, onMore, onRetry, onAp
  * scope with search and older pages, and forms to add and import memory. Inputs: the reads, the
  * first page's read the writes setting came from (older pages merged in make a new object, which
  * no read made), filters, last failure and the actions. */
-export function MemoryView({ saved, writesRead, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onWrites, onReach }: {
+export function MemoryView({ saved, writesRead, suggested, scope, projects, search, failure, busy, onSearch, onScope, onAdd, onImport, onSave, onSaveEdited, onDismiss, onDelete, onMore, onRetry, onApprove, onMove, onWrites, onReach }: {
   saved: Loaded<SavedMemoryPage>;
   writesRead: Loaded<SavedMemoryPage>;
   suggested: Loaded<Suggestion[]>;
@@ -213,6 +224,7 @@ export function MemoryView({ saved, writesRead, suggested, scope, projects, sear
   onApprove?: (memory: SavedMemory) => void;
   onWrites?: (writes: AgentMemoryWrites) => Promise<string>;
   onReach?: (reach: AgentMemoryScope) => Promise<string>;
+  onMove?: (memory: SavedMemory, project: string) => void;
 }) {
   const [writes, holdWrites] = useHeld<AgentMemoryWrites | null>(saved.kind === "ok" ? saved.value.agent_writes : null, Object.is, writesRead);
   const [reach, holdReach] = useHeld<AgentMemoryScope | null>(saved.kind === "ok" ? saved.value.agent_scope : null, Object.is, writesRead);
@@ -251,7 +263,7 @@ export function MemoryView({ saved, writesRead, suggested, scope, projects, sear
     </SettingSection>}
     <SuggestedSection suggested={suggested} busy={busy} onSave={onSave} onSaveEdited={onSaveEdited} onDismiss={onDismiss} />
     <SettingSection title="Saved memories" actions={filters}>
-      <SavedList saved={saved} search={search} names={names} busy={busy} onDelete={onDelete} onMore={onMore} onRetry={onRetry} onApprove={onApprove} />
+      <SavedList saved={saved} search={search} names={names} projects={projects} busy={busy} onDelete={onDelete} onMore={onMore} onRetry={onRetry} onApprove={onApprove} onMove={onMove} />
     </SettingSection>
     <AddMemoryForm where={where} onAdd={onAdd} />
     <ImportMemoryForm projects={projects} initial={scope} onImport={onImport} />
@@ -302,6 +314,7 @@ export function MemorySettings() {
       onSearch={setSearch} onScope={setScope} onRetry={reloadSaved} onMore={() => void more()} onDelete={setDeleting}
       onApprove={(memory) => void act(memory.id, () => approveMemory(memory.id), "Memory approved. Agents get it from their next launch.", reloadSaved)}
       onWrites={(writes) => act("agent-writes", () => setAgentMemoryWrites(writes), writes === "ask" ? "Agents now ask you before a memory is saved." : "Agents now save memories directly.", reloadSaved)}
+      onMove={(memory, project) => void act(memory.id, () => moveMemory(memory.id, project), `Memory moved. Only agents in ${projects.find((item) => item.id === project)?.name ?? "that project"} get it now.`, reloadSaved)}
       onReach={(reach) => act("agent-scope", () => setAgentMemoryScope(reach), reach === "agent" ? "Agents now choose where a memory is saved, app-wide included." : "Agents now save memories in their own project only.", reloadSaved)}
       onAdd={async (text) => {
         setFailure("");

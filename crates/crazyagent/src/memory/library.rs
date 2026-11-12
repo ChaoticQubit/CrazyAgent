@@ -212,6 +212,10 @@ pub enum LibraryAction {
     AgentScope {
         scope: AgentScope,
     },
+    MoveToProject {
+        memory_id: RequestId,
+        project_id: ProjectId,
+    },
 }
 
 impl LibraryAction {
@@ -252,7 +256,8 @@ impl LibraryAction {
             | Self::Forget { .. }
             | Self::Approve { .. }
             | Self::AgentWrites { .. }
-            | Self::AgentScope { .. } => Ok(()),
+            | Self::AgentScope { .. }
+            | Self::MoveToProject { .. } => Ok(()),
         }
     }
 }
@@ -391,8 +396,9 @@ pub fn validate_page(search: Option<&str>, limit: u8) -> Result<(), EngineError>
     Ok(())
 }
 
-const CODES: [&str; 18] = [
+const CODES: [&str; 19] = [
     "memory_not_requested",
+    "memory_not_movable",
     "memory_agent_invalid",
     "memory_import_invalid",
     "memory_import_folder_invalid",
@@ -450,6 +456,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
             Some("This text is no longer in that file. Open the file again and select it again.")
         }
         "memory_not_requested" => Some("Only a memory an agent asked to save can be approved."),
+        "memory_not_movable" => {
+            Some("Only an app-wide memory an agent saved can be moved to a project.")
+        }
         "memory_agent_invalid" => Some("The agent's name could not be kept with the memory."),
         "memory_source_removed" => Some(
             "This memory's source was removed. Delete the memory, then save the research again.",
@@ -553,7 +562,63 @@ pub(crate) fn execute(
         LibraryAction::Approve { memory_id } => approve(tx, memory_id),
         LibraryAction::AgentWrites { writes } => set_agent_writes(tx, *writes),
         LibraryAction::AgentScope { scope } => set_agent_scope(tx, *scope),
+        LibraryAction::MoveToProject {
+            memory_id,
+            project_id,
+        } => move_to_project(tx, memory_id, project_id),
     }
+}
+
+/// Moves one app-wide memory an agent saved into one project the owner chose, so only that
+/// project's agents read it from then on. Nothing moves on its own. Inputs: the transaction,
+/// the memory and the project. Output: Applied, or `memory_missing`, `memory_not_movable`,
+/// `memory_project_missing`, `memory_duplicate` or `memory_full`.
+fn move_to_project(
+    tx: &Transaction<'_>,
+    id: &RequestId,
+    project: &ProjectId,
+) -> Result<Outcome, EngineError> {
+    let Some(memory) = get(tx, id)? else {
+        return rejected("memory_missing");
+    };
+    let agent_saved = matches!(
+        memory.origin,
+        MemoryOrigin::Agent { .. } | MemoryOrigin::Requested { .. }
+    );
+    if memory.scope != MemoryScope::Global || !agent_saved {
+        return rejected("memory_not_movable");
+    }
+    if !project_exists(tx, project)? {
+        return rejected("memory_project_missing");
+    }
+    let (taken, in_scope): (bool, i64) = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM memory_library WHERE project=?1 AND text=?2),
+            (SELECT COUNT(*) FROM memory_library WHERE project=?1)",
+            params![project.as_str(), memory.text],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?;
+    if taken {
+        return rejected("memory_duplicate");
+    }
+    if in_scope >= SCOPE_ITEMS_MAX as i64 {
+        return rejected("memory_full");
+    }
+    let moved = tx
+        .execute(
+            "UPDATE memory_library SET project=?2 WHERE id=?1 AND project IS NULL",
+            params![id.as_str(), project.as_str()],
+        )
+        .map_err(error)?;
+    assert_eq!(moved, 1);
+    let scope = MemoryScope::Project {
+        project_id: project.clone(),
+    };
+    assert!(
+        get(tx, id)?.is_some_and(|saved| saved.scope == scope && saved.origin == memory.origin)
+    );
+    Ok(Outcome::Applied)
 }
 
 fn import(

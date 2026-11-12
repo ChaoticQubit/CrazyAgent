@@ -491,6 +491,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_agent_memory_writes(writes, generation) .await }.await;
             routed(result)
         }
+        "desktop_move_memory" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                project: String,
+                generation: u64,
+            }
+            let Args { id, project, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.move_memory(&id, &project, generation).await }.await;
+            routed(result)
+        }
         "desktop_set_agent_memory_scope" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

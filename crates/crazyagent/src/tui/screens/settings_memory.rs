@@ -48,6 +48,7 @@ pub fn memory_plain(code: &str) -> &'static str {
         "memory_missing" | "knowledge_entry_missing" => "This memory no longer exists.",
         "memory_already_global" => "This memory is already saved for every project.",
         "memory_not_requested" => "This memory is already approved.",
+        "memory_not_movable" => "Only an app-wide memory an agent saved can be moved.",
         "memory_agent_invalid" => "The agent that saved this memory could not be named.",
         "knowledge_source_revoked" => "Its source was removed, so it can't be saved.",
         "knowledge_version_conflict"
@@ -154,6 +155,9 @@ enum Mode {
         field: Box<TextField>,
         project: usize,
     },
+    Move {
+        project: usize,
+    },
     Suggestion {
         save_focused: bool,
     },
@@ -177,6 +181,7 @@ pub struct Memory {
     setting: bool,
     reach: Option<AgentScope>,
     scoping: bool,
+    moving: bool,
     approving: bool,
     deleting: bool,
     suggesting: bool,
@@ -210,6 +215,7 @@ impl Memory {
             setting: false,
             reach: None,
             scoping: false,
+            moving: false,
             approving: false,
             deleting: false,
             suggesting: false,
@@ -292,6 +298,69 @@ impl Memory {
                 set: Some((next, generation)),
             },
         );
+    }
+
+    fn movable(memory: &SavedMemory) -> bool {
+        memory.scope == MemoryScope::Global
+            && matches!(
+                memory.origin,
+                MemoryOrigin::Agent { .. } | MemoryOrigin::Requested { .. }
+            )
+    }
+
+    fn open_mover(&mut self, ctx: &mut Ctx) {
+        if self.moving
+            || !self
+                .focused(ctx)
+                .is_some_and(|memory| Self::movable(&memory))
+        {
+            return;
+        }
+        if Self::project_choices(ctx).is_empty() {
+            ctx.say(Message::error(
+                "Add a project first.",
+                "A moved memory belongs to one project.",
+            ));
+            return;
+        }
+        self.mode = Mode::Move { project: 0 };
+    }
+
+    fn move_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let Mode::Move { project } = &mut self.mode else {
+            return Flow::Ignored;
+        };
+        let choices = Self::project_choices(ctx);
+        if choices.is_empty() {
+            self.mode = Mode::List;
+            return Flow::Handled;
+        }
+        *project = (*project).min(choices.len() - 1);
+        match key {
+            Key::Esc => self.mode = Mode::List,
+            Key::Right | Key::Tab | Key::Down => *project = (*project + 1) % choices.len(),
+            Key::Left | Key::BackTab | Key::Up => {
+                *project = (*project + choices.len() - 1) % choices.len()
+            }
+            Key::Enter => {
+                let target = choices[*project].0.clone();
+                self.mode = Mode::List;
+                if let Some(memory) = self.focused(ctx).filter(Self::movable) {
+                    self.moving = true;
+                    let generation = ctx.next_generation();
+                    send(
+                        ctx,
+                        SettingsJob::MoveMemory {
+                            memory: memory.id,
+                            project: target,
+                            generation,
+                        },
+                    );
+                }
+            }
+            _ => {}
+        }
+        Flow::Handled
     }
 
     fn approve(&mut self, ctx: &mut Ctx) {
@@ -1037,6 +1106,12 @@ impl Screen for Memory {
             Some(Picked::Saved(_)) => vec![hint("Enter", "View"), hint("d", "Delete")],
             None => Vec::new(),
         };
+        if self
+            .focused(ctx)
+            .is_some_and(|memory| Self::movable(&memory))
+        {
+            hints.push(hint("m", "Move to a project"));
+        }
         hints.push(hint("a", "Add"));
         hints.push(hint("w", "Agent memory writes"));
         hints.push(hint("p", "Where agents save"));
@@ -1056,6 +1131,7 @@ impl Screen for Memory {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             Mode::Delete { .. } => return self.delete_key(key, ctx),
+            Mode::Move { .. } => return self.move_key(key, ctx),
             Mode::Add { .. } => return self.add_key(key, ctx),
             Mode::Import { .. } => return self.import_key(key, ctx),
             Mode::Suggestion { .. } => return self.suggestion_key(key, ctx),
@@ -1092,6 +1168,7 @@ impl Screen for Memory {
             Key::Char('a') if ready && !self.adding => self.open_composer(),
             Key::Char('w') if ready => self.toggle_writes(ctx),
             Key::Char('p') if ready => self.toggle_scope(ctx),
+            Key::Char('m') if saved => self.open_mover(ctx),
             Key::Char('y') if saved => self.approve(ctx),
             Key::Char('i') if ready && !self.importing => self.open_importer(ctx),
             Key::Char('/') if !self.memories.is_empty() || self.open().next().is_some() => {
@@ -1176,6 +1253,22 @@ impl Screen for Memory {
                         memory_plain(code),
                     )),
                     Err(_) => {}
+                }
+            }
+            Some(SettingsEvent::MemoryMoved(result)) if self.moving => {
+                self.moving = false;
+                match result {
+                    Ok(()) => {
+                        ctx.say(Message::success(
+                            "Memory moved. Only agents in that project get it now.",
+                            "",
+                        ));
+                        self.reload(ctx);
+                    }
+                    Err(code) => ctx.say(Message::error(
+                        "Could not move this memory.",
+                        memory_plain(code),
+                    )),
                 }
             }
             Some(SettingsEvent::AgentScope(result)) => {
@@ -1307,6 +1400,49 @@ impl Screen for Memory {
         let room = usize::from(MODAL_WIDTH) - 4;
         match self.mode {
             Mode::List | Mode::Add { .. } | Mode::Import { .. } | Mode::Suggestion { .. } => None,
+            Mode::Move { project } => {
+                let choices = Self::project_choices(ctx);
+                let name = choices
+                    .get(project.min(choices.len().saturating_sub(1)))
+                    .map_or_else(
+                        || "A project".to_owned(),
+                        |(_, name)| printable(name.clone()),
+                    );
+                let mut body = vec![
+                    Line::raw("Move this app-wide memory into one project?"),
+                    Line::default(),
+                ];
+                body.push(styled(
+                    cut(&printable(memory.text.clone()), room, ctx.glyphs.ellipsis),
+                    Role::Muted,
+                    theme,
+                ));
+                body.push(Line::default());
+                body.push(Line::raw(cut(
+                    &format!("Project  {} {name} {}", ctx.glyphs.left, ctx.glyphs.right),
+                    room,
+                    ctx.glyphs.ellipsis,
+                )));
+                body.extend(
+                    wrap("Only agents in this project get it from then on.", room)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+                let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
+                Some((
+                    Modal {
+                        width: MODAL_WIDTH,
+                        title: "Move memory".into(),
+                        body,
+                        top: None,
+                    },
+                    vec![
+                        hint(&arrows, "Project"),
+                        hint("Enter", "Move"),
+                        hint("Esc", "Cancel"),
+                    ],
+                ))
+            }
             Mode::View => {
                 let mut body: Vec<Line<'static>> = wrap(&sanitize(&memory.text), room)
                     .into_iter()

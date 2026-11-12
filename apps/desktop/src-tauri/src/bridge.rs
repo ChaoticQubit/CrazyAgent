@@ -771,6 +771,9 @@ impl NativeBridge {
                 crazyagent::memory::library::LibraryAction::AgentScope { .. } => {
                     ("memory_agent_scope", None, None)
                 }
+                crazyagent::memory::library::LibraryAction::MoveToProject {
+                    project_id, ..
+                } => ("memory_move", Some(project_id.as_str().to_owned()), None),
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }

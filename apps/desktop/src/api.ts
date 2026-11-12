@@ -126,6 +126,7 @@ const COPY: Record<string, string> = {
   memory_changed: "This memory changed. Reload it and try again.",
   memory_not_kept: "Only memories you kept can be made global.",
   memory_already_global: "This memory is already in global memory.",
+  memory_not_movable: "Only an app-wide memory an agent saved can be moved to a project.",
   memory_project_missing: "That project no longer exists.",
   memory_search_invalid: "Keep the search on one line, up to 100 characters.",
   memory_page_invalid: "Show between 1 and 20 memories at a time.",
@@ -344,6 +345,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_approve: "approving a memory",
   memory_agent_writes: "saving agent memory writes",
   memory_agent_scope: "saving where agents save memories",
+  memory_move: "moving a memory",
   memory_forget: "forgetting a memory",
   memory_remember: "saving a memory",
   memory_selection: "changing the memory selection",
@@ -1133,6 +1135,12 @@ export function approveMemory(id: string): Promise<Result<void>> {
  * Input: the choice. Output: ok once saved. */
 export function setAgentMemoryWrites(writes: AgentMemoryWrites): Promise<Result<void>> {
   return change("desktop_set_agent_memory_writes", { writes, generation: nextGeneration() });
+}
+
+/** Moves one app-wide memory an agent saved into one project, so only that project's agents
+ * read it. Input: memory id and project id. Output: ok once moved. */
+export function moveMemory(id: string, project: string): Promise<Result<void>> {
+  return change("desktop_move_memory", { id, project, generation: nextGeneration() });
 }
 
 /** Saves the owner's Where agents save memories setting: in the agent's own project only, or

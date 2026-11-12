@@ -2281,6 +2281,99 @@ fn agent_memories_of_projects_that_are_gone_are_forgotten_and_every_other_memory
     assert_eq!(forget_orphan_agent_memories(&db).unwrap(), 0);
 }
 
+/// F34: the owner moves an app-wide memory an agent saved into one project, and only that
+/// project's agents read it from then on. A memory already in a project, an owner note, a
+/// missing memory or project and a text the project already holds are refused.
+#[test]
+fn the_owner_moves_an_app_wide_agent_memory_into_one_project() {
+    let (_directory, mut db, config) = agent_library();
+    let alpha = ProjectId::new("alpha").unwrap();
+    let beta = ProjectId::new("beta").unwrap();
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::AgentScope {
+                scope: AgentScope::Agent
+            }
+        ),
+        Outcome::Applied
+    );
+    for (project, app, text) in [
+        (&alpha, true, "Parser gotcha."),
+        (&alpha, true, "Twice."),
+        (&beta, false, "Twice."),
+    ] {
+        agent_remember(&mut db, project, "Master", app, text)
+            .unwrap()
+            .unwrap();
+    }
+    assert_eq!(
+        owner_change(
+            &mut db,
+            &config,
+            LibraryAction::Add {
+                scope: MemoryScope::Global,
+                text: "Owner rule.".into()
+            }
+        ),
+        Outcome::Applied
+    );
+    let gotcha = memory_with_text(&mut db, "Parser gotcha.");
+    assert_eq!(gotcha.scope, MemoryScope::Global);
+    let owner_rule = memory_with_text(&mut db, "Owner rule.");
+    let twice: String = db
+        .query_row(
+            "SELECT id FROM memory_library WHERE text='Twice.' AND project IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let twice = RequestId::new(twice).unwrap();
+    let moving = |memory_id: &RequestId, project_id: &ProjectId| LibraryAction::MoveToProject {
+        memory_id: memory_id.clone(),
+        project_id: project_id.clone(),
+    };
+
+    assert_eq!(
+        owner_change(&mut db, &config, moving(&gotcha.id, &alpha)),
+        Outcome::Applied
+    );
+    let moved = memory_with_text(&mut db, "Parser gotcha.");
+    assert_eq!(moved.scope, project_scope(&alpha));
+    assert_eq!(moved.origin, gotcha.origin);
+    assert_eq!(recalled(&mut db, &alpha, "gotcha"), ["Parser gotcha."]);
+    assert!(recalled(&mut db, &beta, "gotcha").is_empty());
+
+    for (action, code) in [
+        (moving(&gotcha.id, &beta), "memory_not_movable"),
+        (moving(&owner_rule.id, &alpha), "memory_not_movable"),
+        (
+            moving(&RequestId::new("agent-gone").unwrap(), &alpha),
+            "memory_missing",
+        ),
+        (
+            moving(&twice, &ProjectId::new("absent").unwrap()),
+            "memory_project_missing",
+        ),
+        (moving(&twice, &beta), "memory_duplicate"),
+    ] {
+        assert_eq!(
+            owner_change(&mut db, &config, action.clone()),
+            Outcome::Rejected { code: code.into() },
+            "{action:?}"
+        );
+    }
+    let global: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM memory_library WHERE project IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(global, 2, "refused moves leave the app-wide memories alone");
+}
+
 #[test]
 fn recall_answers_the_newest_memories_first_and_at_most_twelve() {
     let (_directory, mut db, _config) = agent_library();

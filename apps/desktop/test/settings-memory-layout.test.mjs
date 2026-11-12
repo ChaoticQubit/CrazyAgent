@@ -75,6 +75,16 @@ test("F34: Where agents save memories goes from Agent chooses back to This proje
   assert.deepEqual(seen.toasts, ["Agents now save memories in their own project only."]);
 });
 
+test("F34: an app-wide memory an agent saved moves into the project chosen with a real key", async () => {
+  const seen = await on({ memories: "moving" }, async (page) => {
+    await page.evaluate(`document.getElementById("memory-move-m3").focus()`);
+    await stroke(page, { key: "h", code: "KeyH", text: "h", windowsVirtualKeyCode: 72 });
+    return { sent: await argsOf(page, "desktop_move_memory"), toasts: await toasts(page) };
+  });
+  assert.deepEqual(seen.sent.map((args) => [args.id, args.project]), [["m3", "harbor"]]);
+  assert.deepEqual(seen.toasts, ["Memory moved. Only agents in Harbor Notes get it now."]);
+});
+
 test("a saved memory has its text left, its source under it and its actions right", async () => {
   const seen = await on({}, async (page) => ({ sections: await read(page), notes: await count(page, ".pj-note-text") }));
   const [first, waiting] = section(seen.sections, SAVED).rows;

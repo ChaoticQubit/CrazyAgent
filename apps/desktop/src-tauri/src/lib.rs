@@ -745,6 +745,21 @@ async fn desktop_set_agent_memory_writes(
 }
 
 #[tauri::command]
+async fn desktop_move_memory(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    id: String,
+    project: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&webview)?;
+    lock(&state)
+        .await?
+        .move_memory(&id, &project, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_set_agent_memory_scope(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -4656,6 +4671,7 @@ native_commands! {
     desktop_approve_memory,
     desktop_set_agent_memory_writes,
     desktop_set_agent_memory_scope,
+    desktop_move_memory,
     desktop_forget_memory,
     desktop_remember_research,
     desktop_save_selection_to_memory,

@@ -223,6 +223,22 @@ impl NativeBridge {
             .await
     }
 
+    /// Moves one app-wide memory an agent saved into one project, so only that project's
+    /// agents read it. Takes the memory id, the project id and a fresh draft generation.
+    /// Returns the intent receipt.
+    pub async fn move_memory(
+        &mut self,
+        id: &str,
+        project: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let action = LibraryAction::MoveToProject {
+            memory_id: memory_id(id)?,
+            project_id: ProjectId::new(project).map_err(|_| failure("invalid_project"))?,
+        };
+        self.change_memory(action, generation).await
+    }
+
     /// Saves the owner's Where agents save memories setting: this project only or agent
     /// chooses. Takes the choice and a fresh draft generation. Returns the intent receipt.
     pub async fn set_agent_memory_scope(

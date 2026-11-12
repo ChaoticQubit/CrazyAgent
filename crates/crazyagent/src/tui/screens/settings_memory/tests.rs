@@ -904,6 +904,70 @@ fn the_agent_memory_writes_row_shows_the_engine_choice_and_how_to_change_it() {
     }
 }
 
+/// F34: `m` on an app-wide memory an agent saved opens Move memory, the arrows pick the
+/// project and Enter sends one move; the list reloads once it lands, and an owner's own note
+/// never opens it.
+#[test]
+fn m_moves_an_app_wide_agent_memory_into_the_chosen_project() {
+    let mut ctx = memory_ctx(120, 36);
+    let mut list = memories();
+    list.insert(
+        0,
+        saved(
+            8,
+            "Parser gotcha.",
+            MemoryScope::Global,
+            MemoryOrigin::Agent {
+                agent: "Master".into(),
+            },
+        ),
+    );
+    let mut screen = Memory::with(list);
+
+    screen.key(&Key::Char('m'), &mut ctx);
+    assert!(matches!(screen.mode, Mode::Move { project: 0 }));
+    let shown = screen.modal(&ctx).unwrap().0;
+    assert_eq!(shown.title, "Move memory");
+    screen.key(&Key::Right, &mut ctx);
+    assert!(matches!(screen.mode, Mode::Move { project: 1 }));
+    screen.key(&Key::Enter, &mut ctx);
+    match job(&mut ctx) {
+        SettingsJob::MoveMemory {
+            memory,
+            project,
+            generation,
+        } => {
+            assert_eq!(memory.as_str(), "memory-8");
+            assert_eq!(project.as_str(), "ledgerline");
+            assert!(generation > 0);
+        }
+        other => panic!("move expected, got {other:?}"),
+    }
+    screen.key(&Key::Char('m'), &mut ctx);
+    assert!(matches!(screen.mode, Mode::List), "one move at a time");
+    screen.arrive(&settings(SettingsEvent::MemoryMoved(Ok(()))), &mut ctx);
+    assert_eq!(
+        ctx.message().unwrap().lead,
+        "Memory moved. Only agents in that project get it now."
+    );
+    assert!(
+        matches!(job(&mut ctx), SettingsJob::Memories { .. }),
+        "the list reloads"
+    );
+    while ctx.next_request().is_some() {}
+
+    screen.key(&Key::Char('m'), &mut ctx);
+    screen.key(&Key::Esc, &mut ctx);
+    assert!(matches!(screen.mode, Mode::List), "Esc cancels");
+    assert_eq!(ctx.queued(), 0);
+    screen.key(&Key::Down, &mut ctx);
+    screen.key(&Key::Char('m'), &mut ctx);
+    assert!(
+        matches!(screen.mode, Mode::List),
+        "an owner's own note is never moved"
+    );
+}
+
 /// F34: the memory settings row shows where agents save, `p` switches between This project
 /// only and Agent chooses one change at a time, and each answer says what agents now do.
 #[test]

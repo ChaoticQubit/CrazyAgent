@@ -729,6 +729,25 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     );
     let again = bridge.approve_memory(&memory, 5).await?;
     assert_eq!(again.rejection.as_deref(), Some("memory_not_requested"));
+
+    connection.execute(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES ('agent-wide',NULL,?1,'Recipes scale by servings.')",
+        [serde_json::json!({"kind": "agent", "agent": label}).to_string()],
+    )?;
+    let refused = bridge.move_memory(&memory, &id, 6).await?;
+    assert_eq!(refused.rejection.as_deref(), Some("memory_not_movable"));
+    let moved = bridge.move_memory("agent-wide", &id, 7).await?;
+    assert!(matches!(moved.outcome, ActionOutcome::Applied), "{moved:?}");
+    let listed = bridge.memories(Some(&id), None, None).await?;
+    assert!(
+        listed
+            .items
+            .iter()
+            .any(|item| item.id == "agent-wide" && item.scope == "project"),
+        "F34: the moved memory now belongs to the project: {:?}",
+        listed.items
+    );
+    assert!(bridge.memories(None, None, None).await?.items.is_empty());
     assert!(bridge.pending_intent()?.is_none());
     Ok(())
 }
