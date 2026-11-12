@@ -283,3 +283,51 @@ fn the_owner_reads_and_sets_the_pick_and_fallback_rules() {
         );
     }
 }
+
+#[test]
+fn the_largest_models_section_fits_one_owner_frame() {
+    use crate::model_choice::{
+        ALLOWED_MAX, CATALOG_MODELS_MAX, CUSTOM_MAX, Candidate, MODEL_BYTES_MAX, Origin,
+    };
+    let id = |n: usize| {
+        let stem = format!("m{n}-");
+        format!("{stem}{}", "x".repeat(MODEL_BYTES_MAX - stem.len()))
+    };
+    let full: Value = json!((0..ALLOWED_MAX).map(id).collect::<Vec<_>>());
+    let rows = Slot::ALL
+        .iter()
+        .map(|slot| Row {
+            slot: *slot,
+            here: Some(full.clone()),
+            effective: full.clone(),
+            source: Source::Project,
+            version: u64::MAX,
+            access: Access::ReadOnly {
+                reason: crate::model_choice::NOT_SUPPORTED.into(),
+            },
+        })
+        .collect();
+    let candidates = (0..CATALOG_MODELS_MAX + CUSTOM_MAX)
+        .map(|n| Candidate {
+            id: id(n),
+            origin: Origin::Verified,
+        })
+        .collect();
+    let models = Models {
+        harness: "claude-code".into(),
+        rows,
+        candidates,
+    };
+    for reply in [
+        Reply::Values {
+            models: models.clone(),
+        },
+        Reply::Added {
+            added: Added::Pending,
+            models,
+        },
+    ] {
+        let frame = encode_frame(&reply).unwrap();
+        assert!(frame.len() <= crate::protocol::FRAME_BYTES_MAX + 4);
+    }
+}
