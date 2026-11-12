@@ -148,6 +148,8 @@ export interface ProjectContext {
   project_id: string;
   folder: string;
   items: ContextItem[];
+  unlisted_docs?: number;
+  docs_folder_cut?: boolean;
 }
 
 export interface ContextChunk {
