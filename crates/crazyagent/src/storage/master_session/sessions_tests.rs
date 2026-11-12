@@ -1977,5 +1977,14 @@ async fn deleting_a_session_keeps_the_learning_tick_its_owner_messages_gave() {
         .unwrap();
     assert_eq!(messages, 0, "the deleted session's messages are gone");
     assert!(master_done(&case), "the tick outlives the messages");
+    let kept: i64 = case
+        .db()
+        .query_row(
+            "SELECT COUNT(*) FROM learning_marks WHERE step='master'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1, "the delete kept the master step as a mark");
     case.close().await;
 }
