@@ -891,6 +891,17 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             } else {
                 None
             };
+            let search_index = if team.is_some() {
+                match crazyagent::search_index::indexer::start_for_engine(runtime_dir) {
+                    Ok(indexer) => Some(indexer),
+                    Err(problem) => {
+                        eprintln!("the search index is off ({problem})");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let terminal = service
                 .owner_runtime()
                 .and_then(|runtime| runtime.terminal().ok());
@@ -901,6 +912,9 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
             let result = service.run(stopped).await.map_err(|e| e.to_string());
             if let Some(upkeep) = usage_upkeep {
                 let _ = tokio::task::spawn_blocking(move || upkeep.stop()).await;
+            }
+            if let Some(indexer) = search_index {
+                let _ = tokio::task::spawn_blocking(move || indexer.stop()).await;
             }
             if research.is_some() || onboarding.is_some() {
                 let _ = tokio::task::spawn_blocking(move || stop_background(research, onboarding))

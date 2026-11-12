@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use std::path::Path;
 
 pub const CHUNK_BYTES_MAX: usize = 2000;
 pub const BEST_MAX: usize = 50;
@@ -26,15 +27,22 @@ CREATE TABLE IF NOT EXISTS search_sources (
     project TEXT NOT NULL,
     key TEXT NOT NULL CHECK(length(CAST(key AS BLOB)) BETWEEN 1 AND 192),
     position INTEGER NOT NULL DEFAULT 0 CHECK(position >= 0),
-    position_ms INTEGER NOT NULL DEFAULT 0,
+    seen_ms INTEGER NOT NULL DEFAULT 0,
     next_ordinal INTEGER NOT NULL DEFAULT 0 CHECK(next_ordinal >= 0),
     inode INTEGER,
+    place TEXT CHECK(place IS NULL OR length(CAST(place AS BLOB)) BETWEEN 1 AND 4096),
+    skipping INTEGER NOT NULL DEFAULT 0 CHECK(skipping IN (0,1)),
     checked_ms INTEGER NOT NULL,
     PRIMARY KEY(project, key)
 );
 CREATE TABLE IF NOT EXISTS search_projects (
     project TEXT PRIMARY KEY,
     caught_up_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS search_memory (
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    print TEXT NOT NULL CHECK(length(print) BETWEEN 1 AND 200),
+    synced_ms INTEGER NOT NULL
 );";
 
 const FULL_TEXT_TABLE: &str = "CREATE VIRTUAL TABLE IF NOT EXISTS search_chunks_fts USING fts5(
@@ -101,7 +109,7 @@ fn prepare(connection: &Connection, full_text: bool) -> Result<(), EngineError> 
                 .map_err(storage)?;
         }
         connection
-            .execute_batch("DELETE FROM search_chunks; DELETE FROM search_sources; DELETE FROM search_projects;")
+            .execute_batch("DELETE FROM search_chunks; DELETE FROM search_sources; DELETE FROM search_projects; DELETE FROM search_memory;")
             .map_err(storage)?;
         assert!(!triggers_present(connection)?);
         return Ok(());
@@ -159,11 +167,13 @@ fn chunk_text(raw: &str) -> Option<String> {
 }
 
 /// Stores the chunks of one conversation or memory not stored yet, each masked and cut
-/// first; nothing is stored for a project that is gone. Inputs: the database, the project
-/// (None for an app-wide memory), the source, the key, each chunk's ordinal and raw text,
-/// and the time. Output: the chunks stored, or the database failure.
+/// first; nothing is stored for a project that is gone. It runs inside the caller's write
+/// transaction, so the project check and the inserts never split around a project removal.
+/// Inputs: the transaction, the project (None for an app-wide memory), the source, the key,
+/// each chunk's ordinal and raw text, and the time. Output: the chunks stored, or the
+/// database failure.
 pub(crate) fn append(
-    connection: &Connection,
+    connection: &Transaction<'_>,
     project: Option<&ProjectId>,
     source: Source,
     key: &str,
@@ -252,7 +262,7 @@ pub(crate) fn forget_project(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<(), EngineError> {
-    if !made(connection)? {
+    if !table(connection, "search_chunks")? {
         return Ok(());
     }
     for table in ["search_chunks", "search_sources", "search_projects"] {
@@ -292,7 +302,7 @@ pub(crate) fn forget_key(
 /// they were. Inputs: the database and the session id. Output: done, or the database
 /// failure.
 pub(crate) fn forget_session(connection: &Connection, session: &str) -> Result<(), EngineError> {
-    if !made(connection)? {
+    if !table(connection, "search_chunks")? {
         return Ok(());
     }
     let key = format!("session/{session}");
@@ -308,11 +318,11 @@ pub(crate) fn forget_session(connection: &Connection, session: &str) -> Result<(
     Ok(())
 }
 
-fn made(connection: &Connection) -> Result<bool, EngineError> {
+fn table(connection: &Connection, name: &str) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='search_chunks')",
-            [],
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            [name],
             |row| row.get(0),
         )
         .map_err(storage)
@@ -332,6 +342,137 @@ fn match_expression(query: &str) -> Option<String> {
     assert!(words.len() <= WORDS_MAX);
     (!words.is_empty()).then(|| words.join(" "))
 }
+
+/// Tells whether sessions(query) of a project may read the index: full text works and the
+/// project's first full pass is done. Inputs: the database and the project. Output: the
+/// answer, false on any failure so the scan answers.
+pub(crate) fn sessions_ready(connection: &Connection, project: &ProjectId) -> bool {
+    full_text(connection)
+        && connection
+            .query_row(
+                "SELECT caught_up_ms IS NOT NULL FROM search_projects WHERE project=?1",
+                [project.as_str()],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+}
+
+/// Tells whether recall(query) may read the index: full text works and the memories are
+/// as the last sync left them. Input: the database. Output: the answer, false on any
+/// failure so the scan answers.
+pub(crate) fn memories_ready(connection: &Connection) -> bool {
+    if !full_text(connection) {
+        return false;
+    }
+    let synced = connection
+        .query_row(
+            "SELECT print FROM search_memory WHERE singleton=1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional();
+    matches!((synced, memory_print(connection)), (Ok(Some(synced)), Ok(Some(now))) if synced == now)
+}
+
+/// A print of the memory library that changes with every insert, delete, narrowing to a
+/// project and approval, the only changes a memory row ever gets: its row count, ordinal
+/// sum, app-wide count and waiting count. Input: the database. Output: the print, None
+/// without a memory library, or the database failure.
+fn memory_print(connection: &Connection) -> Result<Option<String>, EngineError> {
+    if !table(connection, "memory_library")? {
+        return Ok(None);
+    }
+    let (count, sum, wide, waiting): (i64, i64, i64, i64) = connection
+        .query_row(
+            "SELECT COUNT(*), COALESCE(SUM(ordinal),0), COALESCE(SUM(project IS NULL),0),
+                    COALESCE(SUM(CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind')='requested' ELSE 0 END),0)
+             FROM memory_library",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(storage)?;
+    let print = format!("{count}:{sum}:{wide}:{waiting}");
+    assert!(!print.is_empty() && print.len() <= 200);
+    Ok(Some(print))
+}
+
+/// One stored chunk as a search shows it: its conversation or memory key, its message
+/// number and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Chunk {
+    pub(crate) key: String,
+    pub(crate) ordinal: i64,
+    pub(crate) text: String,
+}
+
+/// Ranks a project's chunks of one source for a query: BM25 first, then fused with the
+/// chosen plugin's vectors by `crate::semantic::hybrid` for a database on disk. The ids it
+/// hands back are only a ranking: every caller reloads each with `chunk`. Inputs: the
+/// database, the project, the source and the untrusted query. Output: at most `BEST_MAX`
+/// chunk ids best first and the ranking's note, or the database failure.
+pub(crate) fn ranked(
+    connection: &Connection,
+    project: &ProjectId,
+    source: Source,
+    query: &str,
+) -> Result<(Vec<i64>, Option<&'static str>), EngineError> {
+    let full_text = best(connection, project, source, query)?;
+    let Some(root) = connection
+        .path()
+        .map(Path::new)
+        .and_then(Path::parent)
+        .filter(|root| !root.as_os_str().is_empty())
+    else {
+        return Ok((full_text, None));
+    };
+    let fused = crate::semantic::hybrid(connection, root, project, source, query, &full_text);
+    let mut ids = fused.ids;
+    ids.truncate(BEST_MAX);
+    Ok((ids, fused.note))
+}
+
+/// Reloads one ranked chunk with the project and source it must belong to, so an id from
+/// any other place is never shown: a conversation chunk of this project, or a memory chunk
+/// of this project or app-wide. Inputs: the database, the id, the project and the source.
+/// Output: the chunk, None for an id of another place, or the database failure.
+pub(crate) fn chunk(
+    connection: &Connection,
+    id: i64,
+    project: &ProjectId,
+    source: Source,
+) -> Result<Option<Chunk>, EngineError> {
+    let scope = match source {
+        Source::Session => "project=?3",
+        Source::Memory => "(project=?3 OR project IS NULL)",
+    };
+    let found = connection
+        .query_row(
+            &format!(
+                "SELECT key, ordinal, text FROM search_chunks WHERE id=?1 AND source=?2 AND {scope}"
+            ),
+            params![id, source.as_str(), project.as_str()],
+            |row| {
+                Ok(Chunk {
+                    key: row.get(0)?,
+                    ordinal: row.get(1)?,
+                    text: row.get(2)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage)?;
+    assert!(
+        found
+            .as_ref()
+            .is_none_or(|chunk| chunk.text.len() <= CHUNK_BYTES_MAX)
+    );
+    Ok(found)
+}
+
+pub mod indexer;
 
 #[cfg(test)]
 mod tests;

@@ -49,7 +49,11 @@ const ROW_TEXT_BYTES_MAX: usize = 64 * 1024;
 const FOOTER_BYTES_MAX: usize = 400;
 const HEADER_SLACK_BYTES: usize = 200;
 const TEAM_ID: &str = "team";
-const SESSION_PREFIX: &str = "session/";
+pub(crate) const SESSION_PREFIX: &str = "session/";
+const PLACE_BYTES_MAX: usize = 4096;
+const SETTLED_MS: i64 = 2_000;
+const OUTSTANDING: &str =
+    "'queued','prepared','delivering','running','waiting_approval','uncertain'";
 const NOT_FOUND: &str = "No conversation of this project has that id. Call sessions() to list them, or sessions(query) to search.";
 const UNREAD: &str = "Not answered: the engine could not read this call.";
 const NOT_AGENT_TOOL: &str = "Not answered: a sub-agent does not use this tool.";
@@ -78,11 +82,76 @@ enum Source {
 
 /// One past conversation as the tools name it: its id, a plain label, when it was last
 /// active in Unix milliseconds and where it is kept.
-struct Conversation {
-    id: String,
+pub(crate) struct Conversation {
+    pub(crate) id: String,
     label: String,
     at_ms: i64,
     source: Source,
+}
+
+/// Where the search index stopped reading one conversation: the next turn ordinal, team
+/// message or record byte, the next message number, the record's file and path below the
+/// agents folder, whether that byte is inside a line over `LINE_BYTES_MAX` still being
+/// skipped, and the record time already read to its end (0 when it must be read again).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Mark {
+    pub(crate) position: i64,
+    pub(crate) ordinal: i64,
+    pub(crate) inode: Option<i64>,
+    pub(crate) place: Option<String>,
+    pub(crate) skipping: bool,
+    pub(crate) seen_ms: i64,
+}
+
+/// What one index read of a conversation found: each new message's number and raw text,
+/// where to go on from, whether the record was replaced so its old chunks must go, whether
+/// everything there is now was read, and the bytes it cost.
+#[derive(Debug)]
+pub(crate) struct Fresh {
+    pub(crate) messages: Vec<(i64, String)>,
+    pub(crate) mark: Mark,
+    pub(crate) restarted: bool,
+    pub(crate) done: bool,
+    pub(crate) bytes: u64,
+}
+
+impl Fresh {
+    fn after(mark: &Mark) -> Self {
+        Self {
+            messages: Vec::new(),
+            mark: mark.clone(),
+            restarted: false,
+            done: false,
+            bytes: 0,
+        }
+    }
+}
+
+/// One engine turn as both the page reader and the index read it: the owner's message,
+/// the engine's line and the master's reply each within its size bound, its ordinal and
+/// whether it is still outstanding.
+struct Turn {
+    owner: Option<String>,
+    engine: Option<String>,
+    reply: Option<String>,
+    ordinal: i64,
+    open: bool,
+}
+
+impl Turn {
+    fn said(self) -> Vec<(String, String)> {
+        let mut said = Vec::with_capacity(2);
+        match (self.owner, self.engine) {
+            (Some(text), _) => said.push(("owner".to_owned(), text)),
+            (None, Some(line)) => said.push(("engine".to_owned(), line)),
+            (None, None) => {}
+        }
+        if let Some(reply) = self.reply {
+            said.push(("master".to_owned(), reply));
+        }
+        assert!(said.len() <= 2);
+        said
+    }
 }
 
 /// What one call may still read, in bytes, so a search over years of records stays bounded.
@@ -227,6 +296,9 @@ pub fn sessions(
     if words.is_empty() {
         return (listing(&found), false);
     }
+    if let Some(text) = indexed(connection, project, &found, &words, query) {
+        return (text, false);
+    }
     let mut budget = Budget {
         left: SCAN_BYTES_MAX,
     };
@@ -361,6 +433,118 @@ pub fn session(
     (text, false)
 }
 
+/// Answers a search from the index once the project's first full pass is done (DEC-105):
+/// the best matches first, each still in this project's listing, or None so the scan
+/// answers, also when the index holds no hit. Takes the database, the project, the
+/// listing, the words and the query. Returns the answer within `ANSWER_BYTES_MAX`.
+fn indexed(
+    connection: &Connection,
+    project: &ProjectId,
+    found: &[Conversation],
+    words: &[String],
+    query: &str,
+) -> Option<String> {
+    if !crate::search_index::sessions_ready(connection, project) {
+        return None;
+    }
+    let (ids, note) = crate::search_index::ranked(
+        connection,
+        project,
+        crate::search_index::Source::Session,
+        query,
+    )
+    .ok()?;
+    let note = note.filter(|note| note.len() <= FOOTER_BYTES_MAX / 2);
+    let footer = "Read a conversation from a hit with session(id, offset), offset being the message number.\n";
+    let room = ANSWER_BYTES_MAX
+        .saturating_sub(query.trim().len() + HEADER_SLACK_BYTES)
+        .saturating_sub(FOOTER_BYTES_MAX)
+        .saturating_sub(note.map_or(0, |note| note.len() + 1));
+    let hits = indexed_hits(connection, project, found, words, &ids, room);
+    if hits.is_empty() {
+        return None;
+    }
+    let mut text = format!(
+        "{} hits for \"{}\", best matches first. {DATA_NOTE}\n",
+        hits.len(),
+        query.trim()
+    );
+    for hit in &hits {
+        text.push_str(hit);
+    }
+    if let Some(note) = note {
+        text.push_str(note);
+        text.push('\n');
+    }
+    text.push_str(footer);
+    assert!(text.len() <= ANSWER_BYTES_MAX);
+    Some(text)
+}
+
+/// Shows ranked chunks as hit lines: only chunks this project's index holds for a
+/// conversation still in its listing, at most `HITS_PER_CONVERSATION_MAX` each and
+/// `HITS_MAX` in all, each excerpt masked again on its way out. Takes the database, the
+/// project, the listing, the words, the ranked ids and the bytes the hits may take.
+/// Returns the hit lines in rank order.
+fn indexed_hits(
+    connection: &Connection,
+    project: &ProjectId,
+    found: &[Conversation],
+    words: &[String],
+    ids: &[i64],
+    room: usize,
+) -> Vec<String> {
+    let listed: HashMap<&str, &Conversation> = found
+        .iter()
+        .map(|conversation| (conversation.id.as_str(), conversation))
+        .collect();
+    let mut shown: HashMap<&str, usize> = HashMap::new();
+    let mut hits = Vec::new();
+    let mut used = 0;
+    for id in ids {
+        if hits.len() >= HITS_MAX {
+            break;
+        }
+        let Ok(Some(chunk)) = crate::search_index::chunk(
+            connection,
+            *id,
+            project,
+            crate::search_index::Source::Session,
+        ) else {
+            continue;
+        };
+        let Some(conversation) = listed.get(chunk.key.as_str()) else {
+            continue;
+        };
+        let here = shown.entry(conversation.id.as_str()).or_default();
+        if *here >= HITS_PER_CONVERSATION_MAX {
+            continue;
+        }
+        let masked = crate::project_setup::redact(&chunk.text);
+        let lower = masked.to_ascii_lowercase();
+        let at = words
+            .iter()
+            .find_map(|word| lower.find(word.as_str()))
+            .unwrap_or(0);
+        let hit = format!(
+            "- {} #{} ({}, {}): {}\n",
+            conversation.id,
+            chunk.ordinal,
+            conversation.label,
+            utc(conversation.at_ms),
+            snippet(&masked, at)
+        );
+        if used + hit.len() > room {
+            break;
+        }
+        used += hit.len();
+        *here += 1;
+        hits.push(hit);
+    }
+    assert!(hits.len() <= HITS_MAX && used <= room);
+    hits
+}
+
 /// Splits a query into at most `WORDS_MAX` lowercase words of at most `WORD_BYTES_MAX`
 /// bytes. Takes the query. Returns the words, none for an empty query.
 fn words(query: &str) -> Vec<String> {
@@ -405,7 +589,11 @@ fn listing(found: &[Conversation]) -> String {
 /// older one leaves of its share goes to the newer ones, whose work is searched most (r1 M1).
 /// Takes the engine database, the project and the agents folder. Returns at most
 /// `RECORDS_MAX` records with the stored conversations.
-fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Conversation> {
+pub(crate) fn conversations(
+    connection: &Connection,
+    project: &ProjectId,
+    agents: &Path,
+) -> Vec<Conversation> {
     let mut found = turn_sessions(connection, project).unwrap_or_default();
     if let Ok(Some(at_ms)) = team_last(connection, project) {
         found.push(Conversation {
@@ -694,7 +882,7 @@ fn record_messages(
     let mut line = Vec::new();
     let mut index = 0;
     while !budget.spent() {
-        let Ok(Some((fits, read))) = next_line(&mut reader, &mut line) else {
+        let Ok(Some((fits, read, _))) = next_line(&mut reader, &mut line) else {
             return;
         };
         budget.spend(read);
@@ -770,18 +958,18 @@ fn single_link(file: &std::fs::File) -> bool {
 
 /// Reads one line into `line` without keeping more than `LINE_BYTES_MAX` bytes of it.
 /// Takes the reader and the buffer. Returns none at the end, else whether the whole line
-/// fit and how many bytes were read, newline included.
+/// fit, how many bytes were read, newline included, and whether the line ended in one.
 fn next_line(
     reader: &mut impl BufRead,
     line: &mut Vec<u8>,
-) -> std::io::Result<Option<(bool, usize)>> {
+) -> std::io::Result<Option<(bool, usize, bool)>> {
     line.clear();
     let mut fits = true;
     let mut read = 0;
     loop {
         let buffer = reader.fill_buf()?;
         if buffer.is_empty() {
-            return Ok((read > 0).then_some((fits, read)));
+            return Ok((read > 0).then_some((fits, read, false)));
         }
         let (used, done) = match buffer.iter().position(|byte| *byte == b'\n') {
             Some(at) => (at + 1, true),
@@ -798,7 +986,7 @@ fn next_line(
         read += used;
         if done {
             assert!(line.len() <= LINE_BYTES_MAX);
-            return Ok(Some((fits, read)));
+            return Ok(Some((fits, read, true)));
         }
     }
 }
@@ -847,35 +1035,46 @@ fn turn_messages(
     project: &ProjectId,
     session: &str,
 ) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut statement = connection.prepare(&format!(
+    let mut messages = Vec::new();
+    for turn in turns(connection, project, session, 0, ROWS_MAX)? {
+        messages.extend(turn.said());
+    }
+    Ok(messages)
+}
+
+/// Reads a master session's engine turns from an ordinal on, in order, each text within
+/// its bound, the one place both the page reader and the index read turns. Takes the
+/// database, the project, the session, the first ordinal and the most turns. Returns them.
+fn turns(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    from: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<Turn>> {
+    let mut statement = connection.prepare_cached(&format!(
         "SELECT CASE WHEN length(CAST(c.text AS BLOB))<={ROW_TEXT_BYTES_MAX} THEN c.text END,
                 CASE WHEN length(CAST(t.body AS BLOB))<=16384 THEN json_extract(t.body,'$.engine_request.line') END,
-                CASE WHEN length(CAST(t.body AS BLOB))<=16384 THEN json_extract(t.body,'$.reply.text') END
+                CASE WHEN length(CAST(t.body AS BLOB))<=16384 THEN json_extract(t.body,'$.reply.text') END,
+                t.ordinal, t.phase IN ({OUTSTANDING})
          FROM master_turns t
          JOIN master_sessions s ON s.id=t.session AND s.project=?2
          LEFT JOIN conversation_entries c ON c.event_cursor=t.input AND c.kind='message' AND c.project=?2
-         WHERE t.session=?1 ORDER BY t.ordinal LIMIT {ROWS_MAX}"
+         WHERE t.session=?1 AND t.ordinal>=?3 ORDER BY t.ordinal LIMIT ?4"
     ))?;
-    let rows = statement.query_map(params![session, project.as_str()], |row| {
-        Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, Option<String>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-        ))
-    })?;
-    let mut messages = Vec::new();
-    for row in rows {
-        let (owner, engine, reply) = row?;
-        match (owner, engine) {
-            (Some(text), _) => messages.push(("owner".to_owned(), text)),
-            (None, Some(line)) => messages.push(("engine".to_owned(), line)),
-            (None, None) => {}
-        }
-        if let Some(reply) = reply {
-            messages.push(("master".to_owned(), reply));
-        }
-    }
-    Ok(messages)
+    let rows = statement.query_map(
+        params![session, project.as_str(), from, limit.min(ROWS_MAX) as i64],
+        |row| {
+            Ok(Turn {
+                owner: row.get(0)?,
+                engine: row.get(1)?,
+                reply: row.get(2)?,
+                ordinal: row.get(3)?,
+                open: row.get(4)?,
+            })
+        },
+    )?;
+    rows.collect()
 }
 
 /// The last time the team of a project wrote a message or engine note, if it ever did.
@@ -895,14 +1094,27 @@ fn team_messages(
     connection: &Connection,
     project: &ProjectId,
 ) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT author, text, created_ms, id FROM team_messages
+    team_rows(connection, project, 0, ROWS_MAX)
+}
+
+/// Reads the team's messages of a project from a position on, oldest first, each text
+/// within its bound, the one place both the page reader and the index read them. Takes
+/// the database, the project, the position and the most rows. Returns author and text.
+fn team_rows(
+    connection: &Connection,
+    project: &ProjectId,
+    from: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare_cached(&format!(
+        "SELECT author, text FROM team_messages
          WHERE project=?1 AND text IS NOT NULL AND length(CAST(text AS BLOB))<={ROW_TEXT_BYTES_MAX}
-         ORDER BY 3, 4 LIMIT {ROWS_MAX}"
+         ORDER BY created_ms, id LIMIT ?2 OFFSET ?3"
     ))?;
-    let rows = statement.query_map([project.as_str()], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
+    let rows = statement.query_map(
+        params![project.as_str(), limit.min(ROWS_MAX) as i64, from],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
     rows.collect()
 }
 
@@ -967,6 +1179,295 @@ fn agent_label(
         Some(persona) => format!("{persona}, agent-{agent} {role} on {harness}"),
         None => format!("agent-{agent} {role} on {harness}"),
     }
+}
+
+/// Reads what is new in one conversation since the index stopped, within the round's
+/// bounds, numbering each message as `session` does: engine turns only once final, team
+/// messages by position, and harness records by whole lines. Takes the database, the
+/// project, the conversation, where the index stopped, the time and the bounds. Returns
+/// what was found, or the database failure.
+pub(crate) fn fresh(
+    connection: &Connection,
+    project: &ProjectId,
+    conversation: &Conversation,
+    from: &Mark,
+    now_ms: i64,
+    chunks_max: usize,
+    bytes_max: u64,
+) -> rusqlite::Result<Fresh> {
+    assert!(chunks_max >= 2);
+    assert!(bytes_max > LINE_BYTES_MAX as u64 + 1);
+    assert!(from.position >= 0 && from.ordinal >= 0);
+    let fresh = match &conversation.source {
+        Source::Turns(session) => {
+            fresh_turns(connection, project, session, from, chunks_max, bytes_max)?
+        }
+        Source::Team => fresh_team(connection, project, from, chunks_max, bytes_max)?,
+        Source::Record {
+            harness,
+            agents,
+            below,
+        } => fresh_record(
+            harness,
+            agents,
+            below,
+            conversation.at_ms,
+            from,
+            now_ms,
+            chunks_max,
+            bytes_max,
+        ),
+    };
+    assert!(fresh.messages.len() <= chunks_max && fresh.bytes <= bytes_max);
+    assert!(fresh.mark.ordinal == from.ordinal + fresh.messages.len() as i64 || fresh.restarted);
+    Ok(fresh)
+}
+
+/// Reads a session's final turns after the mark, stopping before an outstanding turn so
+/// its reply is never missed. Takes the database, the project, the session, the mark and
+/// the bounds. Returns what was found.
+fn fresh_turns(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    from: &Mark,
+    chunks_max: usize,
+    bytes_max: u64,
+) -> rusqlite::Result<Fresh> {
+    let mut fresh = Fresh::after(from);
+    let read = turns(connection, project, session, from.position, chunks_max)?;
+    let fetched = read.len();
+    let mut stop = None;
+    for turn in read {
+        if turn.open {
+            stop = Some(true);
+            break;
+        }
+        let ordinal = turn.ordinal;
+        let said = turn.said();
+        let bytes: u64 = said.iter().map(|(_, text)| text.len() as u64).sum();
+        if fresh.messages.len() + said.len() > chunks_max || fresh.bytes + bytes > bytes_max {
+            stop = Some(false);
+            break;
+        }
+        for (_, text) in said {
+            fresh.messages.push((fresh.mark.ordinal, text));
+            fresh.mark.ordinal += 1;
+        }
+        fresh.bytes += bytes;
+        fresh.mark.position = ordinal + 1;
+    }
+    fresh.done = stop.unwrap_or(fetched < chunks_max.min(ROWS_MAX));
+    Ok(fresh)
+}
+
+/// Reads the team's messages after the mark, by position as `session` numbers them.
+/// Takes the database, the project, the mark and the bounds. Returns what was found.
+fn fresh_team(
+    connection: &Connection,
+    project: &ProjectId,
+    from: &Mark,
+    chunks_max: usize,
+    bytes_max: u64,
+) -> rusqlite::Result<Fresh> {
+    let mut fresh = Fresh::after(from);
+    let room = usize::try_from(ROWS_MAX as i64 - from.position)
+        .unwrap_or(0)
+        .min(chunks_max);
+    if room == 0 {
+        fresh.done = true;
+        return Ok(fresh);
+    }
+    let read = team_rows(connection, project, from.position, room)?;
+    let fetched = read.len();
+    let mut stopped = false;
+    for (_, text) in read {
+        if fresh.bytes + text.len() as u64 > bytes_max {
+            stopped = true;
+            break;
+        }
+        fresh.bytes += text.len() as u64;
+        fresh.messages.push((fresh.mark.ordinal, text));
+        fresh.mark.ordinal += 1;
+        fresh.mark.position += 1;
+    }
+    fresh.done = !stopped && fetched < room;
+    assert!(fresh.mark.position == fresh.mark.ordinal);
+    Ok(fresh)
+}
+
+/// Reads a record's whole new lines after the mark as `record_messages` numbers them: the
+/// same plain-file checks, a record with another file or path or a shorter length read
+/// again from its start, a last line with no newline left for the next round, and a line
+/// over `LINE_BYTES_MAX` skipped across rounds. A record unchanged since a settled full
+/// read is not opened. Takes the harness, the agents folder, the record's path below it,
+/// its time, the mark, the time now and the bounds. Returns what was found.
+#[allow(clippy::too_many_arguments)]
+fn fresh_record(
+    harness: &str,
+    agents: &Path,
+    below: &Path,
+    at_ms: i64,
+    from: &Mark,
+    now_ms: i64,
+    chunks_max: usize,
+    bytes_max: u64,
+) -> Fresh {
+    let mut fresh = Fresh::after(from);
+    let Some(place) = below
+        .to_str()
+        .filter(|place| (1..=PLACE_BYTES_MAX).contains(&place.len()))
+    else {
+        fresh.done = true;
+        return fresh;
+    };
+    let same_place = from.place.as_deref() == Some(place);
+    if same_place && from.seen_ms != 0 && from.seen_ms == at_ms {
+        fresh.done = true;
+        return fresh;
+    }
+    let Ok(file) = crate::platform::open_plain_beneath(agents, below) else {
+        fresh.done = true;
+        return fresh;
+    };
+    let Ok(metadata) = file.metadata() else {
+        fresh.done = true;
+        return fresh;
+    };
+    if !metadata.is_file() || !single_link(&file) {
+        fresh.done = true;
+        return fresh;
+    }
+    let inode = inode(&metadata);
+    let start = from.place.is_none()
+        || !same_place
+        || from.inode != inode
+        || metadata.len() < from.position as u64;
+    if start {
+        fresh.restarted = *from != Mark::default();
+        fresh.mark = Mark {
+            place: Some(place.to_owned()),
+            inode,
+            ..Mark::default()
+        };
+    }
+    let mut file = file;
+    if std::io::Seek::seek(
+        &mut file,
+        std::io::SeekFrom::Start(fresh.mark.position as u64),
+    )
+    .is_err()
+    {
+        return fresh;
+    }
+    let mut reader = BufReader::with_capacity(64 * 1024, file.take(bytes_max));
+    let mut line = Vec::new();
+    let mut stopped = false;
+    loop {
+        if fresh.messages.len() >= chunks_max {
+            stopped = true;
+            break;
+        }
+        let Ok(next) = next_line(&mut reader, &mut line) else {
+            stopped = true;
+            break;
+        };
+        let Some((fits, read, ended)) = next else {
+            break;
+        };
+        fresh.bytes += read as u64;
+        if !ended {
+            if !fits || fresh.mark.skipping {
+                fresh.mark.position += read as i64;
+                fresh.mark.skipping = true;
+            }
+            break;
+        }
+        fresh.mark.position += read as i64;
+        if std::mem::take(&mut fresh.mark.skipping) || !fits {
+            continue;
+        }
+        let Ok(raw) = std::str::from_utf8(&line) else {
+            continue;
+        };
+        if !maybe_message(harness, raw) {
+            continue;
+        }
+        if let Some((_, text)) = record_message(harness, raw.as_bytes()) {
+            fresh.messages.push((fresh.mark.ordinal, text));
+            fresh.mark.ordinal += 1;
+        }
+    }
+    fresh.done = !stopped && fresh.bytes < bytes_max;
+    let settled = fresh.done && !fresh.mark.skipping && at_ms > 0 && at_ms <= now_ms - SETTLED_MS;
+    fresh.mark.seen_ms = if settled { at_ms } else { 0 };
+    assert!(fresh.bytes <= bytes_max);
+    fresh
+}
+
+#[cfg(unix)]
+fn inode(metadata: &std::fs::Metadata) -> Option<i64> {
+    use std::os::unix::fs::MetadataExt;
+    i64::try_from(metadata.ino()).ok()
+}
+
+#[cfg(not(unix))]
+fn inode(_metadata: &std::fs::Metadata) -> Option<i64> {
+    None
+}
+
+/// Tells whether an indexed conversation the listing no longer shows is still kept, so a
+/// conversation left out only by the walk's budgets keeps its chunks: the team's messages,
+/// a master session with turns, or a record of a team agent of the project still a plain
+/// file. Takes the database, the project, the agents folder, the key and the record's
+/// path below the agents folder. Returns the answer, or the database failure.
+pub(crate) fn still_there(
+    connection: &Connection,
+    project: &ProjectId,
+    agents: &Path,
+    key: &str,
+    place: Option<&str>,
+) -> rusqlite::Result<bool> {
+    if key == TEAM_ID {
+        return Ok(team_last(connection, project)?.is_some());
+    }
+    if let Some(session) = key.strip_prefix(SESSION_PREFIX) {
+        return session_kept(connection, project, session);
+    }
+    let agent = key
+        .strip_prefix("agent-")
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|number| number.parse::<i64>().ok());
+    let (Some(agent), Some(place)) = (agent, place) else {
+        return Ok(false);
+    };
+    if !table_exists(connection, "team_agents")? {
+        return Ok(false);
+    }
+    let member: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM team_agents WHERE id=?1 AND project=?2)",
+        params![agent, project.as_str()],
+        |row| row.get(0),
+    )?;
+    Ok(member
+        && crate::platform::open_plain_beneath(agents, Path::new(place)).is_ok_and(|file| {
+            file.metadata().is_ok_and(|metadata| metadata.is_file()) && single_link(&file)
+        }))
+}
+
+/// Tells whether a master session of the project still has engine turns. Takes the
+/// database, the project and the session id. Returns the answer, or the database failure.
+pub(crate) fn session_kept(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM master_sessions s WHERE s.id=?1 AND s.project=?2
+             AND EXISTS(SELECT 1 FROM master_turns t WHERE t.session=s.id))",
+        params![session, project.as_str()],
+        |row| row.get(0),
+    )
 }
 
 /// Tells whether the database has a table, so a reader of another feature's table works on

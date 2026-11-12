@@ -3,6 +3,22 @@ use rusqlite::Connection;
 
 const NOW: i64 = 1_762_950_000_000;
 
+/// Stores chunks the way the indexer does, inside one write transaction. Inputs and output
+/// as `super::append`.
+fn append(
+    db: &Connection,
+    project: Option<&ProjectId>,
+    source: Source,
+    key: &str,
+    chunks: &[(i64, &str)],
+    at_ms: i64,
+) -> Result<usize, EngineError> {
+    let tx = db.unchecked_transaction().unwrap();
+    let stored = super::append(&tx, project, source, key, chunks, at_ms)?;
+    tx.commit().unwrap();
+    Ok(stored)
+}
+
 fn project(id: &str) -> ProjectId {
     ProjectId::new(id).unwrap()
 }
@@ -502,4 +518,139 @@ fn forgetting_works_on_a_database_that_never_made_the_index() {
     let db = Connection::open_in_memory().unwrap();
     forget_session(&db, "s-1").unwrap();
     forget_project(&db, &project("alpha")).unwrap();
+}
+
+#[cfg(unix)]
+fn memory_store() -> Connection {
+    let db = Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE projects(id TEXT PRIMARY KEY); INSERT INTO projects(id) VALUES ('alpha'),('bravo');")
+        .unwrap();
+    crate::memory::library::initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    db
+}
+
+#[cfg(unix)]
+fn remember(db: &Connection, id: &str, project: Option<&str>, origin: &str, text: &str) {
+    db.execute(
+        "INSERT INTO memory_library(id,project,origin,text) VALUES (?1,?2,?3,?4)",
+        rusqlite::params![id, project, origin, text],
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+fn memory_chunks(db: &Connection) -> Vec<(String, Option<String>)> {
+    db.prepare("SELECT key, project FROM search_chunks WHERE source='memory' ORDER BY key")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[cfg(unix)]
+const WRITTEN: &str = r#"{"kind":"written"}"#;
+#[cfg(unix)]
+const WAITING: &str = r#"{"kind":"requested","agent":"Ada"}"#;
+
+/// DEC-105 D6: only memories an agent may read are indexed (none waiting for the owner,
+/// none with hidden characters), and every approval, delete and narrowing reaches the
+/// index on the next sync, which recall waits for.
+#[cfg(unix)]
+#[test]
+fn memory_sync_indexes_only_readable_memories_and_follows_every_change() {
+    let mut db = memory_store();
+    remember(&db, "m1", Some("alpha"), WRITTEN, "okapi project rule");
+    remember(&db, "m2", None, WRITTEN, "okapi app rule");
+    remember(&db, "m3", Some("alpha"), WAITING, "okapi waiting rule");
+    remember(
+        &db,
+        "m4",
+        Some("alpha"),
+        WRITTEN,
+        "okapi hidden\u{200B}rule",
+    );
+    assert!(!memories_ready(&db));
+    indexer::sync_memories(&mut db, NOW).unwrap();
+    assert!(memories_ready(&db));
+    let some = |id: &str| Some(id.to_owned());
+    assert_eq!(
+        memory_chunks(&db),
+        [("m1".to_owned(), some("alpha")), ("m2".to_owned(), None)]
+    );
+    db.execute(
+        "UPDATE memory_library SET origin=?1 WHERE id='m3'",
+        [WRITTEN],
+    )
+    .unwrap();
+    assert!(!memories_ready(&db), "an approval waits for the next sync");
+    indexer::sync_memories(&mut db, NOW).unwrap();
+    assert_eq!(memory_chunks(&db).len(), 3);
+    db.execute("DELETE FROM memory_library WHERE id='m1'", [])
+        .unwrap();
+    db.execute(
+        "UPDATE memory_library SET project='bravo' WHERE id='m2'",
+        [],
+    )
+    .unwrap();
+    indexer::sync_memories(&mut db, NOW).unwrap();
+    assert_eq!(
+        memory_chunks(&db),
+        [
+            ("m2".to_owned(), some("bravo")),
+            ("m3".to_owned(), some("alpha"))
+        ]
+    );
+    assert!(memories_ready(&db));
+}
+
+/// DEC-105 D2 and D3: recall reads the index once it is synced, best first, and shows only
+/// this project's and app-wide memories no one waits on; a query the index cannot match, or
+/// an index not synced yet, is answered by the scan as before.
+#[cfg(unix)]
+#[test]
+fn recall_reads_the_synced_index_and_keeps_its_scope() {
+    let mut db = memory_store();
+    let alpha = project("alpha");
+    remember(&db, "m1", Some("alpha"), WRITTEN, "okapi okapi okapi rule");
+    remember(
+        &db,
+        "m2",
+        None,
+        WRITTEN,
+        "an okapi app rule with more words around it",
+    );
+    remember(&db, "m3", Some("bravo"), WRITTEN, "okapi bravo rule");
+    remember(&db, "m4", Some("alpha"), WAITING, "okapi waiting rule");
+    indexer::sync_memories(&mut db, NOW).unwrap();
+    let ids = |found: Vec<crate::memory::library::SavedMemory>| {
+        found
+            .into_iter()
+            .map(|memory| memory.id.as_str().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let found = crate::memory::library::recall(&mut db, &alpha, "okapi")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ids(found), ["m1", "m2"]);
+    let scanned = crate::memory::library::recall(&mut db, &alpha, "kapi")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ids(scanned).len(),
+        2,
+        "a part of a word still finds through the scan"
+    );
+    remember(
+        &db,
+        "m5",
+        Some("alpha"),
+        WRITTEN,
+        "zebra rule saved just now",
+    );
+    let fresh = crate::memory::library::recall(&mut db, &alpha, "zebra")
+        .unwrap()
+        .unwrap();
+    assert_eq!(ids(fresh), ["m5"], "not synced yet, so the scan answers");
 }
