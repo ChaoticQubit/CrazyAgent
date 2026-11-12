@@ -194,14 +194,14 @@ fn a_fallback_is_told_once_to_the_owner_and_the_master_until_the_model_runs_agai
     };
     assert!(master);
     let notices: Vec<(String, String)> = db
-        .prepare("SELECT kind,text FROM team_notifications WHERE project=?1 ORDER BY id")
+        .prepare("SELECT kind,text FROM owner_notices WHERE project=?1 AND subject LIKE 'model_fallback:%' ORDER BY id")
         .unwrap()
         .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(notices.len(), 3);
-    assert!(notices.iter().all(|(kind, _)| kind == "model_fallback"));
+    assert!(notices.iter().all(|(kind, _)| kind == "pool_failover"));
     assert_eq!(
         notices[0].1,
         "No account in this project's pool can run gpt-a for codex agents now, so task 1 runs on the default model. You are told again only after gpt-a runs once more."
