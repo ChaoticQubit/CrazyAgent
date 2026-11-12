@@ -143,7 +143,7 @@ fn a_waiting_command_is_never_overtaken_on_what_it_waits_for() {
     let resources = [resource("ollama", 1), resource("postgres", 1)];
     assert_eq!(
         grant(&queue, HeavyLane::NoLimit, &resources),
-        vec![true, false, true, true]
+        vec![true, false, false, true]
     );
     let after = [waiting(&["ollama", "postgres"]), running(&["postgres"])];
     assert_eq!(
@@ -189,6 +189,8 @@ fn a_command_naming_an_unknown_resource_is_refused_with_the_known_names() {
 #[test]
 fn parse_reads_the_resources_the_label_and_the_command() {
     let request = parse(&os(&[
+        "--folder",
+        "/state/agents/agent-3/tmp/crazyagent-lane",
         "--uses",
         "ollama",
         "--uses",
@@ -200,12 +202,16 @@ fn parse_reads_the_resources_the_label_and_the_command() {
         "check",
     ]))
     .unwrap();
+    assert_eq!(
+        request.folder,
+        Some(PathBuf::from("/state/agents/agent-3/tmp/crazyagent-lane"))
+    );
     assert_eq!(request.uses, vec!["ollama".to_owned(), "pg-16".to_owned()]);
     assert_eq!(request.label.as_deref(), Some("make check"));
     assert_eq!(request.program, OsString::from("make"));
     assert_eq!(request.arguments, os(&["check"]));
     let plain = parse(&os(&["--", "cargo", "test", "--", "--nocapture"])).unwrap();
-    assert!(plain.uses.is_empty() && plain.label.is_none());
+    assert!(plain.folder.is_none() && plain.uses.is_empty() && plain.label.is_none());
     assert_eq!(plain.arguments, os(&["test", "--", "--nocapture"]));
 }
 
@@ -216,6 +222,9 @@ fn parse_refuses_what_the_lane_cannot_read() {
         &["make"][..],
         &["--"][..],
         &["--uses"][..],
+        &["--folder", "relative/lane", "--", "make"][..],
+        &["--folder", "/a", "--folder", "/b", "--", "make"][..],
+        &["--folder"][..],
         &["--uses", "Ollama", "--", "make"][..],
         &["--uses", "a b", "--", "make"][..],
         &["--uses", "x", "--uses", "x", "--", "make"][..],
@@ -578,4 +587,74 @@ fn the_lane_table_goes_with_its_project() {
         .unwrap();
     crate::coord::forget_project(&connection, &project()).unwrap();
     assert_eq!(rows(&connection), 0);
+}
+
+#[test]
+fn a_project_whose_last_agent_stopped_is_still_ticked_until_its_lane_is_clear() {
+    let root = tempfile::tempdir().unwrap();
+    let connection = db();
+    let a = holder(root.path(), 1);
+    let entry = Entry::enter(&a.folder, &ticket(&[], "make")).unwrap();
+    tick(
+        &connection,
+        &project(),
+        &[a.clone()],
+        &CoordSettings::default(),
+        1_000,
+    )
+    .unwrap();
+    assert_eq!(projects(&connection).unwrap(), vec![project()]);
+    tick(
+        &connection,
+        &project(),
+        &[],
+        &CoordSettings::default(),
+        2_000,
+    )
+    .unwrap();
+    assert!(projects(&connection).unwrap().is_empty());
+    let shown = view(&connection, &project()).unwrap();
+    assert!(shown.running.is_empty() && shown.waiting.is_empty());
+    entry.leave();
+}
+
+#[test]
+fn the_heavy_commands_section_names_the_engine_the_folder_and_the_resources() {
+    let engine = Path::new("/Applications/CrazyAgent.app/Contents/MacOS/crazyagent");
+    let folder = Path::new("/state/team/agents/agent-4/tmp/crazyagent-lane");
+    let section = crate::launch_context::heavy_lane_section(
+        engine,
+        folder,
+        &[resource("ollama", 1), resource("postgres", 2)],
+    )
+    .unwrap();
+    assert!(section.contains(
+        "'/Applications/CrazyAgent.app/Contents/MacOS/crazyagent' lane --folder '/state/team/agents/agent-4/tmp/crazyagent-lane' -- <command>"
+    ), "{section}");
+    assert!(
+        section.contains("ollama, postgres") && section.contains("--uses ollama"),
+        "{section}"
+    );
+    let bare = crate::launch_context::heavy_lane_section(engine, folder, &[]).unwrap();
+    assert!(bare.contains("no shared resources"), "{bare}");
+    for (engine, folder) in [
+        (Path::new("/tmp/it's/crazyagent"), folder),
+        (engine, Path::new("/tmp/line\nbreak")),
+        (Path::new("relative/crazyagent"), folder),
+        (engine, Path::new("relative/lane")),
+    ] {
+        assert_eq!(
+            crate::launch_context::heavy_lane_section(engine, folder, &[]),
+            None,
+            "{engine:?} {folder:?}"
+        );
+    }
+    let most: Vec<SharedResource> = (0..SHARED_RESOURCES_MAX)
+        .map(|at| resource(&format!("{}{at:02}", "r".repeat(29)), 1))
+        .collect();
+    let long = format!("/{}", "e".repeat(1023));
+    let section =
+        crate::launch_context::heavy_lane_section(Path::new(&long), Path::new(&long), &most)
+            .unwrap();
+    assert!(section.len() <= crate::launch_context::HEAVY_LANE_BYTES_MAX);
 }

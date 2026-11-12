@@ -40,10 +40,10 @@ pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize = INSTRUCTIONS_BYTES_MAX
     + HEAVY_LANE_BYTES_MAX;
 /// The most bytes of the section that tells an agent how to run heavy commands through the
 /// project's heavy lane (F28): the engine path, the shared resource names and the rule.
-pub const HEAVY_LANE_BYTES_MAX: usize = 3 * 1024;
+pub const HEAVY_LANE_BYTES_MAX: usize = 4 * 1024;
 const HEAVY_LANE_ENGINE_BYTES_MAX: usize = 1024;
 const _: () = assert!(
-    HEAVY_LANE_ENGINE_BYTES_MAX
+    2 * HEAVY_LANE_ENGINE_BYTES_MAX
         + crate::coord::settings::SHARED_RESOURCES_MAX
             * (crate::coord::settings::RESOURCE_NAME_BYTES_MAX + 2)
         + 1024
@@ -777,21 +777,20 @@ impl AgentContext {
     }
 
     /// Tells a team agent of any harness how to run heavy commands through the project's
-    /// heavy lane (F28) with the engine's `lane` command, naming the project's shared
-    /// resources. An engine path the section cannot quote leaves it out. Input: the absolute
-    /// engine executable and the project's shared resources. Output: the context.
+    /// heavy lane (F28) with the engine's `lane` command, naming its own lane folder and the
+    /// project's shared resources; a native lead's teammates read the same lines. A path the
+    /// section cannot quote leaves it out. Input: the absolute engine executable, the
+    /// agent's absolute lane folder and the project's shared resources. Output: the context.
     pub fn with_heavy_lane(
         mut self,
         engine: &Path,
+        folder: &Path,
         resources: &[crate::coord::settings::SharedResource],
     ) -> Self {
-        if let Some(section) = heavy_lane_section(engine, resources) {
+        if let Some(section) = heavy_lane_section(engine, folder, resources) {
             self.instructions.push_str(&section);
         }
-        assert!(
-            self.instructions.len()
-                <= MASTER_INSTRUCTIONS_BYTES_MAX + 1 + LIVE_INSTRUCTIONS_BYTES_MAX
-        );
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         self
     }
 
@@ -1417,19 +1416,25 @@ fn size(bytes: u64) -> String {
 }
 
 /// The section that tells an agent to run heavy commands through the project's heavy lane
-/// (F28): the exact `lane` command with the quoted engine path, the shared resources it may
-/// name, and that a queued command needs a long timeout or the background. Input: the
-/// absolute engine executable and the project's shared resources. Output: the section, at
-/// most `HEAVY_LANE_BYTES_MAX` bytes, or None for an engine path that is not plain UTF-8,
-/// holds a quote or a line break, or passes `HEAVY_LANE_ENGINE_BYTES_MAX` bytes.
+/// (F28): the exact `lane` command with the quoted engine path and lane folder, the shared
+/// resources it may name, and that a queued command needs a long timeout or the background.
+/// Input: the absolute engine executable, the agent's lane folder and the project's shared
+/// resources. Output: the section, at most `HEAVY_LANE_BYTES_MAX` bytes, or None for a path
+/// that is not absolute plain UTF-8, holds a quote or a line break, or passes
+/// `HEAVY_LANE_ENGINE_BYTES_MAX` bytes.
 pub fn heavy_lane_section(
     engine: &Path,
+    folder: &Path,
     resources: &[crate::coord::settings::SharedResource],
 ) -> Option<String> {
-    let engine = engine
-        .to_str()
-        .filter(|text| text.len() <= HEAVY_LANE_ENGINE_BYTES_MAX)
-        .filter(|text| !text.contains(['\'', '\n', '\r']))?;
+    let quotable = |path: &Path| {
+        path.to_str()
+            .filter(|text| path.is_absolute() && text.len() <= HEAVY_LANE_ENGINE_BYTES_MAX)
+            .filter(|text| !text.contains(['\'', '\n', '\r']))
+            .map(str::to_owned)
+    };
+    let engine = quotable(engine)?;
+    let folder = quotable(folder)?;
     let names: Vec<&str> = resources
         .iter()
         .take(crate::coord::settings::SHARED_RESOURCES_MAX)
@@ -1445,7 +1450,7 @@ pub fn heavy_lane_section(
         )
     };
     let section = format!(
-        "\n## Heavy commands\n\nRun every heavy command through the project's heavy lane, so it waits its turn instead of piling up with other agents' commands: full test suites, builds, and anything that loads a local model or a database. Write it as:\n'{engine}' {} -- <command>\n{shared} The command may wait before it starts, so give it a long timeout or run it in the background. Short commands, such as one test, a format check or git, run as usual.\n",
+        "\n## Heavy commands\n\nRun every heavy command through the project's heavy lane, so it waits its turn instead of piling up with other agents' commands: full test suites, builds, and anything that loads a local model or a database. Write it as:\n'{engine}' {} --folder '{folder}' -- <command>\n{shared} The command may wait before it starts, so give it a long timeout or run it in the background. Short commands, such as one test, a format check or git, run as usual.\n",
         crate::coord::lane::COMMAND
     );
     assert!(section.len() <= HEAVY_LANE_BYTES_MAX);

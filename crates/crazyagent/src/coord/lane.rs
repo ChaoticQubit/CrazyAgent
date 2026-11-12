@@ -1,6 +1,8 @@
 use super::AgentId;
 use super::settings::{CoordSettings, HeavyLane, SharedResource, resource_name_valid};
-use super::store::{Change, failure, state};
+#[cfg(unix)]
+use super::store::Change;
+use super::store::{failure, state};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -11,14 +13,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The folder in an agent's own temporary folder that holds its lane tickets, made by the
-/// engine at every launch; the lane command finds it through `TMPDIR`.
+/// The folder in an agent's own temporary folder (`<agent>/tmp`) that holds its lane
+/// tickets, made by the engine at every launch and named to the agent in its Heavy commands
+/// section; the lane command takes it with `--folder`.
 pub const FOLDER: &str = "crazyagent-lane";
 /// The engine subcommand an agent runs a heavy command through.
 pub const COMMAND: &str = "lane";
 /// How the lane command is used.
-pub const USAGE: &str =
-    "usage: crazyagent lane [--uses NAME]... [--label TEXT] -- PROGRAM [ARGUMENT ...]";
+pub const USAGE: &str = "usage: crazyagent lane --folder LANE_DIR [--uses NAME]... [--label TEXT] -- PROGRAM [ARGUMENT ...]";
 /// The exit code of a lane command that could not run its command: a usage mistake, a
 /// refused ticket or a wait past `WAIT_MAX`. 125 as `env` and `timeout` use it, so it
 /// never reads as the command's own code.
@@ -54,18 +56,28 @@ const TICKET_BYTES_MAX: u64 = 2048;
 const LINE_BYTES_MAX: u64 = 512;
 const STORED_MAX: usize = 4 * TICKETS_PER_PROJECT_MAX;
 const POLLS_MAX: u64 = (WAIT_MAX.as_millis() / POLL.as_millis()) as u64;
+#[cfg(unix)]
 const TICKET: &str = ".lane";
+#[cfg(unix)]
 const PART: &str = ".lpart";
+#[cfg(unix)]
 const GO: &str = ".go";
+#[cfg(unix)]
 const NO: &str = ".no";
+#[cfg(unix)]
 const WAIT: &str = ".wait";
+#[cfg(unix)]
 const WAIT_PART: &str = ".wpart";
+#[cfg(unix)]
 const SUFFIXES: [&str; 6] = [TICKET, PART, GO, NO, WAIT, WAIT_PART];
-const NO_LANE: &str = "crazyagent lane: no heavy lane here (not inside a CrazyAgent agent), so the command runs at once.";
+const NO_LANE: &str = "crazyagent lane: no heavy lane here (no lane folder of a CrazyAgent agent), so the command runs at once.";
+#[cfg(unix)]
 const SILENT: &str =
     "crazyagent lane: CrazyAgent has not answered for 60 seconds, so the command runs at once.";
+#[cfg(unix)]
 const TOO_LONG: &str = "crazyagent lane: the command waited 24 hours for its turn and did not run.";
 const UNREADABLE: &str = "The heavy lane could not read this command's ticket.";
+#[cfg(unix)]
 const GRANTED: &[u8] = b"go\n";
 
 const _: () = assert!(SILENCE_MAX.as_secs() > 2 * HEARTBEAT.as_secs());
@@ -133,13 +145,15 @@ pub fn program_label(program: &OsStr) -> String {
 /// One heavy command as the lane command was asked to run it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Request {
+    pub folder: Option<PathBuf>,
     pub uses: Vec<String>,
     pub label: Option<String>,
     pub program: OsString,
     pub arguments: Vec<OsString>,
 }
 
-/// Reads the lane command's arguments: `--uses NAME` once per shared resource, an optional
+/// Reads the lane command's arguments: `--folder LANE_DIR`, the absolute lane folder the
+/// agent's Heavy commands section names, `--uses NAME` once per shared resource, an optional
 /// `--label TEXT`, then `--` and the command. Takes the arguments after `lane`. Returns
 /// the request, or the usage line with what was wrong.
 pub fn parse(arguments: &[OsString]) -> Result<Request, String> {
@@ -147,6 +161,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Request, String> {
     if arguments.len() > ARGUMENTS_MAX {
         return Err(refuse("too many arguments"));
     }
+    let mut folder: Option<PathBuf> = None;
     let mut uses: Vec<String> = Vec::new();
     let mut label = None;
     let mut at = 0;
@@ -159,6 +174,7 @@ pub fn parse(arguments: &[OsString]) -> Result<Request, String> {
                     return Err(refuse("no command after --"));
                 };
                 let request = Request {
+                    folder,
                     uses,
                     label,
                     program: program.clone(),
@@ -176,6 +192,17 @@ pub fn parse(arguments: &[OsString]) -> Result<Request, String> {
                 } else {
                     Err(refuse("give at most 4 shared resources, each once"))
                 };
+            }
+            "--folder" => {
+                let Some(path) = arguments
+                    .get(at + 1)
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute() && folder.is_none())
+                else {
+                    return Err(refuse("--folder takes the absolute lane folder, once"));
+                };
+                folder = Some(path);
+                at += 2;
             }
             "--uses" => {
                 let Some(name) = value().filter(|name| resource_name_valid(name)) else {
@@ -211,10 +238,11 @@ pub struct Queued {
 
 /// Decides which tickets run, in turn order (F28). A ticket that runs keeps running. A
 /// waiting one runs when the lane has a free slot under `lane`, each resource it names has
-/// a free slot, and no earlier waiting ticket waits for the lane or one of those resources;
-/// so no later command overtakes an earlier one on what they share, and a command that
-/// shares nothing with a waiting one does not wait behind it. A resource the settings do
-/// not name has no slot. Takes the tickets in turn order, the lane option and the shared
+/// a free slot, no earlier ticket waits for a full lane, and no earlier waiting ticket names
+/// one of those resources; so no later command overtakes an earlier one on a resource they
+/// share, which starves no command that needs several, and a command that shares nothing
+/// with a waiting one does not wait behind it. A resource the settings do not name has no
+/// slot. Takes the tickets in turn order, the lane option and the shared
 /// resources. Returns, for each ticket, whether it runs.
 pub fn grant(queue: &[Queued], lane: HeavyLane, resources: &[SharedResource]) -> Vec<bool> {
     assert!(queue.len() <= STORED_MAX);
@@ -261,7 +289,7 @@ pub fn grant(queue: &[Queued], lane: HeavyLane, resources: &[SharedResource]) ->
             }
         } else {
             lane_blocked |= lane_full;
-            blocked.extend(full);
+            blocked.extend(ticket.uses.iter().map(String::as_str));
         }
         runs.push(free);
     }
@@ -409,6 +437,27 @@ pub fn view(db: &Connection, project: &ProjectId) -> Result<LaneView, EngineErro
         }
     }
     Ok(view)
+}
+
+/// The projects whose lane holds a command, so a tick also reaches a project whose last
+/// agent stopped and clears what its commands left, at most `HOLDERS_MAX` projects. Takes
+/// the database. Returns the projects, or the SQLite failure; a stored name that is not a
+/// project id is skipped.
+pub fn projects(db: &Connection) -> Result<Vec<ProjectId>, EngineError> {
+    let mut statement = db
+        .prepare("SELECT DISTINCT project FROM coord_lane ORDER BY project LIMIT ?1")
+        .map_err(state)?;
+    let rows = statement
+        .query_map([HOLDERS_MAX as i64], |row| row.get::<_, String>(0))
+        .map_err(state)?;
+    let mut found = Vec::new();
+    for row in rows {
+        if let Ok(project) = ProjectId::new(row.map_err(state)?) {
+            found.push(project);
+        }
+    }
+    assert!(found.len() <= HOLDERS_MAX);
+    Ok(found)
 }
 
 /// One agent's lane folder the engine reads in a tick: the agent and its
@@ -840,14 +889,14 @@ fn command(request: &Request, out: &mut dyn Write) -> i32 {
     }
 }
 
-/// Runs one heavy command through the project's lane (F28): takes a place in the agent's
-/// lane folder under `tmp`, waits for its turn, runs the command and leaves. Outside an
-/// agent, or when the engine says nothing for `SILENCE_MAX`, the command runs at once with
+/// Runs one heavy command through the project's lane (F28): takes a place in the lane
+/// folder `--folder` names, waits for its turn, runs the command and leaves. With no lane
+/// folder, or when the engine says nothing for `SILENCE_MAX`, the command runs at once with
 /// one line saying so; a refused ticket or a wait past `WAIT_MAX` does not run it. Takes
-/// the arguments after `lane`, the agent's temporary folder from `TMPDIR` and where the
-/// lane command's own lines go. Returns the exit code.
+/// the arguments after `lane` and where the lane command's own lines go. Returns the exit
+/// code.
 #[cfg(unix)]
-pub fn run(arguments: &[OsString], tmp: Option<&Path>, out: &mut dyn Write) -> i32 {
+pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     let request = match parse(arguments) {
         Ok(request) => request,
         Err(problem) => {
@@ -862,7 +911,10 @@ pub fn run(arguments: &[OsString], tmp: Option<&Path>, out: &mut dyn Write) -> i
             .clone()
             .unwrap_or_else(|| program_label(&request.program)),
     };
-    let entered = tmp.and_then(|tmp| Entry::enter(&tmp.join(FOLDER), &ticket).ok());
+    let entered = request
+        .folder
+        .as_deref()
+        .and_then(|folder| Entry::enter(folder, &ticket).ok());
     let Some(entry) = entered else {
         let _ = writeln!(out, "{NO_LANE}");
         return command(&request, out);
@@ -889,10 +941,10 @@ pub fn run(arguments: &[OsString], tmp: Option<&Path>, out: &mut dyn Write) -> i
 }
 
 /// Runs one heavy command where the lane's file locks do not exist: the command runs at
-/// once with one line saying so. Takes the arguments after `lane`, the unused temporary
-/// folder and where the line goes. Returns the exit code.
+/// once with one line saying so. Takes the arguments after `lane` and where the line goes.
+/// Returns the exit code.
 #[cfg(not(unix))]
-pub fn run(arguments: &[OsString], _tmp: Option<&Path>, out: &mut dyn Write) -> i32 {
+pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     let request = match parse(arguments) {
         Ok(request) => request,
         Err(problem) => {

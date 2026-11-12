@@ -1416,9 +1416,10 @@ impl TeamRuntime {
     }
 
     /// Moves every project's heavy lane one step (F28): the lane folders of each project's
-    /// agents that are not stopping, read with that project's coordination settings. Every
-    /// project is served before the first failure is returned, so one unreadable lane holds
-    /// up no other project's.
+    /// agents that are not stopping, read with that project's coordination settings, and
+    /// every project whose lane still holds a command with no such agent left, which clears
+    /// it. Every project is served before the first failure is returned, so one unreadable
+    /// lane holds up no other project's.
     fn lanes(&self) -> Result<(), EngineError> {
         use crate::coord::lane::{FOLDER, Holder};
         let mut projects: BTreeMap<ProjectId, Vec<Holder>> = BTreeMap::new();
@@ -1435,6 +1436,16 @@ impl TeamRuntime {
                 });
         }
         let mut first = None;
+        match crate::coord::lane::projects(&self.connection) {
+            Ok(stored) => {
+                for project in stored {
+                    projects.entry(project).or_default();
+                }
+            }
+            Err(problem) => {
+                first.get_or_insert(problem);
+            }
+        }
         for (project, holders) in &projects {
             let moved =
                 crate::coord::settings::read(&self.connection, project).and_then(|settings| {
@@ -8386,6 +8397,10 @@ impl TeamRuntime {
                     engine
                         .verified_path()
                         .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?,
+                    &self
+                        .agent_folder(id)
+                        .join("tmp")
+                        .join(crate::coord::lane::FOLDER),
                     &resources,
                 )
             }

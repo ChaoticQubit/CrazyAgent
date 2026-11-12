@@ -41,15 +41,27 @@ fn agent(root: &Path, id: i64) -> (PathBuf, Holder) {
     )
 }
 
-/// Starts the real `crazyagent lane` with an agent's `TMPDIR`. Takes the temporary folder
-/// and the arguments after `lane`. Returns the child with stderr piped.
+/// Starts the real `crazyagent lane` with the agent's lane folder, as its Heavy commands
+/// section writes it, and a `TMPDIR` elsewhere, as an agent's short scratch folder is.
+/// Takes the agent's temporary folder and the arguments after `--folder`. Returns the child
+/// with stderr piped.
 fn lane(tmp: &Path, arguments: &[&str]) -> Child {
-    Command::new(env!("CARGO_BIN_EXE_crazyagent"))
-        .arg("lane")
+    lane_in(Some(&tmp.join(FOLDER)), tmp.parent().unwrap(), arguments)
+}
+
+/// Starts the real `crazyagent lane`, with `--folder` when given. Takes the folder, the
+/// `TMPDIR` and the arguments after `--folder`. Returns the child with stderr piped.
+fn lane_in(folder: Option<&Path>, scratch: &Path, arguments: &[&str]) -> Child {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_crazyagent"));
+    command.arg("lane");
+    if let Some(folder) = folder {
+        command.arg("--folder").arg(folder);
+    }
+    command
         .args(arguments)
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("TMPDIR", tmp)
+        .env("TMPDIR", scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -230,7 +242,7 @@ fn a_shared_resource_holds_a_second_command_that_names_it() {
 #[test]
 fn a_lane_command_outside_an_agent_runs_at_once_with_its_exit_code() {
     let root = tempfile::tempdir().unwrap();
-    let child = lane(root.path(), &["--", "/bin/sh", "-c", "exit 7"]);
+    let child = lane_in(None, root.path(), &["--", "/bin/sh", "-c", "exit 7"]);
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(7));
     let text = String::from_utf8(output.stderr).unwrap();
