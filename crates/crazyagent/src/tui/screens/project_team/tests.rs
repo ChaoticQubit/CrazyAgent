@@ -1508,6 +1508,7 @@ fn composer_models(
         .collect(),
         qualified: true,
         reason: None,
+        testable: true,
     }
 }
 

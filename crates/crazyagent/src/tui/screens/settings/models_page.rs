@@ -3,7 +3,7 @@ use super::harness_page::shown;
 use crate::engine::owner::ModelAdded;
 use crate::harness_settings::{Access, Source};
 use crate::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
-use crate::model_choice::test_launch::{self, Tested};
+use crate::model_choice::test_launch::Tested;
 use crate::model_choice::{
     ALLOWED_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, Origin, Row, Slot,
     UNQUALIFIED_REASON_BYTES_MAX, Written, model_valid, shipped,
@@ -34,6 +34,9 @@ mod tests;
 const DETAIL_ROWS: usize = 4;
 const POOL_ROWS: usize = DETAIL_ROWS - 1;
 const TESTING: &str = "Testing. This can take up to 2 minutes.";
+/// Why the owner cannot add a model id on a harness the engine says has no test launch,
+/// word for word on the desktop (MUG2-L1).
+const NO_TEST_LAUNCH: &str = "An id you add needs a test launch, and this harness has none.";
 const PAGE_STEP: isize = 10;
 pub(in crate::tui) const ACCOUNT_MODEL: &str = "Account's own model";
 const APP_VALUE: &str = "Use the app value";
@@ -239,6 +242,16 @@ fn origin_word(origin: Origin) -> &'static str {
         Origin::Verified => "Your id, tested",
         Origin::Failed => "Test launch failed",
     }
+}
+
+/// The state words beside an owner id: a pending id on a harness the engine says has no
+/// test launch is not supported, as nothing will test it (MUG2-L1). Inputs: the id's
+/// origin and whether the harness has a test launch. Output: the words.
+fn own_word(origin: Origin, testable: bool) -> String {
+    if origin == Origin::Pending && !testable {
+        return format!("{NOT_SUPPORTED}.");
+    }
+    origin_word(origin).to_owned()
 }
 
 fn source_word(source: Source) -> &'static str {
@@ -500,9 +513,7 @@ impl ModelsPage {
         if rules.is_some() {
             items.extend([Item::Pick, Item::Fallback]);
         }
-        if row_of(models, Slot::Allowed).is_some_and(|row| row.access == Access::Editable) {
-            items.push(Item::Add);
-        }
+        items.push(Item::Add);
         items.extend(
             models
                 .candidates
@@ -581,6 +592,13 @@ impl ModelsPage {
                     .unwrap_or(0);
                 Edit::Rule { at, from: at }
             }
+            Item::Add if !models.testable => {
+                ctx.say(Message::warning(
+                    &format!("{NOT_SUPPORTED}."),
+                    NO_TEST_LAUNCH,
+                ));
+                return;
+            }
             Item::Add => Edit::Field(TextField::new("Model id", MODEL_BYTES_MAX)),
             Item::Own(_) => return,
         };
@@ -638,9 +656,10 @@ impl ModelsPage {
     /// harness has one and the id is not being tested. Input: the candidate. Output: true
     /// when t offers the test.
     fn testable(&self, candidate: &Candidate) -> bool {
-        candidate.origin == Origin::Pending
-            && test_launch::supported(&self.harness)
-            && !self.testing(&candidate.id)
+        let State::Ready { models, .. } = &self.state else {
+            return false;
+        };
+        candidate.origin == Origin::Pending && models.testable && !self.testing(&candidate.id)
     }
 
     /// Opens the pool choice of the selected owner id's test launch and reads the pools,
@@ -1098,7 +1117,11 @@ impl ModelsPage {
             }
             Item::Add => vec![
                 Line::raw("Add a model id"),
-                muted("Enter to type one"),
+                if models.testable {
+                    muted("Enter to type one")
+                } else {
+                    muted(&format!("{NOT_SUPPORTED}."))
+                },
                 Line::default(),
             ],
             Item::Own(index) => match models.candidates.get(index) {
@@ -1107,7 +1130,7 @@ impl ModelsPage {
                     if self.testing(&candidate.id) {
                         styled("Testing".to_owned(), Role::Accent, &ctx.theme)
                     } else {
-                        muted(origin_word(candidate.origin))
+                        muted(&own_word(candidate.origin, models.testable))
                     },
                     Line::raw("Yours"),
                 ],
@@ -1180,6 +1203,10 @@ impl ModelsPage {
                     cursor = at;
                     out.extend(field_lines);
                 }
+                _ if !models.testable => {
+                    out.extend(lines(&format!("{NOT_SUPPORTED}."), None));
+                    out.extend(lines(NO_TEST_LAUNCH, Some(Role::Muted)));
+                }
                 _ => out.extend(lines(
                     &format!(
                         "Type an id {} takes. It waits for a test launch before it can be ticked.",
@@ -1206,6 +1233,11 @@ impl ModelsPage {
                 }
                 if self.testing(&candidate.id) {
                     out.extend(lines(TESTING, Some(Role::Accent)));
+                    return (out, cursor);
+                }
+                if candidate.origin == Origin::Pending && !models.testable {
+                    out.extend(lines(&format!("{NOT_SUPPORTED}."), None));
+                    out.extend(lines(NO_TEST_LAUNCH, Some(Role::Muted)));
                     return (out, cursor);
                 }
                 let state = match candidate.origin {
@@ -1540,7 +1572,8 @@ impl Screen for ModelsPage {
                 }
             }
             Some(Item::Pick | Item::Fallback) => hints.push(hint("Enter", "Choose")),
-            Some(Item::Add) => hints.push(hint("Enter", "Type an id")),
+            Some(Item::Add) if models.testable => hints.push(hint("Enter", "Type an id")),
+            Some(Item::Add) => {}
             Some(Item::Own(index)) => {
                 if models
                     .candidates

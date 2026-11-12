@@ -59,6 +59,7 @@ fn models(rows: [Row; 3], owned: &[(&str, Origin)]) -> Models {
         candidates,
         qualified: true,
         reason: None,
+        testable: true,
     }
 }
 
@@ -579,6 +580,7 @@ fn a_harness_whose_model_is_not_chosen_shows_the_reason_and_sends_no_set() {
         candidates: vec![],
         qualified: true,
         reason: None,
+        testable: false,
     };
     let page = ModelsPage::new("opencode".into(), "OpenCode".into(), Scope::App);
     let mut shell = Shell::with(ctx(80, 24), Box::new(page));

@@ -32,14 +32,16 @@ export interface ModelCandidate {
 }
 
 /** A harness's Models section from the engine: its three slots in page order, every
- * candidate, the harness's list first, then the owner's ids, and whether the list was
- * checked on the installed harness version, with the reason when it was not. */
+ * candidate, the harness's list first, then the owner's ids, whether the list was checked
+ * on the installed harness version, with the reason when it was not, and whether a test
+ * launch runs on the harness, so the owner can add and test an id. */
 export interface Models {
   harness: string;
   rows: ModelRow[];
   candidates: ModelCandidate[];
   qualified: boolean;
   reason: string | null;
+  testable: boolean;
 }
 
 /** The Models page: the section, the project it was read for (null on the app page) and the
@@ -89,6 +91,9 @@ export const ALLOWED_MAX = 16;
 export const MODEL_BYTES_MAX = 256;
 /** The reason a slot shows on a harness whose model CrazyAgent does not choose. */
 export const NOT_SUPPORTED = "Not supported by this harness";
+/** Why the owner cannot add a model id on a harness the engine says has no test launch,
+ * word for word in the TUI (MUG2-L1). */
+export const NO_TEST_LAUNCH = "An id you add needs a test launch, and this harness has none.";
 /** The choice that runs the account's own model on the app page. */
 export const ACCOUNT_MODEL = "Account's own model";
 /** The choice that keeps the app value on a project page. */
@@ -210,6 +215,13 @@ export function originWord(origin: ModelOrigin): string {
     case "verified": return "Your id, tested";
     case "failed": return "Test launch failed";
   }
+}
+
+/** The state words beside an owner id, as the TUI words them: a pending id on a harness
+ * the engine says has no test launch is not supported, as nothing will test it (MUG2-L1).
+ * Inputs: the origin and whether the harness has a test launch. Output: the words. */
+export function ownWord(origin: ModelOrigin, testable: boolean): string {
+  return origin === "pending" && !testable ? `${NOT_SUPPORTED}.` : originWord(origin);
 }
 
 /** The line naming what the harness's model list was checked against. Inputs: the page and
@@ -383,12 +395,6 @@ export function addModel(harness: string, model: string): Promise<Result<ModelAd
  * there, or the refusal. */
 export function removeModel(harness: string, model: string): Promise<Result<boolean>> {
   return call<boolean>("desktop_remove_model", { harness, model });
-}
-
-/** Tells whether a harness has a test launch for the owner's ids: Claude Code and Codex.
- * Input: the harness id. Output: true when Test can be offered. */
-export function testLaunchHarness(harness: string): boolean {
-  return harness === "claude-code" || harness === "codex";
 }
 
 /** Runs the test launch of one pending owner id on the pool the owner picked; it can take up
