@@ -10605,7 +10605,7 @@ fn a_tools_off_live_master_turn_hands_out_only_its_task_blocks() {
     let fixture = Fixture::new(1);
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
-    team.admit_reply_blocks(&project, BLOCK_REPLY).unwrap();
+    team.admit_reply_blocks(&project, BLOCK_REPLY, 1).unwrap();
     assert_block_delegated(&fixture);
     team.admit_reply_blocks(
         &project,
@@ -10613,6 +10613,7 @@ fn a_tools_off_live_master_turn_hands_out_only_its_task_blocks() {
             "{}\n{{\"task\": \"a\", \"extra\": 1}}\n```",
             tool::BLOCK_FENCE
         ),
+        2,
     )
     .unwrap();
     assert_block_delegated(&fixture);
@@ -31993,6 +31994,30 @@ fn team_message(fixture: &Fixture, author: MessageAuthor, text: &str, state: Mes
     id
 }
 
+/// A master's proposal of one Codex task, as its delegate tool or a task block records it.
+/// Input: the task. Output: the proposal.
+#[cfg(target_os = "macos")]
+fn codex_task(task: &str) -> tool::Proposal {
+    tool::Proposal::Delegate(crate::team::Delegation {
+        harness: Some("codex".into()),
+        prompt: task.into(),
+        role: None,
+    })
+}
+
+/// A tools-off master's reply that hands each task to Codex in its own `crazyagent-task`
+/// block (L6). Input: the tasks. Output: the reply text.
+#[cfg(target_os = "macos")]
+fn codex_blocks(tasks: &[&str]) -> String {
+    assert!(!tasks.is_empty());
+    let mut reply = String::from("On it.");
+    for task in tasks {
+        let block = serde_json::json!({"task": task, "harness": "codex"});
+        reply.push_str(&format!("\n{}\n{block}\n```", tool::BLOCK_FENCE));
+    }
+    reply
+}
+
 /// Counts the tasks the master handed over. Input: the fixture. Output: the count.
 #[cfg(target_os = "macos")]
 fn handed_over(fixture: &Fixture) -> i64 {
@@ -32018,10 +32043,11 @@ fn rounds_row(max: Option<u8>) {
         team.finish_message(
             &project,
             answering,
-            &format!("On it.\nDELEGATE codex: Step {round}"),
+            "On it.",
             TurnEnd::Success,
             None,
-            vec![],
+            vec![codex_task(&format!("Step {round}"))],
+            &[],
         )
         .unwrap();
         let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
@@ -32111,10 +32137,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         first,
-        "DELEGATE codex: Step 0",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Step 0")],
+        &[],
     )
     .unwrap();
     let results = team_message(
@@ -32126,10 +32153,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         results,
-        "DELEGATE codex: Step 1",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Step 1")],
+        &[],
     )
     .unwrap();
     assert_eq!(handed_over(&fixture), 1, "the limit held the second round");
@@ -32144,10 +32172,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         kept,
-        "DELEGATE codex: Step 1",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Step 1")],
+        &[],
     )
     .unwrap();
     for round in 2..6 {
@@ -32160,10 +32189,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
         team.finish_message(
             &project,
             results,
-            &format!("DELEGATE codex: Step {round}"),
+            "On it.",
             TurnEnd::Success,
             None,
-            vec![],
+            vec![codex_task(&format!("Step {round}"))],
+            &[],
         )
         .unwrap();
     }
@@ -32177,10 +32207,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         next,
-        "DELEGATE codex: Footer",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Footer")],
+        &[],
     )
     .unwrap();
     let results = team_message(
@@ -32192,10 +32223,11 @@ fn keep_going_lets_the_master_finish_the_goal_and_a_new_message_brings_the_limit
     team.finish_message(
         &project,
         results,
-        "DELEGATE codex: Footer again",
+        "On it.",
         TurnEnd::Success,
         None,
-        vec![],
+        vec![codex_task("Footer again")],
+        &[],
     )
     .unwrap();
     assert_eq!(handed_over(&fixture), 7, "the new goal has the limit back");
@@ -32305,10 +32337,10 @@ fn fan_out_row(max: u8) {
     );
 }
 
-/// A tools-off live master's reply lines are one round of the owner's goal per turn (S1 r2
-/// L1): under 1 round its first turn's two lines are handed over under that turn's key, its
-/// next turn's line is refused with one note that names keep going, and after the owner's
-/// keep going a later turn's line is handed over under its own key.
+/// A tools-off live master's task blocks are one round of the owner's goal per turn (S1 r2
+/// L1, L6): under 1 round its first turn's two blocks are handed over under that turn's key,
+/// its next turn's block is refused with one note that names keep going, and after the
+/// owner's keep going a later turn's block is handed over under its own key.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going() {
@@ -32317,12 +32349,8 @@ fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going
     let project = fixture.setup.project_id.clone();
     let mut team = fixture.runtime();
     owner_says(&fixture, "Build the page");
-    team.admit_reply_lines(
-        &project,
-        "On it.\nDELEGATE codex: Frontend\nDELEGATE codex: Backend",
-        1,
-    )
-    .unwrap();
+    team.admit_reply_blocks(&project, &codex_blocks(&["Frontend", "Backend"]), 1)
+        .unwrap();
     assert_eq!(handed_over(&fixture), 2);
     assert_eq!(
         count(
@@ -32330,17 +32358,17 @@ fn a_tools_off_live_masters_reply_lines_past_the_round_limit_wait_for_keep_going
             "SELECT COUNT(*) FROM team_tasks WHERE project=?1 AND source='master' AND turn=-1"
         ),
         2,
-        "both lines of turn 1 carry its key"
+        "both blocks of turn 1 carry its key"
     );
     let rounds = crate::team::master_limits::rounds(&fixture.connection, &project).unwrap();
     assert_eq!(rounds.used, 1);
     assert!(!rounds.open());
-    team.admit_reply_lines(&project, "DELEGATE codex: Tests", 2)
+    team.admit_reply_blocks(&project, &codex_blocks(&["Tests"]), 2)
         .unwrap();
     assert_eq!(handed_over(&fixture), 2, "the limit held turn 2");
     assert_eq!(noted(&fixture, &rounds.limit_note()), 1);
     owner_says(&fixture, "keep going");
-    team.admit_reply_lines(&project, "DELEGATE codex: Tests", 3)
+    team.admit_reply_blocks(&project, &codex_blocks(&["Tests"]), 3)
         .unwrap();
     assert_eq!(handed_over(&fixture), 3, "keep going lets turn 3 hand over");
     assert_eq!(

@@ -3696,7 +3696,7 @@ impl TeamRuntime {
                 continue;
             }
             let live = worker.live;
-            worker.stopping = true;
+            worker.stop_for("engine_stop:widened");
             let _ = worker.orders.send(Order::Stop);
             self.access_restarts.remove(&id);
             if live {
@@ -5449,8 +5449,9 @@ impl TeamRuntime {
     /// their results come back together (S1): each task through `admit` like any master task,
     /// with the role it gave, and each wake through `wake_in`; past the round limit none is
     /// handed over and the owner reads why. Refused tasks, the wakes' outcomes and the blocks
-    /// that could not be read each go in one team note. No other reply text is read. Takes the
-    /// project, the turn's reply text and its number. Returns any SQLite failure.
+    /// that could not be read each go in one team note, past the limit too. No other reply
+    /// text is read. Takes the project, the turn's reply text and its number. Returns any
+    /// SQLite failure.
     fn admit_reply_blocks(
         &mut self,
         project: &ProjectId,
@@ -5471,7 +5472,10 @@ impl TeamRuntime {
             .map_err(error)?;
         let key = super::master_limits::live_turn_key(turn);
         let rounds = super::master_limits::rounds(&tx, project)?;
-        if !rounds.open() && !super::master_limits::joins_round(&tx, project, key)? {
+        let held = !proposed.is_empty()
+            && !rounds.open()
+            && !super::master_limits::joins_round(&tx, project, key)?;
+        if held {
             let _ = append_message(
                 &tx,
                 project,
@@ -5480,11 +5484,11 @@ impl TeamRuntime {
                 MessageState::Note,
                 now,
             )?;
-            return tx.commit().map_err(error);
         }
+        let handed: &[tool::Proposal] = if held { &[] } else { &proposed };
         let mut refused = Vec::new();
         let mut woken = Vec::new();
-        for proposal in &proposed {
+        for proposal in handed {
             match proposal {
                 tool::Proposal::Delegate(delegation) => match admit(
                     &tx,
