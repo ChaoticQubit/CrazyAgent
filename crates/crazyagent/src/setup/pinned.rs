@@ -21,7 +21,7 @@ const NAME_BYTES_MAX: usize = 64;
 /// The folders searched after `setup/bin` on a Unix system: the owner's `~/.local/bin`,
 /// the engine's own absolute `PATH` folders, then the platform's fixed folders.
 /// Input: the fixed folders. Output: the folders in search order.
-pub fn system_folders(fixed: &[&str]) -> Vec<PathBuf> {
+pub fn system_folders(fixed: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut system: Vec<PathBuf> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         system.push(PathBuf::from(home).join(".local/bin"));
@@ -29,7 +29,7 @@ pub fn system_folders(fixed: &[&str]) -> Vec<PathBuf> {
     if let Some(path) = std::env::var_os("PATH") {
         system.extend(std::env::split_paths(&path).filter(|dir| dir.is_absolute()));
     }
-    system.extend(fixed.iter().map(PathBuf::from));
+    system.extend(fixed);
     system
 }
 
@@ -86,18 +86,27 @@ impl PinnedInstaller {
         &self.setup
     }
 
-    /// Finds the first runnable copy of a program on the search folders and its version.
-    /// Input: the dependency. Output: its path and version, or none when no copy reports one.
+    /// Finds a program where the tool resolver looks and its version. Input: the
+    /// dependency. Output: its entry and version, or none when it is missing or reports none.
     pub fn locate(&self, dep: Dependency) -> Option<(PathBuf, Version)> {
-        self.search.iter().find_map(|dir| {
-            let candidate = dir.join(dep.program());
-            if !runnable(&candidate) {
-                return None;
-            }
-            self.version(dep, &candidate)
-                .ok()
-                .map(|version| (candidate, version))
-        })
+        self.resolved(dep).ok()?.ok()
+    }
+
+    /// Finds a dependency wherever the tool resolver looks ([`crate::tools::resolve`]), the
+    /// file a launch that needs it runs, and reads its version through the same words.
+    /// Input: the dependency. Output: its entry and version, why it cannot run, or the
+    /// version check's code.
+    fn resolved(
+        &self,
+        dep: Dependency,
+    ) -> Result<Result<(PathBuf, Version), crate::tools::Missing>, InstallError> {
+        let found = match crate::tools::resolve(dep.program(), &self.places) {
+            Ok(found) => found,
+            Err(missing) => return Ok(Err(missing)),
+        };
+        let version = self.version(dep, &found.argv())?;
+        assert!(found.entry.is_absolute());
+        Ok(Ok((found.entry, version)))
     }
 
     /// Returns the `PATH` value that puts `setup/bin` first, for programs the engine runs.
@@ -117,14 +126,19 @@ impl PinnedInstaller {
         env
     }
 
-    fn version(&self, dep: Dependency, program: &Path) -> Result<Version, InstallError> {
+    fn version(&self, dep: Dependency, words: &[OsString]) -> Result<Version, InstallError> {
         let flag = match dep {
             Dependency::Tmux => "-V",
             Dependency::Uv | Dependency::Graphify => "--version",
         };
+        let (program, rest) = words
+            .split_first()
+            .ok_or(InstallError("setup_version_unreadable"))?;
+        let mut arguments = rest.to_vec();
+        arguments.push(OsString::from(flag));
         let (ok, output) = run(
-            program,
-            &[OsString::from(flag)],
+            Path::new(program),
+            &arguments,
             &self.env(),
             &std::env::temp_dir(),
             VERSION_TIME,
@@ -212,7 +226,7 @@ impl PinnedInstaller {
             }
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| InstallError("setup_store_unavailable"))?;
-            if self.version(dep, &program)? != *version {
+            if self.version(dep, &[program.clone().into_os_string()])? != *version {
                 return Err(InstallError("setup_version_mismatch"));
             }
             std::fs::rename(&program, bin.join(dep.program()))
@@ -399,7 +413,14 @@ mod tests;
 
 impl Installer for PinnedInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
-        Ok(self.locate(dep).map(|(_, version)| version))
+        Ok(self.lookup(dep)?.ok())
+    }
+
+    fn lookup(
+        &self,
+        dep: Dependency,
+    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+        Ok(self.resolved(dep)?.map(|(_, version)| version))
     }
 
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
@@ -411,10 +432,9 @@ impl Installer for PinnedInstaller {
         if name.is_empty() || name.contains('/') || name.starts_with('.') {
             return None;
         }
-        self.search
-            .iter()
-            .map(|dir| dir.join(name))
-            .find(|candidate| runnable(candidate))
+        crate::tools::resolve(name, &self.places)
+            .ok()
+            .map(|found| found.entry)
     }
 
     fn install(&self, dep: Dependency, pin: &Pin) -> Result<Version, InstallError> {

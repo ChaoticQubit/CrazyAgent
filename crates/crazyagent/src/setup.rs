@@ -547,9 +547,15 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
 /// Input: the engine root. Output: the installer.
 #[cfg(target_os = "linux")]
 pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
-    let shared = pinned::PinnedInstaller::with_paths(
+    let shared = pinned::PinnedInstaller::with_places(
         engine_root,
-        pinned::system_folders(&linux::SYSTEM_PATH),
+        pinned::system_folders(
+            linux::SYSTEM_PATH
+                .iter()
+                .map(std::path::PathBuf::from)
+                .collect(),
+        ),
+        crate::tools::Places::from_environment(Some(engine_root)),
     );
     Box::new(linux::LinuxInstaller::new(Box::new(shared)))
 }

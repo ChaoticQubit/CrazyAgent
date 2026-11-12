@@ -75,8 +75,11 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                 (None, Some(Some(Err(code)))) => DependencyState::Failed {
                     reason: super::plain_reason(code.0).to_owned(),
                 },
-                (None, Some(Some(Ok(Err(_))) | None)) => DependencyState::Missing {
-                    line: String::new(),
+                (None, Some(Some(Ok(Err(missing))))) => DependencyState::Missing {
+                    line: missing.line(),
+                },
+                (None, Some(None)) => DependencyState::Missing {
+                    line: dep.not_found().line(),
                 },
             };
             DependencyStatus {

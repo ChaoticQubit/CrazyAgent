@@ -1496,10 +1496,17 @@ impl AppSetup {
                     glyphs,
                 ),
             ]));
-            if let DependencyState::Failed { reason } = &tool.state {
+            let detail = match &tool.state {
+                DependencyState::Failed { reason } => Some(setup_reason(reason)),
+                DependencyState::Missing { line } if !line.is_empty() => {
+                    Some(super::new_project_view::printable(line.clone()))
+                }
+                _ => None,
+            };
+            if let Some(detail) = detail {
                 let gap = " ".repeat(2 + TOOL_WIDTH + 2);
                 lines.extend(
-                    wrap(&setup_reason(reason), rest).into_iter().map(|part| {
+                    wrap(&detail, rest).into_iter().map(|part| {
                         join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])
                     }),
                 );

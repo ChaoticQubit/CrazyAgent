@@ -136,6 +136,16 @@ impl Installer for LinuxInstaller {
         }
     }
 
+    fn lookup(
+        &self,
+        dep: Dependency,
+    ) -> Result<Result<Version, crate::tools::Missing>, InstallError> {
+        match dep {
+            Dependency::Tmux => Ok(tmux_version()?.ok_or_else(|| dep.not_found())),
+            Dependency::Uv | Dependency::Graphify => self.common.lookup(dep),
+        }
+    }
+
     fn install_tool(&self, package: &str, version: &str) -> Result<(), InstallError> {
         self.common.install_tool(package, version)
     }
