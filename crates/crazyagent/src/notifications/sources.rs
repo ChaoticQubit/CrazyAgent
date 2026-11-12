@@ -1,7 +1,8 @@
 //! The engine state behind each Action kind (DEC-136a decision 1): open questions, accounts
 //! that need a sign-in, research waiting for a pool, memories to review and change sets to
 //! review. Each source reads only its own tables and reports at most `SOURCE_ROWS_MAX`
-//! conditions; one whose tables are missing reports none and resolves nothing.
+//! conditions; one whose tables are missing reports none and resolves nothing, and one a cap
+//! stopped before the end of its state resolves nothing either.
 
 use super::reconcile::{Condition, SOURCE_ROWS_MAX};
 use super::{NoticeKind, NoticeTarget, error};
@@ -17,13 +18,35 @@ const TEAM_PROJECTS_MAX: i64 = 64;
 
 const _: () = assert!(TEAM_PROJECTS_MAX * 64 <= 8 * SOURCE_ROWS_MAX as i64);
 
-type Source = fn(&Connection, &ModelAccess) -> Result<Option<Vec<Condition>>, EngineError>;
+type Source = fn(&Connection, &ModelAccess) -> Result<Option<Found>, EngineError>;
 
-/// The conditions that hold now: the kinds whose sources were read, their conditions, and
-/// the first failure of a source that could not be read.
+/// What one source read: its conditions, and whether a cap stopped it before the end of its
+/// state, so items it did not reach may still hold and stay open.
+pub(super) struct Found {
+    conditions: Vec<Condition>,
+    capped: bool,
+}
+
+impl Found {
+    /// One source's read. Inputs: the conditions and whether a row, project or inbox cap was
+    /// reached. Output: the read, capped as well when the list itself is full.
+    fn read(conditions: Vec<Condition>, capped: bool) -> Self {
+        assert!(conditions.len() <= SOURCE_ROWS_MAX);
+        let full = conditions.len() == SOURCE_ROWS_MAX;
+        Self {
+            conditions,
+            capped: capped || full,
+        }
+    }
+}
+
+/// The conditions that hold now: the kinds whose sources were read, those of them a cap
+/// stopped before the end, their conditions, and the first failure of a source that could
+/// not be read.
 #[derive(Default)]
 pub(super) struct Live {
     pub kinds: Vec<NoticeKind>,
+    pub partial: Vec<NoticeKind>,
     pub conditions: Vec<Condition>,
     pub problem: Option<EngineError>,
 }
@@ -42,10 +65,18 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
     for (kind, read) in sources {
         match read(connection, access) {
             Ok(Some(found)) => {
-                assert!(found.len() <= SOURCE_ROWS_MAX);
-                assert!(found.iter().all(|condition| condition.kind == kind));
+                assert!(found.conditions.len() <= SOURCE_ROWS_MAX);
+                assert!(
+                    found
+                        .conditions
+                        .iter()
+                        .all(|condition| condition.kind == kind)
+                );
                 live.kinds.push(kind);
-                live.conditions.extend(found);
+                if found.capped {
+                    live.partial.push(kind);
+                }
+                live.conditions.extend(found.conditions);
             }
             Ok(None) => {}
             Err(problem) => {
@@ -53,6 +84,7 @@ pub(super) fn live(connection: &Connection, access: &ModelAccess) -> Live {
             }
         }
     }
+    assert!(live.partial.iter().all(|kind| live.kinds.contains(kind)));
     live
 }
 
@@ -85,11 +117,9 @@ fn push(found: &mut Vec<Condition>, keys: &mut BTreeSet<String>, condition: Cond
 /// master and team alike, keyed by its team message when it has one so linking it never
 /// opens a second item, then each team project's Questions inbox: team questions not yet
 /// linked and agents waiting on the owner in their own terminal. Inputs: the database and
-/// the model access (unused). Output: the conditions, or none without the questions log.
-fn questions(
-    connection: &Connection,
-    _: &ModelAccess,
-) -> Result<Option<Vec<Condition>>, EngineError> {
+/// the model access (unused). Output: the read, capped when the log, the team projects or an
+/// inbox held more than it shows, or none without the questions log.
+fn questions(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
     if !tables_exist(connection, &["questions_log"])? {
         return Ok(None);
     }
@@ -113,6 +143,7 @@ fn questions(
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
+    let mut capped = rows.len() >= SOURCE_ROWS_MAX;
     for (id, project, asker, question, coord) in rows {
         let Ok(project_id) = ProjectId::new(project) else {
             continue;
@@ -146,38 +177,49 @@ fn questions(
         "team_owner_alerts",
     ];
     if tables_exist(connection, &team)? {
-        for project_id in team_projects(connection)? {
-            inbox(connection, &project_id, &mut found, &mut keys)?;
+        let (projects, more) = team_projects(connection)?;
+        capped |= more;
+        for project_id in projects {
+            capped |= inbox(connection, &project_id, &mut found, &mut keys)?;
         }
     }
     assert!(found.len() <= SOURCE_ROWS_MAX);
-    Ok(Some(found))
+    Ok(Some(Found::read(found, capped)))
 }
 
-fn team_projects(connection: &Connection) -> Result<Vec<ProjectId>, EngineError> {
-    let projects: Vec<String> = connection
+/// The team projects whose inbox one tick reads. Input: the database. Output: at most
+/// `TEAM_PROJECTS_MAX` projects, and whether more were left out.
+fn team_projects(connection: &Connection) -> Result<(Vec<ProjectId>, bool), EngineError> {
+    let mut projects: Vec<String> = connection
         .prepare("SELECT DISTINCT project FROM team_agents ORDER BY project LIMIT ?1")
         .map_err(error)?
-        .query_map([TEAM_PROJECTS_MAX], |row| row.get(0))
+        .query_map([TEAM_PROJECTS_MAX + 1], |row| row.get(0))
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
-    Ok(projects
+    let cap = usize::try_from(TEAM_PROJECTS_MAX).expect("the project cap is small");
+    let more = projects.len() > cap;
+    projects.truncate(cap);
+    assert!(projects.len() <= cap);
+    let read = projects
         .into_iter()
         .filter_map(|id| ProjectId::new(id).ok())
-        .collect())
+        .collect();
+    Ok((read, more))
 }
 
 /// Adds one project's team Questions inbox: open team questions not yet in the questions
 /// log, and agents waiting on the owner in their own terminal. Inputs: the database, the
-/// project, the list and its keys. Output: Ok, or the inbox failure.
+/// project, the list and its keys. Output: whether the inbox held more than it shows, or
+/// the inbox failure.
 fn inbox(
     connection: &Connection,
     project_id: &ProjectId,
     found: &mut Vec<Condition>,
     keys: &mut BTreeSet<String>,
-) -> Result<(), EngineError> {
+) -> Result<bool, EngineError> {
     let inbox = crate::team::questions::inbox(connection, project_id)?;
+    let capped = inbox.more > 0 || inbox.waiting.len() >= crate::team::questions::WAITING_SHOWN_MAX;
     let target = |agent: i64| NoticeTarget::Questions {
         project_id: project_id.clone(),
         question: None,
@@ -207,16 +249,13 @@ fn inbox(
         };
         push(found, keys, condition);
     }
-    Ok(())
+    Ok(capped)
 }
 
 /// Accounts that need their owner to sign in (decision 1): each model access connection
 /// the engine reads as needing a sign-in, one item each. Inputs: the database and the model
-/// access. Output: the conditions, or none without the account tables.
-fn accounts(
-    connection: &Connection,
-    access: &ModelAccess,
-) -> Result<Option<Vec<Condition>>, EngineError> {
+/// access. Output: the read, or none without the account tables.
+fn accounts(connection: &Connection, access: &ModelAccess) -> Result<Option<Found>, EngineError> {
     if !tables_exist(connection, &["accounts", "native_auth_operations"])? {
         return Ok(None);
     }
@@ -241,13 +280,14 @@ fn accounts(
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(found))
+    let capped = access.connections.len() > SOURCE_ROWS_MAX;
+    Ok(Some(Found::read(found, capped)))
 }
 
 /// Projects with work waiting for a pool (decision 1): research jobs and team tasks in
 /// needs_pool, one item per project that counts them. Inputs: the database and the model
 /// access (unused). Output: the conditions, or none without the job tables.
-fn pools(connection: &Connection, _: &ModelAccess) -> Result<Option<Vec<Condition>>, EngineError> {
+fn pools(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
     if !tables_exist(connection, &["research_jobs", "team_tasks"])? {
         return Ok(None);
     }
@@ -265,6 +305,7 @@ fn pools(connection: &Connection, _: &ModelAccess) -> Result<Option<Vec<Conditio
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
+    let capped = rows.len() >= SOURCE_ROWS_MAX;
     let mut found = Vec::new();
     let mut keys = BTreeSet::new();
     for (project, jobs, tasks) in rows {
@@ -283,7 +324,7 @@ fn pools(connection: &Connection, _: &ModelAccess) -> Result<Option<Vec<Conditio
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(found))
+    Ok(Some(Found::read(found, capped)))
 }
 
 /// The words of a pool item. Inputs: the research jobs and team tasks waiting. Output:
@@ -310,10 +351,7 @@ fn waiting_words(jobs: i64, tasks: i64) -> String {
 /// Projects with research memories nobody reviewed yet (decision 1), one item per project
 /// that counts them. Inputs: the database and the model access (unused). Output: the
 /// conditions, or none without the memory tables.
-fn memories(
-    connection: &Connection,
-    _: &ModelAccess,
-) -> Result<Option<Vec<Condition>>, EngineError> {
+fn memories(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
     if !tables_exist(connection, &["knowledge_heads", "knowledge_entries"])? {
         return Ok(None);
     }
@@ -332,6 +370,7 @@ fn memories(
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
+    let capped = rows.len() >= SOURCE_ROWS_MAX;
     let mut found = Vec::new();
     let mut keys = BTreeSet::new();
     for (project, count) in rows {
@@ -355,16 +394,13 @@ fn memories(
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(found))
+    Ok(Some(Found::read(found, capped)))
 }
 
 /// Change sets waiting for the owner (decision 1): pending, in conflict or updating, one
 /// item each, oldest first. Inputs: the database and the model access (unused). Output: the
 /// conditions, or none without the change set tables.
-fn change_sets(
-    connection: &Connection,
-    _: &ModelAccess,
-) -> Result<Option<Vec<Condition>>, EngineError> {
+fn change_sets(connection: &Connection, _: &ModelAccess) -> Result<Option<Found>, EngineError> {
     if !tables_exist(
         connection,
         &["landing_change_sets", "landing_change_set_numbers"],
@@ -391,6 +427,7 @@ fn change_sets(
         .map_err(error)?
         .collect::<Result<_, _>>()
         .map_err(error)?;
+    let capped = rows.len() >= SOURCE_ROWS_MAX;
     let mut found = Vec::new();
     let mut keys = BTreeSet::new();
     for (id, project, label, prompt, number) in rows {
@@ -414,5 +451,5 @@ fn change_sets(
         };
         push(&mut found, &mut keys, condition);
     }
-    Ok(Some(found))
+    Ok(Some(Found::read(found, capped)))
 }

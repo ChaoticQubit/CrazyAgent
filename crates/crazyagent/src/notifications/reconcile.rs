@@ -127,13 +127,16 @@ fn open_items(
 }
 
 /// Compares the live conditions with the open items. Inputs: the kinds whose sources were
-/// read, the conditions and the open items. Output: the plan.
+/// read, those of them read only in part, the conditions and the open items. Output: the
+/// plan, which resolves and deletes nothing of a kind read only in part.
 fn plan<'a>(
     kinds: &[NoticeKind],
+    partial: &[NoticeKind],
     live: &'a [Condition],
     open: &BTreeMap<(NoticeKind, String), Open>,
 ) -> Result<Plan<'a>, EngineError> {
     assert!(kinds.iter().all(|kind| kind.class() == NoticeClass::Action));
+    assert!(partial.iter().all(|kind| kinds.contains(kind)));
     assert!(live.iter().all(|condition| kinds.contains(&condition.kind)));
     let mut keys = BTreeSet::new();
     let mut plan = Plan::default();
@@ -156,7 +159,7 @@ fn plan<'a>(
         }
     }
     for (key, item) in open {
-        if keys.contains(key) || !kinds.contains(&key.0) {
+        if keys.contains(key) || !kinds.contains(&key.0) || partial.contains(&key.0) {
             continue;
         }
         if item.dismissed {
@@ -171,17 +174,19 @@ fn plan<'a>(
 /// Brings the open items of the given kinds in step with their live conditions: a new
 /// condition opens a pending unread item, a changed one takes the new text and page, and an
 /// item whose condition is gone is resolved and read, or deleted when the owner had hidden
-/// it. Kinds not listed are left alone, so a source that could not be read resolves nothing.
-/// Inputs: the transaction, the kinds, the conditions and the time. Output: Ok, or the SQLite
-/// failure.
+/// it. Kinds not listed are left alone, so a source that could not be read resolves nothing,
+/// and a kind read only in part opens and updates items but resolves none. Inputs: the
+/// transaction, the kinds, those read in part, the conditions and the time. Output: Ok, or
+/// the SQLite failure.
 pub(crate) fn sync(
     tx: &Transaction<'_>,
     kinds: &[NoticeKind],
+    partial: &[NoticeKind],
     live: &[Condition],
     now: i64,
 ) -> Result<(), EngineError> {
     let open = open_items(tx, kinds)?;
-    let plan = plan(kinds, live, &open)?;
+    let plan = plan(kinds, partial, live, &open)?;
     for condition in &plan.opened {
         let text = shown(&condition.text);
         assert!(!text.is_empty());
@@ -471,12 +476,12 @@ pub fn reconcile(
         .collect();
     let settings = settings(connection)?;
     let open = open_items(connection, &live.kinds)?;
-    let changed = !plan(&live.kinds, &live.conditions, &open)?.is_empty();
+    let changed = !plan(&live.kinds, &live.partial, &live.conditions, &open)?.is_empty();
     if changed || !imports.is_empty() || prune_due(connection, &settings, now)? {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(error)?;
-        sync(&tx, &live.kinds, &live.conditions, now)?;
+        sync(&tx, &live.kinds, &live.partial, &live.conditions, now)?;
         for import in &imports {
             copy(&tx, import, now)?;
         }
