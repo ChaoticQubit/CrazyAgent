@@ -252,6 +252,9 @@ pub(crate) fn forget_project(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<(), EngineError> {
+    if !made(connection)? {
+        return Ok(());
+    }
     for table in ["search_chunks", "search_sources", "search_projects"] {
         connection
             .execute(
