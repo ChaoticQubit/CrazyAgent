@@ -276,6 +276,10 @@ pub enum OwnerMutation {
     SetMasterFrameSettings {
         settings: crate::master_frame_limit::MasterFrameSettings,
     },
+    SetLearningMark {
+        step: crate::learning::MarkStep,
+        on: bool,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -592,6 +596,10 @@ impl OwnerMutation {
             },
             Self::SetMasterFrameSettings { settings } => Command::OwnerMasterFrames {
                 settings: *settings,
+            },
+            Self::SetLearningMark { step, on } => Command::OwnerLearningMark {
+                step: *step,
+                on: *on,
             },
             Self::Memory { action } => {
                 action.validate()?;
