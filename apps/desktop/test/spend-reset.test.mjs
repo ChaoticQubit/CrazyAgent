@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 const client = await import("../src/api-usage.ts");
 const reset = await import("../src/screens/settings/spend-reset.tsx");
 const section = await import("../src/screens/settings/spend-settings.tsx");
+const poolsScreen = await import("../src/screens/settings/pools.tsx");
 
 const NOW = Date.UTC(2026, 10, 12, 13, 0);
 const settings = (confirm, all_limited = "notice") => ({ confirm, all_limited });
@@ -120,4 +121,33 @@ test("a spend says whether the owner confirmed it, and only the confirm dialog s
   assert.equal((control.match(/go\(true\)/g) ?? []).length, 1, "only the dialog confirms");
   assert.match(control, /setAsking\(true\) : go\(false\)/);
   assert.equal(client.usageRefusal({ code: "usage_spend_unconfirmed" }), "Spend confirmation now asks first. Use a free reset again and confirm it.");
+});
+
+test("each Pools row holds its own Spend for an account with a free reset, whatever the all-limited setting", () => {
+  const ok = (value) => ({ kind: "ok", value });
+  const loading = { kind: "loading" };
+  const forbidden = () => { throw new Error("static rendering must not save or navigate"); };
+  const member = { id: "codex-a", kind: "chatgpt", provider: "chatgpt", status: "not_signed_in", status_label: "Not signed in" };
+  const pool = { id: "pool-main", name: "Main", summary: "1 ChatGPT", members: [member], project_count: 0 };
+  const account = { id: "codex-a", name: "Bravo", provider: "chatgpt", provider_name: "ChatGPT / Codex", method: "subscription", method_label: "Sign in with ChatGPT",
+    url: null, model: null, status: "not_signed_in", status_label: "Not signed in" };
+  const ranking = [{ pool: "pool-main", strategy: "spread", own_order_projects: 0, accounts: [{ connection: "codex-a", standing: { kind: "not_signed_in" } }] }];
+  const read = (resets) => new Map([["codex-a", { harness: "Codex", adapter: "codex", may_break: true, resets, credits: null, spend: { kind: "in_app" },
+    not_reported: "not reported by Codex", resets_checked_ms: NOW, credits_checked_ms: null }]]);
+  const two = read({ count: 2, kinds: [], next_expiry_ms: null });
+  const draw = (spend, extras) => renderToStaticMarkup(createElement(poolsScreen.PoolsScreenView, {
+    pools: ok([pool]), accounts: ok([account]), schedule: loading, ranking: ok(ranking), limits: loading, extras, spend, onSpent: noop, nowMs: NOW, selected: undefined,
+    saved: undefined, apply: forbidden, onSelect: forbidden, onNew: forbidden, onDelete: forbidden, onRetry: forbidden, onRetryOrder: forbidden, onRetrySchedule: forbidden,
+    onToggleAdd: forbidden, onDoneAdd: forbidden, onAdd: forbidden, onRemove: forbidden, onRename: forbidden, onDraftName: forbidden,
+  }));
+  const row = (markup) => markup.slice(markup.indexOf('class="pool-row'));
+  for (const [confirm, limited] of [["confirm_each", "no_hint"], ["one_click", "auto_spend"], ["one_click", "notice"]]) {
+    assert.match(row(draw(view({ settings: settings(confirm, limited) }), two)), /class="spend-reset"[\s\S]*>Use a free reset</, `${confirm} ${limited}`);
+  }
+  assert.doesNotMatch(draw(view({ settings: settings("off", "no_hint") }), two), /spend-reset/, "spending off");
+  assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), read({ count: 0, kinds: [], next_expiry_ms: null })), /spend-reset/, "no free reset");
+  assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), read(null)), /spend-reset/, "count not reported");
+  assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), read({ count: 2, kinds: [], next_expiry_ms: NOW })), /spend-reset/, "resets expired");
+  assert.doesNotMatch(draw(view({ settings: settings("one_click", "no_hint") }), new Map()), /spend-reset/, "extras not read");
+  assert.doesNotMatch(draw(undefined, two), /spend-reset/, "spend view not read");
 });

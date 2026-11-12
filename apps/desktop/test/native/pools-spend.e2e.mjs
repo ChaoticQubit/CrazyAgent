@@ -85,6 +85,12 @@ async function reopenPools() {
   await until(() => shown(option(CONFIRM, "Confirm each")), UI_MS, "Pools did not show the spend settings");
 }
 
+/** Names one account's row in the selected pool's order. Input: the account's name. Output:
+ * the row's selector. */
+function poolRow(name) {
+  return `//li[contains(@class,"pool-row")][.//*[contains(@class,"pool-name")][normalize-space(.)=${JSON.stringify(name)}]]`;
+}
+
 /** Reads the spend line under Bravo's control in the notice. Output: the line, or "". */
 async function spendLine() {
   return (await texts("main .notice .spend-reset-line"))[0] ?? "";
@@ -161,11 +167,27 @@ describe("Settings, Pools: the two spend settings and the free reset spend on th
     assert.equal(attempts().length, 2, "no hint spends nothing");
   });
 
+  it("When every pool account is limited, No hint still lets the owner spend from the account's own Pools row", async () => {
+    await choose(CONFIRM, "One click", "confirm", "one_click");
+    const spend = `${poolRow(BRAVO)}//*[@class="spend-reset"]//button`;
+    await until(() => shown(spend), UI_MS, "Bravo's row had no Use a free reset");
+    assert.equal(await shown(`${poolRow(ALPHA)}//*[@class="spend-reset"]`), false, "no Spend on Alpha, which holds no free reset");
+    assert.equal(await shown("main .notice .spend-reset"), false, "no notice on No hint");
+    await click(spend);
+    await until(() => attempts().length === 3, UI_MS, "the row's Spend did not queue a spend");
+    assert.equal(await shown("dialog[open]"), false, "no confirm on one click");
+    assert.deepEqual(attempts().map((row) => [row.account, row.origin]).at(-1), [ids[BRAVO], "owner"]);
+    await allSettled();
+    await shot("spend-row");
+    await choose(CONFIRM, "Off", "confirm", "off");
+    await until(async () => !(await shown("main .spend-reset")), UI_MS, "a Spend control stayed while spending is off");
+  });
+
   it("When every pool account is limited, Spend on its own uses one free reset once, with spending on", async () => {
     await choose(LIMITED, "Spend on its own", "all_limited", "auto_spend");
     await until(async () => (await texts("main .set-help")).includes("Spending is off, so CrazyAgent never uses a free reset on its own."), UI_MS, "auto-spend did not say spending is off");
     await new Promise((done) => setTimeout(done, 12000));
-    assert.equal(attempts().length, 2, "no auto-spend while spending is off");
+    assert.equal(attempts().length, 3, "no auto-spend while spending is off");
     await choose(CONFIRM, "One click", "confirm", "one_click");
     await seedLimited();
     await until(() => attempts().some((row) => row.origin === "auto"), ENGINE_MS, "auto-spend did not queue a spend");
