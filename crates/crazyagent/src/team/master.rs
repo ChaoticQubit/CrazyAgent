@@ -1241,7 +1241,7 @@ pub fn serve_memory_calls(
             Some(Ok(call)) if switched_off(connection, project, &call).unwrap_or(true) => {
                 (SWITCHED_OFF.to_owned(), true)
             }
-            Some(Ok(call)) => memory_answer(connection, project, MASTER_LABEL, call)
+            Some(Ok(call)) => memory_answer(connection, project, (None, MASTER_LABEL), call)
                 .expect("a memory call has an answer")?,
         };
         let _ = tool::answer_call(mailbox, id, &text, error);
@@ -1298,16 +1298,23 @@ fn answer(
             harness,
             role,
             mode,
+            ticket,
         } => {
             return delegate(
                 connection,
                 answering,
                 &task,
-                harness.as_deref(),
-                role.as_deref(),
+                (harness.as_deref(), role.as_deref()),
                 mode,
+                ticket.as_deref(),
             );
         }
+        Call::Ticket { op, arguments } => tool::tracker::answer(
+            connection,
+            tool::tracker::Caller::Master(master),
+            op,
+            &arguments,
+        ),
         Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
         Call::Merge { agent } => return merge::merge(connection, answering, &agent),
         Call::Discard { agent, reason } => {
@@ -1318,7 +1325,7 @@ fn answer(
                 .expect("a past-conversation call has an answer")
         }
         call @ (Call::Remember { .. } | Call::Recall { .. }) => {
-            return memory_answer(connection, project, MASTER_LABEL, call)
+            return memory_answer(connection, project, (Some(master), MASTER_LABEL), call)
                 .expect("a memory call has an answer");
         }
         Call::Ask {
@@ -1346,6 +1353,12 @@ fn answer(
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        call @ (Call::ChecksRun { .. } | Call::ChecksResults) => tool::checks::serve(
+            connection,
+            project,
+            crate::checks::Actor::Master(master),
+            call,
+        ),
         Call::RequestAccess { grant, reason } => tool::questions::request_reply(
             connection,
             project,
@@ -1384,14 +1397,21 @@ pub(super) fn answer_sub(
             harness,
             role,
             mode: None,
+            ticket,
         } => lead_delegate(
             connection,
             answering,
             agent,
             &task,
-            harness.as_deref(),
-            role.as_deref(),
+            (harness.as_deref(), role.as_deref()),
+            ticket.as_deref(),
         )?,
+        Call::Ticket { op, arguments } => tool::tracker::answer(
+            connection,
+            tool::tracker::Caller::Agent(agent),
+            op,
+            &arguments,
+        ),
         Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
         Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
         Call::Discard { .. } => (DISCARD_LEAD_REFUSED.to_owned(), true),
@@ -1402,6 +1422,12 @@ pub(super) fn answer_sub(
         | Call::RequestAccess { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
+        call @ (Call::ChecksRun { .. } | Call::ChecksResults) => tool::checks::serve(
+            connection,
+            &answering.stored.project_id,
+            crate::checks::Actor::Agent(agent),
+            call,
+        ),
         Call::Sessions { .. }
         | Call::Session { .. }
         | Call::Remember { .. }
@@ -1574,16 +1600,17 @@ fn is_worker(
 
 /// Starts a worker of a lead (N1) when Sub-agent depth and Max teammates per harness allow
 /// it (DEC-104 K8): admitted as the master's task would be, only for a harness kind with a
-/// signed-in account, cut from the lead's commit and reporting back to the lead. Takes the
-/// database, what the answers need, the lead, the task, harness and role. Returns the
-/// sentence the lead reads and whether it is a refusal, or a SQLite failure.
+/// signed-in account, cut from the lead's commit and reporting back to the lead, and linked
+/// to the ticket the call names (TI-3). Takes the database, what the answers need, the
+/// lead, the task, harness and role, and the ticket. Returns the sentence the lead reads
+/// and whether it is a refusal, which wrote nothing, or a SQLite failure.
 fn lead_delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
     lead: i64,
     task: &str,
-    harness: Option<&str>,
-    role: Option<&str>,
+    (harness, role): (Option<&str>, Option<&str>),
+    ticket: Option<&str>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -1656,6 +1683,11 @@ fn lead_delegate(
         && super::names::set_task_role(&tx, project, id, role, 0)?.is_err()
     {
         return Err(state("team_task_role_stale"));
+    }
+    if let Some(ticket) = ticket
+        && let Err(reason) = tool::tracker::link_task(&tx, project, ticket, id, now_ms())?
+    {
+        return Ok((format!("Not started: {reason}."), true));
     }
     tx.commit().map_err(state)?;
     Ok((
@@ -1911,13 +1943,13 @@ fn land_on_lead(
 
 /// Answers one saved-memory call of a project's agent: `remember` saves under the owner's
 /// Agent memory writes and Where agents save memories settings and `recall` searches what
-/// agents may read. Takes the
-/// engine database, the project, the agent's label and the call. Returns the text and
-/// whether it is an error, or a SQLite failure; none for any other call.
+/// agents may read. Takes the engine database, the project, the agent's team id (None for a
+/// master answering from its mailbox, which runs no task) and label and the call. Returns the
+/// text and whether it is an error, or a SQLite failure; none for any other call.
 pub(super) fn memory_answer(
     connection: &mut Connection,
     project: &ProjectId,
-    agent: &str,
+    agent: (Option<i64>, &str),
     call: Call,
 ) -> Option<Result<(String, bool), EngineError>> {
     match call {
@@ -1930,39 +1962,38 @@ pub(super) fn memory_answer(
 fn remember(
     connection: &mut Connection,
     project: &ProjectId,
-    agent: &str,
+    agent: (Option<i64>, &str),
     scope: tool::MemoryReach,
     text: &str,
 ) -> Result<(String, bool), EngineError> {
     let app = scope == tool::MemoryReach::App;
-    Ok(
-        match crate::memory::library::agent_remember(connection, project, agent, app, text)? {
-            Ok(saved) => (
-                format!(
-                    "{}{}",
-                    if saved.narrowed {
-                        "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. "
-                    } else {
-                        ""
-                    },
-                    if saved.waiting {
-                        "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
-                    } else {
-                        "Saved to memory. recall finds it now, and agents started from now on get it."
-                    }
-                ),
-                false,
+    let saved = crate::memory::library::agent_remember(connection, project, agent, app, text)?;
+    Ok(match saved {
+        Ok(saved) => (
+            format!(
+                "{}{}",
+                if saved.narrowed {
+                    "Kept in this project's memory, not app-wide: the owner keeps agent memories in their project. "
+                } else {
+                    ""
+                },
+                if saved.waiting {
+                    "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
+                } else {
+                    "Saved to memory. recall finds it now, and agents started from now on get it."
+                }
             ),
-            Err(code) => (
-                format!(
-                    "Not saved: {}",
-                    crate::memory::library::plain_problem(&code)
-                        .unwrap_or("the memory could not be saved.")
-                ),
-                true,
+            false,
+        ),
+        Err(code) => (
+            format!(
+                "Not saved: {}",
+                crate::memory::library::plain_problem(&code)
+                    .unwrap_or("the memory could not be saved.")
             ),
-        },
-    )
+            true,
+        ),
+    })
 }
 
 fn recall(
@@ -2246,13 +2277,18 @@ fn unlogged(problem: &EngineError) -> String {
     )
 }
 
+/// Admits the task a live master's `spawn` names at once, with its role and mode, and
+/// links it to the ticket the call names (TI-3), all in one transaction. Takes the
+/// database, what the answers need, the task, its harness and role, the mode and the
+/// ticket. Returns the sentence the master reads and whether it is a refusal, which wrote
+/// nothing, or a SQLite failure.
 fn delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
     task: &str,
-    harness: Option<&str>,
-    role: Option<&str>,
+    (harness, role): (Option<&str>, Option<&str>),
     mode: Option<crate::coord::settings::SubagentMode>,
+    ticket: Option<&str>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -2312,6 +2348,11 @@ fn delegate(
             params![id, mode.as_str()],
         )
         .map_err(state)?;
+    }
+    if let Some(ticket) = ticket
+        && let Err(reason) = tool::tracker::link_task(&tx, project, ticket, id, now_ms())?
+    {
+        return Ok((format!("Not handed off: {reason}."), true));
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {

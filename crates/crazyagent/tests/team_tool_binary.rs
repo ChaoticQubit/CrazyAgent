@@ -191,6 +191,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
                 harness: Some("codex".into()),
                 role: Some("apple-writer".into()),
                 mode: None,
+                ticket: None,
             },
             "Task 7 is queued for codex.",
             false,

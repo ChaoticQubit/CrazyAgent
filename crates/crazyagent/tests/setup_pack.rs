@@ -1,7 +1,7 @@
 use crazyagent::setup::pack::{PackGroup, PackKind, PackManifest, PackSource, default_pack, parse};
 use std::path::Path;
 
-const DEFAULT_ON: [&str; 19] = [
+const DEFAULT_ON: [&str; 20] = [
     "graphify",
     "superpowers",
     "software-practices",
@@ -9,6 +9,7 @@ const DEFAULT_ON: [&str; 19] = [
     "tiger-style",
     "grill-me",
     "grill",
+    "crazyagent-checks",
     "linear-method",
     "to-releases",
     "to-features",
@@ -153,6 +154,7 @@ fn the_shipped_pack_pins_public_sources_to_full_commits() {
             "software-practices",
             "tiger-style",
             "grill",
+            "crazyagent-checks",
             "linear-method",
             "to-releases",
             "to-features",

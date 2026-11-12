@@ -1006,6 +1006,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: crate::instruction_files::Mode::Both,
+        trust: crate::trust::Trust::Reviewed,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let text = |text: &str| crate::agent_home::Given {
@@ -1142,6 +1143,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: Mode::Both,
+        trust: crate::trust::Trust::Reviewed,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
@@ -1186,6 +1188,7 @@ fn an_agent_cannot_change_the_skills_its_card_lists() {
         id: project.clone(),
         folder: Some(folder.clone()),
         mode: crate::instruction_files::Mode::Both,
+        trust: crate::trust::Trust::Reviewed,
         repeated: crate::agent_home::Repeated::LeaveOut,
     };
     let given = Given {

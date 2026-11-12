@@ -228,6 +228,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
         let mut session = Session::start_with_context(
             LaunchRequest {
                 harness: harness.into(),
+                trust: crazyagent::trust::Trust::Reviewed,
                 executable: installed(binary),
                 working_dir: work.clone(),
                 account: AccountBinding::Url {

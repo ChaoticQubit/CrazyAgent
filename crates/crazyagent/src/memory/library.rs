@@ -725,15 +725,15 @@ pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWri
 }
 
 /// Saves one memory an agent gave with its `remember` tool, with the agent named as its
-/// origin: held for the owner's approval under Ask me first, else saved at once, and an
-/// app-wide ask kept in the agent's project under This project only. The text is untrusted
-/// and checked like a hand-written note. Inputs: the engine connection, the agent's project,
-/// its label, whether it asked for app-wide and the text. Output: what was stored, or a
-/// refusal code `plain_problem` explains.
+/// origin: held for the owner's approval under Ask me first, else saved at once; a team
+/// agent's memory is linked to its task's tickets in the same transaction. An app-wide ask
+/// is kept to the project under This project only or for an untrusted project. Inputs: the
+/// connection, project, team id (None for no team agent) and label, the app-wide ask and the
+/// untrusted text. Output: what was stored, or a refusal code `plain_problem` explains.
 pub(crate) fn agent_remember(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
-    agent: &str,
+    (team_agent, agent): (Option<i64>, &str),
     app: bool,
     text: &str,
 ) -> Result<Result<AgentSaved, String>, EngineError> {
@@ -754,7 +754,9 @@ pub(crate) fn agent_remember(
     if !project_exists(&tx, project)? {
         return Ok(Err("memory_project_missing".into()));
     }
-    let narrowed = app && agent_scope(&tx)? == AgentScope::Project;
+    let untrusted = crate::trust::level(&tx, project.as_str()).map_err(error)?
+        == crate::trust::Trust::Untrusted;
+    let narrowed = app && (untrusted || agent_scope(&tx)? == AgentScope::Project);
     let scope = if app && !narrowed {
         MemoryScope::Global
     } else {
@@ -778,6 +780,10 @@ pub(crate) fn agent_remember(
         }
     };
     insert(&tx, &id, &scope, &origin, text)?;
+    if let Some(team_agent) = team_agent {
+        let now_ms = crate::team::now_ms();
+        crate::tracker::hooks::memory_saved(&tx, project, team_agent, id.as_str(), now_ms)?;
+    }
     tx.commit().map_err(error)?;
     assert!(!narrowed || scope.project().is_some());
     Ok(Ok(AgentSaved {

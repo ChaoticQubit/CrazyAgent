@@ -787,6 +787,14 @@ fn clone_asks_the_store_helper_and_leaves_no_token_in_the_project() {
     )));
     assert!(!config.contains("x-access-token"));
     assert!(!project.join(".git/hooks").exists());
+    assert!(
+        crate::trust::cloned(&project),
+        "a URL clone starts untrusted"
+    );
+    assert_eq!(
+        std::fs::read_to_string(project.join(".git").join(crate::trust::CLONED_MARKER)).unwrap(),
+        "cloned octo-cat/tool\n"
+    );
     assert_eq!(
         account.clone_repo(&home, "octo-cat/tool").unwrap_err().0,
         "clone_destination_exists"

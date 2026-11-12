@@ -1,0 +1,1563 @@
+{
+  "harness": "claude-code",
+  "qualified_versions": [
+    "2.1.309"
+  ],
+  "sources": [
+    "https://code.claude.com/docs/en/settings-reference",
+    "https://code.claude.com/docs/en/settings"
+  ],
+  "keys": [
+    {
+      "key": "advisorModel",
+      "label": "Advisor model",
+      "help": "Pick which model answers when Claude calls the server-side advisor tool. Unset it to turn the advisor off. The advisor must be at least as capable as your main model. See Choose an advisor model for the accepted pairings and what happens when you pick one that isn't accepted.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "alwaysThinkingEnabled",
+      "label": "Always thinking enabled",
+      "help": "Turn extended thinking off for every session by setting this to `false`. Thinking is on by default, so `true` changes nothing. Most people set this through `/config` rather than by editing the file.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "effortLevel",
+      "label": "Effort level",
+      "help": "Set a default effort level for models you haven't saved a level for. Lower levels are faster and cheaper on straightforward tasks, and higher levels reason more deeply on complex problems.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "enforceAvailableModels",
+      "label": "Enforce available models",
+      "help": "The `/model` picker has a Default option, and `default` model setting describes the model it resolves to. An `availableModels` allowlist limits the models you can name, but with the default prefix matching it doesn't remap your account type's default, so Default can still resolve to a model outside the list. This key closes that gap. Requires Claude Code v2.1.175 or later.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "fastMode",
+      "label": "Fast mode",
+      "help": "Turn fast mode on for sessions where it's available, for interactive work like rapid iteration or live debugging where you want speed at a higher cost per token. You don't usually edit this key by hand: running `/fast` writes `fastMode: true` to `~/.claude/settings.json`, and running it again to turn fast mode off removes the key. Fast mode runs only on Opus 5.5, Opus 5, and Opus 4.8: turning it on from another model switches you to Opus, and switching to an unsupported model turns it off. See Switch models while fast mode is on.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "fastModePerSessionOptIn",
+      "label": "Fast mode per session opt in",
+      "help": "Normally, running `/fast` saves `fastMode` to a person's user settings, so fast mode is on at the start of every later session. Set this key to `true` to stop that: a saved `fastMode: true` no longer turns fast mode on at session start, and each person has to run `/fast` in each session they want it. Claude Code leaves the `fastMode` key in their file, so turning this key off restores the old behavior.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "maxEffortLevel",
+      "label": "Max effort level",
+      "help": "Cap the effort level a session can use, leaving lower levels available. Any higher level runs at the cap instead, including one from `/effort`, the `/model` picker, `--effort`, `CLAUDE_CODE_EFFORT_LEVEL`, a skill's or subagent's `effort` frontmatter, or the model's own default. Claude Code applies the cap itself before each request, so it holds on every provider, including Amazon Bedrock, Google Cloud's Agent Platform, and Microsoft Foundry. Requires Claude Code v2.1.267 or later.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model",
+      "label": "Model",
+      "help": "Set the model every new session uses, so you don't have to pick one with `/model` each time. Setting it here doesn't stop you from switching mid-session. If your admin set an organization default model to override user selection, you get that model even when you set this key in user, project, or local settings.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "promptCacheTtl",
+      "label": "Prompt cache TTL",
+      "help": "Choose how long the prompt cache holds the main conversation. This key applies to your interactive, `-p`, and Agent SDK turns, together with the helpers Claude Code runs inline with them. The one-hour lifetime keeps the cache warm across longer breaks, and the API bills each cache write at a higher rate than at the five-minute lifetime. Requires Claude Code v2.1.242 or later.",
+      "type": "enum",
+      "options": [
+        "5m",
+        "1h"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "showThinkingSummaries",
+      "label": "Show thinking summaries",
+      "help": "See summaries of Claude's extended thinking in interactive sessions. Set it if you want the full summaries when you expand thinking with `Ctrl+O`. When unset or `false`, the Anthropic API redacts thinking blocks and Claude Code shows a collapsed stub.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "subagentPromptCacheTtl",
+      "label": "Subagent prompt cache TTL",
+      "help": "Choose how long the prompt cache holds the requests Claude Code makes outside the main conversation. This key applies to subagents, workflows, and Claude Code's own background and helper requests, such as compaction and session titles. The one-hour lifetime keeps the cache warm across longer breaks, and the API bills each cache write at a higher rate than at the five-minute lifetime. Requires Claude Code v2.1.242 or later.",
+      "type": "enum",
+      "options": [
+        "5m",
+        "1h"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "switchModelsOnFlag",
+      "label": "Switch models on flag",
+      "help": "Choose what happens when a safety classifier flags a request: switch to the fallback model and continue, or pause so you can choose between switching and editing the prompt.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "ultracode",
+      "label": "Ultracode",
+      "help": "Start sessions with ultracode on. With it on, Claude plans a workflow for each substantive task instead of waiting for you to ask. Claude plans workflows only when dynamic workflows are enabled for you and your model supports `xhigh` effort. The key doesn't change the session's effort level: ultracode runs at whichever level the session uses. Claude Code reads this key but never writes it: `/effort ultracode` turns ultracode on for the current session only.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "autoMode.classifyAllShell",
+      "label": "Auto mode classify all shell",
+      "help": "Send every Bash and PowerShell command through the auto mode classifier while auto mode is active. By default, auto mode suspends only allow rules that could run arbitrary code: tool-wide and wildcard rules such as `Bash(*)`, and interpreter or shell-wrapper prefixes such as `Bash(python *)`. A command that any other allow rule matches, such as `Bash(npm test)`, skips the classifier unless it carries per-command allowed domains. When it skips, a destructive argument the rule's prefix didn't anticipate can get through unseen. Setting this key suspends every shell allow rule for the session so the classifier sees every command. Requires Claude Code v2.1.193 or later.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "disableAutoMode",
+      "label": "Disable auto mode",
+      "help": "Remove auto mode from the `Shift+Tab` cycle. Any session that would otherwise start in auto mode, whether from `--permission-mode auto`, a settings file, or the built-in default, starts in `default` instead. Administrators set it in managed settings to prevent developers in their organization from using auto mode.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "useAutoModeDuringPlan",
+      "label": "Use auto mode during plan",
+      "help": "Choose whether Claude Code uses the auto mode classifier to review shell commands in plan mode. With the default `true`, the classifier reviews each command during planning when auto mode is available and you see no prompt, except for critical-path removals. Set `false` to get a permission prompt for every command outside the built-in read-only set. Appears in `/config` as Use auto mode during plan.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "permissions.blockReadsOutsideWorkingDirectories",
+      "label": "Permissions block reads outside working directories",
+      "help": "Make Claude's file tools refuse reads outside your working directories in every permission mode, including `bypassPermissions`. Claude Code denies `Read`, `Grep`, `Glob`, and `LSP` calls on those paths and tells Claude to ask you to add the directory with `/add-dir`. Files Claude Code itself needs stay readable, such as your skills, plugins, rules, agents, commands, and the `CLAUDE.md` memory file under `~/.claude/`. Requires Claude Code v2.1.257 or later.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "permissions.defaultMode",
+      "label": "Permissions default mode",
+      "help": "Set the permission mode new sessions start in. When you leave it unset, sessions start in the built-in default for your surface.",
+      "type": "enum",
+      "options": [
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        "dontAsk",
+        "bypassPermissions",
+        "manual"
+      ],
+      "default": "default",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "permissions.disableBypassPermissionsMode",
+      "label": "Permissions disable bypass permissions mode",
+      "help": "Prevent anyone from entering `bypassPermissions` mode. Claude Code then rejects the `--dangerously-skip-permissions` flag, and ignores an agent definition's `permissionMode: bypassPermissions`, so the subagent runs with the parent session's permission mode.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "skipAutoPermissionPrompt",
+      "label": "Skip auto permission prompt",
+      "help": "Skip the one-time notice describing auto mode that Claude Code shows when you first enter auto mode yourself, for example through your own settings or the mode selector, rather than when the built-in default starts a session in it. Claude Code shows that notice once and then records that it was shown, so this key only matters where the notice hasn't appeared yet.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "skipDangerousModePermissionPrompt",
+      "label": "Skip dangerous mode permission prompt",
+      "help": "Skip the confirmation dialog Claude Code shows before a session enters `bypassPermissions` mode, whether from `--dangerously-skip-permissions` or from `defaultMode: \"bypassPermissions\"`. Claude Code writes `true` here in your user settings when you accept that dialog once.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "The engine sets each agent's permission mode and rules.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.enabled",
+      "label": "Sandbox enabled",
+      "help": "Turn on sandboxing for Bash commands. When you pick a mode in the `/sandbox` panel, Claude Code writes this key to `.claude/settings.local.json` for the current project; set it in `~/.claude/settings.json` to sandbox every project.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.failIfUnavailable",
+      "label": "Sandbox fail if unavailable",
+      "help": "Make Claude Code exit with an error at startup when `sandbox.enabled` is `true` but the sandbox can't start, because a dependency is missing or the platform is unsupported. Without this key, Claude Code runs commands unsandboxed. Managed deployments that require sandboxing as a security gate can use this setting.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.autoAllowBashIfSandboxed",
+      "label": "Sandbox auto allow bash if sandboxed",
+      "help": "Let Claude Code run sandboxed Bash commands without a permission prompt. Commands that can't run in the sandbox still go through the regular permission flow, and `deny` rules and content-scoped `ask` rules such as `Bash(git push *)` still apply; a bare `Bash` ask rule is skipped for sandboxed commands. Set it to `false` to send sandboxed commands through the regular permission flow too, which the `/sandbox` Mode tab calls regular permissions mode.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.allowUnsandboxedCommands",
+      "label": "Sandbox allow unsandboxed commands",
+      "help": "Let Claude retry a command outside the sandbox with the `dangerouslyDisableSandbox` parameter after the sandbox blocks it. When it's `false`, Claude Code ignores that parameter. While the sandbox is running, commands Claude runs are then sandboxed unless they match an `excludedCommands` entry. The `/sandbox` Overrides tab shows that state as Strict sandbox mode. A `false` in managed settings turns on strict sandbox mode for the developers it covers.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.filesystem.disabled",
+      "label": "Sandbox filesystem disabled",
+      "help": "Skip filesystem isolation while keeping network isolation. Sandboxed commands get unrestricted read and write access to the host filesystem, and their network egress stays confined to `network.allowedDomains`. Use it when you sandbox to control where commands connect rather than what they write.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.enableWeakerNestedSandbox",
+      "label": "Sandbox enable weaker nested sandbox",
+      "help": "Run the Linux sandbox inside an unprivileged Docker container, where bubblewrap can't mount a fresh `/proc`. Instead the inner sandbox bind-mounts the container's existing `/proc`, which exposes process information that a fresh mount would hide. This reduces security; use it only when the outer container already provides the isolation you need.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.enableWeakerNetworkIsolation",
+      "label": "Sandbox enable weaker network isolation",
+      "help": "Let sandboxed commands on macOS reach the system TLS trust service, `com.apple.trustd.agent`. Go-based tools such as `gh`, `gcloud`, and `terraform` need it to verify TLS certificates when you use `network.httpProxyPort` with a MITM proxy and a custom CA. This reduces security by opening a potential data exfiltration path through the trust service.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.allowAppleEvents",
+      "label": "Sandbox allow apple events",
+      "help": "Let sandboxed commands on macOS send Apple Events, which `open`, `osascript`, and tools that open URLs in a browser need; without it they fail with error `-600`. This removes code-execution isolation: sandboxed commands can launch other applications unsandboxed with no user prompt, and can send AppleScript commands to running applications such as Terminal, subject to the per-app macOS automation-consent prompt (TCC).",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.allowNestedUserNamespaces",
+      "label": "Sandbox allow nested user namespaces",
+      "help": "Let sandboxed commands on Linux and WSL2 create user namespaces, which Chromium's and Electron's own sandbox, a nested bubblewrap, and `unshare` need. If you set this key to `true`, you turn off a security boundary: code from a sandboxed command can end up running outside the sandbox. For rootless Podman or Buildah, use `excludedCommands` instead, because the sandbox stops them in other ways too. Requires Claude Code v2.1.305 or later.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.credentials.allowPlaintextInject",
+      "label": "Sandbox credentials allow plaintext inject",
+      "help": "Allow `mask` substitution on plain HTTP requests as well as TLS-terminated HTTPS. On plain HTTP the upstream identity is unverified and the credential travels in cleartext, so leave this off outside trusted test networks.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.network.allowAllUnixSockets",
+      "label": "Sandbox network allow all unix sockets",
+      "help": "Let sandboxed commands connect to every Unix socket. On Linux and WSL2, the sandbox's seccomp filter blocks `socket(AF_UNIX, ...)` calls, so this is the only way to permit Unix sockets there. When the filter is missing, which `/sandbox` reports on its Dependencies tab, the sandbox doesn't block Unix-socket calls. See Set up Linux and WSL2 for where the filter comes from.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.network.allowLocalBinding",
+      "label": "Sandbox network allow local binding",
+      "help": "Let sandboxed commands on macOS listen on network ports, for example to start a dev server, and connect to any port on localhost. A command that listens on a non-loopback address accepts connections from other machines. The key has no effect on Linux and WSL2, where each sandboxed command has its own loopback interface. To reach a server on the host from Linux or WSL2, see A command fails to reach a server on localhost.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.network.strictAllowlist",
+      "label": "Sandbox network strict allowlist",
+      "help": "Deny sandboxed commands access to hosts outside the allowlist instead of prompting for approval. The allowlist is `allowedDomains` plus domains from `WebFetch(domain:...)` allow rules, or only the managed settings entries when `allowManagedDomainsOnly` is set. Locks that apply without an admin-required sandbox covers a repository's entries. Requires Claude Code v2.1.219 or later.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.network.httpProxyPort",
+      "label": "Sandbox network HTTP proxy port",
+      "help": "Point the sandbox at your own HTTP proxy instead of the one Claude Code runs. Organizations do this to inspect HTTPS traffic, apply their own filtering rules, or log requests. Your proxy takes over filtering, and Claude Code stops applying its domain lists and network prompts to traffic sent there. When unset, Claude Code starts its own proxy for HTTP traffic.",
+      "type": "integer",
+      "default": 1,
+      "min": 1,
+      "max": 65535,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "sandbox.network.socksProxyPort",
+      "label": "Sandbox network SOCKS proxy port",
+      "help": "Point the sandbox at your own SOCKS5 proxy instead of the one Claude Code runs. Your proxy takes over filtering, and Claude Code stops applying its domain lists and network prompts to traffic sent there. When unset, Claude Code starts its own proxy for SOCKS traffic.",
+      "type": "integer",
+      "default": 1,
+      "min": 1,
+      "max": 65535,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "autoCompactEnabled",
+      "label": "Auto compact enabled",
+      "help": "Have Claude Code compact the conversation automatically when context approaches the limit. Appears in `/config` as Auto-compact, and toggling it there writes this key to your user settings.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "autoMemoryDirectory",
+      "label": "Auto memory directory",
+      "help": "Store auto memory in a directory of your choice instead of the per-project default.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "autoMemoryEnabled",
+      "label": "Auto memory enabled",
+      "help": "Turn auto memory on or off. When `false`, Claude doesn't read from or write to the auto memory directory. You can also toggle it with `/memory` during a session, which writes this key to your user settings. CrazyAgent starts its agents and masters with this off, so no memory carries from one session into the next without review; Claude Code's own default is on.",
+      "type": "bool",
+      "default": false,
+      "harness_default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "bashOutputMaxChars",
+      "label": "Bash output max chars",
+      "help": "Set how many characters of a successful Bash or PowerShell command's output Claude receives inline. When output passes the limit, Claude Code saves it to a file and Claude receives a short preview plus the file's path. Raise the limit when command output, such as a verbose build or a full test-suite log, routinely overflows the default and you want Claude to read it without opening the file. Requires Claude Code v2.1.261 or later.",
+      "type": "integer",
+      "default": 30000,
+      "min": 4000,
+      "max": 128000,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "fileCheckpointingEnabled",
+      "label": "File checkpointing enabled",
+      "help": "Have Claude Code snapshot files before each edit so `/rewind` can restore them. Appears in `/config` as Rewind code (checkpoints), and toggling it there writes this key to your user settings.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "idleCompaction",
+      "label": "Idle compaction",
+      "help": "Idle compaction compacts a long conversation that you've stepped away from. Your next message then sends a summary instead of the whole conversation. Once compacted, the conversation shows a notice:",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "plansDirectory",
+      "label": "Plans directory",
+      "help": "Choose where Claude Code stores the plan files it writes in plan mode. Claude Code resolves the path relative to the project root.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "skillListingMaxDescChars",
+      "label": "Skill listing max desc chars",
+      "help": "Each turn, Claude sees a listing of your skills that shows each skill's `description` and `when_to_use` text. This key caps how many characters of that text Claude Code shows per skill; longer text is cut at the cap.",
+      "type": "integer",
+      "default": 1536,
+      "min": 1,
+      "max": 1048576,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "askUserQuestionTimeout",
+      "label": "Ask user question timeout",
+      "help": "Let an unanswered `AskUserQuestion` dialog auto-continue after a period of idle time, submitting whatever options you had already selected. Set it when you step away and want Claude to continue without you. With the default, questions wait until you answer them. For when the timer pauses or never starts, see Question auto-continue timeout.",
+      "type": "enum",
+      "options": [
+        "60s",
+        "5m",
+        "10m",
+        "never"
+      ],
+      "default": "never",
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "autoContinueAtUsageLimit",
+      "label": "Auto continue at usage limit",
+      "help": "After a claude.ai usage limit stops your session, wait in the open session and continue the task automatically after the reset. See Turn automatic continue off. Requires Claude Code v2.1.234 or later.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "autoScrollEnabled",
+      "label": "Auto scroll enabled",
+      "help": "Follow new output to the bottom of the conversation in fullscreen rendering. Turn it off to stay where you scrolled while Claude keeps working; permission prompts still scroll into view.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "axScreenReader",
+      "label": "Ax screen reader",
+      "help": "Render screen-reader friendly output: flat text without decorative borders or animations. Screen-reader mode uses the classic renderer, so the `tui` setting has no effect while it is active; attached background sessions still render fullscreen.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "bashEditDiffEnabled",
+      "label": "Bash edit diff enabled",
+      "help": "Choose whether Claude Code records which files changed in a Git repository while a Bash command runs. When it records them, you see their diff in the terminal after the command, and your PostToolUse Bash hooks receive the changed-file list.",
+      "type": "bool",
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "defaultShell",
+      "label": "Default shell",
+      "help": "Choose whether Bash or PowerShell runs the shell commands you type with the `!` prefix in the input box, the ones Claude Code runs directly and adds to the session.",
+      "type": "enum",
+      "options": [
+        "bash",
+        "powershell"
+      ],
+      "default": "bash",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "dialogExpiry",
+      "label": "Dialog expiry",
+      "help": "Set the deadline for dialogs Claude Code forwards to a remote client, such as a Remote Control or SDK host, and for the approval dialog for a held cross-session message. On Claude Code v2.1.236 or later, the same deadline bounds the mid-session Fable usage-credits consent prompt in a session that may have nobody at the terminal. When no answer arrives before the deadline, Claude Code cancels the dialog and continues with its no-action default. Requires Claude Code v2.1.224 or later.",
+      "type": "enum",
+      "options": [
+        "60s",
+        "5m",
+        "10m",
+        "never"
+      ],
+      "default": "5m",
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "editorMode",
+      "label": "Editor mode",
+      "help": "Choose the key binding mode for the input prompt.",
+      "type": "enum",
+      "options": [
+        "normal",
+        "vim"
+      ],
+      "default": "normal",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "emojiCompletionEnabled",
+      "label": "Emoji completion enabled",
+      "help": "Show emoji suggestions when you type `:` plus a shortcode in the prompt input, and replace a completed shortcode such as `:heart:` with its emoji. Set it to `false` to turn off both.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "keybindingFlavor",
+      "label": "Keybinding flavor",
+      "help": "Deprecated since v2.1.261 and has no effect. The prompt's word-editing keys always follow readline conventions, as in Bash. Claude Code still accepts `keybindingFlavor`, so a settings file that sets it stays valid.",
+      "type": "enum",
+      "options": [
+        "classic",
+        "readline"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "prefersReducedMotion",
+      "label": "Prefers reduced motion",
+      "help": "Reduce or turn off interface animations such as the spinner, shimmer, and flash effects. Appears in `/config` as Reduce motion.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "promptSuggestionEnabled",
+      "label": "Prompt suggestion enabled",
+      "help": "Show or hide prompt suggestions, the grayed-out predictions that appear in your prompt input. Set it to `false`, or turn off Prompt suggestions in `/config`, to hide them.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "respectGitignore",
+      "label": "Respect gitignore",
+      "help": "Control whether the `@` file picker leaves out files that match `.gitignore` patterns. Appears in `/config` as Respect .gitignore in file picker.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "respondToBashCommands",
+      "label": "Respond to bash commands",
+      "help": "Choose whether Claude responds after you run a shell command with the `!` prefix in the input box. By default, Claude Code adds the command's output to the conversation and Claude replies to it. Set this key to `false` to add the output to context without a reply, so you can run several commands and ask about them together.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "showClearContextOnPlanAccept",
+      "label": "Show clear context on plan accept",
+      "help": "When Claude finishes a plan in plan mode, it shows an approval menu. Planning can use a lot of context, so this key adds a first option to that menu, Yes, clear context and ..., that approves the plan, clears the conversation context, and starts implementing from the plan alone. The rest of the label names the permission mode the session continues in, and shows how much of your context the planning used.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "showTurnDuration",
+      "label": "Show turn duration",
+      "help": "Show or hide the turn duration message after each response, such as \"Cooked for 1m 6s done 6:05 PM\". The clock after \"done\" shows when the turn finished; `timeFormat` and `timeZone` control its format and zone. Appears in `/config` as Show turn duration.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "spinnerTipsEnabled",
+      "label": "Spinner tips enabled",
+      "help": "While Claude works, the spinner line rotates through short tips about Claude Code features, such as \"Use Plan Mode to prepare for a complex request before making changes. Press Shift+Tab twice to enable.\" Set this key to `false` to hide them. Appears in `/config` as Show tips.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "syntaxHighlightingDisabled",
+      "label": "Syntax highlighting disabled",
+      "help": "Claude Code colors code by language in the diffs, code blocks, and file previews it shows in the terminal, with its built-in highlighter; no plugin or language server is involved. Set this key to `true` to show them as plain text instead, for example if the colors clash with your terminal theme or slow a screen reader.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "terminalProgressBarEnabled",
+      "label": "Terminal progress bar enabled",
+      "help": "Some terminals can show a progress indicator on the tab or in the taskbar for the program running in them. While Claude is working, Claude Code reports an in-progress state to the terminal, so you can see from another tab or window whether the session is still busy. The indicator stays visible after the turn ends while background subagents or dynamic workflows are still running, and clears once the session is idle.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "terminalTitleFromRename",
+      "label": "Terminal title from rename",
+      "help": "Claude Code sets your terminal tab's title. By default it uses a title it generates from the conversation, and once you give the session a name with `/rename` or `--name`, the tab shows that name instead. Set this key to `false` to keep the generated title on the tab even after you name the session. The name itself still applies, so `/resume ` and the session picker find it.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "theme",
+      "label": "Theme",
+      "help": "Pick the color theme for the interface. Appears in `/config` as Theme.",
+      "type": "enum",
+      "options": [
+        "auto",
+        "dark",
+        "light",
+        "dark-daltonized",
+        "light-daltonized",
+        "dark-ansi",
+        "light-ansi"
+      ],
+      "default": "dark",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "timeFormat",
+      "label": "Time format",
+      "help": "Choose how Claude Code writes the times it shows in the interface, such as the `done 6:05 PM` at the end of each turn duration message and the timestamps in the transcript viewer. To pick a preset, run `/config` and set Time format. Requires Claude Code v2.1.257 or later.",
+      "type": "enum",
+      "options": [
+        "auto",
+        "12-hour",
+        "24-hour",
+        "24-hour-utc"
+      ],
+      "default": "auto",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui",
+      "label": "TUI",
+      "help": "Choose the terminal UI renderer. Use `\"fullscreen\"` for the flicker-free alt-screen renderer with virtualized scrollback, or `\"default\"` for the classic main-screen renderer. Running `/tui fullscreen` or `/tui default` writes this key for you.",
+      "type": "enum",
+      "options": [
+        "default",
+        "fullscreen"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "verbose",
+      "label": "Verbose",
+      "help": "By default, the transcript collapses each tool call to a short summary, such as the command Claude ran and a line count of its output, and you press `Ctrl+O` to switch the whole transcript to the expanded view when you want the details. Set this key to `true` to show every tool call's full input and output inline as it happens, which is useful when you're debugging a hook, an MCP server, or a long shell command. Appears in `/config` as Verbose output.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "viewMode",
+      "label": "View mode",
+      "help": "Set the transcript view Claude Code starts in: `\"default\"`, `\"verbose\"`, or `\"focus\"`. When set, it overrides both the sticky `/focus` selection and the `verbose` setting.",
+      "type": "enum",
+      "options": [
+        "default",
+        "verbose",
+        "focus"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "voiceEnabled",
+      "label": "Voice enabled",
+      "help": "Deprecated since v2.1.92, when the `voice` object replaced it. Claude Code still reads it so older settings files keep working, but new configurations should set `voice.enabled`.",
+      "type": "bool",
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "wheelScrollAccelerationEnabled",
+      "label": "Wheel scroll acceleration enabled",
+      "help": "Accelerate mouse-wheel scroll speed during fast scrolls in fullscreen rendering. Set it to `false` for a constant scroll rate per wheel notch.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "includeCoAuthoredBy",
+      "label": "Include co authored by",
+      "help": "> [!WARNING]>> Deprecated since v2.0.62, when `attribution` replaced it. Claude Code still reads it, but new configurations should set `attribution`.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Commits and pull requests name no agent co-author.",
+        "engine_value": false
+      }
+    },
+    {
+      "key": "includeGitInstructions",
+      "label": "Include git instructions",
+      "help": "Claude Code gives Claude two git-related pieces of context: its built-in instructions for how to write commits and pull requests, in the Bash tool's description, and a git status snapshot of your repository. The snapshot holds the current branch, the main branch, `git status` output, and recent commits. Claude Code reads it when a conversation starts.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "attribution.commit",
+      "label": "Attribution commit",
+      "help": "Set the attribution text Claude Code adds to git commits, including any trailers. Set it to an empty string to hide commit attribution.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Commits and pull requests name no agent co-author.",
+        "engine_value": ""
+      }
+    },
+    {
+      "key": "attribution.pr",
+      "label": "Attribution PR",
+      "help": "Set the attribution text Claude Code adds to pull request descriptions. Set it to an empty string to hide pull request attribution.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Commits and pull requests name no agent co-author.",
+        "engine_value": ""
+      }
+    },
+    {
+      "key": "attribution.sessionUrl",
+      "label": "Attribution session URL",
+      "help": "Choose whether Claude Code appends the claude.ai session link when it commits or opens a pull request from a cloud or Remote Control session. Claude Code adds the link as a `Claude-Session` trailer on commits and as a link in pull request descriptions. Set it to `false` to omit the link.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Commits and pull requests name no agent co-author.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "disableAllHooks",
+      "label": "Disable all hooks",
+      "help": "Turn off hooks, any custom status line, and any custom file suggestion command. Use it to turn all of these off temporarily without deleting them from your settings.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which hooks an agent runs.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "disableWorkflows",
+      "label": "Disable workflows",
+      "help": "Turn off dynamic workflows and the bundled workflow commands for everyone your settings reach, such as an organization through managed settings. To turn workflows on or off just for yourself, use `enableWorkflows` instead, which the Dynamic workflows toggle in `/config` writes to your user settings.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "enableWorkflows",
+      "label": "Enable workflows",
+      "help": "Turn dynamic workflows on or off for yourself when your plan's default isn't what you want. Appears in `/config` as Dynamic workflows, which writes this key to your user settings and removes it again when you toggle back to your plan's default. To turn workflows off for everyone from managed settings, use `disableWorkflows` instead.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "workflowKeywordTriggerEnabled",
+      "label": "Workflow keyword trigger enabled",
+      "help": "Choose whether typing the keyword `ultracode` in a prompt triggers a dynamic workflow. Set it to `false` to type the word without triggering one.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "workflowSizeGuideline",
+      "label": "Workflow size guideline",
+      "help": "Set the agent count Claude aims for in the dynamic workflows it writes. Claude Code sends the value to Claude as advice, not an enforced cap: `\"small\"` asks for fewer than 5 agents, `\"medium\"` fewer than 10, and `\"large\"` fewer than 50. Choose `\"small\"` when you want to bound what a workflow spends.",
+      "type": "enum",
+      "options": [
+        "unrestricted",
+        "small",
+        "medium",
+        "large"
+      ],
+      "default": "medium",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "disableBundledSkills",
+      "label": "Disable bundled skills",
+      "help": "Turn off the skills and workflows included with Claude Code. Claude Code removes bundled skills and workflows entirely, while built-in commands such as `/init` stay typable but are hidden from the model.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disableSkillShellExecution",
+      "label": "Disable skill shell execution",
+      "help": "Turn off inline shell execution for `` !`...` `` and ` ```! ` blocks in skills and custom commands from user, project, plugin, or additional-directory sources. Claude Code replaces each command with `[shell command execution disabled by policy]` instead of running it.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "syncClaudeAiSkills",
+      "label": "Sync Claude AI skills",
+      "help": "Turn off the download of the skills enabled for your claude.ai account. Claude Code downloads them into `~/.claude/skills/synced/` in terminal sessions where you sign in with your claude.ai account, interactive or non-interactive, and in Cowork and cloud sessions. Set `false` to stop that download and stop loading the skills it already synced. Claude Code honors only `false`: `true` is the same as unset and doesn't turn syncing on where it's otherwise off.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "syncClaudeAiPlugins",
+      "label": "Sync Claude AI plugins",
+      "help": "Turn off the download of the plugins enabled for your claude.ai account. Claude Code downloads them into `~/.claude/plugins/synced/` at the start of terminal sessions where you sign in with your claude.ai account and in Cowork sessions, and loads each one as `@synced`. Set `false` to stop that download and stop loading the plugins it already synced. Claude Code honors only `false`: `true` is the same as unset and doesn't turn syncing on where it's otherwise off. Requires Claude Code v2.1.273 or later.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "The engine decides which MCP servers, plugins and connectors an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "disableClaudeAiConnectors",
+      "label": "Disable Claude AI connectors",
+      "help": "Turn off the claude.ai MCP connectors Claude Code fetches itself, so it neither fetches nor connects them. A `true` in any settings file applies: a checked-in project `.claude/settings.json` can opt a repository out of those connectors, but a project-level `false` can't override a user- or managed-level `true`.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which MCP servers, plugins and connectors an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "enableAllProjectMcpServers",
+      "label": "Enable all project MCP servers",
+      "help": "Approve every MCP server defined in project `.mcp.json` files without a prompt. Claude Code writes this key to `.claude/settings.local.json` when you choose to approve all servers in the approval dialog.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which MCP servers, plugins and connectors an agent reaches.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agent",
+      "label": "Agent",
+      "help": "Run the main thread as a named subagent, so Claude Code applies that subagent's system prompt, tool restrictions, and model to your session. The same key sets the default agent for sessions you dispatch from `claude agents`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides which tools an agent has.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "crossSessionInbound",
+      "label": "Cross session inbound",
+      "help": "Choose what this session does with messages arriving from your other Claude Code sessions. When no value applies, Claude Code decides per message from the two sessions' permission-mode classes. Requires Claude Code v2.1.224 or later.",
+      "type": "enum",
+      "options": [
+        "accept",
+        "hold",
+        "refuse"
+      ],
+      "default": "accept",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine routes messages between agents itself.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "disableAgentView",
+      "label": "Disable agent view",
+      "help": "Turn off background agents and agent view: `claude agents`, `--bg`, `/background`, and the on-demand supervisor. Set it in managed settings to enforce it for an organization.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "isolatePeerMachines",
+      "label": "Isolate peer machines",
+      "help": "Require your explicit approval before Claude's `SendMessage` reaches one of your sessions beyond this machine; see Require approval for cross-machine messages. The approval prompt appears even in `bypassPermissions` mode.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine routes messages between agents itself.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "processWrapper",
+      "label": "Process wrapper",
+      "help": "On macOS and Linux, place a corporate launcher command in front of the background processes Claude Code starts. Claude Code runs the launcher with its own command line appended, so the launcher must exec into Claude Code; see Run Claude Code behind a corporate launcher for the launcher contract. Requires Claude Code v2.1.210 or later.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "A setting that runs a command stays with the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "teammateMode",
+      "label": "Teammate mode",
+      "help": "Choose where Claude Code shows agent team teammates: inside your main terminal pane, or in split panes when your terminal supports them. See Choose a display mode.",
+      "type": "enum",
+      "options": [
+        "in-process",
+        "auto",
+        "tmux",
+        "iterm2"
+      ],
+      "default": "in-process",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Sub-agents start only through the engine.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "worktree.baseRef",
+      "label": "Worktree base ref",
+      "help": "Choose which ref new worktrees branch from. `\"fresh\"` branches from `origin/` for a clean tree matching the remote; `\"head\"` branches from your current local `HEAD`, so unpushed commits and feature-branch state are present in the worktree.",
+      "type": "enum",
+      "options": [
+        "fresh",
+        "head"
+      ],
+      "default": "fresh",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "worktree.bgIsolation",
+      "label": "Worktree bg isolation",
+      "help": "Choose how background sessions isolate their file edits. If you moved a session to the background with `` or `/background`, that session edits files in place whatever this key says. With `\"worktree\"`, Claude Code blocks `Edit` and `Write` in the main checkout until the session calls `EnterWorktree`; with `\"none\"`, background jobs edit the working copy directly. Set `\"none\"` for a repository where git worktrees are impractical.",
+      "type": "enum",
+      "options": [
+        "worktree",
+        "none"
+      ],
+      "default": "worktree",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "worktree.location",
+      "label": "Worktree location",
+      "help": "Choose the folder on a remote machine where Desktop SSH sessions create their worktrees, instead of `/.claude/worktrees/`. Only the desktop app reads this key: `--worktree`, the `EnterWorktree` tool, isolated subagents, and background sessions ignore it. Requires Claude Desktop v1.44121.0 or later.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "The engine sets each agent's home, folders and worktree.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "agentPushNotifEnabled",
+      "label": "Agent push notif enabled",
+      "help": "Allow Claude to send a push notification to your phone when it decides one is worth sending, for example when a long task finishes. Claude can send one while Remote Control is connected. Appears in `/config` as Push when Claude decides. When you change it there, Claude Code also saves the value to your account.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "awaySummaryEnabled",
+      "label": "Away summary enabled",
+      "help": "Show a one-line session recap when you return to the terminal after a few minutes away. Set it to `false`, or turn off Session recap in `/config`, to stop the recap.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disableArtifact",
+      "label": "Disable artifact",
+      "help": "Deprecated, and replaced by `enableArtifact`. Claude Code still honors `disableArtifact: true` as equivalent to `enableArtifact: false`, and ignores `disableArtifact: false`.",
+      "type": "bool",
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disableDeepLinkRegistration",
+      "label": "Disable deep link registration",
+      "help": "Stop Claude Code from registering the `claude-cli://` protocol handler with the operating system. Deep links let external tools open a Claude Code session with a pre-filled prompt. Set this in environments where protocol handler registration is restricted or managed separately.",
+      "type": "enum",
+      "options": [
+        "disable"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disableRemoteControl",
+      "label": "Disable remote control",
+      "help": "Turn off Remote Control: Claude Code then refuses `claude remote-control`, the `--remote-control` flag, auto-start, and the in-session toggle, and reports that your organization's policy disabled it. Place it in managed settings for per-device MDM enforcement.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "enableArtifact",
+      "label": "Enable artifact",
+      "help": "Turn off the Artifact tool, which publishes session output as a private web page on claude.ai. When you turn the Artifacts row off in `/config`, Claude Code writes this key to your user settings, so you don't usually edit it by hand.",
+      "type": "bool",
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "inputNeededNotifEnabled",
+      "label": "Input needed notif enabled",
+      "help": "Get a push notification on your phone when a permission prompt or question is waiting for your input. Claude Code sends these only while Remote Control is connected. Appears in `/config` as Push when actions required.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "preferredNotifChannel",
+      "label": "Preferred notif channel",
+      "help": "Choose how Claude Code notifies you when a task completes or a permission prompt is waiting. A mod's notifications use the same setting. Appears in `/config` as Local notifications.",
+      "type": "enum",
+      "options": [
+        "auto",
+        "terminal_bell",
+        "iterm2",
+        "iterm2_with_bell",
+        "kitty",
+        "ghostty",
+        "notifications_disabled"
+      ],
+      "default": "auto",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "remote.defaultEnvironmentId",
+      "label": "Remote default environment ID",
+      "help": "Pick the default cloud environment for cloud sessions you create from the CLI, such as with `claude --cloud`. Claude Code writes this key to your user settings when you pick an environment with `/remote-env`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine is the only controller of an agent session.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "remoteControlAtStartup",
+      "label": "Remote control at startup",
+      "help": "Connect Remote Control automatically when each interactive session starts, instead of waiting for `/remote-control`. Set it to `true` to turn auto-connect on, `false` to turn it off. Appears in `/config` as Enable Remote Control for all sessions.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine is the only controller of an agent session.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "apiKeyHelper",
+      "label": "API key helper",
+      "help": "Run your own command to produce the credential Claude Code sends with model requests. Claude Code runs the command through the system shell, `/bin/sh` on macOS and Linux and `cmd` on Windows, and sends its output as both the `X-Api-Key` and `Authorization: Bearer` headers. Use it for dynamic or rotating credentials, such as short-lived tokens fetched from a vault.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "awsAuthRefresh",
+      "label": "AWS auth refresh",
+      "help": "Run your own command, such as `aws sso login`, to refresh the credentials in your `.aws` directory when the ones Claude Code has for Amazon Bedrock stop working. Claude Code checks the current credentials against STS first and runs the command only when that check fails, then reads the refreshed `.aws` directory.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "awsCredentialExport",
+      "label": "AWS credential export",
+      "help": "Run your own command that prints AWS credentials as JSON, so Claude Code can call Amazon Bedrock with credentials that don't live in your `.aws` directory. Claude Code accepts the `aws sts` output shape and the flat `aws configure export-credentials` shape, and scopes the credentials to its own Bedrock client, so the shell commands Claude runs still see your ambient credentials.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "forceLoginMethod",
+      "label": "Force login method",
+      "help": "Restrict which kind of account people can log in with. Set `\"claudeai\"` to allow only claude.ai accounts, `\"console\"` to allow only Claude Console accounts, or `\"gateway\"` to send people to a cloud gateway instead of a first-party login. Administrators set it in managed settings and pair it with `forceLoginOrgUUID` to keep developers' claude.ai logins inside one organization.",
+      "type": "enum",
+      "options": [
+        "claudeai",
+        "console",
+        "gateway"
+      ],
+      "default": "claudeai",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "forceLoginGatewayUrl",
+      "label": "Force login gateway URL",
+      "help": "Set the gateway URL the `/login` Cloud gateway screen connects to, so people reach your cloud gateway without typing its address. The screen has no URL field: with this key set, it shows your gateway URL and connects when the person presses Enter; without it, it tells them to contact their IT administrator.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "forceLoginOrgUUID",
+      "label": "Force login org UUID",
+      "help": "From a managed source, require claude.ai account logins to belong to one Anthropic organization, given as a single UUID, or to any of several organizations, given as an array. From any settings file, Claude Code also uses a single UUID to pre-select that organization during a claude.ai or Claude Console login, and pre-selects nothing for an array. If you set the key in any settings file, Claude Code also stops offering the keyless Console sign-in in the sessions that file applies to and creates an API key instead.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "gcpAuthRefresh",
+      "label": "GCP auth refresh",
+      "help": "Run your own command to refresh Google Cloud Application Default Credentials when Claude Code finds they've expired or can't be loaded, so Google Cloud's Agent Platform requests keep working without you re-authenticating by hand.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials and sign-in stay with the engine and the account it picked.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "otelHeadersHelper",
+      "label": "OpenTelemetry headers helper",
+      "help": "Run your own command to generate the headers Claude Code sends with OpenTelemetry exports, for backends whose tokens rotate. Claude Code runs it at startup and periodically after that, and expects a JSON object of string header values on stdout.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Telemetry goes only to destinations the engine approves.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "autoUpdatesChannel",
+      "label": "Auto updates channel",
+      "help": "Choose which release channel background auto-updates and `claude update` follow. Set `\"stable\"` for a version that is typically about one week old and skips releases with major regressions, or `\"latest\"` for the most recent release.",
+      "type": "enum",
+      "options": [
+        "latest",
+        "stable"
+      ],
+      "default": "latest",
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine runs the harness version it qualified.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "minimumVersion",
+      "label": "Minimum version",
+      "help": "Keep background auto-updates and `claude update` from installing any version below this one, so moving to the `\"stable\"` channel doesn't downgrade you from a newer `\"latest\"` build. Claude Code writes this key for you when you choose to stay on your current version while switching channels in `/config`, and clears it when you switch back to `\"latest\"`.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine runs the harness version it qualified.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "cleanupPeriodDays",
+      "label": "Cleanup period days",
+      "help": "Set how many days Claude Code keeps session transcripts and other application data before deleting them. Claude Code runs the deletion as a background sweep after a session starts, as long as it can safely determine the retention period. The sweep deletes transcripts without showing a message, so a session you haven't used for longer than the retention period no longer appears in the `/resume` picker. CrazyAgent loses them too: its past-conversation search and master resume read those transcripts.",
+      "type": "integer",
+      "default": 30,
+      "min": 1,
+      "max": 36500,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "desktopSessionCleanupPeriodDays",
+      "label": "Desktop session cleanup period days",
+      "help": "Set an age limit in days for the transcripts of sessions you started or most recently continued in Claude Desktop or Cowork. Without this key, Claude Code keeps those transcripts at any age. Claude Code deletes each one once it's older than both this limit and `cleanupPeriodDays`, so with `cleanupPeriodDays` at its default of 30, a value of `7` still keeps them 30 days. Cleaned up automatically lists the cases where `cleanupPeriodDays` applies instead and Claude Code ignores this key. Requires Claude Code v2.1.248 or later.",
+      "type": "integer",
+      "default": 0,
+      "min": 0,
+      "max": 36500,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "feedbackDrafts",
+      "label": "Feedback drafts",
+      "help": "Control Claude-drafted feedback: whether Claude can queue feedback drafts for you to review, and whether Claude Code shows a card when Claude queues one.",
+      "type": "enum",
+      "options": [
+        "notify",
+        "quiet",
+        "off"
+      ],
+      "default": "notify",
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "skipWebFetchPreflight",
+      "label": "Skip web fetch preflight",
+      "help": "Skip the WebFetch domain safety check, which sends each requested hostname to `api.anthropic.com` before fetching. Set `true` in environments that block traffic to Anthropic, such as Amazon Bedrock, Google Cloud's Agent Platform, or Microsoft Foundry deployments with restrictive egress.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine keeps the harness's own network safety checks on.",
+        "engine_value": null
+      }
+    }
+  ]
+}

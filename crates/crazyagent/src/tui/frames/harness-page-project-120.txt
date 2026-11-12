@@ -1,0 +1,36 @@
+ [◆▪◆▪] CrazyAgent  /  Fieldnotes Mobile  /  Harnesses  /  Codex                                                        
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Codex settings for Fieldnotes Mobile                                                         Codex 0.51.0, qualified  
+  Only Fieldnotes Mobile gets the values set here; App and Default rows follow Settings > Harnesses. A change applies   
+  the next time Codex starts.                                                                                           
+                                                                                                                        
+    Setting                           Value                             From                                            
+  > Hide agent reasoning              On                                Project                                         
+    Reasoning effort                  low                               Project                                         
+    Project doc limit                 0                                 ⊘ Locked                                        
+    Status label                      Empty                             ⊘ Read-only                                     
+    Sandbox                           Not set                           ⊘ Locked                                        
+    Approvals                         never                             ⊘ Locked                                        
+                                                                                                                        
+  Hide agent reasoning                                                                            hide_agent_reasoning  
+  Fixture: hides reasoning events in the agent's output.                                                                
+  On or off. Default: Off.                                                                                              
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+ Space Turn on or off   x Reset   ↑↓ Move   r Read again   Esc Back                                              ? Help 

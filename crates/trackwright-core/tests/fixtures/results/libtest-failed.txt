@@ -1,0 +1,48 @@
+     Running tests/research_jobs.rs (/work/target/debug/deps/research_jobs-7181c3935e9c4418)
+
+running 12 tests
+test the_queue_refuses_a_database_reached_through_a_symlink ... ok
+test enqueue_bounds_its_inputs ... ok
+test a_claimer_cannot_finish_a_job_it_does_not_hold ... ok
+test jobs_without_a_pool_wait_and_resume_when_one_is_assigned ... ok
+test parked_jobs_carry_a_plain_reason_and_resume_clears_it ... ok
+test jobs_queued_with_the_engine_report_path_keep_it_until_done ... ok
+test an_interrupted_job_returns_to_the_queue_without_spending_an_attempt ... ok
+test failures_retry_until_the_attempt_limit_then_stay_failed ... ok
+test stale_running_jobs_from_a_dead_runner_are_requeued ... ok
+test claim_respects_the_per_project_running_limit_and_project_scope ... ok
+test cancel_stops_queued_jobs_now_and_flags_running_jobs ... ok
+test two_claimers_never_claim_the_same_job ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/research_runner.rs (/work/target/debug/deps/research_runner-8197be1c3d979666)
+
+running 9 tests
+test research_runs_on_a_signed_in_managed_codex_account ... ignored, BLOCKED until a signed-in managed Codex account exists; set CRAZYAGENT_MANAGED_CODEX_HOME to its managed profile directory
+test research_without_a_pool_waits_with_a_plain_status ... ok
+test research_with_a_harness_that_cannot_run_yet_fails_plainly ... ok
+test cancelling_running_research_stops_its_process_group ... ok
+test spawn_ready_runs_at_most_the_per_project_limit_at_once ... ok
+test research_output_beyond_the_limit_stops_the_agent ... ok
+test research_that_runs_out_of_time_is_stopped_and_retried_then_failed ... FAILED
+test queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_report has been running for over 60 seconds
+test research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports has been running for over 60 seconds
+test queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_report ... ok
+test research_with_tools_off_reaches_only_the_model_endpoint_and_still_reports ... ok
+
+failures:
+
+---- research_that_runs_out_of_time_is_stopped_and_retried_then_failed stdout ----
+
+thread 'research_that_runs_out_of_time_is_stopped_and_retried_then_failed' (3065424) panicked at crates/crazyagent/tests/research_runner.rs:251:5:
+assertion failed: !process_group_alive(second.process_group.unwrap())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    research_that_runs_out_of_time_is_stopped_and_retried_then_failed
+
+test result: FAILED. 7 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 132.20s
+
+error: test failed, to rerun pass `-p crazyagent --test research_runner`

@@ -519,6 +519,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             harness: Some("codex".into()),
             role: Some("page-writer".into()),
             mode: None,
+            ticket: None,
         })
     );
     assert_eq!(
@@ -528,6 +529,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
         })
     );
     for role in ["@", "???", &"r".repeat(65)] {
@@ -706,6 +708,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         harness: Some("Codex".into()),
         role: None,
         mode: None,
+        ticket: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
     let planted = Call::UpdateWork {
@@ -724,6 +727,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         harness: None,
         role: Some("Page".into()),
         mode: None,
+        ticket: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
 }
@@ -948,13 +952,26 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on()
         .into_iter()
         .filter(|name| *name != STOP_TOOL)
         .chain(QUESTION_TOOLS)
+        .chain(CHECKS_TOOLS)
         .collect();
-    assert_eq!(names, left_on);
+    let tickets: Vec<Value> = tracker::tools();
+    assert_eq!(names[..left_on.len()], left_on[..]);
+    assert_eq!(names.len(), left_on.len() + tickets.len());
+    for (name, ticket) in names[left_on.len()..].iter().zip(&tickets) {
+        assert_eq!(ticket["name"], *name);
+    }
     let tools = answer["result"]["tools"].as_array().unwrap();
-    let ask = left_on.len() - QUESTION_TOOLS.len();
+    let ask = left_on.len() - QUESTION_TOOLS.len() - CHECKS_TOOLS.len();
     assert_eq!(tools[ask], ask_tool());
     assert_eq!(tools[ask + 1], record_tool());
     assert_eq!(tools[ask + 2], withdraw_tool());
+    assert_eq!(tools[ask + 3], request_access_tool());
+    assert_eq!(tools[ask + 4], checks::run_listing());
+    assert_eq!(tools[ask + 5], checks::results_listing());
+    assert_eq!(
+        tools[ask + 4]["inputSchema"]["properties"]["checks"]["maxItems"],
+        checks::CHECKS_NAMED_MAX
+    );
     assert_eq!(
         tools[ask]["inputSchema"]["properties"]["options"]["maxItems"],
         crate::questions::OPTIONS_MAX
@@ -1335,6 +1352,7 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
         })
     );
     for refused in [json!("teams"), json!(3), json!(["native"])] {
@@ -1345,6 +1363,7 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
         harness: Some("claude-code".into()),
         role: None,
         mode: Some(SubagentMode::Native),
+        ticket: None,
     };
     assert_eq!(checked(planted.clone()), Ok(planted));
     let line =
@@ -1475,9 +1494,10 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
+    assert!(known_tools(&names(&CHECKS_TOOLS)));
     assert!(known_tools(&names(&[WAKE_TOOL])));
     assert!(!known_tools(&names(&["Wake"])));
-    let count = TEAM_TOOLS.len() + QUESTION_TOOLS.len() + 1;
+    let count = TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len() + 1;
     assert!(known_tools(&names(&vec![STOP_TOOL; count])));
     assert!(!known_tools(&names(&vec![STOP_TOOL; count + 1])));
 }

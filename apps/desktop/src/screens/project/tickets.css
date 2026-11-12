@@ -1,0 +1,25 @@
+.tk-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.tk-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 12px; width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--surface); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.tk-row:hover { border-color: var(--text-3); }
+.tk-row:focus-visible { outline: 2px solid var(--accent, currentColor); outline-offset: 2px; }
+.tk-id { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.tk-title { flex: 1 1 16rem; min-width: 0; overflow-wrap: anywhere; }
+.tk-status { color: var(--text-3); }
+.tk-filters { flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.tk-board { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(14rem, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; }
+.tk-column { display: grid; align-content: start; gap: 6px; min-height: 8rem; padding: 8px; border: 1px dashed transparent; border-radius: var(--radius-panel); background: var(--surface); }
+.tk-column.droppable { border-color: var(--text-3); }
+.tk-column-head { margin: 0 0 4px; font-size: inherit; color: var(--text-3); }
+.tk-card .tk-row { padding: 6px 8px; }
+.tk-card[draggable="true"] { cursor: grab; }
+.tk-detail-title { margin: 0; overflow-wrap: anywhere; }
+.tk-move { align-items: flex-end; gap: 12px; }
+.tk-body { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tk-criteria, .tk-links, .tk-history { display: grid; gap: 8px; margin: 0; padding-left: 20px; }
+.tk-links { padding-left: 0; list-style: none; }
+.tk-criterion-text { overflow-wrap: anywhere; }
+.tk-checks { display: grid; gap: 4px; margin: 0; padding-left: 16px; }
+.tk-check { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; overflow-wrap: anywhere; }
+.tk-link { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; overflow-wrap: anywhere; }
+.tk-link-title { flex: 1 1 12rem; min-width: 0; }
+.tk-link.gone .tk-link-title { color: var(--text-3); text-decoration: line-through; }

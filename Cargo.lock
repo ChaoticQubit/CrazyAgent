@@ -801,6 +801,8 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
+ "trackwright-cli",
+ "trackwright-core",
  "trash",
  "url",
  "vt100",
@@ -824,6 +826,7 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "tokio",
+ "trackwright-core",
 ]
 
 [[package]]
@@ -5509,6 +5512,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "trackwright-cli"
+version = "2.3.0"
+dependencies = [
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "trackwright-core",
+ "trackwright-mcp",
+]
+
+[[package]]
+name = "trackwright-core"
+version = "2.3.0"
+dependencies = [
+ "quick-xml",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "trackwright-mcp"
+version = "2.3.0"
+dependencies = [
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "trackwright-core",
 ]
 
 [[package]]

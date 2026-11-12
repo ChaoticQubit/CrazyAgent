@@ -67,6 +67,9 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+/// The Codex `-c` setting an untrusted project's launch passes so Codex reads no
+/// repository `AGENTS.md` or `AGENTS.override.md` as project docs.
+pub(crate) const CODEX_NO_PROJECT_DOCS: &str = "project_doc_max_bytes=0";
 /// The Codex 0.164 setting that removes `request_user_input`, the one tool a tools-off
 /// research agent or pane agent is still offered after [`CODEX_TOOLS_OFF`].
 pub(crate) const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
@@ -106,6 +109,43 @@ const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROU
 /// machine busy with builds, and a server that never answers delays the start by 60 s only.
 pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
+/// Claude Code settings the engine decides itself, so no owner value ever takes one: the
+/// fixed settings and the key helper of a keyed account, and the settings behind the
+/// engine's flags and environment (model, permissions and tools, MCP servers, hooks and
+/// environment variables).
+pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 12] = [
+    "apiKeyHelper",
+    "attribution",
+    "disableAllHooks",
+    "disabledMcpjsonServers",
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
+    "env",
+    "hooks",
+    "includeCoAuthoredBy",
+    "model",
+    "permissions",
+    "skipDangerousModePermissionPrompt",
+];
+/// Codex settings the engine decides itself, so no owner value ever takes one: those it
+/// sets on some launches only (the account's provider and model, the project's MCP servers,
+/// a pane's trusted folder), those it writes into the agent's `config.toml` (its
+/// instructions and the project docs limit), and those that would replace the
+/// instructions it delivers.
+pub(crate) const CODEX_ENGINE_KEYS: [&str; 12] = [
+    "check_for_update_on_startup",
+    "developer_instructions",
+    "experimental_instructions_file",
+    "instructions",
+    "mcp_servers",
+    "model",
+    "model_instructions_file",
+    "model_provider",
+    "model_providers",
+    "project_doc_fallback_filenames",
+    "project_doc_max_bytes",
+    "projects",
+];
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -244,9 +284,10 @@ impl Default for LaunchLimits {
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
 /// account, optional model, tools switch, the project sandbox profile, whether the project
-/// gave its agents Full access, the owner's git identity for the agent's own commits and
-/// limits. Every launch is refused unless a sandbox profile is given, or no profile with
-/// `unconfined` set for a Full access project (DEC-102).
+/// gave its agents Full access, the owner's git identity for the agent's own commits,
+/// limits and the project's repository trust. Every launch is refused unless a sandbox
+/// profile is given, or no profile with `unconfined` set for a Full access project
+/// (DEC-102).
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -259,6 +300,7 @@ pub struct LaunchRequest {
     pub unconfined: bool,
     pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
+    pub trust: crate::trust::Trust,
 }
 
 const GIT_IDENTITY_BYTES_MAX: usize = 256;
@@ -720,10 +762,11 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
-/// The Codex app-server command line. Every folder of the working folder's walk is recorded
-/// untrusted, so the app server neither loads a repository's `.codex` nor trusts a folder by
-/// itself. Inputs: the request, the installed context, if any, and the key file. Output: the
-/// arguments and variables, or `launch_working_dir_unavailable`.
+/// The Codex app-server command line, the owner's Codex settings first. Every folder of the
+/// working folder's walk is recorded untrusted for every project, untrusted ones included
+/// (threat model H2), so the app server neither loads a repository's `.codex` nor trusts a
+/// folder by itself. Inputs: the request, the installed context, if any, and the key file.
+/// Output: the arguments and variables, or `launch_working_dir_unavailable`.
 fn codex_invocation(
     request: &LaunchRequest,
     installed: Option<&Installed>,
@@ -735,11 +778,24 @@ fn codex_invocation(
         .working_dir
         .canonicalize()
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let mut arguments = Vec::new();
-    for setting in codex_launch_settings(request, installed, key_file)
+    let engine: Vec<String> = codex_launch_settings(request, installed, key_file)
         .into_iter()
         .chain([super::codex_folder::untrusted(&folder)?])
-    {
+        .collect();
+    let owner = installed.map_or_else(Vec::new, |installed| {
+        let set: Vec<String> = engine
+            .iter()
+            .cloned()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED.map(str::to_owned))
+            .collect();
+        crate::harness_settings::apply::codex_lines(
+            &set,
+            &CODEX_ENGINE_KEYS,
+            installed.harness_settings(),
+        )
+    });
+    let mut arguments = Vec::new();
+    for setting in owner.into_iter().chain(engine) {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
@@ -786,7 +842,8 @@ pub(super) fn codex_launch_settings(
 }
 
 /// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
-/// the account's provider, the model and the tools switch. A keyed provider reads its
+/// the account's provider, the model and the tools switch, and for an untrusted project no
+/// project docs (`project_doc_max_bytes=0`). A keyed provider reads its
 /// relay token by running `/bin/cat` on `key_file` (see [`key_file_text`]), so the token
 /// is in no argument or variable. Input: the request, whether project context was
 /// installed and the key file of a keyed account. Output: the settings, in order.
@@ -826,6 +883,9 @@ pub(super) fn codex_configuration(
             .filter(|setting| !(context && request.tools && **setting == "mcp_servers={}"))
             .map(|setting| (*setting).to_owned()),
     );
+    if request.trust == crate::trust::Trust::Untrusted {
+        configuration.push(CODEX_NO_PROJECT_DOCS.into());
+    }
     assert!(request.account.key().is_none_or(|key| {
         configuration
             .iter()
@@ -837,10 +897,14 @@ pub(super) fn codex_configuration(
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
 /// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
 /// and without `disableAllHooks` when the launch's generated plugin holds the hooks the
-/// owner turned on. Setting sources stay off, so no other hook loads. Inputs: the key file
-/// of a keyed account and whether the launch runs hooks. Output: the settings JSON.
-fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
-    if key_file.is_none() && !hooks {
+/// owner turned on, merged over the owner's Claude Code settings of the installed context,
+/// whose locked values it must hold. Setting sources stay off, so no other hook loads.
+/// Inputs: the key file of a keyed account and the installed context. Output: the settings
+/// JSON.
+fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
+    let hooks = installed.is_some_and(Installed::runs_hooks);
+    let owner = installed.map(Installed::harness_settings);
+    if key_file.is_none() && !hooks && owner.is_none() {
         return CLAUDE_SETTINGS.to_owned();
     }
     let mut settings: serde_json::Value =
@@ -853,6 +917,14 @@ fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
             .as_object_mut()
             .and_then(|fields| fields.remove("disableAllHooks"));
         assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
+    if let Some(owner) = owner {
+        settings = crate::harness_settings::apply::json_settings(
+            &settings,
+            owner,
+            crate::harness_settings::Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        );
     }
     settings.to_string()
 }
@@ -902,7 +974,7 @@ fn claude_invocation(
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let settings = claude_settings(key_file, installed.is_some_and(Installed::runs_hooks));
+    let settings = claude_settings(key_file, installed);
     let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()

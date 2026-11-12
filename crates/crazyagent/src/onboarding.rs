@@ -455,9 +455,10 @@ fn real_dir(path: &Path) -> bool {
 /// retries only failed steps; an onboarding left by a removed project starts
 /// over as a new project, also when it was left at another folder with the
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
-/// while that folder is still there. A new project's own instruction files
-/// (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied into its
-/// project instructions and moved into `.crazyagent/imported/` last, and the moved
+/// while that folder is still there. A folder CrazyAgent cloned from a URL starts at the
+/// untrusted repository level, its agents at Sandboxed access. A new project's own
+/// instruction files (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md, CLAUDE.local.md) are copied
+/// into its project instructions and moved into `.crazyagent/imported/` last, and the moved
 /// files are kept for the onboarding view; a file or import the engine refuses
 /// stays in place for the owner's later import. Takes the transaction,
 /// configuration, engine database path and action. Returns Applied or a plain
@@ -568,9 +569,14 @@ pub(crate) fn execute(
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
+    crate::trust::record_onboarded(tx, &project_id, &repo).map_err(error)?;
+    let enforcement = crate::trust::Enforcement::for_level(
+        crate::trust::level(tx, project_id.as_str()).map_err(error)?,
+    );
     let access = Some(AgentAccess::NEW_PROJECT)
-        .filter(|level| level.unavailable().is_none())
+        .filter(|level| level.unavailable().is_none() && enforcement.allows(*level))
         .unwrap_or_default();
+    assert!(enforcement.allows(access));
     let homes = crate::sandbox::toolchains::ToolHomes::owner().ok();
     let policy = AgentPolicy {
         access,

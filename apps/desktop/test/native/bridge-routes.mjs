@@ -7,7 +7,7 @@ export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.me
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
 
-const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
+const NATIVE_ONLY = /\bbridge::(?!tracker::writes\b)|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|\bWebview\b/;
 const QUEUE_CALL = /^state\.0\.\w+\([^;]*\)\s*\.await$/;
 const IMPL_TYPES = ["NativeBridge", "BridgeQueue"];
@@ -249,7 +249,8 @@ function imports(source) {
 }
 
 /** Renders the bridge binary's route table from lib.rs: one arm per routed command that parses
- * its camelCase arguments like Tauri and runs the command body on the shared bridge. An argument
+ * its camelCase arguments like Tauri and runs the command body on the shared bridge, with a
+ * pure `bridge::` helper the body calls named through the desktop crate. An argument
  * lib.rs reads through its own `CommandArg` gets a same-named struct in the arm that takes each
  * field from the key the app reads, flattened so those keys sit beside the other arguments.
  * Inputs: the lib.rs source and `methods` output, the app's bridge when omitted. Output: the
@@ -272,7 +273,7 @@ ${fields}            }
             };
 `;
     return `        "${name}" => {
-${parse}            let result: Result<_, BridgeError> = async { ${body} }.await;
+${parse}            let result: Result<_, BridgeError> = async { ${body.replaceAll(/(?<![\w:])bridge::/g, "crazyagent_desktop::bridge::")} }.await;
             routed(result)
         }
 `;

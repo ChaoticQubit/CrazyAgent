@@ -5,13 +5,15 @@ use super::{Flow, Place, Screen, SettingsSection};
 use crate::harnesses::finding::{self, Found};
 use crate::harnesses::update::{HarnessVersions, Latest, Method, UpdateMode, UpdateSettings};
 use crate::harnesses::{AccountKind, HarnessEntry, HarnessStatus, ToolControl};
+use crate::protocol::ProjectId;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::{Hint, Message, Modal, hint, sections_hint};
+use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint, sections_hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
 use crate::tui::text::{
-    cells, cut, join, list_row, pad, restyle, row, status, styled, thumb, width, with_bar, wrap,
+    cells, cut, indent, join, list_row, pad, restyle, row, status, styled, thumb, width, with_bar,
+    wrap,
 };
 use crate::tui::theme::Role;
 use crate::tui::widgets::TextField;
@@ -429,7 +431,9 @@ pub fn control_sentence(entry: &HarnessEntry) -> String {
 }
 
 /// Settings, Harnesses: every harness the engine knows, whether it is on this
-/// Mac, how much CrazyAgent controls it and which accounts it runs on.
+/// Mac, how much CrazyAgent controls it and which accounts it runs on. Enter on
+/// an installed harness opens its settings page, app-wide or, when the list was
+/// opened from a project's settings, for that project.
 /// Input: keys and the engine's harness catalog. Output: the table and the
 /// selected harness's details.
 pub struct Harnesses {
@@ -438,6 +442,7 @@ pub struct Harnesses {
     waiting: bool,
     selected: usize,
     offset: usize,
+    project: Option<(ProjectId, String)>,
     settings: Load<UpdateSettings>,
     opened: bool,
     versions: BTreeMap<String, HarnessVersions>,
@@ -478,6 +483,16 @@ impl Harnesses {
             finding: BTreeSet::new(),
             choosing: None,
             looked: None,
+            project: None,
+        }
+    }
+
+    /// The harness list opened from one project's settings, so Enter opens the
+    /// project's overrides. Inputs: the project and its name. Output: the screen.
+    pub fn for_project(id: ProjectId, name: String) -> Self {
+        Self {
+            project: Some((id, name)),
+            ..Self::new()
         }
     }
 
@@ -1029,9 +1044,13 @@ impl Harnesses {
             }
         }
         let wide = ctx.wide();
+        let title = match &self.project {
+            Some((_, name)) => format!("Harnesses for {name}"),
+            None => "Harnesses".to_owned(),
+        };
         let mut lines = vec![row(
             limit,
-            styled("Harnesses", Role::Accent, theme),
+            styled(title, Role::Accent, theme),
             styled(
                 format!("{} of {} installed", self.installed(), self.entries.len()),
                 Role::Muted,
@@ -1040,8 +1059,14 @@ impl Harnesses {
             glyphs,
         )];
         if wide {
+            let subtitle = match &self.project {
+                Some((_, name)) => format!(
+                    "Enter opens a harness's settings for {name} only; the rest follow Settings > Harnesses."
+                ),
+                None => SUBTITLE.to_owned(),
+            };
             lines.extend(
-                wrap(SUBTITLE, limit)
+                wrap(&subtitle, limit)
                     .into_iter()
                     .map(|part| styled(part, Role::Muted, theme)),
             );
@@ -1184,6 +1209,30 @@ impl Harnesses {
         let target = self.selected as isize + delta;
         self.selected = target.clamp(0, count as isize - 1) as usize;
     }
+
+    fn selected_installed(&self) -> bool {
+        self.entries
+            .get(self.selected)
+            .is_some_and(|entry| entry.status != HarnessStatus::NotInstalled)
+    }
+
+    fn open_selected(&self, ctx: &mut Ctx) -> Flow {
+        let Some(entry) = self.entries.get(self.selected) else {
+            return Flow::Handled;
+        };
+        if entry.status == HarnessStatus::NotInstalled {
+            ctx.say(Message::warning(
+                &format!("{} is not installed.", entry.name),
+                "Install it yourself, then press r to check again.",
+            ));
+            return Flow::Handled;
+        }
+        Flow::Open(Place::HarnessSettings {
+            harness: entry.id.clone(),
+            name: entry.name.clone(),
+            project: self.project.clone(),
+        })
+    }
 }
 
 impl Screen for Harnesses {
@@ -1192,12 +1241,19 @@ impl Screen for Harnesses {
     }
 
     fn crumbs(&self) -> Vec<String> {
-        vec!["Settings".into(), "Harnesses".into()]
+        match &self.project {
+            Some((_, name)) => vec![name.clone(), "Harnesses".into()],
+            None => vec!["Settings".into(), "Harnesses".into()],
+        }
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-        let mut hints = vec![hint(&arrows, "Move"), hint("r", "Check again")];
+        let mut hints = vec![hint(&arrows, "Move")];
+        if self.selected_installed() {
+            hints.push(hint("Enter", "Settings"));
+        }
+        hints.push(hint("r", "Check again"));
         let mode = self.mode();
         let missing = self
             .entries
@@ -1225,7 +1281,10 @@ impl Screen for Harnesses {
                 hints.push(hint("u", "Update"));
             }
         }
-        hints.extend([sections_hint(ctx.glyphs), hint("Esc", "Home")]);
+        match self.project {
+            Some(_) => hints.push(hint("Esc", "Back")),
+            None => hints.extend([sections_hint(ctx.glyphs), hint("Esc", "Home")]),
+        }
         hints
     }
 
@@ -1260,13 +1319,17 @@ impl Screen for Harnesses {
             Key::PageDown => self.move_by(page),
             Key::Home => self.selected = 0,
             Key::End => self.selected = self.entries.len().saturating_sub(1),
+            Key::Enter => return self.open_selected(ctx),
             _ => return Flow::Ignored,
         }
         Flow::Handled
     }
 
     fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
-        step(SettingsSection::Harnesses, forward, ctx)
+        match self.project {
+            Some(_) => Flow::Ignored,
+            None => step(SettingsSection::Harnesses, forward, ctx),
+        }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
@@ -1341,7 +1404,13 @@ impl Screen for Harnesses {
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = (area.width as usize).saturating_sub(4).max(8);
         let content = self.body(limit, ctx);
-        draw_page(frame, area, SettingsSection::Harnesses, content, None, ctx)
+        match self.project {
+            Some(_) => {
+                draw_lines(frame.buffer_mut(), area, &indent(content, 2));
+                None
+            }
+            None => draw_page(frame, area, SettingsSection::Harnesses, content, None, ctx),
+        }
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
@@ -1418,7 +1487,13 @@ impl Screen for Harnesses {
     }
 
     fn place(&self) -> Option<Place> {
-        Some(Place::Settings(SettingsSection::Harnesses))
+        Some(match &self.project {
+            Some((id, name)) => Place::ProjectHarnesses {
+                id: id.clone(),
+                name: name.clone(),
+            },
+            None => Place::Settings(SettingsSection::Harnesses),
+        })
     }
 }
 

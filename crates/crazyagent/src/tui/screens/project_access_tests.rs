@@ -278,6 +278,28 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_row_with_its_line() {
     assert!(!off.policy().ide_git_hooks);
 }
 
+#[test]
+fn the_access_box_never_offers_a_level_the_repository_trust_refuses() {
+    let mut untrusted = view();
+    for level in &mut untrusted.levels {
+        level.unavailable = level
+            .access
+            .unavailable_under(crate::trust::Trust::Untrusted)
+            .map(str::to_owned);
+    }
+    let mut edit = AccessEdit::of(&untrusted);
+    edit.key(key(KeyCode::Right));
+    assert_eq!(edit.access, AgentAccess::Sandboxed);
+    edit.key(key(KeyCode::Left));
+    assert_eq!(edit.access, AgentAccess::Sandboxed);
+    let rows: Vec<String> = edit
+        .rows(&super::new_project_view::Look::plain(), usize::MAX)
+        .iter()
+        .map(|row| row.text())
+        .collect();
+    assert!(rows.iter().all(|row| !row.contains("< Own branch >")));
+}
+
 /// T8: the access box keeps the project's tool cache choice when it saves.
 #[test]
 fn the_access_box_keeps_the_tool_cache_choice_when_it_saves() {

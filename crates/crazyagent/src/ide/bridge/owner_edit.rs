@@ -83,6 +83,12 @@ pub(crate) fn edit(
         return Err(failure("ide_agent_files_read_only"));
     }
     crate::landing::owner_edit::record(&db, &worktree, path, now)?;
+    let at = i64::try_from(now).map_err(|_| failure("ide_clock_unavailable"))?;
+    let edited = crate::scorecard::Kind::OwnerEdit;
+    crate::scorecard::logged(
+        edited,
+        crate::scorecard::mark(&db, project, edited, path, at),
+    );
     super::super::readonly::unlock(&db, id, path)?;
     super::super::workspace::write(root, project)?;
     let Some(host) = host.filter(|_| role == "sub") else {

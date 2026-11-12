@@ -107,6 +107,7 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const HEAD_LOOK_EVERY: Duration = Duration::from_secs(5);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
+const DAILY_EVERY: Duration = Duration::from_secs(60);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
 /// How long after a Codex agent starts the engine keeps asking its app-server whether it
@@ -265,6 +266,7 @@ struct Plan {
     network: AgentNetwork,
     grants: Vec<AccessGrant>,
     layout: Layout,
+    trust: crate::trust::Trust,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
@@ -374,6 +376,7 @@ impl Plan {
         );
         Ok(LaunchRequest {
             harness: self.harness.clone(),
+            trust: self.trust,
             executable: self.executable.clone(),
             working_dir: self.working_dir.clone(),
             account,
@@ -743,6 +746,7 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     master_watch: super::screen_questions::MasterWatch,
     teammates_next: Option<Instant>,
+    daily_next: Option<Instant>,
     teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
     teammates_rested: BTreeMap<i64, BTreeSet<i64>>,
     teammate_turn_tries: BTreeMap<i64, BTreeMap<i64, u8>>,
@@ -1086,6 +1090,7 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             master_watch: super::screen_questions::MasterWatch::default(),
             teammates_next: None,
+            daily_next: None,
             teammate_worktree_tries: BTreeMap::new(),
             teammates_rested: BTreeMap::new(),
             teammate_turn_tries: BTreeMap::new(),
@@ -1515,9 +1520,9 @@ impl TeamRuntime {
     /// register, sends pending messages to the master, delivers finished results, starts or
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
-    /// the questions masters' harnesses ask the owner in their own terminals, alerts the
-    /// owner to new questions and terminal waits by severity, then brings the notification
-    /// store in step (DEC-136a).
+    /// the questions masters' harnesses ask the owner in their own terminals, asks the
+    /// scorecard's daily question when it is due, alerts the owner to new questions and
+    /// terminal waits by severity, then brings the notification store in step (DEC-136a).
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -1537,6 +1542,7 @@ impl TeamRuntime {
         self.sweep()?;
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
+        self.ask_daily()?;
         let questions = super::questions::tick(&mut self.connection, now_ms());
         let notices = self
             .notices
@@ -1593,6 +1599,27 @@ impl TeamRuntime {
             }
         }
         first.map_or(Ok(()), Err)
+    }
+
+    /// Asks the owner the scorecard's daily question, checked at most once each
+    /// `DAILY_EVERY`; `scorecard::ask_daily` asks only while its setting is on and none was
+    /// asked in the last 20 hours. A failure is logged by its plain code and retried at the
+    /// next check, so the tick goes on.
+    fn ask_daily(&mut self) -> Result<(), EngineError> {
+        let now = Instant::now();
+        if self.daily_next.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        self.daily_next = Some(now + DAILY_EVERY);
+        let projects = self.active_projects()?;
+        if let Err(problem) = crate::scorecard::ask_daily(&self.connection, &projects, now_ms()) {
+            eprintln!(
+                "scorecard_daily_failed cause={}",
+                crate::protocol::plain_code(&problem.0)
+            );
+        }
+        assert!(self.daily_next.is_some_and(|next| next > now));
+        Ok(())
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
@@ -3843,6 +3870,11 @@ impl TeamRuntime {
         if let Some(reason) = access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
+        if let Some((line, code)) =
+            crate::trust::Enforcement::for_level(self.trust_level(project)?).refusal(access)
+        {
+            return Err(with_code(line, Some(code)));
+        }
         let worker = self.workers.get_mut(&id).expect("worker exists");
         worker.grants = generation;
         worker.access = access;
@@ -3851,6 +3883,17 @@ impl TeamRuntime {
             context,
             access,
         })))
+    }
+
+    /// Reads how far the owner trusts the project's repository. Takes the project. Returns
+    /// the level, or the owner's line when it cannot be read.
+    fn trust_level(&self, project: &ProjectId) -> Result<crate::trust::Trust, String> {
+        crate::trust::level(&self.connection, project.as_str()).map_err(|_| {
+            with_code(
+                "the project's repository trust could not be read",
+                Some("repository_trust_unreadable"),
+            )
+        })
     }
 
     /// Tells the owner once of each pair of agents whose waits under Wait would have closed
@@ -6434,12 +6477,18 @@ impl TeamRuntime {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
-            self.connection
+            let taken = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            taken
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL, wait=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            crate::tracker::hooks::task_taken(&taken, project, task, agent, now_ms())?;
+            taken.commit().map_err(error)?;
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
@@ -8710,7 +8759,25 @@ impl TeamRuntime {
             })?;
         }
         let _ = private_directory(&tmp.join(crate::coord::lane::FOLDER));
-        let context = self.context(&stored.project_id, id, role, tools, layout)?;
+        let settings = crate::harness_settings::apply::for_launch(
+            &self.connection,
+            launch,
+            executable,
+            Some(&stored.project_id),
+        )
+        .map_err(|e| {
+            let name = crate::harnesses::spec(launch).map_or(launch, |spec| spec.name);
+            let sentence = format!(
+                "the saved {name} settings could not be read, so this agent did not start; \
+                 reset them in Settings > Harnesses"
+            );
+            with_code(&sentence, Some(&e.0))
+        })?;
+        let context = self
+            .context(&stored.project_id, id, role, tools, layout)?
+            .with_harness_settings(settings);
+        let trust = self.trust_level(&stored.project_id)?;
+        let enforcement = crate::trust::Enforcement::for_level(trust);
         let task_start = match role {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
             AgentRole::Teammate => None,
@@ -8720,7 +8787,11 @@ impl TeamRuntime {
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
-        let kept = match (tools, &self.settings) {
+        if let Some((line, code)) = enforcement.refusal(policy.access) {
+            return Err(with_code(line, Some(code)));
+        }
+        let open = tools && !enforcement.model_endpoints_only;
+        let kept = match (open, &self.settings) {
             (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
                 .map_err(|code| {
                     with_code(
@@ -8737,7 +8808,7 @@ impl TeamRuntime {
             }
             (false, _) => Vec::new(),
         };
-        let proxy = if tools
+        let proxy = if open
             && policy.network == AgentNetwork::None
             && !matches!(remote, SandboxRemote::Loopback(_))
         {
@@ -8751,7 +8822,7 @@ impl TeamRuntime {
         };
         let network = match &proxy {
             Some(proxy) => SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]),
-            None if tools => policy.network.sandbox(Some(remote)),
+            None if open => policy.network.sandbox(Some(remote)),
             None => SandboxNetwork::Only(vec![remote]),
         };
         let homes = ToolHomes::owner().map_err(sandboxed)?;
@@ -8933,6 +9004,12 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
+        if enforcement.repo_config_as_text {
+            sandbox = sandbox.hide_repository_config(&root).map_err(sandboxed)?;
+        }
+        assert!(
+            !enforcement.model_endpoints_only || !matches!(sandbox.network(), SandboxNetwork::Open)
+        );
         let hidden =
             crate::sandbox::hidden_paths::load(&self.connection, stored.project_id.as_str())
                 .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
@@ -9034,6 +9111,7 @@ impl TeamRuntime {
             network: policy.network,
             grants: policy.grants.clone(),
             layout,
+            trust,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self
@@ -9115,9 +9193,10 @@ impl TeamRuntime {
     /// Reads what one team agent launch receives: the project context and approved
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
     /// tool for a master with tools on, served by the captured engine while the file at its
-    /// path is still that one, and the team's skill and server names for a master with tools
-    /// off. Takes the project, the agent id, its role, tools switch and git layout, which
-    /// picks how its work lands.
+    /// path is still that one, the ticket rules after a live master's or sub-agent's team
+    /// tools, and the team's skill and server names for a master with tools off. Takes the
+    /// project, the agent id, its role, tools switch and git layout, which picks how its
+    /// work lands.
     fn context(
         &self,
         project: &ProjectId,
@@ -9155,6 +9234,7 @@ impl TeamRuntime {
                 })?;
                 context
                     .with_live_team_tool(engine, &self.mailbox(id), &off)
+                    .and_then(|context| context.with_ticket_rules(&self.connection, project))
                     .map_err(unread)
             }
             Some(engine) if master && tools => {
@@ -9180,6 +9260,7 @@ impl TeamRuntime {
                 })?;
                 context
                     .with_agent_team_tool(engine, &self.mailbox(id), &off, layout == Layout::Clone)
+                    .and_then(|context| context.with_ticket_rules(&self.connection, project))
                     .map_err(unread)
             }
             _ => Ok(context),

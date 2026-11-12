@@ -1,0 +1,24 @@
+ TW-R1  unit on CS-12                                                           
+ Finished  failed  1 of 2 passed  batch trigger-7  by owner                     
+                                                                                
+ Binding                                                                        
+   Source       git trackwright                                                 
+   Commit       aaaaaaaaaaaa  tree bbbbbbbbbbbb                                 
+   Base         cccccccccccc                                                    
+   Change       CS-12                                                           
+   Check        unit  kind unit                                                 
+   Command      cargo test --locked                                             
+   Profile      dddddddddddd                                                    
+   Toolchain    rust rustc 1.98.1                                               
+   Sandbox      eeeeeeeeeeee  network off  timeout 1800 s                       
+   Environment  ffffffffffff                                                    
+                                                                                
+ Integrity                                                                      
+   Executed     2  build ok  holdouts ran                                       
+   Removed      0  new skips 0  protected 0                                     
+                                                                                
+ Results  2  unlinked 1                                                         
+   passed   sum::adds_two_numbers                                 TW-T1         
+   failed   sum::overflows                                        unlinked      
+                                                                                
+                                                                                

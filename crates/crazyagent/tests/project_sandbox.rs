@@ -4274,3 +4274,93 @@ fn every_secret_name_stays_denied_once_the_secret_rule_is_split() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn an_agent_cannot_write_or_swap_the_ticket_view_and_the_exports_folder() {
+    const VIEW: &str = "engine view\n";
+    let attacks: [(&str, &str, bool); 9] = [
+        (
+            "overwrite the view",
+            "echo agent > .crazyagent/tickets.md",
+            true,
+        ),
+        (
+            "link the view outside",
+            "rm -f .crazyagent/tickets.md; ln -s ../../outside/fixture.txt .crazyagent/tickets.md",
+            true,
+        ),
+        (
+            "overwrite an export",
+            "echo agent > .crazyagent/exports/open.md",
+            true,
+        ),
+        (
+            "plant an export",
+            "echo agent > .crazyagent/exports/planted.md",
+            true,
+        ),
+        (
+            "plant a link in exports",
+            "ln -s ../../../outside .crazyagent/exports/out.md",
+            true,
+        ),
+        (
+            "move the exports away",
+            "mv .crazyagent/exports .crazyagent/moved",
+            true,
+        ),
+        (
+            "swap the exports for a link",
+            "rm -rf .crazyagent/exports; ln -s ../../outside .crazyagent/exports",
+            true,
+        ),
+        ("make the exports first", "mkdir .crazyagent/exports", false),
+        (
+            "link the exports first",
+            "ln -s ../../outside .crazyagent/exports",
+            false,
+        ),
+    ];
+    let mut landed = Vec::new();
+    for (name, script, made) in attacks {
+        let case = case();
+        let state = case.project.join(".crazyagent");
+        let exports = state.join("exports");
+        let view = state.join("tickets.md");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(&view, VIEW).unwrap();
+        if made {
+            fs::create_dir(&exports).unwrap();
+            fs::write(exports.join("open.md"), VIEW).unwrap();
+        }
+        let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+        let protected = sandbox.protected_paths();
+        assert!(protected.contains(&exports), "{protected:?}");
+        assert!(protected.contains(&view), "{protected:?}");
+        let profile = case.profiles.join("tracker.sb");
+        let _ = run(&sandbox, &profile, script);
+        let listed = |folder: &Path| -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let view_kept = fs::symlink_metadata(&view).is_ok_and(|meta| meta.is_file())
+            && fs::read_to_string(&view).unwrap() == VIEW;
+        let exports_kept = if made {
+            fs::symlink_metadata(&exports).is_ok_and(|meta| meta.is_dir())
+                && listed(&exports) == ["open.md"]
+                && fs::read_to_string(exports.join("open.md")).unwrap() == VIEW
+        } else {
+            fs::symlink_metadata(&exports).is_err()
+        };
+        let outside_kept = listed(&case.outside) == ["fixture.txt"]
+            && fs::read_to_string(case.outside.join("fixture.txt")).unwrap() == "outside fixture\n";
+        if !(view_kept && exports_kept && outside_kept && !state.join("moved").exists()) {
+            landed.push(name);
+        }
+    }
+    assert_eq!(landed, Vec::<&str>::new());
+}

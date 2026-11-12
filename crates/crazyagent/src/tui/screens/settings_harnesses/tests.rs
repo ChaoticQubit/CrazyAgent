@@ -223,6 +223,82 @@ fn words_follow_the_engine_catalog() {
     assert_eq!(works_with(&[AccountKind::Local]), "Local model");
 }
 
+#[test]
+fn enter_opens_the_settings_page_of_an_installed_harness_only() {
+    let found = found();
+    let mut ctx = harness_ctx(80, 24);
+    let mut screen = Harnesses::with(found.entries.clone());
+    match screen.key(&Key::Enter, &mut ctx) {
+        Flow::Open(place) => assert_eq!(
+            place,
+            Place::HarnessSettings {
+                harness: "codex".into(),
+                name: "Codex".into(),
+                project: None,
+            }
+        ),
+        other => panic!("expected the Codex page, got {other:?}"),
+    }
+    let cursor = found
+        .entries
+        .iter()
+        .position(|entry| entry.id == "cursor-agent")
+        .unwrap();
+    for _ in 0..cursor {
+        screen.key(&Key::Down, &mut ctx);
+    }
+    assert!(matches!(screen.key(&Key::Enter, &mut ctx), Flow::Handled));
+    assert_eq!(ctx.message().unwrap().lead, "Cursor CLI is not installed.");
+    assert!(
+        screen
+            .hints(&ctx)
+            .iter()
+            .all(|item| item.label != "Settings")
+    );
+}
+
+#[test]
+fn the_project_harness_list_opens_the_project_page() {
+    let found = found();
+    let project = crate::protocol::ProjectId::new("alpha").unwrap();
+    let mut screen = Harnesses::for_project(project.clone(), "Fieldnotes Mobile".into());
+    screen.entries = found.entries.clone();
+    screen.load = Load::Ready(());
+    assert_eq!(screen.crumbs(), ["Fieldnotes Mobile", "Harnesses"]);
+    assert_eq!(
+        screen.place(),
+        Some(Place::ProjectHarnesses {
+            id: project.clone(),
+            name: "Fieldnotes Mobile".into(),
+        })
+    );
+    let mut ctx = harness_ctx(80, 24);
+    assert!(matches!(screen.step(true, &mut ctx), Flow::Ignored));
+    match screen.key(&Key::Enter, &mut ctx) {
+        Flow::Open(place) => assert_eq!(
+            place,
+            Place::HarnessSettings {
+                harness: "codex".into(),
+                name: "Codex".into(),
+                project: Some((project, "Fieldnotes Mobile".into())),
+            }
+        ),
+        other => panic!("expected the project page, got {other:?}"),
+    }
+    let mut shell = Shell::with(harness_ctx(80, 24), Box::new(screen));
+    let rows = render(&mut shell, 80, 24);
+    assert!(
+        rows[2].starts_with("  Harnesses for Fieldnotes Mobile"),
+        "{}",
+        rows[2]
+    );
+    let shown = rows.join("\n");
+    assert!(!shown.contains("Plugins and skills"), "{shown}");
+    assert!(shown.contains("Enter Settings"), "{shown}");
+    assert!(shown.contains("Esc Back"), "{shown}");
+    assert!(!shown.contains("Sections"), "{shown}");
+}
+
 const BREW_LINE: &str = "/opt/homebrew/bin/brew upgrade --cask claude-code@latest";
 
 #[derive(Debug, PartialEq)]

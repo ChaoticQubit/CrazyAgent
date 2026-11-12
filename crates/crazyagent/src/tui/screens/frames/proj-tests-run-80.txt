@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Tests
+────────────────────────────────────────────────────────────────────────────────
+  Overview  Conversation  Agents  Changes  Questions  Context  Tests  Settings
+───────────────────────────────────────────────────────────────━━━━━────────────
+   Cases  [Runs]  Coverage
+   FM-R1  unit
+   Finished  failed  2 of 3 passed  batch b0123456789abcdef  by engine:checks
+
+   Binding
+     Source       git fieldnotes-mobile
+     Commit       4f1c2b9e7d3a  tree 9d8c7b6a5f4e
+     Base         0b1c2d3e4f5a
+     Change       c0ffee00c0ffee00c0ffee00c0ffee01
+     Check        unit  kind unit
+     Command      cargo test --locked --offline --workspace
+     Profile      5e7f9a1b3c5d
+     Toolchain    rust rustc 1.91.0
+     Sandbox      c3a5e7f9b1d3  network off  timeout 1800 s
+     Environment  e1d3c5b7a9f1
+
+   Integrity
+     Executed     3  build ok  holdouts not run
+
+ ↑↓ Scroll  Esc Back  Tab Page  s Settings  Shift-←→ Tabs                ? Help

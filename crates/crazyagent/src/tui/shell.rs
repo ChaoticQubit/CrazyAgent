@@ -7,7 +7,7 @@ use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
     HINT_ROWS_MAX, Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, header, hint,
-    strip_bidi, too_small, wrapped_footer,
+    strip_controls, too_small, wrapped_footer,
 };
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
@@ -90,6 +90,16 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         label: "Settings / Setup".into(),
         kind: "Settings",
         place: Place::Setup { first_run: false },
+    });
+    out.push(Target {
+        label: "Settings / Checks".into(),
+        kind: "Settings",
+        place: Place::CheckSettings { project: None },
+    });
+    out.push(Target {
+        label: "Settings / Tickets".into(),
+        kind: "Settings",
+        place: Place::TicketSettings { project: None },
     });
     for (label, place) in [
         ("New project", Place::NewProject),
@@ -851,7 +861,7 @@ impl Shell {
     /// Input: the ratatui frame. Output: none.
     pub fn draw(&mut self, frame: &mut Frame) {
         self.paint(frame);
-        strip_bidi(frame.buffer_mut());
+        strip_controls(frame.buffer_mut());
     }
 
     /// Paints background, header, rule, body, message line, help line, then any modal and

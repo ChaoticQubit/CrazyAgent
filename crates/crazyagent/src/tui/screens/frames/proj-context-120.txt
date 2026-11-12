@@ -1,6 +1,6 @@
  [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Context
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ≟ Questions   ⧉ Context   ☰ Settings
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ≟ Questions   ⧉ Context   ✓ Tests   ☰ Settings
 ─────────────────────────────────────────────────────────────────────━━━━━━━━━──────────────────────────────────────────
   Context                                                                                 ~/projects/fieldnotes-mobile
 

@@ -121,6 +121,23 @@ impl OwnerController {
         }
     }
 
+    /// Reads a project's repository trust: its level and why it has it, every level, the
+    /// rules Untrusted locks and the gaps no level closes. Takes the project id. Returns the
+    /// trust view, or the engine's refusal for an unreadable level.
+    pub async fn project_trust(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<crate::trust::TrustView, EngineError> {
+        match self
+            .read(OwnerRead::ProjectTrust { project_id })
+            .await?
+            .data
+        {
+            OwnerData::ProjectTrust { trust, .. } => Ok(*trust),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Lists a set-up project's files for `@` tags: the tracked and the untracked, not
     /// ignored paths relative to its folder that contain the query in any case.
     /// Takes the project id, the query (at most 256 bytes) and the limit (1 to 200).
@@ -435,6 +452,31 @@ impl OwnerController {
                 project_id,
                 version,
                 policy,
+            },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Sets a project's repository trust. Takes the project id, the version the screen
+    /// showed, the level, whether the owner confirmed a raise and the client generation.
+    /// Returns the actual owner response; an unconfirmed raise is `trust_raise_unconfirmed`
+    /// and a level changed since the screen read it is `stale_revision`.
+    pub async fn set_project_trust(
+        &mut self,
+        project_id: ProjectId,
+        version: u64,
+        trust: crate::trust::Trust,
+        confirm_raise: bool,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_trust(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::SetProjectTrust {
+                project_id,
+                version,
+                trust,
+                confirm_raise,
             },
             generation,
         )?;

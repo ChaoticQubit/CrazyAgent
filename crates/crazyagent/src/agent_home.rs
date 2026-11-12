@@ -131,14 +131,16 @@ impl Harness {
 /// The project one agent launch serves: the engine data folder holding `engine.db` and
 /// the app-wide instructions, the project id, the project folder whose
 /// `.crazyagent/instructions.md` holds the project instructions, none when the project
-/// has no recorded folder, which of the two texts the owner chose for its agents and
-/// whether project lines the app text already has are left out.
+/// has no recorded folder, which of the two texts the owner chose for its agents, whether
+/// project lines the app text already has are left out and how far the owner trusts the
+/// repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProject {
     pub data: PathBuf,
     pub id: ProjectId,
     pub folder: Option<PathBuf>,
     pub mode: crate::instruction_files::Mode,
+    pub trust: crate::trust::Trust,
     pub repeated: Repeated,
 }
 
@@ -239,17 +241,20 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
 /// by the project's mode: the app-wide instructions, the project instructions, or the app
 /// text with the project text appended, each under its heading; empty when the given texts
 /// are blank. Project lines the app text already has are left out unless the project keeps
-/// them. No instruction file outside the app is read. Everything is given inline,
-/// never moved to a file the agent must open. Input: the project. Output: at most
-/// `GIVEN_BYTES_MAX` bytes of markdown, or a code; past the limit it names the larger
-/// part, such as `agent_instructions_too_large_project`.
+/// them. No instruction file outside the app is read. An untrusted repository whose git
+/// index tracks `.crazyagent/instructions.md` never gives that file as the project
+/// instructions: it is repository text. Everything is given inline. Input: the project.
+/// Output: at most `GIVEN_BYTES_MAX` bytes of markdown, or a code; past the limit it names
+/// the larger part, such as `agent_instructions_too_large_project`.
 pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
     let app = match project.mode.app() {
         true => read_app(&project.data)?,
         false => String::new(),
     };
     let own = match (&project.folder, project.mode.project()) {
-        (Some(folder), true) => read_project(folder)?,
+        (Some(folder), true) if !repository_instructions(folder, project.trust) => {
+            read_project(folder)?
+        }
         _ => String::new(),
     };
     let text = render(&app, &own, project.repeated);
@@ -268,6 +273,24 @@ pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
         files: Vec::new(),
         section_bytes: 0,
     })
+}
+
+/// Tells whether an untrusted repository's git index tracks its own
+/// `.crazyagent/instructions.md`, which then is repository text and never the owner's
+/// project instructions; when git cannot answer for a repository, the file is withheld.
+/// Inputs: the project folder and its trust. Output: true when the file is not given.
+fn repository_instructions(folder: &Path, trust: crate::trust::Trust) -> bool {
+    if !crate::trust::Enforcement::for_level(trust).repo_config_as_text {
+        return false;
+    }
+    if matches!(
+        fs::symlink_metadata(folder.join(".git")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound
+    ) {
+        return false;
+    }
+    crate::landing::tracked_files(folder, &[crate::trust::repo_config::PROJECT_INSTRUCTIONS])
+        .map_or(true, |tracked| tracked == [true])
 }
 
 /// Names the refusal for owner instructions past `GIVEN_BYTES_MAX` after the part that

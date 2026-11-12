@@ -703,7 +703,7 @@ fn untrusted(metadata: &Path, path: &Path) -> EngineError {
     error(format!("{UNTRUSTED_GIT_ENTRY}{shown}"))
 }
 
-const CONFIG_REFUSED: &str = "repository_config_refused:";
+pub(crate) const CONFIG_REFUSED: &str = "repository_config_refused:";
 const GIT_BOOLEANS: &[&str] = &["true", "false", "yes", "no", "on", "off", "1", "0"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1128,6 +1128,14 @@ pub(crate) fn refused_config_line(code: &str, repository: &str) -> Option<String
          .git/config, then send again.",
         rule.key, rule.why
     ))
+}
+
+/// Runs the admission config refusal on a repository that engine git touches outside
+/// admission, for an untrusted project (threat model G-a): the same `REFUSED_KEYS` rules,
+/// read with `--no-includes`, so `include.path` itself is refused. Input: the repository
+/// root. Output: Ok, or `repository_config_refused:<rule>` naming the key.
+pub(crate) fn refuse_repository_config(repository: &Path) -> Result<(), EngineError> {
+    validate_config(repository)
 }
 
 /// Checks every entry of a repository's own Git config against [`REFUSED_KEYS`]. Input: the

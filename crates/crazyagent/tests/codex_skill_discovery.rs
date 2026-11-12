@@ -198,6 +198,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
             unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
+            trust: crazyagent::trust::Trust::Reviewed,
         },
         &context,
     )

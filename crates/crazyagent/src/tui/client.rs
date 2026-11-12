@@ -24,10 +24,12 @@ mod account_profile;
 pub(super) mod accounts;
 pub(super) mod app_setup;
 pub(super) mod changes;
+pub(super) mod checks;
 mod claude_code;
 pub(super) mod cleanup;
 pub(super) mod conflict;
 pub(super) mod editor;
+pub(super) mod harness_settings;
 pub(super) mod ide;
 pub(super) mod intake;
 pub(super) mod learning;
@@ -39,6 +41,7 @@ pub(super) mod roadmap;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
+pub(super) mod tracker;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {

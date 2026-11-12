@@ -1,10 +1,10 @@
-use super::new_project_view::{Look, Row};
+use super::new_project_view::{Look, Row, tab_strip};
 use super::project::{
     JobLog, MasterStatus, PoolInfo, ProjectReply, ProjectScreen, REFRESH_MS, RemoveChoice, Tab,
     Transcript, memory_source, plain_problem, research_kind,
 };
 use super::project_markdown::line_width;
-use super::project_view::{activity, job_status, project_screen};
+use super::project_view::{activity, job_status, project_screen, tab_items};
 use crate::client_controller::OwnerController;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
@@ -17,6 +17,7 @@ use crate::project_setup::{
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::{Color, Style};
 use std::os::unix::fs::PermissionsExt;
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -97,6 +98,9 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::RepositoryTrust { project } => SetupView::RepositoryTrust(Box::new(
+            controller.project_trust(project).await.map_err(problem)?,
+        )),
         SetupQuery::ReviewMemory {
             project,
             entry_id,
@@ -768,6 +772,115 @@ fn a_new_screen_reads_its_setup_first_and_waits_for_each_reply() {
     assert_eq!(screen.next_query(20 + REFRESH_MS), None);
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     assert!(text(&drawn.rows).contains("Its master conversation still works in Conversation."));
+}
+
+/// The plain look with the accent and the mark told apart from the plain label and the rule.
+fn marked_look() -> Look {
+    Look {
+        accent: Style::new().fg(Color::Cyan),
+        mark: Style::new().fg(Color::Magenta),
+        ..Look::plain()
+    }
+}
+
+#[test]
+fn the_nine_project_tabs_fit_at_80_columns_with_a_gap_of_one() {
+    let look = marked_look();
+    let items = tab_items(3, 80, &look);
+    let labels: Vec<&str> = items.iter().map(|(label, _)| label.as_str()).collect();
+    assert_eq!(
+        labels,
+        Tab::ALL.iter().map(|tab| tab.label()).collect::<Vec<_>>()
+    );
+    assert_eq!(labels.len(), 9);
+    let [top, under] = tab_strip(80, &items, Tab::Agents as usize, &look);
+    assert_eq!(top.width(), 80);
+    assert_eq!(under.width(), 80);
+    assert_eq!(top.text(), format!("  {:<78}", labels.join(" ")));
+    assert!(!top.text().contains('\u{2026}'), "{}", top.text());
+    assert!(!top.text().contains('3'), "counts drop before the gap does");
+}
+
+#[test]
+fn the_active_tab_keeps_its_accent_and_heavy_rule_at_a_gap_of_one() {
+    let look = marked_look();
+    let items = tab_items(0, 80, &look);
+    for (active, (label, _)) in items.iter().enumerate() {
+        let [top, under] = tab_strip(80, &items, active, &look);
+        let label = label.as_str();
+        let accented: Vec<&str> = top
+            .0
+            .iter()
+            .filter(|span| span.style == look.accent)
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(accented, [label]);
+        let marked: Vec<&str> = under
+            .0
+            .iter()
+            .filter(|span| span.style == look.mark)
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(marked, ["\u{2501}".repeat(label.len())]);
+        let start = 2 + items[..active]
+            .iter()
+            .map(|(label, _)| label.len() + 1)
+            .sum::<usize>();
+        let rule: Vec<char> = under.text().chars().collect();
+        assert_eq!(rule.len(), 80);
+        for (column, glyph) in rule.iter().enumerate() {
+            let heavy = (start..start + label.len()).contains(&column);
+            assert_eq!(
+                *glyph,
+                if heavy { '\u{2501}' } else { '\u{2500}' },
+                "{label} column {column}: {}",
+                under.text()
+            );
+        }
+        assert_eq!(&top.text()[start..start + label.len()], label);
+    }
+}
+
+#[test]
+fn a_strip_that_fits_at_a_gap_of_two_is_drawn_as_before() {
+    let look = marked_look();
+    let items: Vec<(String, String)> = Tab::ALL
+        .iter()
+        .filter(|tab| **tab != Tab::Tickets)
+        .map(|tab| (tab.label().to_owned(), String::new()))
+        .collect();
+    assert_eq!(items.len(), 8);
+    let [top, under] = tab_strip(80, &items, Tab::Conversation as usize, &look);
+    assert_eq!(
+        top.text(),
+        format!(
+            "{:<80}",
+            "  Overview  Conversation  Agents  Changes  Questions  Context  Tests  Settings"
+        )
+    );
+    assert_eq!(
+        under.text(),
+        format!(
+            "{}{}{}",
+            "\u{2500}".repeat(12),
+            "\u{2501}".repeat(12),
+            "\u{2500}".repeat(56)
+        )
+    );
+    let accented: Vec<&str> = top
+        .0
+        .iter()
+        .filter(|span| span.style == look.accent)
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert_eq!(accented, ["Conversation"]);
+    assert!(
+        under
+            .0
+            .iter()
+            .filter(|span| span.content.contains('\u{2500}'))
+            .all(|span| span.style == look.muted)
+    );
 }
 
 #[test]
@@ -3912,6 +4025,23 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         })),
         "an edit drafted before the plan cannot cancel it"
     );
+}
+
+#[test]
+fn h_on_the_settings_tab_opens_the_project_harness_list() {
+    let look = Look::plain();
+    let project = ProjectId::new("harnesses").unwrap();
+    let mut screen = loaded(&project);
+    assert_ne!(screen.key(key(KeyCode::Char('h'))), ProjectReply::Harnesses);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('h'))), ProjectReply::Harnesses);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let team = text(&drawn.rows)
+        .lines()
+        .find(|line| line.trim_start().starts_with("Team"))
+        .map(|line| line.trim_end().to_owned())
+        .unwrap_or_default();
+    assert!(team.ends_with("   h Harness settings"), "{team}");
 }
 
 /// A document longer than one chunk is opened, another file is opened while its second

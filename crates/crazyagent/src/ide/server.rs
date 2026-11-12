@@ -1053,8 +1053,13 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
+    let trusted = crate::trust::Enforcement::for_level(super::workspace::project_trust(
+        data,
+        launch.project,
+    )?)
+    .ide_workspace_trust;
     let confined = policy.access != AgentAccess::Full;
-    let hooks = (confined && policy.hooks).then_some(launch.root);
+    let hooks = (confined && policy.hooks && trusted).then_some(launch.root);
     let index_project = confined.then_some(launch.root);
     let written = settings::write(folder, &home, data, hooks, policy.access, index_project)?;
     let ceiling = confined.then(|| confined_git(data, &launch)).transpose()?;
@@ -1069,12 +1074,12 @@ fn command(
         home,
     };
     let mut command = launcher_command(&launch, info, &places)?;
-    server_arguments(&mut command, info, &places, policy.access);
+    server_arguments(&mut command, info, &places, policy.access, trusted);
     assert_eq!(
         command
             .get_args()
             .any(|arg| arg == "--disable-workspace-trust"),
-        policy.access != AgentAccess::Full
+        policy.access != AgentAccess::Full && trusted
     );
     let git = ceiling.as_deref().map(|ceiling| env::ServerGit {
         ceiling,
@@ -1182,16 +1187,17 @@ fn launcher_command(
 
 /// Adds the server's command line: 127.0.0.1 at the server port, the token file (never the
 /// token), its own server data folder, the user data folder inside it, the extensions folder,
-/// license accepted, telemetry off, workspace trust off below Full access and a 30 s
-/// reconnection grace, with its server data folder as the working directory, since a profile
-/// lets it read no folder above. At Full access no sandbox limits the project's code, so
+/// license accepted, telemetry off, workspace trust off below Full access for a trusted
+/// repository and a 30 s reconnection grace, with its server data folder as the working
+/// directory. At Full access, or for an untrusted repository (VS Code Restricted Mode),
 /// workspace trust asks the owner first. Inputs: the command, the server's info, the launch's
-/// places and the project's level.
+/// places, the project's level and whether its repository is trusted.
 fn server_arguments(
     command: &mut Command,
     info: &ServerInfo,
     places: &Places<'_>,
     access: AgentAccess,
+    trusted: bool,
 ) {
     command
         .args(["--host", "127.0.0.1", "--port"])
@@ -1206,7 +1212,7 @@ fn server_arguments(
         .arg(&places.extensions)
         .arg("--accept-server-license-terms")
         .args(["--telemetry-level", "off"]);
-    if access != AgentAccess::Full {
+    if access != AgentAccess::Full && trusted {
         command.arg("--disable-workspace-trust");
     }
     command

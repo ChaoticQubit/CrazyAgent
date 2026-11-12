@@ -25,9 +25,11 @@ pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
+pub(in crate::tui) mod project_trust;
 pub(in crate::tui) mod project_view;
 pub(in crate::tui) mod questions;
 pub(in crate::tui) mod recovery_banner;
+pub(in crate::tui) mod scorecard;
 pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;
@@ -39,6 +41,8 @@ pub mod startup;
 pub mod team;
 pub(in crate::tui) mod team_messages;
 pub(in crate::tui) mod team_settings;
+pub(in crate::tui) mod tests;
+pub(in crate::tui) mod tickets;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
@@ -58,6 +62,8 @@ mod project_frames;
 mod project_page_tests;
 #[cfg(all(test, unix))]
 mod project_tests;
+#[cfg(all(test, unix))]
+mod project_trust_tests;
 #[cfg(all(test, unix))]
 mod questions_tests;
 
@@ -135,18 +141,22 @@ pub enum ProjectTab {
     Changes,
     Questions,
     Context,
+    Tests,
+    Tickets,
     Settings,
 }
 
 impl ProjectTab {
     /// Every tab in order.
-    pub const ALL: [ProjectTab; 7] = [
+    pub const ALL: [ProjectTab; 9] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
         Self::Questions,
         Self::Context,
+        Self::Tests,
+        Self::Tickets,
         Self::Settings,
     ];
 
@@ -160,6 +170,8 @@ impl ProjectTab {
             Self::Changes => "Changes",
             Self::Questions => "Questions",
             Self::Context => "Context",
+            Self::Tests => "Tests",
+            Self::Tickets => "Tickets",
             Self::Settings => "Settings",
         }
     }
@@ -205,6 +217,15 @@ pub enum Place {
         id: ProjectId,
         name: String,
     },
+    HarnessSettings {
+        harness: String,
+        name: String,
+        project: Option<(ProjectId, String)>,
+    },
+    ProjectHarnesses {
+        id: ProjectId,
+        name: String,
+    },
     ProjectMemory {
         id: ProjectId,
         name: String,
@@ -221,6 +242,12 @@ pub enum Place {
         path: String,
         name: String,
         project: Option<ProjectId>,
+    },
+    CheckSettings {
+        project: Option<(ProjectId, String)>,
+    },
+    TicketSettings {
+        project: Option<(ProjectId, String)>,
     },
 }
 
@@ -368,8 +395,12 @@ pub trait Screen {
             | Place::TeamSettings { id, .. }
             | Place::Master { id, .. }
             | Place::ProjectProcess { id, .. }
+            | Place::ProjectHarnesses { id, .. }
             | Place::ProjectMemory { id, .. } => Some(id),
             Place::Onboarding { project, .. } => project,
+            Place::HarnessSettings { project, .. }
+            | Place::CheckSettings { project }
+            | Place::TicketSettings { project } => project.map(|(id, _)| id),
             Place::Home
             | Place::Welcome
             | Place::Settings(_)
@@ -416,6 +447,24 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
                 name: name.clone(),
             }))
         }
+        Place::HarnessSettings {
+            harness,
+            name,
+            project,
+        } => Box::new(settings::harness_page::HarnessPage::new(
+            harness.clone(),
+            name.clone(),
+            match project {
+                None => process::Scope::App,
+                Some((id, name)) => process::Scope::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            },
+        )),
+        Place::ProjectHarnesses { id, name } => Box::new(
+            settings_harnesses::Harnesses::for_project(id.clone(), name.clone()),
+        ),
         Place::ProjectMemory { id, name } => Box::new(settings_memory::Memory::for_project(
             id.clone(),
             name.clone(),
@@ -426,6 +475,24 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
+        Place::CheckSettings { project } => {
+            Box::new(settings::checks::CheckSettingsPage::new(match project {
+                None => process::Scope::App,
+                Some((id, name)) => process::Scope::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            }))
+        }
+        Place::TicketSettings { project } => {
+            Box::new(settings::tickets::TicketSettingsPage::new(match project {
+                None => process::Scope::App,
+                Some((id, name)) => process::Scope::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            }))
+        }
         Place::Onboarding {
             path,
             name,

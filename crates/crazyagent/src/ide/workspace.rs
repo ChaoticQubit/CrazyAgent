@@ -183,19 +183,30 @@ pub fn kept_ports(settings: Option<&(PathBuf, PathBuf)>) -> Result<Vec<u16>, Eng
 }
 
 /// A project's [`IdePolicy`]; the default, Sandboxed with hooks off and the Open network no
-/// Sandboxed IDE reads, when none is saved. Inputs: the engine root and the project. Output:
-/// the policy, or `ide_workspace_unavailable` for one that cannot be read, so a tampered one
-/// never widens the IDE or turns its hooks on.
+/// Sandboxed IDE reads, when none is saved, and hooks always off for an untrusted repository.
+/// Inputs: the engine root and the project. Output: the policy, or `ide_workspace_unavailable`
+/// for a policy or trust level that cannot be read, so a tampered one never widens the IDE or
+/// turns its hooks on.
 pub fn ide_policy(root: &Path, project: &ProjectId) -> Result<IdePolicy, EngineError> {
+    let trust = project_trust(root, project)?;
     let db = open(root)?;
     crate::sandbox::policy::load(&db, project.as_str())
         .map(|policy| IdePolicy {
             access: policy.access,
             network: policy.network,
-            hooks: policy.ide_git_hooks,
+            hooks: policy.ide_git_hooks_under(trust),
             agent_files: policy.ide_agent_files,
         })
         .map_err(unavailable)
+}
+
+/// How far the owner trusts the project's repository, which decides whether the IDE opens
+/// it in VS Code Restricted Mode. Inputs: the engine root and the project. Output: the
+/// level, or `ide_workspace_unavailable` for a level that cannot be read, so a tampered one
+/// never reads as Reviewed.
+pub fn project_trust(root: &Path, project: &ProjectId) -> Result<crate::trust::Trust, EngineError> {
+    let db = open(root)?;
+    crate::trust::level(&db, project.as_str()).map_err(unavailable)
 }
 
 /// The agent folders rule a sandboxed IDE server or terminal of the project holds (DEC-124):

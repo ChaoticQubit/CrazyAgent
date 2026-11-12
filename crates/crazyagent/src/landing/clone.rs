@@ -609,7 +609,11 @@ pub(super) fn repoint_linked(
 /// the agent's git repacks them away. Inputs: the owner checkout root, the clone's git
 /// folder and the bounds. Output: Ok, else `changes_workspace_invalid` or
 /// `changes_too_large`.
-fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result<(), EngineError> {
+pub(crate) fn check_store(
+    repository: &Path,
+    git_dir: &Path,
+    bounds: &TreeBounds,
+) -> Result<(), EngineError> {
     let objects = git_dir.join("objects");
     let info = objects.join("info");
     let pack = objects.join("pack");

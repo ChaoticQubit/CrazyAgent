@@ -7,8 +7,10 @@ import {
 } from "../../api-harness-updates";
 import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
 import { useLoad, type Loaded } from "../../state";
-import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";
+import { Button, Dialog, Icon, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge, formatRoute } from "../../ui";
 import { SettingRow } from "../../ui/setting";
+import { displayText } from "../conversation";
+import { HarnessPage } from "./harness-page";
 import "../project/projects.css";
 
 const KIND_LABEL: Record<HarnessAccountKind, string> = {
@@ -75,6 +77,21 @@ function statusWord(entry: HarnessEntry): string {
   return entry.status.kind === "ready" ? "Ready" : entry.status.kind === "not_installed" ? "Not installed" : `Limited control: ${entry.status.reason}`;
 }
 
+/** Where a harness row leads: a Ready or Limited control harness opens its settings page; a
+ * harness that isn't installed has none and expands its details instead. Input: the entry.
+ * Output: the page link, or null. */
+export function harnessPageHref(entry: Pick<HarnessEntry, "id" | "status">): string | null {
+  return entry.status.kind === "not_installed" ? null : formatRoute({ name: "settings", tab: "harnesses", harness: entry.id });
+}
+
+function HarnessDetails({ entry }: { entry: HarnessEntry }) {
+  return <dl className="details-grid">
+    <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</dd>
+    <dt>Runs in the background with</dt><dd className="mono">{entry.headless}</dd>
+    <dt>Model</dt><dd>{entry.model_selection ? "You can choose the model" : "Chosen inside the harness"}</dd>
+  </dl>;
+}
+
 function lastLine(versions: HarnessVersions, name: string): string | null {
   const last = versions.last;
   if (last === null) return null;
@@ -100,6 +117,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
   onCheck: () => void; onUpdate: () => void; onInstall: () => void; onGuide: (url: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const href = harnessPageHref(entry);
   const missing = entry.status.kind === "not_installed";
   const shown = !missing && versions !== null && mode !== "off" ? versions : null;
   const absent = missing ? versions : null;
@@ -114,7 +132,9 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
   const said = missing || read?.last?.code?.startsWith("harness_install_") ? "What the installer said" : "What the updater said";
   return <>
     <SettingRow label={entry.name}>
-      <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>
+      {href !== null
+        ? <a className="set-label" href={href} aria-label={`${entry.name} settings`}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</a>
+        : <button type="button" className="set-label" aria-expanded={open} onClick={() => setOpen(!open)}><ProviderMark provider={entry.id} name={entry.name} />{entry.name}</button>}
       <span className="set-help">
         <span>Tools: {entry.tools.kind === "switchable" ? "Can turn on or off" : entry.tools.reason}</span>
         <span>Accounts it can use: {entry.account_kinds.map((kind) => KIND_LABEL[kind]).join(", ") || "None"}</span>
@@ -136,11 +156,7 @@ export function HarnessRowView({ entry, versions, mode, problem, checking = fals
       <summary>{said}</summary>
       <pre className="mono">{read.last.output}</pre>
     </details>}
-    {open && <dl className="details-grid">
-      <dt>Found at</dt><dd className="mono">{entry.executable ? homePath(entry.executable) : "Not found on this Mac"}</dd>
-      <dt>Runs in the background with</dt><dd className="mono">{entry.headless}</dd>
-      <dt>Model</dt><dd>{entry.model_selection ? "You can choose the model" : "Chosen inside the harness"}</dd>
-    </dl>}
+    {open && <HarnessDetails entry={entry} />}
   </>;
 }
 
@@ -386,9 +402,38 @@ export function HarnessesView({ catalog, checkedAt, onCheck, settings = null, on
   </div>;
 }
 
-/** Settings, Harnesses: has the engine look for harnesses again on every visit and on Check
- * again, so a harness installed a moment ago shows at once, and reads the update settings. */
-export function Harnesses() {
+/** One harness's settings page in Settings, Harnesses: a way back to the list, the harness with
+ * its status and where it was found, then its app-wide settings. Inputs: the catalog read and
+ * the harness id from the route. Output: the screen. */
+export function HarnessScreenView({ catalog, id }: { catalog: Loaded<HarnessEntry[]>; id: string }) {
+  const back = <a className="btn quiet" href={formatRoute({ name: "settings", tab: "harnesses" })}><Icon name="arrow-left" size={15} />All harnesses</a>;
+  if (catalog.kind === "loading") return <div className="stack">{back}<Skeleton shape="row" count={6} /></div>;
+  if (catalog.kind === "not_ready") return <div className="stack">{back}<NotReady what="The harness list" /></div>;
+  if (catalog.kind === "error") return <div className="stack">{back}<p className="secondary" role="alert">Couldn't read the harness list. Go back and choose Check again.</p></div>;
+  const entry = catalog.value.find((item) => item.id === id);
+  if (entry === undefined) return <div className="stack">{back}<p className="secondary">CrazyAgent doesn't know the harness {displayText(id)}.</p></div>;
+  return <div className="stack">
+    {back}
+    <div className="hs-head"><ProviderMark provider={entry.id} name={entry.name} large /><h2>{entry.name}</h2><StatusBadge word={statusWord(entry)} /></div>
+    <HarnessDetails entry={entry} />
+    <HarnessPage harness={entry.id} projectId={null} />
+  </div>;
+}
+
+function HarnessScreen({ id }: { id: string }) {
+  const [catalog] = useLoad(harnessCatalog, [], "harness-catalog");
+  return <HarnessScreenView catalog={catalog} id={id} />;
+}
+
+/** Settings, Harnesses: the list, or one harness's settings page when the route names it.
+ * Input: the harness id from the route, if any. */
+export function Harnesses({ harness }: { harness?: string }) {
+  return harness === undefined ? <HarnessList /> : <HarnessScreen key={harness} id={harness} />;
+}
+
+/** Settings, Harnesses list: has the engine look for harnesses again on every visit and on
+ * Check again, so a harness installed a moment ago shows at once, and reads the update settings. */
+function HarnessList() {
   const [catalog, reload] = useLoad(() => harnessCatalog(true), [], "harness-check");
   const [loaded, reloadSettings] = useLoad(loadHarnessUpdateSettings, []);
   const [settings, setSettings] = useState<UpdateSettings | null>(null);

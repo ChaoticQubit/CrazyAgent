@@ -44,9 +44,11 @@ mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
 pub(crate) mod changes;
+pub(crate) mod checks;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod harness_settings;
 mod icloud;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
@@ -60,8 +62,10 @@ mod projects_home;
 pub(crate) mod questions;
 pub(crate) mod recovery;
 pub(crate) mod roadmap;
+pub(crate) mod scorecard;
 mod setup;
 pub(crate) mod terminal;
+pub(crate) mod tracker;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
@@ -2198,6 +2202,7 @@ enum Protocol {
     GitHub,
     AccountProfile,
     HarnessCatalog,
+    HarnessSettings,
     Plugins,
     Agents,
     Changes,
@@ -2207,6 +2212,9 @@ enum Protocol {
     IdeExtensions,
     Recovery,
     Questions,
+    Checks,
+    Tracker,
+    Scorecard,
     Roadmap,
     NativeAuth,
     Process,
@@ -2233,6 +2241,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("github", Protocol::GitHub),
         ("account_profile", Protocol::AccountProfile),
         ("harness_catalog", Protocol::HarnessCatalog),
+        ("harness_settings", Protocol::HarnessSettings),
         ("plugins", Protocol::Plugins),
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
@@ -2242,6 +2251,9 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
         ("questions", Protocol::Questions),
+        ("checks", Protocol::Checks),
+        ("tracker", Protocol::Tracker),
+        ("scorecard", Protocol::Scorecard),
         ("roadmap", Protocol::Roadmap),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
@@ -2318,6 +2330,10 @@ async fn serve_admitted(
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
+            Protocol::Checks => return Ok(Some(Deferred::Checks(a))),
+            Protocol::Tracker => return Ok(Some(Deferred::Tracker(a))),
+            Protocol::HarnessSettings => return Ok(Some(Deferred::HarnessSettings(a))),
+            Protocol::Scorecard => return Ok(Some(Deferred::Scorecard(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
@@ -2505,6 +2521,18 @@ async fn serve_admitted(
             let served = questions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
         }
+        Deferred::Checks(a) => {
+            let served = checks::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(checks::CHECKS_TIMEOUT, served).await;
+        }
+        Deferred::Tracker(a) => {
+            let served = tracker::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(tracker::TRACKER_TIMEOUT, served).await;
+        }
+        Deferred::Scorecard(a) => {
+            let served = scorecard::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(scorecard::SCORECARD_TIMEOUT, served).await;
+        }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
@@ -2524,6 +2552,10 @@ async fn serve_admitted(
         Deferred::Usage(a) => {
             let served = usage::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+        }
+        Deferred::HarnessSettings(a) => {
+            let served = harness_settings::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(harness_settings::HARNESS_SETTINGS_TIMEOUT, served).await;
         }
         Deferred::HarnessUpdates(a) => {
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
@@ -2581,10 +2613,13 @@ struct Tasks {
 /// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
 /// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
 /// which wait for an IDE server to start, Questions requests, which wait for the database
-/// write lock and rewrite a project's questions page, Cleanup requests, which size and
+/// write lock and rewrite a project's questions page, Checks requests, which wait for the
+/// same lock and start check runners, Tracker requests, which wait for the same lock and
+/// rewrite a project's ticket view, Scorecard requests, which read the engine records
+/// behind the go/no-go numbers, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
-/// Usage requests, which read and write the usage store, harness version, update and
+/// Usage requests, which read and write the usage store, harness version, settings, update and
 /// install requests, which wait for a harness, Homebrew, npm or a vendor's release
 /// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
 /// and Process proposals, which wait for an Edit with AI model run. Each carries the
@@ -2602,11 +2637,15 @@ enum Deferred {
     Process(Admission),
     IdeTab(Admission),
     Questions(Admission),
+    Checks(Admission),
+    Tracker(Admission),
+    Scorecard(Admission),
     Roadmap(Admission),
     Cleanup(Admission),
     Overview(Admission),
     SkillImport(Admission),
     Usage(Admission),
+    HarnessSettings(Admission),
     HarnessUpdates(Admission),
     Icloud(Admission),
 }
@@ -2642,6 +2681,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::GitHub => github::refusal(code)?,
         Protocol::AccountProfile => account_profile::refusal(body, code)?,
         Protocol::HarnessCatalog => harness_catalog::refusal(code)?,
+        Protocol::HarnessSettings => harness_settings::refusal(code)?,
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
@@ -2651,6 +2691,9 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::Questions => questions::refusal(code)?,
+        Protocol::Checks => checks::refusal(code)?,
+        Protocol::Tracker => tracker::refusal(code)?,
+        Protocol::Scorecard => scorecard::refusal(code)?,
         Protocol::Roadmap => roadmap::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,

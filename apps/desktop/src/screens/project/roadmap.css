@@ -1,0 +1,9 @@
+.rm-page { max-width: 960px; }
+.rm-card { display: grid; gap: var(--space-2); padding: var(--space-3) var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.rm-title { font-weight: 500; overflow-wrap: anywhere; margin: 0; }
+.rm-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
+.rm-item { display: grid; gap: 4px; min-width: 0; }
+.rm-progress { display: grid; grid-template-columns: minmax(80px, 240px) auto; gap: var(--space-2); align-items: center; }
+.rm-bar { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.rm-bar > span { display: block; height: 100%; background: var(--accent); }
+@media (max-width: 760px) { .rm-progress { grid-template-columns: minmax(0, 1fr); } }

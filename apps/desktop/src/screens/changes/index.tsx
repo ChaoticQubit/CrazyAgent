@@ -5,6 +5,7 @@ import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
+import { ChangeSetChecks } from "../project/tests";
 import type { ProjectData } from "../project/shared";
 import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, committedFirstNote, conflictNote, diffText, fileLine, fileMarks, landingNote, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
@@ -286,6 +287,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       </li>)}</ul>
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={reread} />}
     </div>}
+    {shown && <ChangeSetChecks key={shown.id} projectId={data.id} set={shown} navigate={data.navigate} />}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
     {asking?.kind === "commit" && <CommitFirstDialog key={`${asking.set.id}:${asking.set.head}`} files={asking.files} untracked={asking.untracked} pending={busy}

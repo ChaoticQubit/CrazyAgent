@@ -371,20 +371,31 @@ pub fn bidi_control(character: char) -> bool {
         '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
-/// Removes direction-changing characters from every cell of a drawn frame, so untrusted text
-/// drawn on any path cannot reorder what the owner reads. Input: the frame buffer. Output: none.
-pub fn strip_bidi(buffer: &mut Buffer) {
+/// Whether a character must never reach the terminal from a cell: a control character, which
+/// could start an escape sequence or move the cursor, or a direction-changing one. Input: the
+/// character. Output: true for those characters.
+fn hidden_control(character: char) -> bool {
+    character.is_control() || bidi_control(character)
+}
+
+/// Removes control and direction-changing characters from every cell of a drawn frame, so
+/// untrusted text such as a repository name or commit message drawn on any path cannot send
+/// the terminal an escape sequence or reorder what the owner reads. Input: the frame buffer.
+/// Output: none.
+pub fn strip_controls(buffer: &mut Buffer) {
     for cell in &mut buffer.content {
         let symbol = cell.symbol();
-        if symbol.is_ascii() || !symbol.chars().any(bidi_control) {
+        if symbol.bytes().all(|byte| (b' '..=b'~').contains(&byte))
+            || !symbol.chars().any(hidden_control)
+        {
             continue;
         }
         let kept: String = symbol
             .chars()
-            .filter(|character| !bidi_control(*character))
+            .filter(|character| !hidden_control(*character))
             .collect();
         cell.set_symbol(if kept.is_empty() { " " } else { &kept });
-        assert!(!cell.symbol().chars().any(bidi_control));
+        assert!(!cell.symbol().chars().any(hidden_control));
     }
 }
 
@@ -759,7 +770,7 @@ mod tests {
             cells(&buffer).contains('\u{202e}'),
             "the widget path keeps the character"
         );
-        strip_bidi(&mut buffer);
+        strip_controls(&mut buffer);
         let after = cells(&buffer);
         assert!(
             !after.chars().any(|character| BIDI.contains(&character)),
@@ -774,6 +785,30 @@ mod tests {
         }
         for kept in ['\u{200d}', '\u{200c}', 'a', '\u{6f22}', '\u{fe0f}'] {
             assert!(!bidi_control(kept), "{kept:?}");
+        }
+    }
+
+    #[test]
+    fn repository_names_and_commit_messages_with_control_and_bidi_characters_render_inert() {
+        use ratatui::widgets::Widget;
+        let area = Rect::new(0, 0, 60, 2);
+        let mut buffer = Buffer::empty(area);
+        Line::raw("octo\u{1b}]0;owned\u{7}/tool\u{202e}gpj.exe")
+            .render(Rect::new(0, 0, 60, 1), &mut buffer);
+        Line::raw("Fix \u{1b}[2Jbug\u{8}\u{8}\r\u{2066}main\u{2069}\u{9b}31m")
+            .render(Rect::new(0, 1, 60, 1), &mut buffer);
+        strip_controls(&mut buffer);
+        let after = cells(&buffer);
+        assert!(
+            !after
+                .chars()
+                .any(|character| character.is_control() || bidi_control(character)),
+            "{after:?}"
+        );
+        for kept in [
+            "octo", "]0;owned", "/tool", "gpj.exe", "Fix ", "[2Jbug", "main", "31m",
+        ] {
+            assert!(after.contains(kept), "{kept:?} in {after:?}");
         }
     }
 }

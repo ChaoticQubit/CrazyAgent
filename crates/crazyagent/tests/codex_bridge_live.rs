@@ -255,6 +255,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     };
     let built = command(
         &request,

@@ -16,6 +16,7 @@ fn project(root: &Path) -> AgentProject {
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
         mode: crate::instruction_files::Mode::Both,
+        trust: crate::trust::Trust::Reviewed,
         repeated: crate::agent_home::Repeated::LeaveOut,
     }
 }

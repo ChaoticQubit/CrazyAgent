@@ -1,0 +1,104 @@
+{
+  "harness": "claude-code",
+  "qualified_versions": ["2.1.309"],
+  "sources": ["https://example.invalid/fixture/claude-code-settings"],
+  "keys": [
+    {
+      "key": "cleanupPeriodDays",
+      "label": "Keep sessions for",
+      "help": "Fixture: days a session transcript is kept.",
+      "type": "integer",
+      "default": 30,
+      "min": 1,
+      "max": 3650,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "spinnerTipsEnabled",
+      "label": "Spinner tips",
+      "help": "Fixture: shows tips while the agent works.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "outputStyle",
+      "label": "Output style",
+      "help": "Fixture: the style the agent answers in.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 64,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "feedback.surveys",
+      "label": "Feedback surveys",
+      "help": "Fixture: asks for feedback now and then.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disableAllHooks",
+      "label": "Hooks off",
+      "help": "Fixture: turns off every hook.",
+      "type": "bool",
+      "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine runs no hooks inside an agent.",
+        "engine_value": true
+      }
+    },
+    {
+      "key": "includeCoAuthoredBy",
+      "label": "Co-author line",
+      "help": "Fixture: adds an agent co-author line to commits.",
+      "type": "bool",
+      "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Commits name no agent co-author.",
+        "engine_value": false
+      }
+    },
+    {
+      "key": "attribution.commit",
+      "label": "Commit attribution",
+      "help": "Fixture: text added to each commit message.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Commits name no agent co-author.",
+        "engine_value": ""
+      }
+    },
+    {
+      "key": "apiKeyHelper",
+      "label": "Key helper",
+      "help": "Fixture: a command that prints the API key.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 512,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "Credentials stay with the engine.",
+        "engine_value": null
+      }
+    }
+  ]
+}
