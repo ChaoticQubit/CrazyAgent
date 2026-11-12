@@ -359,7 +359,7 @@ impl Shell {
                     self.show();
                 }
             }
-            Flow::Go(_) => {}
+            Flow::Go(place) => self.go(place),
         }
     }
 
