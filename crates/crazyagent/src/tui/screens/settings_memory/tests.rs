@@ -1091,7 +1091,7 @@ fn a_project_memory_reads_only_its_project_and_y_approves_a_requested_memory_in_
     }
     assert!(
         ctx.next_request().is_none(),
-        "the app-wide Agent memory writes setting and research suggestions stay in Settings"
+        "the app-wide Agent memory writes and Where agents save settings and research suggestions stay in Settings"
     );
 
     let list = vec![
