@@ -629,13 +629,28 @@ fn a_window_a_good_poll_left_out_names_its_provider_and_a_failed_read_keeps_its_
     }
 }
 
+/// Takes the next usage read the page sent, past any stored extras read an earlier read left
+/// queued, and the extras read every usage read sends with it. Input: the context. Output:
+/// the range start the usage read asked for.
 fn asked_since(ctx: &mut Ctx) -> Option<i64> {
-    match ctx.next_request() {
-        Some(Request::Settings(job)) => match *job {
-            SettingsJob::Usage { since_ms, .. } => since_ms,
+    loop {
+        match ctx.next_request() {
+            Some(Request::Settings(job)) => match *job {
+                SettingsJob::Extras { detail } => {
+                    assert!(!detail, "the usage screen never asks for the detail rows");
+                }
+                SettingsJob::Usage { since_ms, .. } => {
+                    let next = ctx.next_request();
+                    assert!(
+                        matches!(&next, Some(Request::Settings(job)) if matches!(**job, SettingsJob::Extras { detail: false })),
+                        "each usage read also reads the stored extras"
+                    );
+                    return since_ms;
+                }
+                other => panic!("a usage read expected, got {other:?}"),
+            },
             other => panic!("a usage read expected, got {other:?}"),
-        },
-        other => panic!("a usage read expected, got {other:?}"),
+        }
     }
 }
 
@@ -695,6 +710,10 @@ fn the_page_asks_for_its_range_and_shows_answers_failures_and_not_ready() {
         panic!("the page asks for usage");
     };
     assert_eq!(format!("{job:?}"), "Usage");
+    let Some(Request::Settings(job)) = ctx.next_request() else {
+        panic!("the page reads the stored extras with it");
+    };
+    assert_eq!(format!("{job:?}"), "Extras");
     assert!(page.busy(&ctx));
     assert!(
         text(&page.body(96, NOW, 0, &ctx))
