@@ -1630,11 +1630,9 @@ pub fn owner_git_identity(
 }
 
 /// Lists the files in the owner's checkout that keep a change set's Accept from landing
-/// (F21): files staged anywhere, unstaged edits to files the squash changes, and untracked
-/// files where it adds one; an unstaged edit to a file it leaves alone does not block.
+/// (F21): staged files, and unstaged or untracked ones in the squash's way.
 /// Inputs: the store, the change set and the target branch, None for the Land on branch.
-/// Output: the files, empty when none blocks, or `changes_too_large` past
-/// `DIRTY_FILES_MAX`.
+/// Output: the files, empty when none blocks, or `changes_too_large`.
 pub fn owner_dirty(
     db: &Connection,
     id: &ChangeSetId,

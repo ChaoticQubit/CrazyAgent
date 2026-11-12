@@ -703,13 +703,10 @@ fn listed_names(owner: &Repo, args: &[&str]) -> Result<BTreeSet<String>, EngineE
     Ok(names)
 }
 
-/// The files of the owner's checkout an Accept would touch (F21): every path staged against
-/// the tip, since the rollback of a failed branch move and the intent recovery compare the
-/// whole index with the squash; every unstaged edit to a tracked file the squash changes;
-/// and every untracked file where the squash adds one. An unstaged edit to a file the squash
-/// leaves alone does not count, so the owner's own tools may keep editing other tracked
-/// files. A submodule counts by the commit it records, so no git runs inside it under config
-/// the engine did not write. Inputs: the checkout, its root, the tip and the squash tree.
+/// The files of the owner's checkout in an Accept's way (F21): every path staged against the
+/// tip, every unstaged edit to a file the squash changes and every untracked file where it
+/// adds one; other unstaged edits stay, and submodules count by their recorded commit.
+/// Inputs: the checkout, its root, the tip and the squash tree.
 /// Output: the files, sorted, empty when Accept can write.
 fn dirty_paths(
     owner: &Repo,
@@ -781,12 +778,10 @@ fn dirty_paths(
     Ok(dirty.into_iter().collect())
 }
 
-/// What an Accept of an open change set onto a target would find in the owner's checkout
-/// (F21), worked out as [`accept_held`] works out its squash: None when it lands through no
-/// checkout or would conflict, else the branch ref, its tip and the files of
-/// [`dirty_paths`]. The caller holds the repository's hold. Inputs: the store, the settled
-/// change set and the target branch, None for the Land on branch. Output: the answer, or
-/// `changes_too_large` past `DIRTY_FILES_MAX` files.
+/// What an Accept onto a target would find in the owner's checkout (F21), its squash worked
+/// out as [`accept_held`] does, under the caller's repository hold. Inputs: the store, the
+/// settled change set and the target branch, None for the Land on branch. Output: None when
+/// no checkout is written or it would conflict, else the ref, its tip and [`dirty_paths`].
 fn blocking(
     db: &Connection,
     record: &Record,
@@ -843,16 +838,11 @@ pub(super) fn owner_dirty(
         .unwrap_or_default())
 }
 
-/// Commits the owner's files that keep a change set's Accept from landing, first and
-/// nothing else (F21): the engine works the blocking files out again under the repository's
-/// hold and refuses any file outside them, builds the tree from the branch tip in a private
-/// index with each file as the checkout holds it, added, changed or deleted, commits it with
-/// the owner's message and identity, stages the same files in the owner's index and moves
-/// the branch by compare and swap. The owner then accepts again. Inputs: the store, the
-/// owner's home, the change set, the files, the message and the target branch, None for
-/// the Land on branch. Output: the commit and the branch, or `changes_stale`,
-/// `changes_message_invalid`, `changes_git_unsupported`, `changes_git_busy`,
-/// `changes_branch_moved` or another git code.
+/// Commits only the files [`blocking`] finds now (F21), as the checkout holds them, from a
+/// private index with the owner's message and identity, stages them in the owner's index and
+/// moves the branch by compare and swap. Inputs: the store, the owner's home, the change set,
+/// the files, the message and the target, None for the Land on branch. Output: the commit
+/// and branch, or `changes_stale`, `changes_message_invalid` or a git code.
 pub(super) fn commit_owner_files(
     db: &Connection,
     home: &Path,

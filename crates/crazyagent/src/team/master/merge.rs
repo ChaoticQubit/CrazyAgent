@@ -295,13 +295,11 @@ fn found(
     }))
 }
 
-/// Discards the change set a finished harness the master started has waiting, for the live
-/// master's `discard` tool (DEC-147 S3.6): the set stays restorable for seven days from
-/// Changes, the harness's worktree goes back to the owner's branch, the project activity
-/// records the master as the one who discarded it, and the team conversation tells the
-/// owner, with the master's reason. Takes the engine database, what the answers need, the
-/// harness's name and the reason. Returns the sentence the master reads and whether it is a
-/// refusal, or a SQLite failure.
+/// Discards a finished harness's waiting change set for the master's `discard` tool
+/// (DEC-147 S3.6), restorable for 7 days, logged as the master's and told to the owner with
+/// the reason. Takes the engine database, what the answers need, the harness's name and the
+/// reason. Returns the sentence the master reads and whether it is a refusal, or a SQLite
+/// failure.
 pub(super) fn discard(
     connection: &mut Connection,
     answering: &Answering<'_>,
