@@ -1484,7 +1484,7 @@ impl AppSetup {
                         limit,
                     )
                     .into_iter()
-                    .map(|part| styled(part, Role::Muted, theme)),
+                    .map(|part| styled(part, Role::Warning, theme)),
                 );
             }
         }
