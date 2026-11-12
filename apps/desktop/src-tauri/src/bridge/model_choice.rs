@@ -84,6 +84,7 @@ pub fn window_value(slot: Slot, value: Value) -> Result<Value, BridgeError> {
         Slot::Allowed => value
             .as_array()
             .is_some_and(|ids| ids.len() <= ALLOWED_MAX && ids.iter().all(window_id)),
+        Slot::Native => false,
     };
     if fits {
         Ok(value)
@@ -476,6 +477,29 @@ mod tests {
             window_project(Some(String::new())).unwrap_err().code,
             "model_choice_project_unknown"
         );
+    }
+
+    /// M-11 (DEC-150): the window sends the Native sub-agent model as one of its two option
+    /// names; a model id, another case, a list or null is refused before the engine is asked.
+    #[test]
+    fn the_window_sends_the_native_sub_agent_model_as_one_option_name() {
+        assert_eq!(window_slot("native").unwrap(), Slot::Native);
+        for value in [json!("follow"), json!("harness")] {
+            assert_eq!(window_value(Slot::Native, value.clone()).unwrap(), value);
+        }
+        for value in [
+            json!("Follow"),
+            json!("opus"),
+            json!(""),
+            json!(["follow"]),
+            Value::Null,
+        ] {
+            assert_eq!(
+                window_value(Slot::Native, value.clone()).unwrap_err().code,
+                "model_choice_value_invalid",
+                "{value}"
+            );
+        }
     }
 
     /// A section with every slot once in order joins the shipped list's versions and
