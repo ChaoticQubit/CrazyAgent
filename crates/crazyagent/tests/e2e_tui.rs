@@ -1722,9 +1722,11 @@ fn notice_change(runtime: &tokio::runtime::Runtime, engine: &Engine, action: Not
 }
 
 /// DEC-136a decision 10: the TUI header shows the notification store's unread and pending
-/// counts over every project and reads them again on each refresh: a reported app update
-/// counts as unread, an open question as unread and pending, and marking everything read
-/// from another client leaves only the pending question.
+/// counts over every project and reads them again on each refresh. The project is set up
+/// with market research and no pool, so its research waits for a pool: that Action is the
+/// first unread and pending item. A reported app update adds one unread, an open question
+/// one unread and pending, and marking everything read from another client leaves the two
+/// pending Actions.
 #[test]
 fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
     let mut engine = Engine::start("ca-e2e-notice-");
@@ -1749,10 +1751,9 @@ fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
 
     let pty = Pty::launch(tmux, &engine.socket());
     reach_home(&pty, |screen| at_home(screen, PROJECT));
-    let screen = pty.screen();
-    assert!(
-        !header_row(&screen).contains("unread") && !header_row(&screen).contains("pending"),
-        "an empty store shows no counts:\n{screen}"
+    pty.until(
+        "the header counts the research waiting for a pool",
+        |screen| header_row(screen).contains("1 unread, 1 pending"),
     );
 
     notice_change(
@@ -1765,7 +1766,7 @@ fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
         },
     );
     pty.until("the header counts the unread app update", |screen| {
-        header_row(screen).contains("1 unread") && !header_row(screen).contains("pending")
+        header_row(screen).contains("2 unread, 1 pending")
     });
 
     let db = questions::open(engine.path()).unwrap();
@@ -1784,7 +1785,7 @@ fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
     .unwrap();
     drop(db);
     pty.until("the header counts the open question as pending", |screen| {
-        header_row(screen).contains("2 unread, 1 pending")
+        header_row(screen).contains("3 unread, 2 pending")
     });
 
     notice_change(
@@ -1792,9 +1793,9 @@ fn the_tui_header_counts_unread_and_pending_notifications_as_they_change() {
         &engine,
         NoticeAction::ReadAll { project_id: None },
     );
-    pty.until("mark all read leaves the pending question", |screen| {
+    pty.until("mark all read leaves the two pending Actions", |screen| {
         let header = header_row(screen);
-        header.contains("1 pending") && !header.contains("unread")
+        header.contains("2 pending") && !header.contains("unread")
     });
     drop(pty);
     engine.stop();
