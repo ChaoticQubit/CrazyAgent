@@ -358,7 +358,7 @@ fn a_pin_or_record_the_owner_since_took_off_the_list_starts_on_the_default() {
     assert_eq!(starts(&db), (on("gpt-a"), on("gpt-a")));
     let catalog = crate::model_choice::catalog("codex");
     let scope = crate::harness_settings::Scope::App;
-    let version = crate::model_choice::store::values(&db, "codex", &catalog, &scope)
+    let version = crate::model_choice::store::values(&db, "codex", &catalog, &scope, None)
         .unwrap()
         .rows
         .iter()

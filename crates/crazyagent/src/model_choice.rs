@@ -25,6 +25,11 @@ pub const CUSTOM_MAX: usize = 32;
 pub const ALLOWED_MAX: usize = 16;
 /// The reason a slot shows when CrazyAgent cannot choose that harness's model there.
 pub const NOT_SUPPORTED: &str = "Not supported by this harness";
+/// The longest reason a Models section gives for an installed harness version its shipped
+/// catalog was not checked on (DEC-150 G1): the harness name, every listed version and the
+/// installed one.
+pub const UNQUALIFIED_REASON_BYTES_MAX: usize =
+    64 + HARNESS_BYTES_MAX + (VERSIONS_MAX + 1) * (crate::harness_settings::VERSION_BYTES_MAX + 2);
 /// Every refusal code the model choice store returns.
 pub const MODEL_CHOICE_CODES: &[&str] = &[
     "model_choice_harness_unknown",
@@ -128,14 +133,18 @@ pub struct Row {
     pub access: Access,
 }
 
-/// A harness's Models section at one scope: its three slots in page order and every
-/// candidate id, the catalog's first, then the owner's.
+/// A harness's Models section at one scope: its three slots in page order, every
+/// candidate id, the catalog's first, then the owner's, and whether the shipped catalog
+/// was checked on the installed harness version, with the reason when it was not. An
+/// unchecked version keeps the catalog ids (DEC-150 G1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Models {
     pub harness: String,
     pub rows: Vec<Row>,
     pub candidates: Vec<Candidate>,
+    pub qualified: bool,
+    pub reason: Option<String>,
 }
 
 /// What a set or reset did: saved as the next version, refused as stale with the current
@@ -192,6 +201,27 @@ pub fn catalog(harness: &str) -> Vec<String> {
         assert_catalog(id, &ids);
     }
     ids
+}
+
+/// Tells why a harness's shipped catalog was not checked on its installed version (DEC-150
+/// G1): the versions it lists and the installed one, or that the engine could not read it.
+/// Recorded, never enforced, as the provider serves the ids. Inputs: the harness name and
+/// the installed version, none when unknown. Output: the reason, none when the catalog
+/// lists the version or the harness ships no catalog.
+pub fn unqualified(harness: &str, installed: Option<&str>) -> Option<String> {
+    assert!(installed.is_none_or(crate::harness_settings::installed::version_valid));
+    let catalog = shipped(harness)?;
+    if installed.is_some_and(|version| catalog.qualified_versions.iter().any(|q| q == version)) {
+        return None;
+    }
+    let name = crate::harnesses::spec(harness).map_or(harness, |spec| spec.name);
+    let listed = catalog.qualified_versions.join(", ");
+    let reason = match installed {
+        Some(version) => format!("listed for {name} {listed}; installed {version} not yet checked"),
+        None => format!("listed for {name} {listed}; installed version unknown"),
+    };
+    assert!(reason.len() <= UNQUALIFIED_REASON_BYTES_MAX);
+    Some(reason)
 }
 
 /// Reads the shipped model catalog of a harness name or alias. A shipped catalog out of

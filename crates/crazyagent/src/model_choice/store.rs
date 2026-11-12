@@ -54,15 +54,17 @@ pub enum Begun {
     Verified,
 }
 
-/// Builds a harness's Models section at one scope, read in one snapshot. Inputs: the
-/// engine database, the harness name, its model catalog and the scope. Output: the
-/// section, or `model_choice_harness_unknown`, `model_choice_project_unknown` or
-/// `model_choice_unavailable`.
+/// Builds a harness's Models section at one scope, read in one snapshot, saying whether
+/// the shipped catalog was checked on the installed version (DEC-150 G1). Inputs: the
+/// engine database, the harness name, its model catalog, the scope and the installed
+/// version, none when unknown. Output: the section, or `model_choice_harness_unknown`,
+/// `model_choice_project_unknown` or `model_choice_unavailable`.
 pub fn values(
     db: &Connection,
     harness: &str,
     catalog: &[String],
     scope: &Scope,
+    installed: Option<&str>,
 ) -> Result<Models, EngineError> {
     let harness = known(harness)?;
     assert_catalog(harness, catalog);
@@ -76,10 +78,13 @@ pub fn values(
         rows.push(row(tx, harness, scope, slot, &usable)?);
     }
     assert_eq!(rows.len(), Slot::ALL.len());
+    let reason = super::unqualified(harness, installed);
     Ok(Models {
         harness: harness.to_owned(),
         rows,
         candidates,
+        qualified: reason.is_none(),
+        reason,
     })
 }
 

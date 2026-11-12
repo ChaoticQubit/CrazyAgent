@@ -1219,7 +1219,7 @@ done
             Begun::Pending
         );
         store::custom_checked(&fixture.connection, "codex", "gpt-a", true).unwrap();
-        let version = store::values(&fixture.connection, "codex", &catalog, &scope)
+        let version = store::values(&fixture.connection, "codex", &catalog, &scope, None)
             .unwrap()
             .rows
             .iter()

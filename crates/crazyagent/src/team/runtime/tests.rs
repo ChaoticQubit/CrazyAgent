@@ -29437,7 +29437,7 @@ fn a_master_model_no_pool_account_runs_falls_back_with_one_notice() {
     let catalog = crate::model_choice::catalog("codex");
     let set_master = |model: &str| {
         let scope = crate::harness_settings::Scope::App;
-        let models = store::values(&fixture.connection, "codex", &catalog, &scope).unwrap();
+        let models = store::values(&fixture.connection, "codex", &catalog, &scope, None).unwrap();
         let version = models
             .rows
             .iter()
@@ -29508,7 +29508,7 @@ fn codex_model(fixture: &Fixture, model: &str, slot: crate::model_choice::Slot) 
     {
         store::custom_checked(&fixture.connection, "codex", model, true).unwrap();
     }
-    let version = store::values(&fixture.connection, "codex", &catalog, &scope)
+    let version = store::values(&fixture.connection, "codex", &catalog, &scope, None)
         .unwrap()
         .rows
         .iter()
