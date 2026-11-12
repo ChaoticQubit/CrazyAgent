@@ -28,9 +28,20 @@ pub(super) struct End<'a> {
     pub(super) leftovers: bool,
 }
 
+/// The codes a problem closes with when the engine itself ended the terminal at one of its
+/// bounds, and the cause each end is named by.
+const ENGINE_LIMITS: [(&str, &str); 2] = [
+    ("launch_deadline", "engine_limit:launch_deadline"),
+    (
+        "launch_transcript_unavailable",
+        "engine_limit:launch_transcript_unavailable",
+    ),
+];
+
 /// Names why an agent's terminal ended. Inputs: the cause the engine recorded when it asked
 /// the agent to stop, if it did, whether the agent got as far as ready, and the problem it
 /// ended with. Output: `owner_stop`, `rate_limited`, `engine_stop:<why>`, `takeover_failed`,
+/// `engine_limit:<code>` when the problem closes with a code of [`ENGINE_LIMITS`],
 /// `start_failed` or `ended_by_itself`.
 pub(super) fn cause(
     stop: Option<&'static str>,
@@ -43,9 +54,21 @@ pub(super) fn cause(
         None if problem.is_some_and(|problem| problem.contains("could not be taken over")) => {
             "takeover_failed"
         }
-        None if !ready && problem.is_some() => "start_failed",
-        None => "ended_by_itself",
+        None => match problem.and_then(engine_limit) {
+            Some(limit) => limit,
+            None if !ready && problem.is_some() => "start_failed",
+            None => "ended_by_itself",
+        },
     }
+}
+
+/// Finds the engine bound a problem names in its closing `(code)`, as `with_code` writes
+/// it. Input: the problem. Output: the `engine_limit:<code>` cause, none for any other.
+fn engine_limit(problem: &str) -> Option<&'static str> {
+    let code = problem.strip_suffix(')')?.rsplit_once('(')?.1;
+    let &(_, limit) = ENGINE_LIMITS.iter().find(|(named, _)| *named == code)?;
+    assert!(limit.ends_with(code));
+    Some(limit)
 }
 
 /// Writes one end row and drops the project's oldest rows past [`ENDS_PER_PROJECT_MAX`].
@@ -124,6 +147,44 @@ mod tests {
         assert_eq!(cause(None, false, Some("exit 3")), "start_failed");
         assert_eq!(cause(None, false, None), "ended_by_itself");
         assert_eq!(cause(None, true, Some("exit 1")), "ended_by_itself");
+    }
+
+    /// Owner 11-11 (D): an end the engine itself made at one of its bounds is named
+    /// `engine_limit:<code>`, before or after ready, never `ended_by_itself`; a pane that
+    /// closed by itself, a code that is not the problem's closing one and an asked stop keep
+    /// their own causes.
+    #[test]
+    fn an_end_at_an_engine_bound_is_named_engine_limit() {
+        let closed = |code: &str| format!("The agent process closed. ({code})");
+        for (code, named) in super::ENGINE_LIMITS {
+            assert_eq!(cause(None, true, Some(&closed(code))), named);
+            assert_eq!(cause(None, false, Some(&closed(code))), named);
+            assert_eq!(named, format!("engine_limit:{code}"));
+        }
+        assert_eq!(
+            cause(None, true, Some(&closed("launch_closed"))),
+            "ended_by_itself"
+        );
+        assert_eq!(
+            cause(
+                None,
+                true,
+                Some("(launch_deadline) then the agent process closed")
+            ),
+            "ended_by_itself"
+        );
+        assert_eq!(
+            cause(Some("owner_stop"), true, Some(&closed("launch_deadline"))),
+            "owner_stop"
+        );
+        assert_eq!(
+            cause(
+                None,
+                true,
+                Some("The agent's running terminal could not be taken over (launch_deadline)")
+            ),
+            "takeover_failed"
+        );
     }
 
     #[test]
