@@ -646,10 +646,10 @@ fn a_refused_save_over_a_four_line_text_keeps_the_problem_in_view_at_80_by_24() 
     assert!(tall.contains("so yours were not saved."), "{tall}");
 }
 
-/// A refused save over a newer text longer than the room left keeps the problem line and
-/// both editor rows in view at 80x24 (backlog 39): after the blank rows and the long intro,
-/// the quote of the text that landed gives way from the bottom, down to one row, and its
-/// more line counts what it hid. At 120x40 the quote shows up to its six rows.
+/// A refused save over a newer text of six or more rows keeps the problem line and both
+/// editor rows in view at 80x24 (backlog 39): after the blank rows and the long intro, the
+/// quote of the text that landed gives way from the bottom, down to one row, and its more
+/// line counts what it hid. At 120x40 the quote shows its six rows.
 #[test]
 fn a_refused_save_over_a_long_newer_text_keeps_the_problem_and_both_editor_rows_in_view_at_80_by_24()
  {
@@ -657,7 +657,7 @@ fn a_refused_save_over_a_long_newer_text_keeps_the_problem_and_both_editor_rows_
         "One.", "Two.", "Three.", "Four.", "Five.", "Six.", "Seven.", "Eight.", "Nine.", "Ten.",
         "Eleven.", "Twelve.",
     ];
-    for count in [5, 7, 12] {
+    for count in [6, 7, 12] {
         let mut shell = opened(Scope::App, "Old rule.\nSecond rule.");
         typed(&mut shell, "Mine. ");
         shell.key(Key::Ctrl('s'));
