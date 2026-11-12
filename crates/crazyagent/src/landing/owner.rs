@@ -5,7 +5,7 @@ use super::git::{Repo, Writes, failure};
 use super::store::{self, Intent, Record};
 use super::{
     AcceptOutcome, AgentKind, BRANCH_BYTES_MAX, BRANCHES_MAX, ChangeSetId, ChangeState,
-    MESSAGE_BYTES_MAX, TargetBranches,
+    LandingResult, MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::activity::{ActivityKind, ENGINE_ACTOR, OWNER_ACTOR};
 use crate::agent_git::Layout;
@@ -867,6 +867,7 @@ fn finish(
     by: By<'_>,
 ) -> Result<(), EngineError> {
     record.state = ChangeState::Accepted;
+    record.landing_result = LandingResult::Landed;
     record.accepted_in = match by {
         By::Owner(place) => place,
         By::Named(_) | By::Master => None,
@@ -1214,6 +1215,33 @@ pub(super) fn accept_to(
     let repository = store::load(db, id)?.repository;
     let _held = flow::hold_unmoved(db, &repository)?;
     accept_held(db, home, id, expected_head, edited, target, by, stopped)
+        .inspect_err(|problem| note_refused(db, id, problem))
+}
+
+/// The codes an Accept answers without having tried to land: a set that moved on or is
+/// gone, a store that cannot be read, or a message the owner must fix first.
+const NOT_TRIED: [&str; 4] = [
+    "changes_stale",
+    "changes_not_found",
+    "changes_unavailable",
+    "changes_message_invalid",
+];
+
+/// Keeps that an Accept was refused before anything landed as the set's landing result,
+/// apart from how its agent's turn went (F23); a refusal that tried nothing leaves it, and a
+/// store failure is logged by its plain code. Inputs: the store, the change set and the
+/// refusal. Output: none.
+fn note_refused(db: &Connection, id: &ChangeSetId, problem: &EngineError) {
+    let code = crate::protocol::plain_code(&problem.0);
+    if NOT_TRIED.contains(&code) {
+        return;
+    }
+    if let Err(error) = store::set_landing_result(db, id, LandingResult::Refused) {
+        eprintln!(
+            "landing_result_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+    }
 }
 
 /// The body of [`accept_to`], for a caller that already holds [`hold`] on the repository.
@@ -1260,6 +1288,7 @@ fn accept_held(
     if !conflicts.is_empty() {
         if let Some(by) = by.named() {
             record.state = ChangeState::Conflict;
+            record.landing_result = LandingResult::Conflict;
             record.conflicts = conflicts.clone();
             record.updated_ms = flow::now_ms()?;
             store::save(db, &record)?;

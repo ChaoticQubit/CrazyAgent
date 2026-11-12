@@ -6,7 +6,7 @@ import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, changeSetName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, landingNote, lastPageSeen, movedNote, movedOn, outcomeNote, regeneratedNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import { useChangeList } from "./poll";
 import "./changes.css";
@@ -112,7 +112,7 @@ export function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved, lo
   }
   const allowed = actions(set, now);
   const settled = reviewed(carried);
-  const notes = [movedNote(carried), conflictNote(set), regeneratedNote(set), checkedNote(set), outcomeNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
+  const notes = [movedNote(carried), conflictNote(set), regeneratedNote(set), checkedNote(set), outcomeNote(set), landingNote(set), updatingNote(set), restoreNote(set, now)].filter((note): note is string => note !== null);
   const head = carried.head;
   const diff = read?.id === set.id && read.head === head && read.page === page ? read.result : undefined;
   useEffect(() => {

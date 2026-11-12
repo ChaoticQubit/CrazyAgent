@@ -4,6 +4,7 @@ import { failureCopy } from "./api-projects";
 
 export type ChangeState = "pending" | "conflict" | "updating" | "accepted" | "discarded";
 export type TurnOutcome = "succeeded" | "failed" | "cancelled";
+export type LandingResult = "none" | "landed" | "conflict" | "refused";
 
 export interface ChangeSet {
   id: string;
@@ -25,6 +26,7 @@ export interface ChangeSet {
   outside: boolean;
   regenerated: string[];
   number?: number | null;
+  landing_result?: LandingResult;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";

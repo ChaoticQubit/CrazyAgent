@@ -165,6 +165,19 @@ pub enum TurnOutcome {
     Cancelled,
 }
 
+/// What the last landing try of a change set did, kept apart from how its agent's turn
+/// went (F23): none yet, landed, conflicted with the branch it lands on, or refused before
+/// anything landed, such as for a dirty project folder.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LandingResult {
+    #[default]
+    None,
+    Landed,
+    Conflict,
+    Refused,
+}
+
 /// Where a change set stands. Pending waits for the owner; Conflict was refused by an
 /// Accept that conflicts; Updating holds the owner's branch merged in with conflict
 /// markers until the agent's next turn ends; Accepted and Discarded are final, except
@@ -248,7 +261,8 @@ pub struct TurnEnd {
 /// restorable). While open, `files`, `added` and `removed` count only what is not yet on
 /// the owner's branch. `number` is the set's number in its project, from 1 in the order the
 /// project's sets were added, None for a set an engine without numbers stored until the
-/// next engine start numbers it.
+/// next engine start numbers it. `last_outcome` is how the agent's last turn went and
+/// `landing_result` what the last landing try did, two separate facts (F23).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeSetView {
@@ -276,6 +290,8 @@ pub struct ChangeSetView {
     pub number: Option<u64>,
     #[serde(default)]
     pub regenerated: Vec<String>,
+    #[serde(default)]
+    pub landing_result: LandingResult,
 }
 
 /// How a file changed between a change set's base and head.
@@ -1760,6 +1776,41 @@ pub fn open_set_line(set: &ChangeSetView) -> String {
         set.removed
     );
     crate::memory::visible_text(&line.replace(char::is_control, "\u{fffd}"))
+}
+
+/// How an agent's last turn ended, as the owner reads it beside its change set, kept apart
+/// from what landing did (F23): a landed set whose turn failed or was stopped says both
+/// facts, so "failed" never reads as a failed landing. Input: the change set. Output: the
+/// line, None after a turn that succeeded.
+pub fn turn_line(set: &ChangeSetView) -> Option<&'static str> {
+    let landed = set.state == ChangeState::Accepted;
+    match (set.last_outcome, landed) {
+        (TurnOutcome::Succeeded, _) => None,
+        (TurnOutcome::Failed, false) => {
+            Some("The agent's last turn failed. These are the changes it made before it stopped.")
+        }
+        (TurnOutcome::Cancelled, false) => Some(
+            "The agent's last turn was stopped. These are the changes it made before it stopped.",
+        ),
+        (TurnOutcome::Failed, true) => Some(
+            "Last turn: failed. Landing: landed. How the turn ended does not change what landed.",
+        ),
+        (TurnOutcome::Cancelled, true) => Some(
+            "Last turn: stopped. Landing: landed. How the turn ended does not change what landed.",
+        ),
+    }
+}
+
+/// What the last landing try of an open change set did when nothing else on screen says
+/// it (F23): an Accept refused before anything landed. Input: the change set. Output: the
+/// line, None otherwise.
+pub fn landing_line(set: &ChangeSetView) -> Option<&'static str> {
+    let open = matches!(
+        set.state,
+        ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+    );
+    (open && set.landing_result == LandingResult::Refused)
+        .then_some("Landing: the last Accept was refused, so nothing landed yet.")
 }
 
 /// The words a sentence names a change set by: "change set #16 (Wren: checkout UI, 7

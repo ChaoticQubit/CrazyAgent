@@ -7,7 +7,7 @@ use super::project_time::duration;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
-    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches, TurnOutcome,
+    FileKind, FileMark, FileStatus, MESSAGE_BYTES_MAX, TargetBranches,
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
@@ -1225,18 +1225,11 @@ fn details(set: &ChangeSetView, content: usize, now_ms: i64, look: &Look) -> Vec
             look.muted,
         ));
     }
-    match set.last_outcome {
-        TurnOutcome::Failed => notes.push((
-            "The agent's last turn failed. These are the changes it made before it stopped."
-                .to_owned(),
-            look.warning,
-        )),
-        TurnOutcome::Cancelled => notes.push((
-            "The agent's last turn was stopped. These are the changes it made before it stopped."
-                .to_owned(),
-            look.warning,
-        )),
-        TurnOutcome::Succeeded => {}
+    if let Some(line) = crate::landing::turn_line(set) {
+        notes.push((line.to_owned(), look.warning));
+    }
+    if let Some(line) = crate::landing::landing_line(set) {
+        notes.push((line.to_owned(), look.warning));
     }
     match set.state {
         ChangeState::Conflict if !set.conflicts.is_empty() => {

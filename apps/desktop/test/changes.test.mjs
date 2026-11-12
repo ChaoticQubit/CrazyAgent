@@ -44,6 +44,11 @@ test("a change set reads as its agent, a state word, its size and that CrazyAgen
   assert.equal(model.outcomeNote(set()), null);
   assert.equal(model.outcomeNote(set({ last_outcome: "failed" })), "The agent's last turn failed. These are the changes it made before it stopped.");
   assert.equal(model.outcomeNote(set({ last_outcome: "cancelled" })), "The agent's last turn was stopped. These are the changes it made before it stopped.");
+  assert.equal(model.outcomeNote(set({ last_outcome: "failed", state: "accepted", landing_result: "landed" })), "Last turn: failed. Landing: landed. How the turn ended does not change what landed.", "OA CS#035688c8: a landed set whose turn failed says both facts (F23)");
+  assert.equal(model.outcomeNote(set({ last_outcome: "cancelled", state: "accepted" })), "Last turn: stopped. Landing: landed. How the turn ended does not change what landed.");
+  assert.equal(model.landingNote(set({ landing_result: "refused" })), "Landing: the last Accept was refused, so nothing landed yet.");
+  assert.equal(model.landingNote(set({ landing_result: "refused", state: "accepted" })), null, "a closed set says its state instead");
+  assert.equal(model.landingNote(set()), null, "an engine without landing results sends none");
 });
 
 test("a set its agent is fixing for conflicts with main says so in Changes", () => {

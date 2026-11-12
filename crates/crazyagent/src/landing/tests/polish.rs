@@ -105,3 +105,67 @@ fn an_agent_summary_names_the_set_and_lists_its_commit_subjects() {
     };
     assert_eq!(case.landed_message(&commit), message);
 }
+
+/// OA CS#035688c8: what landing did is kept apart from how the agent's turn went. A set whose
+/// turn failed reads refused after an Accept refused for a dirty file it changes, then landed
+/// once it lands, while its turn still reads failed, and both lines say so (F23).
+#[test]
+fn the_landing_result_is_kept_apart_from_the_turn_result() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Failed).unwrap();
+    assert_eq!(case.view(&id).landing_result, LandingResult::None);
+    write(&case.repo.join("README"), "one\ntwo\nthree\nowner\n");
+    assert_eq!(refused(case.accept(&id)), "changes_owner_dirty");
+    let view = case.view(&id);
+    assert_eq!(view.landing_result, LandingResult::Refused);
+    assert_eq!(
+        turn_line(&view),
+        Some("The agent's last turn failed. These are the changes it made before it stopped.")
+    );
+    assert_eq!(
+        landing_line(&view),
+        Some("Landing: the last Accept was refused, so nothing landed yet.")
+    );
+    case.owner(&["checkout", "--", "README"]);
+    let AcceptOutcome::Landed { .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    let view = case.view(&id);
+    assert_eq!(view.last_outcome, TurnOutcome::Failed);
+    assert_eq!(view.landing_result, LandingResult::Landed);
+    assert_eq!(
+        turn_line(&view),
+        Some("Last turn: failed. Landing: landed. How the turn ended does not change what landed.")
+    );
+    assert_eq!(landing_line(&view), None);
+    assert_eq!(
+        store::load(&case.db, &id).unwrap().landing_result,
+        LandingResult::Landed
+    );
+}
+
+/// An Accept that conflicts keeps conflict as the landing result, and a stale head that
+/// tried nothing leaves it as it was (F23).
+#[test]
+fn a_conflicting_accept_keeps_conflict_and_a_stale_one_changes_nothing() {
+    let case = Case::new();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    case.owner_commit("README", "one\ntwo\nthree\nmine\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    assert_eq!(case.view(&id).landing_result, LandingResult::Conflict);
+    let stale = accept(
+        &case.db,
+        &case.home,
+        &id,
+        &"0".repeat(40),
+        None,
+        crate::activity::AcceptPlace::Changes,
+    );
+    assert_eq!(refused(stale), "changes_stale");
+    assert_eq!(case.view(&id).landing_result, LandingResult::Conflict);
+}

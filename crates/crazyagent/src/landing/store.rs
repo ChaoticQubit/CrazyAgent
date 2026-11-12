@@ -1,5 +1,7 @@
 use super::git::failure;
-use super::{AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, TurnOutcome};
+use super::{
+    AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, LandingResult, TurnOutcome,
+};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -41,7 +43,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS landing_change_sets (
     regenerated_head TEXT,
     regenerated_files TEXT NOT NULL DEFAULT '[]',
     accepted_in TEXT,
-    summary TEXT NOT NULL DEFAULT ''
+    summary TEXT NOT NULL DEFAULT '',
+    landing_result TEXT NOT NULL DEFAULT 'none'
+        CHECK(landing_result IN ('none','landed','conflict','refused'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS landing_change_sets_open
     ON landing_change_sets(worktree) WHERE state IN ('pending','conflict','updating');
@@ -70,8 +74,8 @@ const NUMBER_PASS_MAX: i64 = 10_000;
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
     restorable_until_ms,pruned,landed,intent,message,waiting,outside,made,undone,landed_on,\
-    restored,regenerated_head,regenerated_files,accepted_in,summary";
-const ADDED_COLUMNS: [(&str, &str); 11] = [
+    restored,regenerated_head,regenerated_files,accepted_in,summary,landing_result";
+const ADDED_COLUMNS: [(&str, &str); 12] = [
     ("message", "message TEXT NOT NULL DEFAULT ''"),
     (
         "waiting",
@@ -98,6 +102,11 @@ const ADDED_COLUMNS: [(&str, &str); 11] = [
     ),
     ("accepted_in", "accepted_in TEXT"),
     ("summary", "summary TEXT NOT NULL DEFAULT ''"),
+    (
+        "landing_result",
+        "landing_result TEXT NOT NULL DEFAULT 'none' \
+         CHECK(landing_result IN ('none','landed','conflict','refused'))",
+    ),
 ];
 
 /// A step of owner-checkout or worktree work the engine recorded before starting it, so
@@ -207,7 +216,8 @@ impl Earlier {
 /// that Accept moved; `undone` is the commit that reverted it; `accepted_in` is where the
 /// owner pressed that Accept, None for anyone else's, one stored before places were kept, or
 /// a place a later build named, which this build reads as None and keeps as stored;
-/// `summary` is the subject the agent's own summary of its last turn gave, empty without one.
+/// `summary` is the subject the agent's own summary of its last turn gave, empty without one;
+/// `landing_result` is what the last landing try did, apart from `last_outcome` (F23).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Record {
     pub(super) id: ChangeSetId,
@@ -243,6 +253,7 @@ pub(super) struct Record {
     pub(super) regenerated_files: Vec<String>,
     pub(super) accepted_in: Option<crate::activity::AcceptPlace>,
     pub(super) summary: String,
+    pub(super) landing_result: LandingResult,
 }
 
 impl Record {
@@ -273,6 +284,7 @@ impl Record {
             } else {
                 Vec::new()
             },
+            landing_result: self.landing_result,
         }
     }
 
@@ -339,6 +351,15 @@ pub(super) fn state_name(state: ChangeState) -> &'static str {
         ChangeState::Updating => "updating",
         ChangeState::Accepted => "accepted",
         ChangeState::Discarded => "discarded",
+    }
+}
+
+pub(super) fn landing_name(result: LandingResult) -> &'static str {
+    match result {
+        LandingResult::None => "none",
+        LandingResult::Landed => "landed",
+        LandingResult::Conflict => "conflict",
+        LandingResult::Refused => "refused",
     }
 }
 
@@ -434,6 +455,13 @@ fn read(row: &Row<'_>) -> rusqlite::Result<Record> {
             .get::<_, Option<String>>(33)?
             .and_then(|name| crate::activity::AcceptPlace::parse(&name)),
         summary: text(34)?,
+        landing_result: match text(35)?.as_str() {
+            "none" => LandingResult::None,
+            "landed" => LandingResult::Landed,
+            "conflict" => LandingResult::Conflict,
+            "refused" => LandingResult::Refused,
+            _ => return Err(invalid(35)),
+        },
     })
 }
 
@@ -479,7 +507,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
     db.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
-             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35) \
+             (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36) \
              ON CONFLICT(id) DO UPDATE SET {updates}"
         ),
         params![
@@ -518,6 +546,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
             regenerated_files,
             record.accepted_in.map(crate::activity::AcceptPlace::name),
             record.summary,
+            landing_name(record.landing_result),
         ],
     )
     .map_err(|error| match error.sqlite_error_code() {
@@ -539,6 +568,24 @@ pub(super) fn set_summary(
     db.execute(
         "UPDATE landing_change_sets SET summary=?2 WHERE id=?1",
         params![id.as_str(), summary],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Stores what a landing try that changed nothing did to a change set (F23), touching no
+/// other column, and only while the set is open, so a set closed beside it keeps its result.
+/// Inputs: the store, the change set and the result. Output: Ok once stored.
+pub(super) fn set_landing_result(
+    db: &Connection,
+    id: &ChangeSetId,
+    result: LandingResult,
+) -> Result<(), EngineError> {
+    initialize(db)?;
+    db.execute(
+        "UPDATE landing_change_sets SET landing_result=?2 \
+         WHERE id=?1 AND state IN ('pending','conflict','updating')",
+        params![id.as_str(), landing_name(result)],
     )
     .map_err(storage)?;
     Ok(())

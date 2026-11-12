@@ -2213,6 +2213,7 @@ pub(super) fn record(
             regenerated_files: Vec::new(),
             accepted_in: None,
             summary: String::new(),
+            landing_result: super::LandingResult::None,
             files: 0,
             added: 0,
             removed: 0,
@@ -2234,6 +2235,7 @@ pub(super) fn record(
     record.state = ChangeState::Pending;
     record.waiting = false;
     record.conflicts.clear();
+    record.landing_result = super::LandingResult::None;
     record.last_outcome = turn.outcome;
     record.turn = turn_id;
     record.head = current.clone();
