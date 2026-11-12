@@ -1561,7 +1561,7 @@ fn a_tab_the_run_could_not_use_is_said_while_the_others_are_written() {
     assert!(tab_of(&overview, Tab::Features).text.is_none());
     assert_eq!(
         overview.failure.as_deref(),
-        Some("1 tab in the reply could not be used and stayed as it was")
+        Some("Features was too long for a tab. Install & use was left out of the reply.")
     );
     assert_eq!(overview.checked_ms, Some(7));
     assert!(!overview.running);
@@ -1572,6 +1572,56 @@ fn a_tab_the_run_could_not_use_is_said_while_the_others_are_written() {
     let overview = read(&db, &project, folder.path(), 11).unwrap();
     assert!(overview.failure.is_none(), "a whole reply clears the line");
     assert_eq!(overview.checked_ms, Some(10));
+}
+
+#[test]
+fn a_reply_that_leaves_asked_tabs_out_writes_the_others_and_names_the_ones_left_out() {
+    let (db, project, folder) = case();
+    let mut runs = FakeTabRuns::default();
+    read(&db, &project, folder.path(), 0).unwrap();
+    assert_eq!(tick(&db, &mut runs, 0).unwrap(), 1);
+    let ended = Ended::Reply {
+        reply: "~~~quick-info\nBeehive keeps bees.\n~~~\n\n~~~competitors\nHive is older.\n~~~\n",
+        with_competitors: true,
+    };
+    assert_eq!(runs.end(&db, folder.path(), ended, 7), 1);
+    let overview = read(&db, &project, folder.path(), 8).unwrap();
+    assert_eq!(
+        tab_of(&overview, Tab::QuickInfo).text.as_deref(),
+        Some("Beehive keeps bees.\n")
+    );
+    assert_eq!(
+        tab_of(&overview, Tab::Competitors).text.as_deref(),
+        Some("Hive is older.\n")
+    );
+    assert!(tab_of(&overview, Tab::Features).text.is_none());
+    assert_eq!(
+        overview.failure.as_deref(),
+        Some("Features and Install & use were left out of the reply.")
+    );
+    assert_eq!(overview.checked_ms, Some(7));
+
+    refresh(&db, &project).unwrap();
+    assert_eq!(tick(&db, &mut runs, 9).unwrap(), 1);
+    let unasked = Ended::Reply {
+        reply: REPLY,
+        with_competitors: false,
+    };
+    assert_eq!(runs.end(&db, folder.path(), unasked, 10), 1);
+    let overview = read(&db, &project, folder.path(), 11).unwrap();
+    assert!(
+        overview.failure.is_none(),
+        "a tab that was not asked for is never named"
+    );
+}
+
+#[test]
+fn the_prompt_asks_for_every_tab_and_never_lets_the_agent_leave_one_out() {
+    for with_competitors in [false, true] {
+        let text = prompt("EVIDENCE", &[], with_competitors);
+        assert!(!text.contains("Leave out a tab"), "{text}");
+        assert!(text.contains("Write every tab asked for."), "{text}");
+    }
 }
 
 #[test]

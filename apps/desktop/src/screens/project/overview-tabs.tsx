@@ -106,6 +106,7 @@ const READ_ONLY = "This is the project's own file. Edit it in the project.";
 const CUT = "Showing the first part of a long file.";
 const NO_README = "This project has no README file.";
 const WRITING = "Writing now";
+const QUEUED = "Refresh waiting to run";
 const NOT_READY = "CrazyAgent's engine isn't ready yet. Try again in a moment.";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -251,19 +252,29 @@ export async function runResearch(data: Pick<ProjectData, "id" | "setup" | "noti
   return "";
 }
 
+/** Whether the engine holds a writing run that has not started yet, after a Refresh, a
+ * landed change set or a wait for an account: engine state, so it survives leaving the
+ * view. Input: the overview. Output: the answer. */
+function queued(overview: ProjectOverview): boolean {
+  return overview.stale && !overview.running && overview.refresh !== "off" && !overview.needs_home;
+}
+
 /** What a generated tab with no text says, by what will write it. Input: the overview.
  * Output: the line. */
 function unwritten(overview: ProjectOverview): string {
   if (overview.running) return `${WRITING}. This tab fills in when the run ends.`;
   if (overview.refresh === "off") return "Overview tabs are off in Project settings.";
+  if (queued(overview)) return "A refresh is waiting to run. This tab fills in when it ends.";
   if (overview.refresh === "refresh_only") return "Not written yet. Choose Refresh to write it.";
   return "Not written yet. It is written after the next landed change set, or when you choose Refresh.";
 }
 
-/** The strip's status words: that a run is writing, else when the tabs were last checked.
- * Inputs: the overview and now in milliseconds. Output: the words, or null with nothing to say. */
+/** The strip's status words: that a run is writing or waiting to run, else when the tabs
+ * were last checked. Inputs: the overview and now in milliseconds. Output: the words, or null
+ * with nothing to say. */
 function checked(overview: ProjectOverview, now: number): string | null {
   if (overview.running) return WRITING;
+  if (queued(overview)) return QUEUED;
   if (overview.checked_ms === null || overview.needs_home) return null;
   const said = ago(overview.checked_ms, now);
   return `Checked ${said === "Just now" ? "just now" : said}`;
@@ -555,7 +566,8 @@ function CompetitorsPanel({ data, overview, state, onSelect }: { data: ProjectDa
   const text = state.text === null ? null : <MarkdownView source={state.text} onOpenLink={(href) => void openLink(href)} />;
   if (source.kind === "missing") return <><NoCompetitorResearch data={data} onSelect={onSelect} />{text}</>;
   const follow = overview.running ? `${WRITING}. This tab fills in when the run ends.`
-    : overview.refresh === "off" ? "Overview tabs are off in Project settings." : "Choose Refresh to write this tab from it.";
+    : overview.refresh === "off" ? "Overview tabs are off in Project settings."
+    : queued(overview) ? "A refresh is waiting to run. This tab fills in when it ends." : "Choose Refresh to write this tab from it.";
   return <>
     {source.kind === "report" && <div className="pj-row"><span className="pj-small pj-muted">Written from the competitor research report.</span>
       <button type="button" className="btn" onClick={() => data.navigate(`/projects/${encodeURIComponent(data.id)}/context?file=${encodeURIComponent(source.path)}`)}>Open report</button></div>}
