@@ -16,6 +16,11 @@ pub const LOCAL_FOLDERS_MAX: usize = 64;
 const NAME_BYTES_MAX: usize = 255;
 const SECRET_PATH_BYTES_MAX: usize = 512;
 const ENGINE_NAMES: [&str; 2] = [".git", ".crazyagent"];
+/// What the engine keeps directly in a project folder made before the projects home, whose
+/// state folder is the project folder itself ([`crate::projects_home::state_folder`]).
+const LEGACY_STATE_NAMES: [&str; 4] = ["context", "worktrees", "research", "brief.md"];
+/// The engine folder name a shared folder is never written under ([`ProjectSandbox::allow_shared_write`]).
+const CONTEXT_NAME: &str = "context";
 
 /// The refusal code for a launch whose untracked paths git could not list.
 pub const UNLISTED: &str = "shared_folders_unlisted";
@@ -235,11 +240,12 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         });
     }
     let listed = untracked(root).ok_or(UNLISTED)?;
+    let engine = engine_names(root);
     let mut kept_out = Vec::new();
     let mut writes = Vec::new();
     for path in &listed {
         let top = path.split('/').next().unwrap_or_default();
-        if top.is_empty() || ENGINE_NAMES.contains(&top) {
+        if top.is_empty() || engine.contains(&top) {
             continue;
         }
         if !shared.shares(top) {
@@ -250,7 +256,12 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         let folder = root.join(top);
         let plain_folder = std::fs::symlink_metadata(&folder)
             .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
-        if shared.access == SharedAccess::ReadWrite && whole_folder && plain_folder {
+        let engine_context = top.eq_ignore_ascii_case(CONTEXT_NAME);
+        if shared.access == SharedAccess::ReadWrite
+            && whole_folder
+            && plain_folder
+            && !engine_context
+        {
             writes.push(folder);
         }
     }
@@ -294,19 +305,20 @@ pub fn apply(
 }
 
 /// The top-level folders of the project folder the owner may pick for Chosen folders: real
-/// folders, not links, with plain names, but `.git` and `.crazyagent`, sorted, at most
-/// [`LOCAL_FOLDERS_MAX`]. Takes the project folder. Returns the names, none when it cannot be
-/// read.
+/// folders, not links, with plain names, never the engine's own ([`engine_names`]), sorted,
+/// at most [`LOCAL_FOLDERS_MAX`]. Takes the project folder. Returns the names, none when it
+/// cannot be read.
 pub fn local_folders(root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
+    let engine = engine_names(root);
     let mut names: Vec<String> = entries
         .flatten()
         .take(4 * LOCAL_FOLDERS_MAX)
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .filter_map(|entry| entry.file_name().into_string().ok())
-        .filter(|name| plain_name(name))
+        .filter(|name| plain_name(name) && !engine.contains(&name.as_str()))
         .collect();
     names.sort();
     names.truncate(LOCAL_FOLDERS_MAX);
@@ -377,6 +389,17 @@ pub fn context_section(
 /// The most bytes of [`context_section`].
 pub const SECTION_BYTES_MAX: usize = 3072;
 const CHOSEN_LIST_BYTES_MAX: usize = 512;
+
+/// The top-level names in the project folder `root` that belong to the engine: `.git` and
+/// `.crazyagent`, and in a project made before the projects home, the state it keeps there.
+/// Takes the project folder. Returns the names.
+fn engine_names(root: &Path) -> Vec<&'static str> {
+    let mut names = ENGINE_NAMES.to_vec();
+    if crate::projects_home::state_folder(root) == root {
+        names.extend(LEGACY_STATE_NAMES);
+    }
+    names
+}
 
 fn plain_name(name: &str) -> bool {
     !name.is_empty()

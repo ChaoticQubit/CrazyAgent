@@ -204,6 +204,61 @@ fn none_keeps_out_every_untracked_path_but_the_engine_folders() {
     assert!(plan.writes.is_empty());
 }
 
+/// A project made before the projects home keeps the engine's worktrees and context in the
+/// project folder itself: None never keeps those out, the picker never offers them, and
+/// Read-write never opens a top-level `context` folder for writing in any layout.
+#[cfg(unix)]
+#[test]
+fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_writes() {
+    let (_temp, root) = project();
+    std::fs::remove_dir_all(root.join(".crazyagent")).unwrap();
+    let own = root.join("worktrees").join("agent-1");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("work.txt"), "work\n").unwrap();
+    std::fs::create_dir_all(root.join("context")).unwrap();
+    std::fs::write(root.join("context").join("facts.md"), "facts\n").unwrap();
+    let none = SharedFolders {
+        scope: SharedScope::None,
+        ..SharedFolders::default()
+    };
+    let kept = plan(&root, &none).unwrap();
+    assert!(kept.kept_out.contains(&root.join("program")), "{kept:?}");
+    assert!(
+        kept.kept_out
+            .iter()
+            .all(|path| !path.starts_with(root.join("worktrees"))
+                && !path.starts_with(root.join("context"))),
+        "{kept:?}"
+    );
+    let offered = local_folders(&root);
+    assert!(offered.contains(&"program".to_owned()), "{offered:?}");
+    assert!(
+        !offered.contains(&"worktrees".to_owned()) && !offered.contains(&"context".to_owned()),
+        "{offered:?}"
+    );
+    let write = SharedFolders {
+        access: SharedAccess::ReadWrite,
+        ..SharedFolders::default()
+    };
+    let opened = plan(&root, &write).unwrap();
+    assert!(opened.writes.contains(&root.join("program")), "{opened:?}");
+    assert!(
+        !opened.writes.contains(&root.join("context"))
+            && !opened.writes.contains(&root.join("worktrees")),
+        "{opened:?}"
+    );
+
+    let (_temp, modern) = project();
+    std::fs::create_dir_all(modern.join("context")).unwrap();
+    std::fs::write(modern.join("context").join("notes.md"), "mine\n").unwrap();
+    let opened = plan(&modern, &write).unwrap();
+    assert!(
+        !opened.writes.contains(&modern.join("context")),
+        "a user's context folder stays readable but never writable: {opened:?}"
+    );
+    assert!(local_folders(&modern).contains(&"context".to_owned()));
+}
+
 /// Chosen folders keeps out only the untracked paths under folders the owner did not pick.
 #[cfg(unix)]
 #[test]
