@@ -44,6 +44,7 @@ pub use transport::recovery::{
     RecoveryBanner, RunShown,
 };
 pub use transport::roadmap::ROADMAP_CODES;
+pub use transport::app_plugins::{APP_PLUGINS_CODES, SearchSaved};
 pub use transport::scorecard::{SCORECARD_CODES, Saved as ScorecardSaved};
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::tracker::{

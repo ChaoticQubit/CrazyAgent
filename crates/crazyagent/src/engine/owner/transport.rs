@@ -42,6 +42,7 @@ use tokio::time::Instant;
 
 mod account_profile;
 pub(crate) mod accounts;
+pub(crate) mod app_plugins;
 pub(crate) mod agents;
 pub(crate) mod changes;
 pub(crate) mod checks;
@@ -2215,6 +2216,7 @@ enum Protocol {
     Checks,
     Tracker,
     Scorecard,
+    AppPlugins,
     Roadmap,
     NativeAuth,
     Process,
@@ -2254,6 +2256,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("checks", Protocol::Checks),
         ("tracker", Protocol::Tracker),
         ("scorecard", Protocol::Scorecard),
+        ("app_plugins", Protocol::AppPlugins),
         ("roadmap", Protocol::Roadmap),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
@@ -2334,6 +2337,7 @@ async fn serve_admitted(
             Protocol::Tracker => return Ok(Some(Deferred::Tracker(a))),
             Protocol::HarnessSettings => return Ok(Some(Deferred::HarnessSettings(a))),
             Protocol::Scorecard => return Ok(Some(Deferred::Scorecard(a))),
+            Protocol::AppPlugins => return Ok(Some(Deferred::AppPlugins(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
@@ -2533,6 +2537,10 @@ async fn serve_admitted(
             let served = scorecard::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(scorecard::SCORECARD_TIMEOUT, served).await;
         }
+        Deferred::AppPlugins(a) => {
+            let served = app_plugins::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(app_plugins::APP_PLUGINS_TIMEOUT, served).await;
+        }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
@@ -2616,7 +2624,8 @@ struct Tasks {
 /// write lock and rewrite a project's questions page, Checks requests, which wait for the
 /// same lock and start check runners, Tracker requests, which wait for the same lock and
 /// rewrite a project's ticket view, Scorecard requests, which read the engine records
-/// behind the go/no-go numbers, Cleanup requests, which size and
+/// behind the go/no-go numbers, App plugins requests, which read and write plugin files,
+/// keys and the local model download, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
 /// Usage requests, which read and write the usage store, harness version, settings, update and
@@ -2640,6 +2649,7 @@ enum Deferred {
     Checks(Admission),
     Tracker(Admission),
     Scorecard(Admission),
+    AppPlugins(Admission),
     Roadmap(Admission),
     Cleanup(Admission),
     Overview(Admission),
@@ -2694,6 +2704,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Checks => checks::refusal(code)?,
         Protocol::Tracker => tracker::refusal(code)?,
         Protocol::Scorecard => scorecard::refusal(code)?,
+        Protocol::AppPlugins => app_plugins::refusal(code)?,
         Protocol::Roadmap => roadmap::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
