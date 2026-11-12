@@ -1,0 +1,127 @@
+use super::*;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// The host a test probe hands out, none until the test installs tmux, and how many times
+/// the runtime asked for it.
+#[derive(Clone, Default)]
+struct Found {
+    host: Arc<Mutex<Option<Arc<dyn Host>>>>,
+    asked: Arc<AtomicUsize>,
+}
+
+impl Found {
+    fn probe(&self) -> TerminalProbe {
+        let found = self.clone();
+        Box::new(move || {
+            found.asked.fetch_add(1, Ordering::SeqCst);
+            found.host.lock().unwrap().clone()
+        })
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+}
+
+/// Opens a team runtime as an engine that started before tmux was installed: no terminal
+/// host, the stand-in Codex given, and the probe when one is given.
+/// Inputs: the fixture, the stand-in script and the probe. Output: the runtime.
+fn without_tmux(fixture: &Fixture, script: &str, probe: Option<TerminalProbe>) -> TeamRuntime {
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, script).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    match probe {
+        Some(probe) => runtime.with_terminal_probe(probe),
+        None => runtime,
+    }
+}
+
+fn says_tmux_is_missing(fixture: &Fixture) -> bool {
+    let status = fixture.status();
+    !super::super::super::master::live(&fixture.connection, &fixture.setup.project_id).unwrap()
+        && status.live_master == Some(false)
+        && status.live_problem.as_deref() == Some(super::super::super::master::TERMINAL_MISSING)
+}
+
+/// On a fresh Mac the engine starts before tmux is installed. A live master switched on
+/// there never waits in silence: the switch turns off with the one line that says tmux is
+/// missing and how to install it, in the master's problem line and one team note, and no
+/// master row starts. The owner's Try again turns the switch on again, finds tmux still
+/// missing and turns it off with the same line, writing no second note.
+#[test]
+fn a_live_master_with_no_tmux_turns_off_and_says_tmux_is_missing_once() {
+    let fixture = Fixture::new(1);
+    let mut team = without_tmux(&fixture, RESUMING_CODEX, None);
+    let project = fixture.setup.project_id.clone();
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(
+        &mut team,
+        "the switch says tmux is missing",
+        says_tmux_is_missing,
+    );
+    idle_ticks(&mut team);
+    assert!(masters(&fixture.connection).is_empty(), "no master starts");
+    assert_eq!(
+        noted(&fixture, super::super::super::master::TERMINAL_MISSING),
+        1
+    );
+
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "Try again says it again", says_tmux_is_missing);
+    idle_ticks(&mut team);
+    assert!(masters(&fixture.connection).is_empty());
+    assert_eq!(
+        noted(&fixture, super::super::super::master::TERMINAL_MISSING),
+        1,
+        "the same reason is noted once"
+    );
+    team.shutdown().unwrap();
+}
+
+/// tmux installed after the engine started is found without an engine restart: the runtime
+/// looks for a terminal host again at each live master start, never while the switch is off,
+/// and Try again then starts the live master in its terminal and clears the tmux line.
+#[test]
+fn a_live_master_starts_once_tmux_is_installed_with_no_engine_restart() {
+    let fixture = Fixture::new(1);
+    let found = Found::default();
+    let mut team = without_tmux(&fixture, RESUMING_CODEX, Some(found.probe()));
+    let project = fixture.setup.project_id.clone();
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "no tmux yet", says_tmux_is_missing);
+    let asked = found.asked();
+    assert!(asked >= 1, "the start looked for tmux");
+    idle_ticks(&mut team);
+    assert_eq!(
+        found.asked(),
+        asked,
+        "nothing looks while the switch is off"
+    );
+
+    let host = fixture.host();
+    *found.host.lock().unwrap() = Some(host.clone());
+    super::super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs in its terminal", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(host.alive().unwrap(), names(&[master]));
+    fixture.until(&mut team, "the tmux line is gone", |f| {
+        f.status().live_problem.is_none()
+    });
+    assert!(super::super::super::master::live(&fixture.connection, &project).unwrap());
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
