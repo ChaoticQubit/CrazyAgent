@@ -499,10 +499,11 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
     assert_eq!(resolve("tmux", &places).unwrap().program, own);
 }
 
-/// R-M1: a PATH or probed folder in a temp folder, which agents with the temp folder grant
-/// and other users write, is refused.
+/// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
+/// that sits in a temp folder, which agents with the temp folder grant and other users
+/// write, is refused. Probed folders pass the probes' own rule instead (`probe::kept`).
 #[test]
-fn a_path_or_probed_folder_in_a_temp_folder_is_refused() {
+fn a_path_folder_in_a_temp_folder_is_refused() {
     let (_folder, home) = scratch();
     let owner_temp = std::env::temp_dir().join("tools-planted/bin");
     let shared = PathBuf::from("/private/tmp/tools-planted/bin");
@@ -518,7 +519,4 @@ fn a_path_or_probed_folder_in_a_temp_folder_is_refused() {
         "{:?}",
         engine.folders()
     );
-    let probed = engine.with_probed(vec![owner_temp.clone(), shared.clone()]);
-    assert!(!probed.folders().contains(&owner_temp));
-    assert!(!probed.folders().contains(&shared));
 }

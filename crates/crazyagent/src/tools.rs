@@ -170,19 +170,16 @@ impl Places {
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
     /// global prefix and the login shell's PATH, after every folder known without running a
-    /// program and before the system folders; folders in a temp folder and folders agents
-    /// can write are dropped. Input: the probed folders. Output: the places.
+    /// program and before the system folders; folders agents can write are dropped. The
+    /// probes keep only folders [`probe::kept`] passes, which also drops shared temp folders
+    /// others can change. Input: the probed folders. Output: the places.
     pub fn with_probed(self, probed: Vec<PathBuf>) -> Self {
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
             .folders
             .into_iter()
             .partition(|folder| system.contains(folder));
-        folders.extend(
-            probed
-                .into_iter()
-                .filter(|folder| !system.contains(folder) && !in_temp(folder)),
-        );
+        folders.extend(probed.into_iter().filter(|folder| !system.contains(folder)));
         folders.extend(last);
         Self::kept(folders, self.home, self.engine_roots)
     }
