@@ -166,6 +166,7 @@ fn a_real_tools_off_claude_run_stops_every_request_at_its_output_cap_and_ends_on
         account: &account,
         wall_time: Duration::from_secs(300),
         output_tokens: Some(CUT_TOKENS),
+        stream: false,
     };
     let profile = signed_in.acquire(&format!("research-{name}"));
     let started = Instant::now();

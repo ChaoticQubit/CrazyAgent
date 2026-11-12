@@ -90,14 +90,12 @@ const PANE_PREFIX: &str = "research-";
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
 /// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
-const CLAUDE_ARGUMENTS: [&str; 6] = [
-    "--print",
-    "--output-format",
-    "text",
-    "--strict-mcp-config",
-    "--setting-sources",
-    "",
-];
+const CLAUDE_ARGUMENTS: [&str; 4] = ["--print", "--strict-mcp-config", "--setting-sources", ""];
+/// The output a Claude Code run writes by default: the answer as plain text.
+const CLAUDE_TEXT: [&str; 2] = ["--output-format", "text"];
+/// The output a streamed Claude Code run writes: stream-json, which Claude Code's print mode
+/// writes only with its verbose events, carrying the harness's own error fields (MG-M1).
+const CLAUDE_STREAM: [&str; 3] = ["--output-format", "stream-json", "--verbose"];
 /// The `--settings` every research Claude Code gets; a keyed run adds its `apiKeyHelper`.
 const CLAUDE_SETTINGS: &str = "{\"disableAllHooks\":true}";
 
@@ -1113,7 +1111,7 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, false, account)?;
                 launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
@@ -1515,9 +1513,10 @@ impl ResearchRunner {
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
-/// as, `prompt` goes to it on stdin, `wall_time` bounds it and
+/// as, `prompt` goes to it on stdin, `wall_time` bounds it,
 /// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
-/// limit; a Codex run has no such cap).
+/// limit; a Codex run has no such cap) and `stream` has Claude Code write
+/// stream-json, its answer read from the result line (`claude_result`).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
     #[cfg(unix)]
@@ -1532,6 +1531,8 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub wall_time: Duration,
     #[cfg(unix)]
     pub output_tokens: Option<u32>,
+    #[cfg(unix)]
+    pub stream: bool,
 }
 
 /// How a read-only agent run ended: its last message, a plain failure, out
@@ -1712,7 +1713,15 @@ impl ResearchRunner {
                 (output, read_only_stdout(harness))
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.output_tokens, account)?;
+                claude_arguments(
+                    &mut command,
+                    &home,
+                    &tmp,
+                    false,
+                    run.output_tokens,
+                    run.stream,
+                    account,
+                )?;
                 (
                     agent.join(read_only_stdout(harness)),
                     read_only_stdout(harness),
@@ -1800,7 +1809,10 @@ impl ResearchRunner {
             return Ok(ending);
         }
         let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
-            .map(|text| text.trim().to_owned())
+            .map(|text| match (run.stream, harness) {
+                (true, ResearchHarness::ClaudeCode) => claude_result(&text).unwrap_or_default(),
+                _ => text.trim().to_owned(),
+            })
             .unwrap_or_default();
         Ok(if answer.is_empty() {
             ReadOnlyEnding::Failed("Agent returned no answer".into())
@@ -2233,14 +2245,16 @@ fn codex_arguments(
 /// either a managed config directory or a keyless Anthropic endpoint in bare
 /// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of each request (`None` for Claude Code's own limit) and the
-/// account. Returns an error for an account that does not fit Claude Code.
+/// output tokens of each request (`None` for Claude Code's own limit), whether it
+/// writes stream-json (`CLAUDE_STREAM`) and the account. Returns an error for an
+/// account that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
     tmp: &Path,
     tools: bool,
     output_tokens: Option<u32>,
+    stream: bool,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
     let key_file = match account {
@@ -2262,6 +2276,11 @@ fn claude_arguments(
     };
     command
         .args(CLAUDE_ARGUMENTS)
+        .args(if stream {
+            &CLAUDE_STREAM[..]
+        } else {
+            &CLAUDE_TEXT[..]
+        })
         .arg("--settings")
         .arg(settings)
         .env("CLAUDE_CONFIG_DIR", home)
@@ -3360,6 +3379,23 @@ pub(crate) fn private_directory(path: &Path) -> io::Result<()> {
 /// gives its inner message. Takes the agent's stdout log, its harness and
 /// the log bound; the log is read bounded and never through a link.
 #[cfg(unix)]
+/// Reads a streamed Claude Code run's answer (MG-M1): the text of its last result line when
+/// that result is a success the harness did not mark an error, trimmed. Input: the run's
+/// stream-json output. Output: the answer, or none for an error, no result line or no text.
+#[cfg(unix)]
+fn claude_result(output: &str) -> Option<String> {
+    let last = output
+        .lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "result")?;
+    if last["subtype"] != "success" || last["is_error"] != false {
+        return None;
+    }
+    let answer = last["result"].as_str()?.trim();
+    (!answer.is_empty()).then(|| answer.to_owned())
+}
+
 fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     const GENERIC: &str = "Agent stopped with an error";
     if harness != ResearchHarness::Codex {
@@ -4169,6 +4205,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         assert!(matches!(
             runner.run_read_only(&run, &|| false),
@@ -4248,6 +4285,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         let _ = runner.run_read_only(&run, &|| false);
         let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-1.sb"))
@@ -4323,6 +4361,7 @@ mod tests {
             account: &account,
             wall_time: Duration::from_secs(5),
             output_tokens: None,
+            stream: false,
         };
         let _ = runner.run_read_only(&run, &|| false);
         let profile = fs::read_to_string(root.state.join("profiles").join("overview-alpha-2.sb"))
@@ -5660,6 +5699,7 @@ mod tests {
                 Path::new("/agent/tmp"),
                 tools,
                 output_tokens,
+                false,
                 &account,
             )
             .unwrap();

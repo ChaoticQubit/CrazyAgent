@@ -65,32 +65,43 @@ pub fn provider(harness: &str) -> &'static str {
     }
 }
 
-/// Tells whether a failed test run's standard output carries the provider's refusal code
-/// for the harness (DEC-150 F8) as a whole word. Inputs: the supported harness and the
-/// output, at most the runner's output bound. Output: true when the code is there.
+/// Tells whether a test run's stream carries the provider's refusal in an error field the
+/// harness writes itself (DEC-150 F8, MG-M1, Q-6): a Claude Code stream-json assistant line
+/// whose `error` is `model_not_found`, or a Codex `exec --json` error whose provider body
+/// code is `model_not_found` or whose `codexErrorInfo` is `modelNotFound`; the model's own
+/// text never counts. Inputs: the supported harness and the output. Output: the answer.
 pub fn refused(harness: &str, output: &str) -> bool {
-    use crate::harnesses::launch::{
-        CLAUDE_MODEL_REFUSED, CODEX_MODEL_REFUSED, CODEX_SERVER_MODEL_REFUSED,
-    };
+    use crate::harnesses::launch::CLAUDE_MODEL_REFUSED;
     assert!(supported(harness));
-    let codes: &[&str] = match harness {
-        "claude-code" => &[CLAUDE_MODEL_REFUSED],
-        _ => &[CODEX_MODEL_REFUSED, CODEX_SERVER_MODEL_REFUSED],
-    };
-    codes.iter().any(|code| word(output, code))
+    output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|event| match harness {
+            "claude-code" => event["type"] == "assistant" && event["error"] == CLAUDE_MODEL_REFUSED,
+            _ => codex_refusal(&event),
+        })
 }
 
-/// Tells whether a text holds a code as a whole word: no letter, digit or underscore on
-/// either side of it. Inputs: the text and the non-empty code. Output: true when it does.
-fn word(text: &str, code: &str) -> bool {
-    assert!(!code.is_empty());
-    let joins = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
-    let bytes = text.as_bytes();
-    text.match_indices(code).any(|(at, _)| {
-        let end = at + code.len();
-        assert!(end <= bytes.len());
-        !(at > 0 && joins(bytes[at - 1])) && !(end < bytes.len() && joins(bytes[end]))
-    })
+/// Tells whether one Codex `exec --json` event is the provider's refusal of the model: an
+/// `error` or `turn.failed` whose message is a provider body with code `model_not_found`,
+/// or a `turn.failed` whose `codexErrorInfo` is `modelNotFound`. Input: the event. Output:
+/// the answer.
+fn codex_refusal(event: &serde_json::Value) -> bool {
+    use crate::harnesses::launch::{CODEX_MODEL_REFUSED, CODEX_SERVER_MODEL_REFUSED};
+    let body = |message: &serde_json::Value| {
+        message
+            .as_str()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+            .is_some_and(|body| body["error"]["code"] == CODEX_MODEL_REFUSED)
+    };
+    match event["type"].as_str() {
+        Some("error") => body(&event["message"]),
+        Some("turn.failed") => {
+            event["error"]["codexErrorInfo"] == CODEX_SERVER_MODEL_REFUSED
+                || body(&event["error"]["message"])
+        }
+        _ => false,
+    }
 }
 
 /// Decides a test launch from how its run ended and, for a failed run, its output.
@@ -275,6 +286,7 @@ mod run {
             account: &account,
             wall_time: WALL_TIME,
             output_tokens: Some(OUTPUT_TOKENS),
+            stream: true,
         };
         let ended = match runner.run_read_only(&run, &|| false) {
             Ok(ReadOnlyEnding::Answered(_)) => Ended::Answered,

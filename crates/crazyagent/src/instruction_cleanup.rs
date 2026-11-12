@@ -396,6 +396,7 @@ mod run {
                 account: &account,
                 wall_time: left,
                 output_tokens: Some(OUTPUT_TOKENS_MAX),
+                stream: false,
             };
             match runner.run_read_only(&run, &|| false) {
                 Ok(ReadOnlyEnding::Answered(text)) => return Ok(text),

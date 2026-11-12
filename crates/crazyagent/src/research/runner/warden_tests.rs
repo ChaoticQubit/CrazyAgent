@@ -94,6 +94,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
             account: &account,
             wall_time: Duration::from_secs(60),
             output_tokens: None,
+            stream: false,
         },
         stop,
     )
@@ -271,6 +272,7 @@ fn an_untrusted_onboarding_run_hides_the_repository_agent_files_and_project_docs
             account: &account,
             wall_time: Duration::from_secs(60),
             output_tokens: None,
+            stream: false,
         };
         match runner.run_read_only(&run, &|| false).unwrap() {
             ReadOnlyEnding::Answered(text) => text,
