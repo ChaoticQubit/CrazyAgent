@@ -1615,7 +1615,8 @@ mod tests {
     }
 
     /// DEC-154: the shell reads the stored extras at most once a minute from its 5 s tick,
-    /// never the detail rows, and says a new free reset once, naming the account.
+    /// never the detail rows, and says a new free reset once, naming the account. Profile
+    /// reads no accounts of its own, so every account read counted here is the watch's.
     #[test]
     fn the_shell_reads_the_stored_extras_once_a_minute_and_says_a_new_free_reset_once() {
         let mut ctx = ctx();
@@ -1626,7 +1627,7 @@ mod tests {
             status: "Ready".into(),
             no_window: None,
         }]);
-        let mut shell = at(Place::Home, ctx);
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
         drain(&mut shell);
         shell.tick();
         assert_eq!(
@@ -1671,7 +1672,7 @@ mod tests {
     /// account with no name yet is said as "An account", never by its id.
     #[test]
     fn the_reset_watch_asks_for_the_account_names_once_and_never_shows_an_id() {
-        let mut shell = at(Place::Home, ctx());
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx());
         drain(&mut shell);
         shell.tick();
         assert_eq!(watch_asks(&mut shell), (1, 1));
@@ -1687,7 +1688,7 @@ mod tests {
     fn the_reset_watch_waits_for_the_engine() {
         let mut ctx = ctx();
         ctx.link = Link::Connecting;
-        let mut shell = at(Place::Home, ctx);
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
         drain(&mut shell);
         shell.tick();
         assert_eq!(watch_asks(&mut shell), (0, 0));

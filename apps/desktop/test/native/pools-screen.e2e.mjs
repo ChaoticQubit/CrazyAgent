@@ -93,7 +93,7 @@ function seedResets(name, count) {
   const store = new DatabaseSync(join(dirname(process.env.CRAZYAGENT_DESKTOP_SOCKET), "engine.db"));
   try {
     store.exec("PRAGMA busy_timeout = 5000");
-    store.prepare("INSERT INTO account_limit_extras (account,resets_count,reset_kinds,resets_expire_ms,resets_checked_ms,resets_gained_ms) VALUES (?,?,'weekly',?,?,?)")
+    store.prepare("INSERT OR REPLACE INTO account_limit_extras (account,resets_count,reset_kinds,resets_expire_ms,resets_checked_ms,resets_gained_ms) VALUES (?,?,'weekly',?,?,?)")
       .run(ids[name], count, now + 3 * 86_400_000, now, now);
   } finally {
     store.close();

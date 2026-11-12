@@ -10,6 +10,7 @@ let root = null;
 const asked = [];
 const toasts = [];
 const realTimeout = window.setTimeout.bind(window);
+const T0 = Date.now();
 
 window.setTimeout = (work, ms, ...rest) => {
   if (ms !== RESET_WATCH_MS) return realTimeout(work, ms, ...rest);
@@ -27,8 +28,9 @@ window.__TAURI_INTERNALS__ = {
   transformCallback: () => 0,
 };
 
-/** One stored extras row as the engine answers it. Inputs: the account, its count and how
- * long ago it rose, null for never. Output: the row. */
+/** One stored extras row as the engine answers it, its gain stamp fixed against the page's
+ * start so the same row reads the same stamp on every look. Inputs: the account, its count and
+ * how long before the start it rose, null for never. Output: the row. */
 function row([account, count, agoMs]) {
   return {
     account,
@@ -40,9 +42,9 @@ function row([account, count, agoMs]) {
       credits: null,
       spend: { kind: "in_app" },
       not_reported: "not reported by Codex",
-      resets_checked_ms: Date.now(),
+      resets_checked_ms: T0,
       credits_checked_ms: null,
-      resets_gained_ms: agoMs === null ? null : Date.now() - agoMs,
+      resets_gained_ms: agoMs === null ? null : T0 - agoMs,
     },
   };
 }
