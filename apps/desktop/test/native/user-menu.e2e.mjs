@@ -135,3 +135,36 @@ test("the name opens the user menu; each item opens its dialog over the page and
     }
   });
 });
+
+test("a deep link from a project section opens its dialog and puts that exact address back, section included", { timeout: 300000 }, async () => {
+  const folder = join(run.root, "projects");
+  mkdirSync(folder, { mode: 0o700 });
+  assert.equal((await value(run.bridge, "desktop_set_projects_home", { path: folder, generation: 2 })).outcome, "applied");
+  const receipt = await value(run.bridge, "desktop_setup_project", {
+    spec: { name: "Menu Page", repositories: [] },
+    setup: { about: "A page under the user menu", tech_stack: [], platforms: ["website"], research: [], pool: "local-pool", team: null, documents: [] },
+    generation: 3,
+  });
+  assert.equal(receipt.outcome, "applied", `the project is made: ${JSON.stringify(receipt)}`);
+  const section = `#/projects/${encodeURIComponent(receipt.project_id)}/settings?section=remove`;
+  await withPage(async ({ evaluate, send }) => {
+    const me = owner({ evaluate, send }, run.evidence);
+    try {
+      await send("Page.enable");
+      await send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
+      await send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+      await send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/${section}` });
+      await me.waitFor("the project's Remove section", (text) => text.includes("Remove project"));
+      await send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/settings/profile` });
+      await until(evaluate, "the Profile dialog over the section", (now) => now.dialogs.join() === "Profile" && now.hash === section);
+      await me.capture("user-menu-over-section");
+      await escape(send);
+      await until(evaluate, "the dialog closed on the same section", (now) => now.dialogs.length === 0 && now.hash === section);
+      await me.waitFor("the Remove section still shown", (text) => text.includes("Remove project"));
+      assert.deepEqual(await evaluate("window.__e2eErrors"), [], "the page raised no errors");
+    } catch (failure) {
+      await me.capture("user-menu-section-failure").catch(() => {});
+      throw failure;
+    }
+  });
+});

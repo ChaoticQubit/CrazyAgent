@@ -81,12 +81,12 @@ test("with the engine running and a profile saved, a deep link to Updates opens 
 
 for (const [tab, title] of [["profile", "Profile"], ["updates", "Updates"], ["github", "GitHub"], ["home", "Projects folder"]]) {
   test(`a deep link to ${title} opens its dialog over the page the owner was on, not the Settings page`, () => {
-    const markup = render({}, { name: "settings", tab }, { name: "metrics" });
+    const markup = render({}, { name: "settings", tab }, { name: "settings", tab: "pools" });
     assert.match(markup, /class="sidebar"/);
     assert.match(markup, new RegExp(`<dialog class="dialog wide"[^>]*><div class="dialog-head"><h2 id="[^"]+">${title}</h2>`));
     assert.match(markup, /class="user-dialog"/);
-    assert.match(markup, /href="#\/metrics" aria-current="page"/);
-    assert.doesNotMatch(markup, /<h1>Settings<\/h1>|settings-nav/);
+    assert.match(markup, /class="settings-nav-item" href="#\/settings\/pools" aria-current="page"/, "the page under stays Settings, Pools");
+    assert.doesNotMatch(markup, new RegExp(`href="#/settings/${tab}"`), "the Settings list does not name it");
   });
 }
 

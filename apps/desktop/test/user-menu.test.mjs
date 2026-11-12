@@ -20,7 +20,7 @@ for (const [title, on] of DIALOGS) {
         await readable(page, [".dialog-head h2", ".user-dialog .settings-top p"]);
         return page.evaluate("Fixture.dialogFrame()");
       }, theme);
-      assert.deepEqual(seen, { title, headingHidden: true, fits: true, sideways: false, open: 1 });
+      assert.deepEqual(seen, { title, headingHidden: true, gap: "16px", fits: true, sideways: false, open: 1 });
     });
   }
 }
