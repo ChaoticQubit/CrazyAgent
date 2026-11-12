@@ -412,3 +412,34 @@ fn a_model_refusal_holds_for_its_project_connection_and_model_until_it_expires()
     assert!(refused(&db, &project(), &a, &last, 3_000).unwrap());
     assert!(!refused(&db, &project(), &a, "m-0", 3_000).unwrap());
 }
+
+#[test]
+fn the_master_is_told_each_harness_s_models_as_the_pick_rule_offers_them() {
+    use crate::model_choice::rules::{self, PickRule, Rule, RuleWritten};
+    let (_tmp, db) = engine();
+    owner_models(&db, &["gpt-a", "gpt-b"], &["gpt-a"], Some("gpt-b"));
+    let lines = || master_lines(&db, &project(), &["codex", "rcli", "codex"]).unwrap();
+    assert_eq!(
+        lines(),
+        format!("{MODELS_HEAD}\n- codex: gpt-a; leave model out for the default, gpt-b\n")
+    );
+    let rule = |pick: PickRule| {
+        let version = rules::rules(&db).unwrap().pick_version;
+        let written = rules::set_rule(&db, Rule::Pick(pick), version).unwrap();
+        assert!(matches!(written, RuleWritten::Saved { .. }), "{written:?}");
+    };
+    rule(PickRule::Hint);
+    let catalog = crate::model_choice::catalog("codex").join(", ");
+    assert_eq!(
+        lines(),
+        format!(
+            "{MODELS_HEAD}\n- codex: {catalog}, gpt-a, gpt-b; leave model out for the default, gpt-b\n"
+        )
+    );
+    rule(PickRule::Default);
+    assert_eq!(
+        lines(),
+        format!("{MODELS_HEAD}\n- codex: leave model out; tasks run the default, gpt-b\n")
+    );
+    assert_eq!(master_lines(&db, &project(), &["rcli"]).unwrap(), "");
+}
