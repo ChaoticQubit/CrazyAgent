@@ -24,6 +24,8 @@ use serde_json::{Map, Value};
 mod tests;
 
 const DAYS_CHARS_MAX: usize = 2;
+const _: () = assert!(trackwright_core::tests_model::RUNS_RETAINED_PER_PROJECT_MAX == 100_000);
+const _: () = assert!(trackwright_core::tests_model::RUN_RETAINED_DAYS_MAX == 90);
 const LABEL_CELLS: usize = 22;
 const NAME_CELLS: usize = 20;
 
@@ -654,6 +656,11 @@ fn label(key: &str) -> String {
         "import" => "Roadmap import",
         "manual_evidence" => "Manual checks",
         "ci_evidence" => "CI checks",
+        "test_evidence" => "Test evidence",
+        "skipped_counts" => "Skipped tests",
+        "case_protected_visibility" => "Protected tests",
+        "run_writers" => "Test run writers",
+        "run_retention" => "Old test runs",
         other => other,
     }
     .to_owned()
@@ -715,6 +722,43 @@ fn option_text(key: &str, value: &Value) -> (String, String) {
         ),
         ("ci_evidence", "owner") => ("Owner", "Only you record CI evidence."),
         ("ci_evidence", "agents") => ("Agents too", "Agents may record CI evidence."),
+        ("test_evidence", "latest") => (
+            "Latest result",
+            "A linked test counts once its latest result in any finished run passed.",
+        ),
+        ("test_evidence", "current_source") => (
+            "Current source",
+            "A linked test counts once it passed on the ticket's current source.",
+        ),
+        ("test_evidence", "plan") => (
+            "Plan",
+            "A linked test counts once it passed inside the ticket's active plan.",
+        ),
+        ("skipped_counts", "fail") => ("Not met", "A skipped linked test leaves its check unmet."),
+        ("skipped_counts", "neutral") => (
+            "Neutral",
+            "A skipped linked test neither meets nor fails its check.",
+        ),
+        ("case_protected_visibility", "hidden") => (
+            "Hidden",
+            "Agents see only a protected test's id, title and latest outcome.",
+        ),
+        ("case_protected_visibility", "summary") => (
+            "Summary",
+            "Agents also see a protected test's step headings.",
+        ),
+        ("case_protected_visibility", "full") => ("Full", "Agents see a protected test whole."),
+        ("run_writers", "any") => ("Anyone", "Any actor may record test runs."),
+        ("run_writers", "engine_only") => (
+            "Engine only",
+            "Only CrazyAgent's own check runs are recorded.",
+        ),
+        ("run_retention", "keep_all") => ("Keep all", "Every test run is kept."),
+        ("run_retention", "prune_count") => (
+            "Past 100,000",
+            "Unlinked runs past 100,000 in a project go, oldest first.",
+        ),
+        ("run_retention", "prune_age") => ("After 90 days", "Unlinked runs older than 90 days go."),
         _ => return (value.to_string(), String::new()),
     };
     (name.to_owned(), meaning.to_owned())

@@ -1809,6 +1809,10 @@ fn the_scorecard_opens_from_usage_with_the_desktop_words() {
     engine.stop();
 }
 
+/// The most PgDn presses a harness page takes to reach its locked settings: a page of up to
+/// 160 rows at 10 rows a press.
+const HARNESS_PAGES_MAX: usize = 16;
+
 /// The harness row the Settings, Harnesses list marks, if any. Input: the screen. Output: the
 /// marked row's text after its marker.
 fn marked_row(screen: &str) -> Option<&str> {
@@ -1856,11 +1860,26 @@ fn a_harness_settings_page_opens_from_settings_harnesses_with_the_desktop_words(
     for words in [
         "What every master and agent using this harness starts with, in every project.",
         "Running ones keep their settings.",
-        "Set by CrazyAgent (",
+        "Settings (",
         "Esc All harnesses",
     ] {
         assert!(screen.contains(words), "{words}:\n{screen}");
     }
+    let mut locked = screen.contains("Set by CrazyAgent (");
+    for _ in 0..HARNESS_PAGES_MAX {
+        if locked {
+            break;
+        }
+        let before = pty.screen();
+        pty.keys(&["PageDown"]);
+        let now = pty.until("PgDn moves down the settings", |now| now != before);
+        locked = now.contains("Set by CrazyAgent (");
+    }
+    assert!(
+        locked,
+        "PgDn reaches the Set by CrazyAgent group:\n{}",
+        pty.screen()
+    );
     assert!(
         screen.contains("is qualified. You can change the settings below.")
             || screen.contains("so every setting is read-only"),
