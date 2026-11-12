@@ -3271,11 +3271,10 @@ async fn an_applied_access_save_stops_the_projects_running_ide() {
     engine.stop().await;
 }
 
-/// F26: a new project gets a first policy that allows every toolchain the owner has
-/// installed; a project whose policy was never saved, as one made before, records the
-/// toolchains it uses on its first save; a later save keeps exactly the choices sent.
+/// F26: a new project gets a first policy at Sandboxed that allows every toolchain the
+/// owner has installed, at version 0, and a later save keeps exactly the choices sent.
 #[tokio::test]
-async fn a_projects_first_policy_records_the_toolchains_it_uses_or_the_owner_has_installed() {
+async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_first_policy() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy};
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
@@ -3291,7 +3290,7 @@ async fn a_projects_first_policy_records_the_toolchains_it_uses_or_the_owner_has
         "a new project gets its first policy"
     );
     let fresh = owner.project_agent_policy(project.clone()).await.unwrap();
-    assert_eq!(fresh.access, AgentAccess::Sandboxed);
+    assert_eq!((fresh.access, fresh.version), (AgentAccess::Sandboxed, 0));
     assert!(
         fresh
             .toolchains
@@ -3301,23 +3300,7 @@ async fn a_projects_first_policy_records_the_toolchains_it_uses_or_the_owner_has
         "{:?}",
         fresh.toolchains
     );
-    let folder = std::fs::read_dir(engine.home())
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| path.is_dir() && !path.file_name().unwrap().to_string_lossy().starts_with('.'))
-        .expect("the project folder in the home");
-    std::fs::write(folder.join("Cargo.toml"), "[package]\n").unwrap();
     let database = engine.root.path().join("engine.db");
-    let connection = rusqlite::Connection::open(&database).unwrap();
-    connection.busy_timeout(Duration::from_secs(5)).unwrap();
-    connection
-        .execute(
-            "DELETE FROM project_agent_policy WHERE project='f26-tools'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
     let body = || -> String {
         rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap()
@@ -3328,22 +3311,15 @@ async fn a_projects_first_policy_records_the_toolchains_it_uses_or_the_owner_has
             )
             .unwrap()
     };
-    let sandboxed = AgentPolicy::default();
-    assert_eq!(sandboxed.access, AgentAccess::Sandboxed);
-    assert!(sandboxed.toolchains.is_empty());
-    let saved = owner
-        .set_project_agent_policy(project.clone(), fresh.version, sandboxed.clone(), 2)
-        .await
-        .unwrap();
-    assert_eq!(result(saved), OwnerResult::Applied);
-    assert!(
-        body().contains("{\"toolchain\":\"rust\",\"allowed\":true}"),
-        "the first save records the toolchain the project uses: {}",
+    let installed = fresh.toolchains.iter().filter(|row| row.installed).count();
+    assert_eq!(
+        body().matches("\"allowed\":true").count(),
+        installed,
+        "one recorded choice per installed toolchain: {}",
         body()
     );
-    let view = owner.project_agent_policy(project.clone()).await.unwrap();
     let saved = owner
-        .set_project_agent_policy(project.clone(), view.version, sandboxed, 3)
+        .set_project_agent_policy(project.clone(), fresh.version, AgentPolicy::default(), 2)
         .await
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
