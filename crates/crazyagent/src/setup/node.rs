@@ -151,17 +151,30 @@ pub fn runtime(engine_root: &Path) -> Option<NodeRuntime> {
     (own_file && inside && prefix_ready).then_some(NodeRuntime { node, npm, prefix })
 }
 
-/// Finds a usable Node on the resolver's places. Input: the places. Output: the Node, or
-/// none when node or npm is missing.
+/// The one test of whether this machine has Node, used by the setup row, the setup run and
+/// npm harness installs alike: the tool resolver finds `node`, and finds `npm` with the
+/// interpreter its first line names. The engine's own Node is found the same way, through
+/// its links in `setup/bin`. Nothing is run. Input: the places. Output: the Node, or none
+/// when node or npm is missing or unusable.
 pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
-    let _ = places;
-    None
+    let node = crate::tools::resolve("node", places).ok()?;
+    let npm = crate::tools::resolve("npm", places).ok()?;
+    assert!(node.entry.is_absolute() && npm.entry.is_absolute());
+    Some(Usable {
+        node: node.entry,
+        npm: npm.entry,
+    })
 }
 
-/// Makes the engine npm prefix. Input: the prefix folder. Output: Ok, or the setup code.
+/// Makes the engine npm prefix private and ready for `npm install -g`: the prefix with its
+/// `bin` and `lib/node_modules` folders, each this user's alone, kept as they are when
+/// already so. Input: the prefix folder. Output: Ok, or `setup_store_unavailable`.
 pub fn make_prefix(prefix: &Path) -> Result<(), InstallError> {
-    let _ = prefix;
-    Err(InstallError("setup_store_unavailable"))
+    for made in [prefix.join("bin"), prefix.join("lib").join("node_modules")] {
+        private_folder(&made)?;
+    }
+    private_folder(prefix)?;
+    private_folder(&prefix.join("lib"))
 }
 
 /// Installs this target's pinned Node into the engine root, as `install_pin` does. Input:
@@ -230,10 +243,7 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
         for name in LINKED {
             link(&folder(engine_root).join("bin").join(name), &bin.join(name))?;
         }
-        let prefix = prefix(engine_root);
-        for made in [prefix.join("bin"), prefix.join("lib").join("node_modules")] {
-            private_folder(&made)?;
-        }
+        make_prefix(&prefix(engine_root))?;
         runtime(engine_root).ok_or(InstallError("setup_install_failed"))
     })();
     let _ = std::fs::remove_dir_all(&staging);

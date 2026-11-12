@@ -130,6 +130,59 @@ impl Roots {
             npm: None,
         }
     }
+
+    /// The roots of this machine for one engine: [`Roots::system`] with the npm that npm
+    /// harnesses install with, found by setup's one Node test on the engine's resolver
+    /// places, and the engine's own prefix `<engine root>/harnesses`. Nothing is run.
+    /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
+    pub fn engine(engine_root: &Path) -> Self {
+        Self {
+            npm: engine_npm(engine_root),
+            ..Self::system()
+        }
+    }
+}
+
+/// Finds the npm an npm harness installs with for one engine: the Node setup finds and the
+/// engine prefix, named by its real path when it exists so an install found inside it
+/// matches. Input: the engine root. Output: the npm, or none with no usable Node.
+#[cfg(unix)]
+fn engine_npm(engine_root: &Path) -> Option<super::NpmInstall> {
+    let places = crate::tools::Places::from_environment(Some(engine_root));
+    let found = crate::setup::node::usable(&places)?;
+    let named = crate::setup::node::prefix(engine_root);
+    let prefix = named.canonicalize().unwrap_or(named);
+    let node_bin = found.node.parent()?.to_path_buf();
+    Some(super::NpmInstall {
+        program: found.npm,
+        search: vec![node_bin, prefix.join("bin")],
+        prefix,
+    })
+}
+
+/// Finds no npm where setup has no Node. Input: the engine root, unused. Output: none.
+#[cfg(not(unix))]
+fn engine_npm(_engine_root: &Path) -> Option<super::NpmInstall> {
+    None
+}
+
+/// Makes the engine prefix private before an npm install into it, so npm never makes it
+/// with the umask's modes. Inputs: the install command and the roots. Output: Ok, or
+/// `harness_install_failed` when the prefix can't be made private.
+#[cfg(unix)]
+fn ready_prefix(fixed: &Fixed, roots: &Roots) -> Result<(), &'static str> {
+    match (&fixed.prefix, &roots.npm) {
+        (Some(prefix), Some(engine)) if *prefix == engine.prefix => {
+            crate::setup::node::make_prefix(prefix).map_err(|_| INSTALL_FAILED)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Makes nothing where npm installs never run. Inputs: unused. Output: Ok.
+#[cfg(not(unix))]
+fn ready_prefix(_fixed: &Fixed, _roots: &Roots) -> Result<(), &'static str> {
+    Ok(())
 }
 
 fn now_ms() -> i64 {
@@ -553,6 +606,7 @@ impl Updates {
         }
         let running = self.begin(id)?;
         let fixed = install_command(id, roots)?;
+        ready_prefix(&fixed, roots)?;
         let home = roots.home.clone();
         Self::spawn(running, move || installed_now(&fixed, &home, after), |_| {})
     }

@@ -162,7 +162,8 @@ fn the_engine_looks_in_homebrew_on_both_macs_and_the_system_folders_last() {
     };
     assert_eq!(at("/app"), 0);
     assert_eq!(at("/engine/setup/bin"), 1);
-    assert_eq!(at("/custom/bin"), 2);
+    assert_eq!(at("/engine/harnesses/bin"), 2);
+    assert_eq!(at("/custom/bin"), 3);
     assert!(at("/opt/homebrew/bin") < at("/usr/local/bin"));
     assert!(at("/usr/local/bin") < folders.iter().position(|f| f.starts_with(&home)).unwrap());
     assert_eq!(

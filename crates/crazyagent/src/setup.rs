@@ -102,8 +102,9 @@ pub const TARGET: &str = if cfg!(all(target_os = "macos", target_arch = "aarch64
     "unknown"
 };
 
-/// A system tool the app needs: tmux runs agent terminals, uv installs Graphify and
-/// Graphify builds each project's code graph. Setup finds each one or installs it.
+/// A system tool the app needs: tmux runs agent terminals, uv installs Graphify,
+/// Graphify builds each project's code graph and Node runs the harnesses npm installs.
+/// Setup finds each one or installs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Dependency {
@@ -115,7 +116,7 @@ pub enum Dependency {
 
 impl Dependency {
     /// Every dependency in install order; uv comes before Graphify, which needs it.
-    pub const ALL: [Self; 3] = [Self::Tmux, Self::Uv, Self::Graphify];
+    pub const ALL: [Self; 4] = [Self::Tmux, Self::Uv, Self::Graphify, Self::Node];
 
     /// The program name looked up on the search path, such as `tmux`.
     pub fn program(self) -> &'static str {
@@ -134,7 +135,7 @@ impl Dependency {
             Self::Tmux => "tmux",
             Self::Uv => "uv",
             Self::Graphify => "Graphify command",
-            Self::Node => "node",
+            Self::Node => "Node.js",
         }
     }
 }
@@ -201,7 +202,8 @@ impl From<Version> for String {
 /// checks its SHA-256 and takes one program out of it; `UvTool` installs one pinned
 /// package version from its bundled hash lock; `Homebrew` installs one formula, whose bottles
 /// Homebrew verifies itself; `Winget` installs one package version, whose installer
-/// winget checks against its manifest's SHA-256.
+/// winget checks against its manifest's SHA-256; `Archive` downloads one archive, checks its
+/// SHA-256 and keeps its whole `top` folder, as Node's release is kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pin {
     Release {
@@ -576,8 +578,9 @@ impl Installer for RefusingInstaller {
 
 /// The pinned install of one dependency for one target triple: uv from its release
 /// archive with the published SHA-256 where one is pinned, or from winget on Windows;
-/// Graphify through `uv tool install`; tmux by its formula name. Inputs: the target and
-/// the dependency. Output: the pin, or `None` when that target has no uv pin.
+/// Graphify through `uv tool install`; tmux by its formula name; Node from its official
+/// archive on Mac and Linux. Inputs: the target and the dependency. Output: the pin, or
+/// `None` when that target has no uv or Node pin.
 pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
     match dep {
         Dependency::Uv => {
@@ -605,8 +608,27 @@ pub fn pin_for(target: &str, dep: Dependency) -> Option<Pin> {
         Dependency::Tmux => Some(Pin::Homebrew {
             formula: "tmux".to_owned(),
         }),
-        Dependency::Node => None,
+        Dependency::Node => node_pin(target),
     }
+}
+
+/// The official Node archive for one target as a setup pin. Input: the target.
+/// Output: the pin, or none where no Node archive is pinned.
+#[cfg(unix)]
+fn node_pin(target: &str) -> Option<Pin> {
+    let pinned = node::pin(target)?;
+    Some(Pin::Archive {
+        version: Version(node::NODE_VERSION.to_owned()),
+        url: pinned.url,
+        sha256: pinned.sha256,
+        top: pinned.top,
+    })
+}
+
+/// Pins no Node where setup cannot unpack one. Input: the target, unused. Output: none.
+#[cfg(not(unix))]
+fn node_pin(_target: &str) -> Option<Pin> {
+    None
 }
 
 /// The pinned install of one dependency on this system. Input: the dependency.
@@ -615,9 +637,9 @@ pub fn platform_pin(dep: Dependency) -> Option<Pin> {
     pin_for(TARGET, dep)
 }
 
-/// One owner change to the default pack, as the owner mutations carry it: start setup
-/// with the ticked entries, or switch or remove an installed entry at the pack version the
-/// screen showed.
+/// One owner change to setup, as the owner mutations carry it: start setup with the
+/// ticked entries, switch or remove an installed entry at the pack version the screen
+/// showed, or install one missing dependency alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SetupAction {

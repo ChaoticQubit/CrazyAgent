@@ -475,8 +475,8 @@ impl OwnerMutation {
                     version: *version,
                 },
             },
-            Self::InstallDependency { .. } => Command::OwnerSetup {
-                action: crate::setup::SetupAction::Run { pack: Vec::new() },
+            Self::InstallDependency { name } => Command::OwnerSetup {
+                action: crate::setup::SetupAction::Install { name: *name },
             },
             Self::RemovePackEntry { id, version } => Command::OwnerSetup {
                 action: crate::setup::SetupAction::Remove {

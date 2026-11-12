@@ -374,7 +374,7 @@ async fn answer(
         Action::Versions { id, look } => {
             let entry = entry(engine, search, &id, false).await?;
             blocking(move || {
-                let versions = updates.versions(&open(&root)?, &entry, &Roots::system(), look);
+                let versions = updates.versions(&open(&root)?, &entry, &Roots::engine(&root), look);
                 Ok(WireReply::Versions {
                     versions: Box::new(versions),
                 })
@@ -394,7 +394,7 @@ async fn answer(
                     });
                 };
                 updates
-                    .start(&open(&root)?, &entry, &Roots::system(), after)
+                    .start(&open(&root)?, &entry, &Roots::engine(&root), after)
                     .map(|()| WireReply::Started)
                     .map_err(failure)
             })
@@ -411,7 +411,7 @@ async fn answer(
                     search,
                     updates,
                 };
-                job.install(&db, &entry)
+                job.install(&db, &root, &entry)
                     .map(|()| WireReply::Started)
                     .map_err(failure)
             })
@@ -470,9 +470,14 @@ struct Job {
 
 impl Job {
     /// Starts the install of one catalog entry and, once it ends, pins the harness and
-    /// probes the catalog again so every later launch sees it. Inputs: the engine database
-    /// and the entry. Output: Ok once the install runs, or the refusal code.
-    fn install(&self, db: &rusqlite::Connection, entry: &HarnessEntry) -> Result<(), &'static str> {
+    /// probes the catalog again so every later launch sees it. Inputs: the engine database,
+    /// the engine folder and the entry. Output: Ok once the install runs, or the refusal code.
+    fn install(
+        &self,
+        db: &rusqlite::Connection,
+        root: &Path,
+        entry: &HarnessEntry,
+    ) -> Result<(), &'static str> {
         let (owner, runtime, probe, search) = (
             self.owner.clone(),
             self.runtime.clone(),
@@ -486,7 +491,7 @@ impl Job {
             let found = entries.into_iter().find(|entry| entry.id == id)?;
             found.executable
         };
-        self.updates.install(db, entry, &Roots::system(), after)
+        self.updates.install(db, entry, &Roots::engine(root), after)
     }
 
     /// Starts the install of the next queued harness from a fresh catalog probe, on the
@@ -504,7 +509,7 @@ impl Job {
             .map_err(|_| UNKNOWN_HARNESS)?;
         let db = open(root).map_err(|_| UNAVAILABLE)?;
         assert!(entry.id == id);
-        self.install(&db, &entry)
+        self.install(&db, root, &entry)
     }
 }
 

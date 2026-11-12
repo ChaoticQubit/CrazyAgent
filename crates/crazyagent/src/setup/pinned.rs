@@ -37,10 +37,12 @@ pub fn system_folders(fixed: &[&str]) -> Vec<PathBuf> {
 /// its release archive, kept only when its SHA-256 matches the pin; Graphify and other
 /// Python tools come from their bundled hash locks. Installs go into `<engine root>/setup`:
 /// programs in `setup/bin`, tool environments, cache and Python under `setup/uv`. Lookups
-/// search `setup/bin` first, then the system folders. Nothing runs with sudo.
+/// search `setup/bin` first, then the system folders; Node is looked up through the tool
+/// resolver's places instead, the engine's own by default. Nothing runs with sudo.
 pub struct PinnedInstaller {
     setup: PathBuf,
     search: Vec<PathBuf>,
+    places: Option<crate::tools::Places>,
 }
 
 impl PinnedInstaller {
@@ -56,14 +58,31 @@ impl PinnedInstaller {
             }
         }
         assert!(!search.is_empty());
-        Self { setup, search }
+        Self {
+            setup,
+            search,
+            places: None,
+        }
     }
 
-    /// Uses the given resolver places for the Node lookup. Input: the places. Output: the
-    /// installer.
+    /// Looks Node up on the given resolver places instead of the engine's own, as tests do.
+    /// Input: the places. Output: the installer.
     pub fn with_places(self, places: crate::tools::Places) -> Self {
-        let _ = places;
-        self
+        Self {
+            places: Some(places),
+            ..self
+        }
+    }
+
+    /// Finds a usable Node ([`super::node::usable`]) and asks it for its version.
+    /// Output: the version, or none when no usable Node reports one.
+    fn node(&self) -> Option<Version> {
+        let places = self
+            .places
+            .clone()
+            .unwrap_or_else(|| crate::tools::Places::from_environment(self.setup.parent()));
+        let found = super::node::usable(&places)?;
+        self.version(Dependency::Node, &found.node).ok()
     }
 
     /// Returns the private install folder, `<engine root>/setup`.
@@ -116,6 +135,9 @@ impl PinnedInstaller {
         )?;
         if !ok {
             return Err(InstallError("setup_version_unreadable"));
+        }
+        if dep == Dependency::Node {
+            return node_version(&output);
         }
         version_from(&output)
     }
@@ -375,6 +397,16 @@ fn plain_name(name: &str) -> bool {
         })
 }
 
+/// Reads the version Node prints for `--version`: one word such as `v26.13.1` on the first
+/// line, kept without its `v`. Input: the output. Output: the version, or
+/// `setup_version_unreadable`.
+fn node_version(output: &[u8]) -> Result<Version, InstallError> {
+    let unreadable = InstallError("setup_version_unreadable");
+    let text = std::str::from_utf8(output).map_err(|_| unreadable)?;
+    let word = text.lines().next().unwrap_or_default().trim();
+    Version::parse(word.strip_prefix('v').ok_or(unreadable)?)
+}
+
 /// Points `at` at `target` with a new link put in place by one rename, so a reader never
 /// sees it missing. Inputs: the target and the link path. Output: Ok, or
 /// `setup_store_unavailable`.
@@ -403,6 +435,9 @@ mod tests;
 
 impl Installer for PinnedInstaller {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError> {
+        if dep == Dependency::Node {
+            return Ok(self.node());
+        }
         Ok(self.locate(dep).map(|(_, version)| version))
     }
 
@@ -439,6 +474,24 @@ impl Installer for PinnedInstaller {
                 python,
             } => {
                 self.uv_tool(package, version, python)?;
+                version
+            }
+            Pin::Archive {
+                version,
+                url,
+                sha256,
+                top,
+            } if dep == Dependency::Node => {
+                let engine_root = self
+                    .setup
+                    .parent()
+                    .ok_or(InstallError("setup_store_unavailable"))?;
+                let pinned = super::node::NodePin {
+                    url: url.clone(),
+                    sha256: sha256.clone(),
+                    top: top.clone(),
+                };
+                super::node::install_pin(engine_root, &pinned)?;
                 version
             }
             Pin::Homebrew { .. } | Pin::Winget { .. } | Pin::Archive { .. } => {
