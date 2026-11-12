@@ -303,7 +303,7 @@ jobs:
             printf '%s\n' 'http://archive.ubuntu.com/ubuntu/' 'http://security.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
             sudo apt-get "${apt_options[@]}" update --error-on=any
           fi
-          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends build-essential file patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends build-essential bison file musl-tools patchelf pkg-config libsqlite3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
       - name: Install SQLite for Windows
         if: matrix.os == 'windows'
         run: |
@@ -352,8 +352,22 @@ jobs:
           mkdir -p "$RUNNER_TEMP/rcli"
           node scripts/release/rcli.mjs --sdk "$GITHUB_WORKSPACE/.local-state/tools/rcli-source" --bun "$BUN_PATH" --output "$RUNNER_TEMP/rcli/crazyagent-rcli$exe"
           echo "RCLI_HOST=$RUNNER_TEMP/rcli/crazyagent-rcli$exe" >> "$GITHUB_ENV"
+      - name: Build bundled tmux
+        if: matrix.os != 'windows'
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/crazyagent-tmux"
+          rm -rf "$work"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target "$TARGET" --work "$work/build" --out "$work/crazyagent-tmux"
+          echo "TMUX_SIDECAR=$work/crazyagent-tmux" >> "$GITHUB_ENV"
       - name: Stage desktop sidecars
-        run: node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" --tauri-dir apps/desktop/src-tauri
+        run: |
+          set -euo pipefail
+          tmux=()
+          if [ "$PLATFORM" != windows ]; then tmux=(--tmux "$TMUX_SIDECAR"); fi
+          node scripts/release/assets.mjs stage --target "$TARGET" --cargo-dir "${CARGO_TARGET_DIR:-target}/$TARGET/release" --rcli "$RCLI_HOST" "${tmux[@]}" --tauri-dir apps/desktop/src-tauri
       - name: Prepare Windows signing tools
         if: matrix.os == 'windows'
         run: |
@@ -486,6 +500,20 @@ jobs:
           if security list-keychains -d user | grep -qF "$keychain"; then echo "::error::the job keychain is still in the search list"; exit 1; fi
           if [ -e "$keychain" ] || [ -e "$RUNNER_TEMP/apple" ]; then echo "::error::signing material is still on disk"; exit 1; fi
           echo "signing keychain and Apple keys removed"
+      - name: Check the bundled tmux signature
+        if: matrix.os == 'macos'
+        env:
+          SIGNING_STATUS: ${{ steps.desktop.outputs.status }}
+        run: |
+          set -euo pipefail
+          tmux="${CARGO_TARGET_DIR:-target}/$TARGET/release/bundle/macos/CrazyAgent.app/Contents/MacOS/crazyagent-tmux"
+          test -f "$tmux" && test -x "$tmux"
+          case "$TARGET" in aarch64-apple-darwin) arch=arm64 ;; x86_64-apple-darwin) arch=x86_64 ;; *) echo "::error::no macOS architecture for $TARGET"; exit 1 ;; esac
+          test "$(lipo -archs "$tmux")" = "$arch"
+          if [ "$SIGNING_STATUS" = signed ]; then
+            codesign --verify --strict --verbose=2 "$tmux"
+            codesign --display --verbose=2 "$tmux" 2>&1 | grep -E -q 'flags=.*runtime' || { echo "::error::the bundled tmux is not signed with the hardened runtime"; exit 1; }
+          fi
       - name: Package release assets
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
