@@ -48,6 +48,7 @@ pub(in crate::tui) struct Notifications {
     cursor: usize,
     top: usize,
     marked: BTreeSet<i64>,
+    changing: BTreeSet<u64>,
     asked: Option<NoticesQuery>,
     stale: bool,
 }
@@ -64,6 +65,7 @@ impl Notifications {
             cursor: 0,
             top: 0,
             marked: BTreeSet::new(),
+            changing: BTreeSet::new(),
             asked: None,
             stale: false,
         }
@@ -105,6 +107,7 @@ impl Notifications {
         self.cursor = 0;
         self.top = 0;
         self.marked.clear();
+        self.changing.clear();
         self.asked = None;
         self.stale = false;
         self.read(None, ctx);
@@ -139,8 +142,11 @@ impl Notifications {
         }
     }
 
+    /// Takes the reply to a change: one that stands reads the list again and, once every
+    /// piece of the list's own latest change stands, clears the marks; a refused one says
+    /// so and keeps the marks to try again. Inputs: the reply and the context. Output: none.
     fn take_change(&mut self, event: &NoticesEvent, ctx: &mut Ctx) {
-        let NoticesQuery::Act { action, .. } = &event.query else {
+        let NoticesQuery::Act { action, generation } = &event.query else {
             return;
         };
         if !matches!(
@@ -153,12 +159,23 @@ impl Notifications {
         ) {
             return;
         }
+        let own = self.changing.remove(generation);
         match &event.result {
-            Ok(_) => self.read(None, ctx),
-            Err(code) => ctx.say(Message::error(
-                "The notifications were not changed.",
-                super::settings_accounts::plain(code),
-            )),
+            Ok(_) => {
+                if own && self.changing.is_empty() {
+                    self.marked.clear();
+                }
+                self.read(None, ctx);
+            }
+            Err(code) => {
+                if own {
+                    self.changing.clear();
+                }
+                ctx.say(Message::error(
+                    "The notifications were not changed.",
+                    super::settings_accounts::plain(code),
+                ));
+            }
         }
     }
 
@@ -175,8 +192,8 @@ impl Notifications {
     }
 
     /// Sends one change to every item of the marked rows, or of the row under the cursor
-    /// when none is marked, as folds in pieces of at most `PAGE_MAX`, then clears the
-    /// marks. Inputs: the change and the context. Output: none.
+    /// when none is marked, as folds in pieces of at most `PAGE_MAX`; the marks stay until
+    /// every piece stands. Inputs: the change and the context. Output: none.
     fn change(&mut self, change: FoldChange, ctx: &mut Ctx) {
         let rows = self.rows();
         let folds: Vec<NoticeFold> = if self.marked.is_empty() {
@@ -189,12 +206,14 @@ impl Notifications {
                 .map(|row| self.fold_of(row))
                 .collect()
         };
+        self.changing.clear();
         for piece in folds.chunks(usize::from(PAGE_MAX)) {
             assert!(!piece.is_empty() && piece.len() <= usize::from(PAGE_MAX));
             let folds = piece.to_vec();
-            send(NoticeAction::Folds { folds, change }, ctx);
+            self.changing
+                .insert(send(NoticeAction::Folds { folds, change }, ctx));
         }
-        self.marked.clear();
+        assert!(self.changing.len() <= PAGES_MAX);
     }
 
     fn open(&mut self, ctx: &mut Ctx) -> Flow {
@@ -322,13 +341,15 @@ impl Notifications {
 }
 
 /// Queues one change to the store with a fresh generation. Inputs: the change and the
-/// context. Output: none; a full queue answers it as the owner being busy.
-fn send(action: NoticeAction, ctx: &mut Ctx) {
+/// context. Output: the generation its reply carries; a full queue answers it as the
+/// owner being busy.
+fn send(action: NoticeAction, ctx: &mut Ctx) -> u64 {
     let generation = ctx.next_generation();
     ctx.request(Request::Notices(Box::new(NoticesQuery::Act {
         action,
         generation,
     })));
+    generation
 }
 
 /// A project's name from the projects the shell read, or its id while it is not listed.
@@ -428,17 +449,18 @@ impl Screen for Notifications {
             Key::Char('r') => self.change(FoldChange::Read, ctx),
             Key::Char('u') => self.change(FoldChange::Unread, ctx),
             Key::Char('d') => self.change(FoldChange::Delete, ctx),
-            Key::Char('a') => send(
-                NoticeAction::ReadAll {
-                    project_id: self.project.clone(),
-                },
-                ctx,
-            ),
+            Key::Char('a') => {
+                let project_id = self.project.clone();
+                send(NoticeAction::ReadAll { project_id }, ctx);
+            }
             Key::Char('f') => self.walk_filter(true, ctx),
             Key::Char('p') => self.walk_project(true, ctx),
             Key::Char('P') => self.walk_project(false, ctx),
             Key::Char('s') => return Flow::Open(Place::NotificationSettings),
-            Key::Esc if !self.marked.is_empty() => self.marked.clear(),
+            Key::Esc if !self.marked.is_empty() => {
+                self.marked.clear();
+                self.changing.clear();
+            }
             _ => return Flow::Ignored,
         }
         Flow::Handled
