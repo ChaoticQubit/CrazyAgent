@@ -313,16 +313,25 @@ pub fn resolve_harnesses(
         claude: given
             .claude
             .or_else(|| harness_entry("claude-code", search, path)),
-        rcli: rcli_entry(given.rcli, path, executable_folder),
+        rcli: rcli_entry(
+            given.rcli,
+            &crate::tools::Places::new(
+                path.map(|path| std::env::split_paths(path).collect())
+                    .unwrap_or_default(),
+                None,
+            ),
+            executable_folder,
+        ),
     }
 }
 
 /// Resolves the RCLI host for one engine start: the given path, else the host next to the
-/// running executable, then on PATH, links kept. Inputs: the given path, the PATH value and
-/// the folder holding the running executable. Output: the entry, or none.
+/// running executable, then wherever the tool resolver looks ([`crate::tools::resolve`]),
+/// links kept. Inputs: the given path, the places and the folder holding the running
+/// executable. Output: the entry, or none.
 pub fn rcli_entry(
     given: Option<PathBuf>,
-    path: Option<&OsStr>,
+    places: &crate::tools::Places,
     executable_folder: Option<&Path>,
 ) -> Option<PathBuf> {
     let beside = || {
@@ -332,9 +341,8 @@ pub fn rcli_entry(
             .map(|file| folder.join(file))
             .find(|entry| executable_file(entry).is_some())
     };
-    given
-        .or_else(beside)
-        .or_else(|| path_entry(RCLI_EXECUTABLE, path))
+    let _ = places;
+    given.or_else(beside)
 }
 
 /// How the team runtime, usage upkeep, research and onboarding find a harness the engine did
@@ -756,6 +764,82 @@ mod tests {
             Some(&app),
         );
         assert_eq!(found.rcli, Some(app.join(RCLI_EXECUTABLE)));
+    }
+
+    /// Keeps only the folders of `places` inside `root`, in their order, so a row sees the
+    /// engine's search order without this machine's Homebrew and system folders. Inputs:
+    /// the places and the scratch root. Output: the places.
+    fn scratch_only(places: crate::tools::Places, root: &Path) -> crate::tools::Places {
+        crate::tools::Places::new(
+            places
+                .folders()
+                .iter()
+                .filter(|folder| folder.starts_with(root))
+                .cloned()
+                .collect(),
+            places.home().map(Path::to_path_buf),
+        )
+    }
+
+    #[test]
+    fn the_rcli_host_is_found_in_every_layout_the_engine_looks_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let home = root.join("home");
+        let engine = root.join("engine");
+        let app = root.join("CrazyAgent.app/Contents/MacOS");
+        let elsewhere = root.join("elsewhere/bin");
+        let hidden = root.join("project/.crazyagent/bin");
+        std::fs::create_dir_all(&home).unwrap();
+        let path = std::env::join_paths([hidden.clone(), elsewhere.clone()]).unwrap();
+        let places = scratch_only(
+            crate::tools::Places::engine(
+                Some(&engine),
+                None,
+                Some(home.clone()),
+                Some(path.as_os_str()),
+            ),
+            &root,
+        );
+        let layouts = [
+            home.join(".cargo/bin"),
+            home.join(".local/bin"),
+            elsewhere.clone(),
+            engine.join("setup/bin"),
+            app.clone(),
+        ];
+        assert_eq!(rcli_entry(None, &places, Some(&app)), None);
+        program(&hidden.join(RCLI_EXECUTABLE), 0o755);
+        assert_eq!(
+            rcli_entry(None, &places, Some(&app)),
+            None,
+            "a host in a .crazyagent folder is never used"
+        );
+        for folder in layouts {
+            program(&folder.join(RCLI_EXECUTABLE), 0o755);
+            assert_eq!(
+                rcli_entry(None, &places, Some(&app)),
+                Some(folder.join(RCLI_EXECUTABLE)),
+                "{}",
+                folder.display()
+            );
+        }
+        let given = PathBuf::from("/explicit/crazyagent-rcli");
+        assert_eq!(
+            rcli_entry(Some(given.clone()), &places, Some(&app)),
+            Some(given)
+        );
+        let linked = root.join("linked/bin");
+        let real = root.join("install/crazyagent-rcli");
+        program(&real, 0o755);
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&real, linked.join(RCLI_EXECUTABLE)).unwrap();
+        let only_link = crate::tools::Places::new(vec![linked.clone()], Some(home));
+        assert_eq!(
+            rcli_entry(None, &only_link, None),
+            Some(linked.join(RCLI_EXECUTABLE)),
+            "the entry keeps its link, so the pin follows an update behind it"
+        );
     }
 
     #[cfg(target_os = "macos")]
