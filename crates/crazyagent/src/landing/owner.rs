@@ -1293,7 +1293,15 @@ fn accept_held(
     let identity = owner_identity(&repository, home)?;
     let message = edited.unwrap_or_else(|| record.message());
     let identity = (identity.0.as_str(), identity.1.as_str());
-    let second = super::ancestry::merge_parent(db, &owner, &record.project, &tip, &record.head)?;
+    let second = super::ancestry::merge_parent(
+        db,
+        &owner,
+        &repository,
+        &record.project,
+        &tip,
+        &record.head,
+        identity,
+    )?;
     let parents: Vec<&str> = std::iter::once(tip.as_str())
         .chain(second.as_deref())
         .collect();

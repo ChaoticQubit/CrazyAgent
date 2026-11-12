@@ -15288,6 +15288,15 @@ fn parents_of(case: &Case, commit: &str) -> Vec<String> {
         .collect()
 }
 
+/// Commits every change in the agent's worktree under the owner's git identity, the one
+/// the engine gives agents' own commits, so a Merge commit landing may carry it (L3-L1).
+/// Inputs: the case and the message. Output: the new HEAD.
+fn owner_named_commit(case: &Case, message: &str) -> String {
+    case.agent(&["add", "-A"]);
+    case.agent(&["commit", "-q", "-m", message]);
+    case.agent_head()
+}
+
 /// Lands one new line of the case's own agent and returns the landed commit. Input: the
 /// case. Output: the landed commit.
 fn land_fourth_line(case: &Case) -> String {
@@ -15327,7 +15336,7 @@ fn merge_commit_landing_keeps_the_agent_head_as_its_second_parent() {
     let before = case.tip();
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
-    let head = case.agent_commit("Add the fourth line");
+    let head = owner_named_commit(&case, "Add the fourth line");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
         panic!("the set did not land");
@@ -15356,13 +15365,13 @@ fn merge_commit_landing_lands_the_same_agent_s_next_set_with_no_conflict() {
     .unwrap();
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
-    case.agent_commit("Add the fourth line");
+    owner_named_commit(&case, "Add the fourth line");
     let first = case.turn(TurnOutcome::Succeeded).unwrap();
     let AcceptOutcome::Landed { commit: landed, .. } = case.accept(&first).unwrap() else {
         panic!("the first set did not land");
     };
     case.edit("README", "one\ntwo\nthree\nfour\nfive\n");
-    let head = case.agent_commit("Add the fifth line");
+    let head = owner_named_commit(&case, "Add the fifth line");
     let second = case.turn(TurnOutcome::Succeeded).unwrap();
     assert_ne!(second, first);
     let AcceptOutcome::Landed { commit, .. } = case.accept(&second).unwrap() else {
@@ -15391,7 +15400,7 @@ fn merge_commit_landing_refuses_an_agent_message_with_a_control_character() {
     let before = case.tip();
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
-    case.agent_commit("Add the fourth line \u{1b}[31mred");
+    owner_named_commit(&case, "Add the fourth line \u{1b}[31mred");
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
     assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
     assert_eq!(case.tip(), before, "nothing landed");
@@ -15408,10 +15417,10 @@ fn merge_commit_landing_refuses_an_unplain_commit_below_a_squash_landed_base() {
     crate::team::initialize(&case.db).unwrap();
     case.start();
     case.edit("README", "one\ntwo\nthree\nfour\n");
-    case.agent_commit("Add the fourth line \u{1b}[31mred");
+    owner_named_commit(&case, "Add the fourth line \u{1b}[31mred");
     let first = case.turn(TurnOutcome::Succeeded).unwrap();
     case.edit("NOTES", "five\n");
-    case.agent_commit("Add the notes");
+    owner_named_commit(&case, "Add the notes");
     let AcceptOutcome::Landed { commit, .. } = case.accept(&first).unwrap() else {
         panic!("the squash set did not land");
     };
@@ -15429,6 +15438,172 @@ fn merge_commit_landing_refuses_an_unplain_commit_below_a_squash_landed_base() {
     assert_eq!(case.view(&second).state, ChangeState::Pending);
 }
 
+/// Under Merge commit every carried commit's tree passes the landing's own tree checks,
+/// not only the set's final tree: a commit that adds a bare-repository layout, a link out
+/// of the project or a gitlink, which the agent's next commit removes again, is refused,
+/// so none of them ever enters the owner's history (L3-M1).
+#[test]
+fn merge_commit_landing_refuses_a_carried_commit_whose_tree_fails_the_landing_checks() {
+    let variants: [(&str, fn(&Case)); 3] = [
+        ("bare layout", |case| {
+            for (path, text) in [
+                ("vault/HEAD", "ref: refs/heads/main\n"),
+                ("vault/config", "[core]\n\tbare = true\n"),
+                ("vault/objects/info/packs", "\n"),
+                ("vault/refs/heads/main", "0\n"),
+            ] {
+                write(&case.workspace.worktree.join(path), text);
+            }
+            case.agent(&["add", "-A"]);
+        }),
+        ("outside link", |case| {
+            std::os::unix::fs::symlink("../../../../outside", case.workspace.worktree.join("out"))
+                .unwrap();
+            case.agent(&["add", "-A"]);
+        }),
+        ("gitlink", |case| {
+            let tip = case.tip();
+            case.agent(&[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{tip},lib"),
+            ]);
+        }),
+    ];
+    for (what, add) in variants {
+        let case = Case::new();
+        crate::team::initialize(&case.db).unwrap();
+        crate::team::set_landing_mode(
+            &case.db,
+            &case.workspace.project,
+            crate::team::LandingMode::Merge,
+        )
+        .unwrap();
+        let before = case.tip();
+        case.start();
+        add(&case);
+        case.agent(&["commit", "-q", "-m", "Add a helper"]);
+        case.agent(&[
+            "rm",
+            "-r",
+            "-q",
+            "--cached",
+            "--ignore-unmatch",
+            "vault",
+            "out",
+            "lib",
+        ]);
+        let _ = std::fs::remove_dir_all(case.workspace.worktree.join("vault"));
+        let _ = std::fs::remove_file(case.workspace.worktree.join("out"));
+        case.edit("README", "one\ntwo\nthree\nfour\n");
+        owner_named_commit(&case, "Remove the helper");
+        let id = case.turn(TurnOutcome::Succeeded).unwrap();
+        assert_eq!(
+            case.accept(&id).unwrap_err().0,
+            "changes_merge_unsafe",
+            "{what}"
+        );
+        assert_eq!(case.tip(), before, "{what}: nothing landed");
+        assert_eq!(case.view(&id).state, ChangeState::Pending, "{what}");
+    }
+}
+
+/// Under Merge commit a carried commit must name the owner's identity, which the engine
+/// gives agents' own commits, or the engine's own: an agent commit written under another
+/// author or committer is refused, so no commit lands in the owner's history under a name
+/// the engine never gave (L3-L1). The same set lands under Squash as the owner's commit.
+#[test]
+fn merge_commit_landing_refuses_a_carried_commit_under_another_identity() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Squash,
+    )
+    .unwrap();
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the set did not land under Squash");
+    };
+    assert_eq!(parents_of(&case, &commit), vec![before]);
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%an <%ae>", &commit])
+            .trim(),
+        "Repo Owner <owner@example.invalid>"
+    );
+}
+
+/// Under Merge commit an agent message holding a record mark followed by four field marks
+/// is refused: each commit object is read whole, so no message byte can split it into a
+/// second record and slip its control characters past the check (L3 r1 F1).
+#[test]
+fn merge_commit_landing_refuses_record_and_field_marks_in_an_agent_message() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "x\u{1e}a\u{1f}b\u{1f}c\u{1f}d\u{1f}e");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+}
+
+/// Under Merge commit a set carrying more than `MERGED_COMMITS_MAX` agent commits is
+/// refused before anything lands (DEC-147.6 bound).
+#[test]
+fn merge_commit_landing_refuses_more_than_256_carried_commits() {
+    let case = Case::new();
+    crate::team::initialize(&case.db).unwrap();
+    crate::team::set_landing_mode(
+        &case.db,
+        &case.workspace.project,
+        crate::team::LandingMode::Merge,
+    )
+    .unwrap();
+    let before = case.tip();
+    case.start();
+    for step in 0..ancestry::MERGED_COMMITS_MAX {
+        case.agent(&[
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            &format!("Step {step}"),
+        ]);
+    }
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    owner_named_commit(&case, "Add the fourth line");
+    assert_eq!(
+        case.agent(&["rev-list", "--count", &format!("{before}..HEAD")])
+            .trim(),
+        (ancestry::MERGED_COMMITS_MAX + 1).to_string()
+    );
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.accept(&id).unwrap_err().0, "changes_merge_unsafe");
+    assert_eq!(case.tip(), before, "nothing landed");
+}
+
 /// Agent-written text with hidden or control characters is never plain; a message with
 /// newlines and tabs is.
 #[test]
@@ -15437,6 +15612,9 @@ fn only_plain_agent_text_may_enter_the_owner_history() {
     assert!(!ancestry::plain_text("Add\u{1b}[31m red"));
     assert!(!ancestry::plain_text("Add\r overwritten"));
     assert!(!ancestry::plain_text("Add \u{202e}enil"));
+    assert!(!ancestry::plain_text("x\u{1e}a"), "a record mark");
+    assert!(!ancestry::plain_text("a\u{1f}b"), "a field mark");
+    assert!(!ancestry::plain_text("a\u{9b}31m"), "a C1 control");
 }
 
 /// After another agent's Accept, an idle teammate on the old base with nothing of its own

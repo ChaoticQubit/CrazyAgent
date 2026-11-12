@@ -12,7 +12,7 @@ use std::time::Duration;
 /// The most agent commits one Merge commit landing may carry into the owner's history.
 pub(super) const MERGED_COMMITS_MAX: usize = 256;
 
-/// The most bytes of names, emails and messages of those commits the check reads.
+/// The most bytes of carried commit objects, all together, the check reads.
 const MERGED_TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
 
 /// The most agent worktrees one Accept moves onto the landed tip.
@@ -22,11 +22,12 @@ const MOVED_PLACES_MAX: usize = 512;
 /// landing work that holds the repository before it leaves the move to the next one.
 const HOLD_WAIT: Duration = Duration::from_secs(2);
 
-/// Separates the commits `git log` prints for the Merge commit check.
-const RECORD_MARK: char = '\u{1e}';
+/// The most bytes the commit list of the Merge commit check may print: 257 lines of a
+/// commit and its parents.
+const LISTED_BYTES_MAX: usize = 256 * 1024;
 
-/// Separates the fields of one commit in that output.
-const FIELD_MARK: char = '\u{1f}';
+/// The most bytes one carried commit object may hold.
+const COMMIT_BYTES_MAX: usize = 1024 * 1024;
 
 /// One agent worktree the team records. Fields: the agent id and its three paths.
 struct Place {
@@ -38,21 +39,24 @@ struct Place {
 
 /// The second parent an Accept gives the commit it lands (DEC-147.6): none under the
 /// project's Landing setting Squash, the set's head under Merge commit once every commit
-/// the merge would carry into the owner's history passed [`carried_commits_plain`].
-/// Inputs: the store, the owner repository, the project, the tip the commit lands on and
-/// the set's head. Output: the parent, None for a squash, or the refusal.
+/// the merge would carry into the owner's history passed [`check_carried`]. Inputs: the
+/// store, the owner repository and checkout, the project, the tip the commit lands on, the
+/// set's head and the owner's identity. Output: the parent, None for a squash, or the
+/// refusal.
 pub(super) fn merge_parent(
     db: &Connection,
     owner: &Repo,
+    checkout: &Path,
     project: &ProjectId,
     tip: &str,
     head: &str,
+    identity: (&str, &str),
 ) -> Result<Option<String>, EngineError> {
     assert!(super::git::is_object_id(tip) && super::git::is_object_id(head));
     match crate::team::landing_mode(db, project)? {
         LandingMode::Squash => Ok(None),
         LandingMode::Merge => {
-            carried_commits_plain(owner, tip, head)?;
+            check_carried(owner, checkout, tip, head, identity)?;
             Ok(Some(head.to_owned()))
         }
     }
@@ -60,43 +64,144 @@ pub(super) fn merge_parent(
 
 /// Checks every commit a Merge commit would make part of the owner's branch, the ones
 /// reachable from `head` but not from `tip`, which includes agent commits below a set's
-/// measured base that an earlier Squash landing left out of the owner's history: at most
-/// [`MERGED_COMMITS_MAX`], and no author, committer or message holding hidden text or a
-/// control character other than a newline or a tab, so nothing an agent wrote can hide in
-/// or garble the owner's `git log`. Inputs: the owner repository, the tip and the head.
-/// Output: Ok, or `changes_merge_unsafe`.
-pub(super) fn carried_commits_plain(
+/// measured base that an earlier Squash landing left out of the owner's history. There may
+/// be at most [`MERGED_COMMITS_MAX`] and each needs a parent. Each commit object is read
+/// whole, so no byte of a message can pass for a separator (L3 r1 F1), and must be UTF-8
+/// with no `encoding` other than UTF-8, no hidden text and no control character other than
+/// a newline or a tab in any header or message line. Its author and committer must be the
+/// owner's identity, which the engine gives agents' commits, or the engine's own (L3-L1).
+/// Its tree must pass the landing's own tree checks against its first parent (L3-M1).
+/// Inputs: the owner repository and checkout, the tip, the head and the owner's identity.
+/// Output: Ok, or `changes_merge_unsafe` or `changes_git_failed`.
+pub(super) fn check_carried(
     owner: &Repo,
+    checkout: &Path,
     tip: &str,
     head: &str,
+    identity: (&str, &str),
 ) -> Result<(), EngineError> {
     let range = format!("{tip}..{head}");
     let count = format!("--max-count={}", MERGED_COMMITS_MAX + 1);
-    let format = "--format=%x1e%an%x1f%ae%x1f%cn%x1f%ce%x1f%B";
-    let output = owner.exec(
-        &["log", "--no-show-signature", &count, format, &range, "--"],
+    let listed = owner.exec(
+        &["rev-list", "--parents", &count, &range, "--"],
         None,
         &[],
-        MERGED_TEXT_BYTES_MAX,
+        LISTED_BYTES_MAX,
     )?;
-    if output.overflow {
-        return Err(failure("changes_merge_unsafe"));
-    }
-    if output.code != 0 {
+    if listed.code != 0 || listed.overflow {
         return Err(failure("changes_git_failed"));
     }
-    let text = std::str::from_utf8(&output.stdout).map_err(|_| failure("changes_merge_unsafe"))?;
-    let commits: Vec<&str> = text.split(RECORD_MARK).skip(1).collect();
-    if commits.len() > MERGED_COMMITS_MAX {
+    let text = std::str::from_utf8(&listed.stdout).map_err(|_| failure("changes_git_failed"))?;
+    let lines: Vec<&str> = text.lines().filter(|line| !line.is_empty()).collect();
+    if lines.len() > MERGED_COMMITS_MAX {
         return Err(failure("changes_merge_unsafe"));
     }
-    for commit in commits {
-        let fields: Vec<&str> = commit.splitn(5, FIELD_MARK).collect();
-        if fields.len() != 5 || !fields.iter().all(|field| plain_text(field)) {
+    let mut carried: Vec<(&str, &str)> = Vec::with_capacity(lines.len());
+    for line in lines {
+        let ids: Vec<&str> = line.split(' ').collect();
+        if !ids.iter().all(|id| super::git::is_object_id(id)) {
+            return Err(failure("changes_git_failed"));
+        }
+        let &[commit, first, ..] = ids.as_slice() else {
+            return Err(failure("changes_merge_unsafe"));
+        };
+        carried.push((commit, first));
+    }
+    assert!(carried.len() <= MERGED_COMMITS_MAX);
+    let mut read = 0usize;
+    for &(commit, _) in &carried {
+        let object = owner.exec(&["cat-file", "commit", commit], None, &[], COMMIT_BYTES_MAX)?;
+        if object.code != 0 {
+            return Err(failure("changes_git_failed"));
+        }
+        read = read.saturating_add(object.stdout.len());
+        if object.overflow || read > MERGED_TEXT_BYTES_MAX {
+            return Err(failure("changes_merge_unsafe"));
+        }
+        let text =
+            std::str::from_utf8(&object.stdout).map_err(|_| failure("changes_merge_unsafe"))?;
+        if !plain_commit(text, identity) {
             return Err(failure("changes_merge_unsafe"));
         }
     }
+    for (commit, parent) in carried {
+        check_carried_tree(owner, checkout, parent, commit)?;
+    }
     Ok(())
+}
+
+/// Tells whether one raw commit object may enter the owner's history under Merge commit:
+/// every header and message line is plain text, at most one `author` and one `committer`
+/// header, both naming an identity the engine gives, and no `encoding` but UTF-8, so git
+/// shows the owner the same text that was checked. Inputs: the object as UTF-8 and the
+/// owner's identity. Output: the answer.
+fn plain_commit(text: &str, identity: (&str, &str)) -> bool {
+    if !plain_text(text) {
+        return false;
+    }
+    let headers = text.split_once("\n\n").map_or(text, |(headers, _)| headers);
+    let (mut author, mut committer) = (None, None);
+    for line in headers.lines() {
+        if let Some(rest) = line.strip_prefix("author ") {
+            if author.replace(person(rest)).is_some() {
+                return false;
+            }
+        } else if let Some(rest) = line.strip_prefix("committer ") {
+            if committer.replace(person(rest)).is_some() {
+                return false;
+            }
+        } else if let Some(rest) = line.strip_prefix("encoding ") {
+            if !matches!(rest.to_ascii_lowercase().as_str(), "utf-8" | "utf8") {
+                return false;
+            }
+        }
+    }
+    matches!(
+        (author, committer),
+        (Some(Some(author)), Some(Some(committer)))
+            if known_identity(author, identity) && known_identity(committer, identity)
+    )
+}
+
+/// Reads the name and email of an `author` or `committer` header after its keyword: the
+/// name, then the email in angle brackets, then the date. Input: the header's value.
+/// Output: the name and email, or None for a malformed value.
+fn person(value: &str) -> Option<(&str, &str)> {
+    let (name, rest) = value.split_once(" <")?;
+    let (email, _) = rest.split_once('>')?;
+    Some((name, email))
+}
+
+/// Runs the landing's tree checks on one carried commit against its first parent, as
+/// [`flow::check_merged`] and [`owner::uses_configured_commands`] check a set's merged
+/// tree: a refusal of either becomes `changes_merge_unsafe`. Inputs: the owner repository
+/// and checkout, the parent and the commit. Output: Ok, or the refusal.
+fn check_carried_tree(
+    owner: &Repo,
+    checkout: &Path,
+    parent: &str,
+    commit: &str,
+) -> Result<(), EngineError> {
+    let unsafe_merge = |error: EngineError| {
+        if error.0 == "changes_git_failed" {
+            error
+        } else {
+            failure("changes_merge_unsafe")
+        }
+    };
+    flow::check_merged(owner, checkout, parent, commit, commit).map_err(unsafe_merge)?;
+    let paths = super::diff::changed_paths(owner, parent, commit).map_err(unsafe_merge)?;
+    if super::owner::uses_configured_commands(owner, &paths, &[commit]).map_err(unsafe_merge)? {
+        return Err(failure("changes_merge_unsafe"));
+    }
+    Ok(())
+}
+
+/// Tells whether a carried commit's author or committer is one the engine gives: the
+/// owner's identity, which agents' own commits take, or the engine's own (L3-L1). Inputs:
+/// the commit's name and email and the owner's identity. Output: the answer.
+fn known_identity(person: (&str, &str), owner: (&str, &str)) -> bool {
+    person == owner || person == flow::ENGINE
 }
 
 /// Tells whether agent-written text may enter the owner's history: no hidden text and no

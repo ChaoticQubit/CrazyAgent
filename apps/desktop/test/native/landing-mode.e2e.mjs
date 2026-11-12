@@ -16,7 +16,6 @@ const appRoot = fileURLToPath(new URL("../..", import.meta.url));
 const SETUP_MS = 120000;
 const GIT = "/usr/bin/git";
 const OWNER = ["-c", "user.name=E2E Owner", "-c", "user.email=owner@example.invalid"];
-const AGENT = ["-c", "user.name=E2E Agent", "-c", "user.email=agent@example.invalid"];
 const SETTING = "Landing";
 const AGENTS = [
   { name: "agent-north", label: "Ada (@north) · Codex" },
@@ -193,15 +192,17 @@ async function kept(status, mode) {
   }
 }
 
-/** Has the first agent commit one line in its own worktree, records its turn, and accepts
- * the set from the Changes tab as the owner does. Inputs: what the steps get. Output: the
- * branch tip before the accept, the agent's commit and the landed commit. */
+/** Has the first agent commit one line in its own worktree under the owner's identity, the
+ * one the engine gives agents' commits (the repository's user.name and user.email), records
+ * its turn, and accepts the set from the Changes tab as the owner does. Inputs: what the
+ * steps get. Output: the branch tip before the accept, the agent's commit and the landed
+ * commit. */
 async function landOne({ me, page, repo, agents, recordTurn, changes }) {
   const [north] = agents;
   const before = git(repo, "rev-parse", "HEAD");
   writeFileSync(join(north.worktree, "README.md"), "# Seed shop for gardens\n\nSells seeds.\n");
   git(north.worktree, "add", "README.md");
-  git(north.worktree, ...AGENT, "commit", "-q", "-m", "Name the shop for gardens");
+  git(north.worktree, "commit", "-q", "-m", "Name the shop for gardens");
   const agentHead = git(north.worktree, "rev-parse", "HEAD");
   recordTurn(north, "Name the shop for gardens");
   await changes();
