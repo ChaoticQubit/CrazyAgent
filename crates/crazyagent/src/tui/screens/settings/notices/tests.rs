@@ -359,6 +359,59 @@ fn s_on_the_list_opens_the_page_and_esc_discards_picks_before_going_back() {
 }
 
 #[test]
+fn esc_during_a_save_waits_for_its_reply_so_the_result_is_kept() {
+    for (result, lead, tone) in [
+        (
+            Err("notification_settings_invalid".to_owned()),
+            "The notification settings were not saved.",
+            Tone::Error,
+        ),
+        (
+            Ok(NoticesReply::Done),
+            "Notification settings saved.",
+            Tone::Success,
+        ),
+    ] {
+        let mut shell = shell_at(ready(120, 40), Place::Notifications);
+        sent(&mut shell);
+        shell.key(Key::Char('s'));
+        assert_eq!(sent(&mut shell), vec![NoticesQuery::Settings]);
+        shell.arrive(reply(
+            NoticesQuery::Settings,
+            Ok(NoticesReply::Settings(NoticeSettings::default())),
+        ));
+        shell.key(Key::Right);
+        shell.key(Key::Enter);
+        let queries = sent(&mut shell);
+        assert_eq!(queries.len(), 1, "one save is on its way");
+        shell.key(Key::Esc);
+        assert_eq!(
+            shell.place(),
+            Some(Place::NotificationSettings),
+            "Esc waits for the save's reply"
+        );
+        let shown = screen(&mut shell, 120, 40);
+        assert!(
+            !shown.contains("Discard changes"),
+            "no key offers to drop a save on its way:\n{shown}"
+        );
+        shell.arrive(reply(queries[0].clone(), result));
+        let message = shell.ctx.message().cloned().expect("the result is shown");
+        assert_eq!((message.lead.as_str(), message.tone), (lead, tone));
+        if tone == Tone::Error {
+            shell.key(Key::Esc);
+            assert_eq!(
+                shell.place(),
+                Some(Place::NotificationSettings),
+                "after a refusal Esc first drops the kept pick"
+            );
+        }
+        shell.key(Key::Esc);
+        assert_eq!(shell.place(), Some(Place::Notifications));
+    }
+}
+
+#[test]
 fn go_to_opens_the_page_by_its_settings_name() {
     let mut shell = shell_at(ready(120, 40), Place::Home);
     shell.key(Key::Ctrl('k'));
