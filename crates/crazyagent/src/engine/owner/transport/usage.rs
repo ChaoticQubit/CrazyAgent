@@ -462,7 +462,7 @@ async fn finish(
         Prepared::Extras(accounts, None) => return Ok(Reply::Extras { accounts }),
         Prepared::Extras(accounts, Some(root)) => {
             tokio::task::spawn_blocking(move || {
-                usage::service::request_detail(&usage::open(&root)?, crate::team::now_ms())
+                usage::extras::request_detail(&usage::open(&root)?, crate::team::now_ms())
             })
             .await
             .map_err(|_| failure("usage_unavailable"))??;
@@ -533,6 +533,7 @@ mod extras_request_tests {
                 not_reported: format!("not reported by {harness}"),
                 resets_checked_ms: Some(i64::MAX),
                 credits_checked_ms: Some(i64::MAX),
+                resets_gained_ms: Some(i64::MAX),
             },
         };
         let accounts = (0..EXTRAS_ACCOUNTS_MAX).map(entry).collect::<Vec<_>>();

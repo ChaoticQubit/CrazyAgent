@@ -477,11 +477,15 @@ async fn only_a_pools_extras_read_asks_for_the_detail_rows() {
     saved_claude(&usage).await;
     let db = crate::usage::open(&usage.engine_root).unwrap();
 
+    let due = |db: &rusqlite::Connection| {
+        crate::usage::extras::detail_due(db, None, crate::team::now_ms()).unwrap()
+    };
+
     usage.client.usage_extras(false).await.unwrap();
-    assert!(!crate::usage::service::detail_wanted(&db, crate::team::now_ms()).unwrap());
+    assert!(!due(&db), "a stored-only read takes no Pools lease");
 
     usage.client.usage_extras(true).await.unwrap();
-    assert!(crate::usage::service::detail_wanted(&db, crate::team::now_ms()).unwrap());
+    assert!(due(&db), "a Pools read takes the lease the next poll reads");
     drop(db);
     usage.stop().await;
 }

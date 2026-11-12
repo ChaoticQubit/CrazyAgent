@@ -111,6 +111,7 @@ mod tests {
             not_reported: "not reported by Codex".into(),
             resets_checked_ms: None,
             credits_checked_ms: None,
+            resets_gained_ms: None,
         }
     }
 
