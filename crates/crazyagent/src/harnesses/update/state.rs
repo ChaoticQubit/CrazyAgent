@@ -1,8 +1,8 @@
 use super::run::run_raw;
 use super::{
-    BREW_PREFIXES, CHECK_TIME, CheckWhen, Fixed, HarnessVersions, InstallFromApp, LOOKUP_FAILED,
-    LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots, START_FAILED, UPDATE_TIME,
-    UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide, install_command,
+    BREW_PREFIXES, BUNDLED, CHECK_TIME, CheckWhen, Fixed, HarnessVersions, InstallFromApp,
+    LOOKUP_FAILED, LastUpdate, Latest, Method, OnlineLookup, Pointer, Ran, Roots, START_FAILED,
+    UPDATE_TIME, UpdateMode, UpdateSettings, VERSION_TIME, check_command, guide, install_command,
     installed_version, latest, latest_from_pointer, lookup, method, pointer, run, shown,
     update_command,
 };
@@ -276,6 +276,7 @@ type Reader = Box<dyn Fn(&Pointer) -> Result<Vec<u8>, &'static str> + Send + Syn
 #[derive(Default)]
 struct State {
     running: Option<&'static str>,
+    queued: Vec<&'static str>,
     last: HashMap<&'static str, LastUpdate>,
     latest: HashMap<&'static str, Latest>,
 }
@@ -558,7 +559,9 @@ impl Updates {
     /// The harnesses waiting in the install queue, in the order they install; the one
     /// installing now is no longer listed. Output: their catalog ids.
     pub fn queued(&self) -> Vec<String> {
-        Vec::new()
+        let state = self.state();
+        assert!(state.queued.len() <= harnesses::specs().len());
+        state.queued.iter().map(|id| (*id).to_owned()).collect()
     }
 
     /// Puts a list of harnesses in the install queue: each a catalog harness once, never the
@@ -570,8 +573,27 @@ impl Updates {
         db: &Connection,
         ids: &[String],
     ) -> Result<Vec<&'static str>, &'static str> {
-        let _ = (db, ids);
-        Err(INSTALL_LIST_INVALID)
+        if settings(db).map_err(|_| SETTINGS_UNREADABLE)?.install == InstallFromApp::Off {
+            return Err(INSTALL_OFF);
+        }
+        if ids.is_empty() || ids.len() > harnesses::specs().len() {
+            return Err(INSTALL_LIST_INVALID);
+        }
+        let mut picked: Vec<&'static str> = Vec::with_capacity(ids.len());
+        for id in ids {
+            let spec = harnesses::spec(id).ok_or(INSTALL_LIST_INVALID)?;
+            if spec.id == BUNDLED || picked.contains(&spec.id) {
+                return Err(INSTALL_LIST_INVALID);
+            }
+            picked.push(spec.id);
+        }
+        let mut state = self.state();
+        if !state.queued.is_empty() {
+            return Err(BUSY);
+        }
+        state.queued.clone_from(&picked);
+        assert!(state.queued.len() == ids.len());
+        Ok(picked)
     }
 
     /// Installs the queued harnesses one after another: each starts only once no update or
@@ -580,10 +602,51 @@ impl Updates {
     /// and the longest wait for the job slot. Output: none; returns once the last one started.
     pub fn drain(
         self: &Arc<Self>,
-        start: impl FnMut(&'static str) -> Result<(), &'static str>,
+        mut start: impl FnMut(&'static str) -> Result<(), &'static str>,
         pause: Duration,
         wait_max: Duration,
     ) {
-        let _ = (start, pause, wait_max);
+        assert!(!pause.is_zero() && pause <= wait_max);
+        let looks = wait_max.as_millis() / pause.as_millis().max(1);
+        while let Some(id) = self.next_queued() {
+            let mut result = Err(BUSY);
+            for _ in 0..=looks {
+                if self.idle() {
+                    result = start(id);
+                    if result != Err(BUSY) {
+                        break;
+                    }
+                }
+                std::thread::sleep(pause);
+            }
+            if let Err(code) = result {
+                self.refused(id, code);
+            }
+        }
+    }
+
+    /// Takes the next harness off the install queue. Output: its catalog id, none when the
+    /// queue is empty.
+    fn next_queued(&self) -> Option<&'static str> {
+        let mut state = self.state();
+        (!state.queued.is_empty()).then(|| state.queued.remove(0))
+    }
+
+    /// Records a queued install that never ran as that harness's last record. Inputs: the
+    /// catalog id and the refusal code.
+    fn refused(&self, id: &'static str, code: &'static str) {
+        let mut state = self.state();
+        state.last.insert(
+            id,
+            LastUpdate {
+                ok: false,
+                code: Some(code.to_owned()),
+                output: String::new(),
+                from: None,
+                to: None,
+                ended_ms: now_ms(),
+            },
+        );
+        assert!(state.last.len() <= harnesses::specs().len());
     }
 }
