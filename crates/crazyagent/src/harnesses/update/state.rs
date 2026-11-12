@@ -498,6 +498,9 @@ impl Updates {
             Some(executable) => self.present(spec, executable, roots, settings, look),
             None => missing(spec.id, roots, settings),
         };
+        if let Latest::Newer { version } = &versions.latest {
+            crate::notifications::events::harness_update(db, spec.id, version, now_ms());
+        }
         let state = self.state();
         versions.running = state.running == Some(spec.id);
         versions.last = state.last.get(spec.id).cloned();

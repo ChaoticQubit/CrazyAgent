@@ -4,6 +4,7 @@ import { refreshUsage, setManualReset, usageRefusal } from "../../api-usage";
 import { useAppSession, useLoad } from "../../state";
 import { PageHeader, type SidebarProject } from "../../ui";
 import { NextAccountsPanel } from "../settings/account-choice";
+import { ScorecardPanel } from "../settings/scorecard";
 import type { LimitsControls } from "./limits";
 import { MetricsView } from "./view";
 
@@ -11,8 +12,9 @@ const TICK_MS = 30_000;
 const NOT_READY = "This isn't ready in this build yet.";
 
 /** The app Metrics page from the bottom of the sidebar: every project's usage, each account's
- * limits and the next accounts, with a filter for one project. A picked project that leaves
- * the list falls back to every project. Input: the engine's projects. */
+ * limits and the next accounts, with a filter for one project, then the go/no-go scorecard,
+ * which scores the whole engine whatever project is picked. A picked project that leaves the
+ * list falls back to every project. Input: the engine's projects. */
 export function AppMetrics({ projects }: { projects: SidebarProject[] }) {
   const session = useAppSession();
   const [picked, setPicked] = useState<string | null>(null);
@@ -54,6 +56,9 @@ export function AppMetrics({ projects }: { projects: SidebarProject[] }) {
   const projectId = picked !== null && projects.some((project) => project.id === picked) ? picked : null;
   return <>
     <PageHeader title="Metrics" description="Every project on this engine in one place." />
-    <MetricsView projectId={projectId} filter={{ projects, onProject: setPicked, limits }} />
+    <div className="stack">
+      <MetricsView projectId={projectId} filter={{ projects, onProject: setPicked, limits }} />
+      <ScorecardPanel />
+    </div>
   </>;
 }

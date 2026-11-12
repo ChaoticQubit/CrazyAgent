@@ -38,7 +38,7 @@ const ASKED_AGAIN_MS: i64 = 20 * 60 * 60 * 1000;
 const DAILY_QUESTION: &str = "Did you choose CrazyAgent for your work today?";
 const DAILY_CONTEXT: &str = concat!(
     "The go/no-go scorecard counts the days you answer Yes. ",
-    "Turn this question off in Settings, Usage, Scorecard."
+    "Turn this question off on the go/no-go scorecard."
 );
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS scorecard_marks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

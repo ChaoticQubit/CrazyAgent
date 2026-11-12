@@ -190,6 +190,15 @@ fn registry_exists(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
+/// The name the owner gave a registered account. Inputs: the engine database and the
+/// connection id. Output: the name, or none for an account not in the registry.
+pub(crate) fn registered_name(
+    db: &Connection,
+    id: &CredentialRef,
+) -> Result<Option<String>, EngineError> {
+    Ok(registered(db, id)?.map(|(_, record)| record.details.name))
+}
+
 fn registered(db: &Connection, id: &CredentialRef) -> Result<Option<(i64, Record)>, EngineError> {
     if !registry_exists(db)? {
         return Ok(None);
@@ -597,6 +606,43 @@ fn listed(
         launchable,
         rejected,
     })
+}
+
+/// Whether one account needs its owner to sign in, as the notification center reads it in
+/// the engine tick, with no run host stamp (DEC-136a): any account the provider rejected,
+/// or a native managed account whose latest sign-in did not end authenticated and is not
+/// under way. OAuth accounts never need one here; API key accounts only on a rejection, so
+/// no key file is opened. Inputs: the store and the connection. Output: the answer.
+pub(crate) fn needs_sign_in(db: &Connection, model: &ModelConnection) -> Result<bool, EngineError> {
+    if matches!(model.auth, ModelAuthentication::Oauth { .. }) {
+        return Ok(false);
+    }
+    let rejected = crate::model_gateway::sign_in_rejected(db, model)?;
+    let ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
+        return Ok(rejected);
+    };
+    let under_way = matches!(
+        latest_sign_in(db, profile_ref)?,
+        Some(
+            NativeAuthPhase::Starting
+                | NativeAuthPhase::AwaitingOwner
+                | NativeAuthPhase::CheckingAccount
+                | NativeAuthPhase::Cancelling
+                | NativeAuthPhase::Uncertain
+        )
+    );
+    let authenticated = super::latest_sign_in_authenticated(db, model)?;
+    Ok(rejected || (!authenticated && !under_way))
+}
+
+/// The name the owner gave one account, or its provider's name when the registry has no
+/// record of it. Inputs: the store and the connection. Output: the name.
+pub(crate) fn account_name(
+    db: &Connection,
+    model: &ModelConnection,
+) -> Result<String, EngineError> {
+    Ok(registered(db, &model.id)?
+        .map_or_else(|| fallback(model).name, |(_, record)| record.details.name))
 }
 
 fn latest_sign_in(

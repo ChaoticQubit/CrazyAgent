@@ -220,7 +220,7 @@ test("a project without tickets offers a key from its name, and keys are 2 to 8 
 
 test("the Tickets tab sits after Questions and both tracker tabs route", async () => {
   const { TABS } = await import("../src/screens/project/index.tsx");
-  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "questions", "tickets", "roadmap", "context", "process", "settings"]);
+  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "metrics", "settings"]);
   assert.equal(TABS.find((tab) => tab.id === "tickets").label, "Tickets");
   const router = await import("../src/ui/router.ts");
   for (const tab of ["tickets", "roadmap"]) {
@@ -229,4 +229,31 @@ test("the Tickets tab sits after Questions and both tracker tabs route", async (
   }
   const index = readFileSync(new URL("../src/screens/project/index.tsx", import.meta.url), "utf8");
   assert.match(index, /\{active === "tickets" && <TicketsTab data=\{data\} \/>\}/);
+});
+
+test("a project's ticket settings use the Settings section parts and offer Use app default once it sets a key", async () => {
+  const settings = await import("../src/screens/settings/tickets.tsx");
+  const keys = [
+    ["close", ["agents", "evidence", "owner"], "evidence", "owner"],
+    ["create", ["direct", "triage", "owner_only"], "triage", null],
+    ["agent_edit", ["any", "status_and_criteria", "none"], "status_and_criteria", null],
+    ["cycle_days", [7, 14, 21, 28], 14, null],
+    ["rollover", ["auto", "ask", "off"], "auto", null],
+    ["import", ["auto_once", "on_request"], "auto_once", null],
+    ["manual_evidence", ["owner", "agents"], "owner", null],
+    ["ci_evidence", ["engine", "owner", "agents"], "engine", null],
+  ].map(([key, options, below, here]) => ({ key, options, proposed: below, custom: key === "cycle_days" ? { min: 1, max: 90 } : null, here, below, effective: here ?? below }));
+  const html = renderToStaticMarkup(createElement(settings.TicketSettingsView, {
+    page: { kind: "ok", value: { project_id: "alpha", version: 2, keys } }, scope: "project", projectId: "alpha", drafts: {}, busy: false, note: "",
+    onDraft: () => {}, onSave: () => {}, onUseAppDefault: () => {}, onRetry: () => {},
+  }));
+  assert.match(html, /class="pj set-groups"/);
+  assert.match(html, /class="set-group"/);
+  assert.match(html, /Ticket rules/);
+  assert.match(html, /A value set here wins over the app value for this project only\./);
+  assert.match(html, /App default \(When the evidence is in\)/);
+  assert.equal((html.match(/class="set-row wide"/g) ?? []).length, 8);
+  assert.equal((html.match(/class="set-changed"/g) ?? []).length, 1, "only Closing tickets differs from the app value");
+  assert.match(html, /Use app default/);
+  assert.match(html, /Save changes/);
 });
