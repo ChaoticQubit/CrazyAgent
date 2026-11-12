@@ -1331,25 +1331,57 @@ fn carrying(
 ) -> Result<Vec<(i32, String)>, Unstopped> {
     let word = format!("{LINEAGE_VARIABLE}={}", token.as_str());
     let output = read_bounded(owned(PS_ENVIRONMENT), pending, Some(word))?;
-    let listing = String::from_utf8_lossy(&output);
     let user = rustix::process::getuid().as_raw();
     let own = i32::try_from(std::process::id()).map_err(|_| Unstopped::Uncertain)?;
-    let found: Vec<(i32, String)> = listing
-        .lines()
+    Ok(carriers(&output, user, own))
+}
+
+/// Reads the carriers out of what [`kept_lines`] kept, split by the same [`fields`] it
+/// split by: each line of `user`'s, not `own`, above 1 and not a zombie, whose id and user
+/// are plain digits. Inputs: the kept lines, the user id and the engine's id. Output: each
+/// carrier's id and start, at most `TABLE_ROWS_MAX`.
+#[cfg(target_os = "macos")]
+fn carriers(kept: &[u8], user: u32, own: i32) -> Vec<(i32, String)> {
+    let found: Vec<(i32, String)> = kept
+        .split(|byte| *byte == b'\n')
         .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            let pid = fields.first()?.parse::<i32>().ok()?;
-            let owner = fields.get(1)?.parse::<u32>().ok()?;
-            (fields.len() == KEPT_FIELDS
+            let parts: Vec<&str> = fields(line)
+                .map(std::str::from_utf8)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            let pid: i32 = number(parts.first()?.as_bytes())?;
+            let owner: u32 = number(parts.get(1)?.as_bytes())?;
+            (parts.len() == KEPT_FIELDS
                 && owner == user
                 && pid != own
                 && pid > 1
-                && !fields[2].starts_with('Z'))
-            .then(|| (pid, fields[3..KEPT_FIELDS].join(" ")))
+                && !parts[2].starts_with('Z'))
+            .then(|| (pid, parts[3..KEPT_FIELDS].join(" ")))
         })
         .take(TABLE_ROWS_MAX)
         .collect();
-    Ok(found)
+    assert!(found.len() <= TABLE_ROWS_MAX);
+    found
+}
+
+/// Splits one listing line into its fields on ASCII whitespace only, the one way every
+/// environment listing reader splits, so a byte another reader would take as a separator,
+/// such as a vertical tab or a no-break space, stays inside a field (L1 r2 L1). Input: the
+/// line. Output: its non-empty fields.
+#[cfg(unix)]
+fn fields(line: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
+    line.split(u8::is_ascii_whitespace)
+        .filter(|field| !field.is_empty())
+}
+
+/// Reads a field that must be a plain decimal number, as `ps` prints ids: 1 to 10 ASCII
+/// digits, no sign and nothing else. Input: the field. Output: the number, or none.
+#[cfg(unix)]
+fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
+    if field.is_empty() || field.len() > 10 || !field.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(field).ok()?.parse().ok()
 }
 
 /// Finds no process by its environment where none is listed here: Linux reads no token yet.
@@ -1476,8 +1508,11 @@ fn owned(argv: &[&str]) -> Vec<String> {
 /// line that holds `word` as a whole field only its first `KEPT_FIELDS` fields, so no
 /// environment text is kept. A listing in which two lines start with the same process id is
 /// refused whole: a line that copies a real process's id can only come from text an agent
-/// put in its arguments or environment (L1 r1 F1). Inputs: the listing, the word and where
-/// to keep. Output: Ok, or the read's error, an overlong or forged listing included.
+/// put in its arguments or environment (L1 r1 F1). So is one whose line holding `word` does
+/// not start with a plain digits id, as a line led by a vertical tab or a no-break space
+/// (L1 r2 L1). Fields are split by [`fields`], as [`carriers`] splits them. Inputs: the
+/// listing, the word and where to keep. Output: Ok, or the read's error, an overlong or
+/// forged listing included.
 #[cfg(unix)]
 fn kept_lines(listing: impl std::io::Read, word: &[u8], kept: &mut Vec<u8>) -> std::io::Result<()> {
     use std::io::BufRead;
@@ -1494,23 +1529,21 @@ fn kept_lines(listing: impl std::io::Read, word: &[u8], kept: &mut Vec<u8>) -> s
         if total > ENVIRONMENT_BYTES_MAX {
             return Err(std::io::Error::other("listing_too_long"));
         }
-        let fields = line
-            .split(u8::is_ascii_whitespace)
-            .filter(|field| !field.is_empty());
-        if let Some(pid) = fields
-            .clone()
-            .next()
-            .and_then(|field| std::str::from_utf8(field).ok())
-            .and_then(|field| field.parse::<i32>().ok())
-            && !seen.insert(pid)
-        {
-            return Err(std::io::Error::other("listing_pid_twice"));
+        let parts = fields(&line);
+        let holds = parts.clone().any(|field| field == word);
+        match parts.clone().next().and_then(number::<i32>) {
+            Some(pid) if !seen.insert(pid) => {
+                return Err(std::io::Error::other("listing_pid_twice"));
+            }
+            Some(_) => {}
+            None if holds => return Err(std::io::Error::other("listing_line_forged")),
+            None => {}
         }
         if seen.len() > TABLE_ROWS_MAX {
             return Err(std::io::Error::other("listing_too_long"));
         }
-        if fields.clone().any(|field| field == word) {
-            for field in fields.take(KEPT_FIELDS) {
+        if holds {
+            for field in parts.take(KEPT_FIELDS) {
                 kept.extend_from_slice(field);
                 kept.push(b' ');
             }
@@ -2138,6 +2171,38 @@ pub(crate) mod tests {
             String::from_utf8(kept).unwrap(),
             "601 501 S Tue Nov 10 16:32:13 2026 \n"
         );
+    }
+
+    /// L1 r2 L1: a forged token line led by a vertical tab or a no-break space before a real
+    /// process's id is refused whole by the listing reader, and the carrier reader, which
+    /// splits by the same ASCII fields, never reads an id that is not plain digits.
+    #[test]
+    fn a_token_line_led_by_a_vertical_tab_or_no_break_space_is_refused_and_never_a_carrier() {
+        let ours = LineageToken::new().unwrap();
+        let word = format!("{LINEAGE_VARIABLE}={}", ours.as_str());
+        for lead in ["\x0b", "\u{a0}"] {
+            let listing = format!(
+                "  602   501 S    Tue Nov 10 16:32:13 2026     /Applications/Owner.app/owner\n\
+                 900   501 S    Tue Nov 10 16:30:00 2026     /opt/agent x\n\
+                 {lead}602   501 S    Tue Nov 10 16:32:13 2026 {word}\n"
+            );
+            let mut kept = Vec::new();
+            assert!(
+                kept_lines(listing.as_bytes(), word.as_bytes(), &mut kept).is_err(),
+                "{lead:?}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let kept = "\x0b602 501 S Tue Nov 10 16:32:13 2026 \n\
+                        \u{a0}603 501 S Tue Nov 10 16:32:13 2026 \n\
+                        +604 501 S Tue Nov 10 16:32:13 2026 \n\
+                        605 501 S Tue Nov 10 16:32:13 2026 \n";
+            assert_eq!(
+                carriers(kept.as_bytes(), 501, 1),
+                vec![(605, "Tue Nov 10 16:32:13 2026".to_owned())]
+            );
+        }
     }
 
     #[test]
