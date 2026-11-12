@@ -23,7 +23,7 @@
       "apply": "rcli_config",
       "scope": "app_and_project",
       "locked": {
-        "reason": "The model comes from the account and pool the engine picks.",
+        "reason": "The provider comes from the account the engine picks from the pool.",
         "engine_value": null
       }
     },
@@ -37,7 +37,7 @@
       "apply": "rcli_config",
       "scope": "app_and_project",
       "locked": {
-        "reason": "The model comes from the account and pool the engine picks.",
+        "reason": "The model is the master model chosen in Models, else the model of the account the engine picks from the pool.",
         "engine_value": null
       }
     },
