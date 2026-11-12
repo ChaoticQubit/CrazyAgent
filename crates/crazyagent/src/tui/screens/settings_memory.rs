@@ -1174,10 +1174,12 @@ impl Screen for Memory {
             return Flow::Handled;
         }
         match settings_event(arrival) {
-            Some(SettingsEvent::Memories(result)) => {
-                let asked = std::mem::take(&mut self.waiting);
+            Some(SettingsEvent::Memories(scopes, result))
+                if self.waiting && *scopes == self.scoped =>
+            {
+                self.waiting = false;
                 match result {
-                    Ok(memories) if asked => {
+                    Ok(memories) => {
                         self.memories = memories
                             .iter()
                             .filter(|memory| self.scoped.contains(&memory.scope))
@@ -1189,14 +1191,10 @@ impl Screen for Memory {
                             ctx.store.memory = Load::Ready(self.memories.len());
                         }
                     }
-                    Ok(_) => {}
-                    Err(code) if asked && self.memories.is_empty() => {
-                        self.load = Load::Failed(code.clone())
-                    }
-                    Err(code) if asked => {
+                    Err(code) if self.memories.is_empty() => self.load = Load::Failed(code.clone()),
+                    Err(code) => {
                         ctx.say(Message::error("Could not refresh memories.", plain(code)))
                     }
-                    Err(_) => {}
                 }
             }
             Some(SettingsEvent::MemoryDeleted(result)) if self.deleting => {
