@@ -5,6 +5,7 @@ import {
   routeOf, sendNotice, signInsQuery, type FoldChange, type Notice, type NoticeAction, type NoticeCounts, type NoticeFilter, type NoticePage,
 } from "../../api-notifications";
 import { Icon, LoadError } from "../../ui";
+import { cover } from "../../ui/overlay";
 import { displayText } from "../conversation";
 import "./notifications.css";
 
@@ -249,14 +250,16 @@ function NoticePanel({ projects, newest, onClose, onChanged }: {
 }
 
 /** The bell top right on every page: reads both counts every few seconds and opens the
- * panel, which Escape or a click outside closes. Input: the projects the picker offers.
- * Output: the bell and, when open, the panel. */
+ * panel, which Escape or a click outside closes; while open it covers the page like a
+ * Drawer, so the IDE webview steps aside. Input: the projects the picker offers. Output:
+ * the bell and, when open, the panel. */
 export function NoticeBell({ projects }: { projects: readonly PickedProject[] }) {
   const [counts, setCounts] = useState<NoticeCounts>({ unread: 0, pending: 0 });
   const [newest, setNewest] = useState(0);
   const [open, setOpen] = useState(false);
   const [tick, setTick] = useState(0);
   const corner = useRef<HTMLDivElement>(null);
+  useEffect(() => (open ? cover() : undefined), [open]);
   useEffect(() => {
     let live = true;
     let timer = 0;
