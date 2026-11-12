@@ -285,6 +285,13 @@ pub(crate) fn forget_key(
     Ok(())
 }
 
+/// Removes a deleted master session's engine turns from the index, in whichever project
+/// they were. Inputs: the database and the session id. Output: done, or the database
+/// failure.
+pub(crate) fn forget_session(_connection: &Connection, _session: &str) -> Result<(), EngineError> {
+    unimplemented!("search index forget_session")
+}
+
 /// Turns an untrusted query into an FTS5 expression of plain words: at most `WORDS_MAX`
 /// words of at most `WORD_BYTES_MAX` bytes that hold a letter or digit, each one quoted
 /// phrase with its quotes doubled and a prefix star, so no word is read as FTS5 syntax.

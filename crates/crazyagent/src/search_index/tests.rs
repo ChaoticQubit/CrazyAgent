@@ -458,3 +458,48 @@ fn without_full_text_the_index_is_emptied_and_not_used_until_it_is_back() {
     .unwrap();
     assert_eq!(best(&db, &alpha, Source::Session, "kept").unwrap().len(), 1);
 }
+
+#[test]
+fn deleting_a_master_session_forgets_its_turns_in_every_project() {
+    let db = store();
+    let alpha = project("alpha");
+    append(
+        &db,
+        Some(&alpha),
+        Source::Session,
+        "session/s-1",
+        &[(0, "owner asked about caching")],
+        NOW,
+    )
+    .unwrap();
+    append(
+        &db,
+        Some(&alpha),
+        Source::Session,
+        "session/s-2",
+        &[(0, "owner asked about caching too")],
+        NOW,
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO search_sources(project,key,checked_ms) VALUES ('alpha','session/s-1',1)",
+        [],
+    )
+    .unwrap();
+    forget_session(&db, "s-1").unwrap();
+    assert_eq!(
+        texts(&db, &best(&db, &alpha, Source::Session, "caching").unwrap()),
+        ["owner asked about caching too"]
+    );
+    let left: i64 = db
+        .query_row("SELECT COUNT(*) FROM search_sources", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
+fn forgetting_works_on_a_database_that_never_made_the_index() {
+    let db = Connection::open_in_memory().unwrap();
+    forget_session(&db, "s-1").unwrap();
+    forget_project(&db, &project("alpha")).unwrap();
+}
