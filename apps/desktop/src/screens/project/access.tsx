@@ -102,7 +102,7 @@ export const EXTRAS_UNDER_FULL = "Full access runs agents without a sandbox, so 
 
 /** What each kind of extra lets agents do, in the owner's words, the same as the engine's question. */
 export const GRANT_MEANINGS: Record<AccessGrant["kind"], string> = {
-  socket: "Agents may connect to this socket and talk to the program behind it with your rights, but never replace or remove it. Container, VM, key and password agent sockets, and sockets of other users, are never allowed.",
+  socket: "Agents may connect to this socket and talk to the program behind it with your rights, but never replace or remove it. Container, VM, terminal, editor, key and password agent sockets, and sockets of other users, are never allowed.",
   port: "Agents may connect to this port on this computer, even when their network is limited. Ports from 49152 up, your sign-in, your local model and CrazyAgent's own ports are never allowed.",
   temp_folder: "Agents use your own temp folder as theirs: they can read and change other apps' temp files there, but no socket in it.",
 };

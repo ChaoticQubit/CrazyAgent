@@ -73,6 +73,23 @@ const KEY_WORDS: [&str; 10] = [
     "secretive",
     "keepass",
 ];
+const CONTROL_WORDS: [&str; 13] = [
+    "tmux",
+    "emacs",
+    "nvim",
+    "zellij",
+    "kitty",
+    "wezterm",
+    "alacritty",
+    "iterm",
+    "vscode",
+    "codium",
+    "cursor",
+    "windsurf",
+    "hammerspoon",
+];
+const CONTROL_NAMES: [&str; 5] = ["vim", "code", "screen", "screens", "uscreens"];
+const CONTROL_PORTS: [u16; 4] = [2375, 2376, 9222, 9229];
 const KEY_STARTS: [&str; 2] = ["gpg", "ssh"];
 const KEY_NAME_WORDS: [&str; 3] = ["agent", "gpg", "ssh"];
 
@@ -153,7 +170,7 @@ pub fn refusal_text(code: &str) -> &'static str {
             "That socket belongs to CrazyAgent itself, so it is never allowed."
         }
         "grant_socket_agent" => {
-            "That socket hands out your SSH keys or other agents' terminals, so it is never allowed."
+            "That socket controls a terminal or an editor (tmux, screen, Zellij, kitty, WezTerm, Alacritty, iTerm2, Emacs, Neovim, VS Code, Cursor and the like) or hands out your SSH keys, which can run anything as you, so it is never allowed."
         }
         "grant_socket_host" => {
             "That socket controls containers or virtual machines (Docker, containerd, Podman, Colima, Lima, OrbStack and the like), which can reach your whole computer, so it is never allowed."
@@ -162,13 +179,13 @@ pub fn refusal_text(code: &str) -> &'static str {
             "That socket belongs to a key or password agent (gpg-agent, 1Password, SSH or another agent), so it is never allowed."
         }
         "grant_socket_owner" => {
-            "That socket belongs to the system or another user, or sits in a folder other users can change, so it is never allowed."
+            "That socket belongs to the system or another user, has a second name, or sits in a folder other users can change, so it is never allowed."
         }
         "grant_socket_missing" => {
             "There is no socket at that path now. Start the program that makes it, then allow it again."
         }
         "grant_port_reserved" => {
-            "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), so it is never allowed."
+            "That port belongs to your sign-in, your local model or CrazyAgent itself (its IDE or model proxy), or controls Docker, a browser or a Node debugger, so it is never allowed."
         }
         "grant_port_dynamic" => {
             "Ports from 49152 up are lent by the system to CrazyAgent's IDE and other apps for a while, so they are never allowed. Pick a fixed port below 49152."
@@ -186,13 +203,13 @@ pub fn refusal_text(code: &str) -> &'static str {
 }
 
 /// Checks one grant the owner or an agent named, as a save, an Allow and each launch take
-/// it: a socket as the canonical path of an existing socket the user owns in a folder no
-/// other user can change, never with the owner's credentials, in the engine's data folder,
-/// a launchd listener or tmux folder, nor one of a container or VM host or a key agent; a
-/// port below the dynamic range other than the owner's fixed ports, the model proxy ports
-/// and every IDE port the engine recorded; the temp folder only when it is the owner's
-/// private one. Inputs: the grant and the engine's data folder. Output: the grant to keep,
-/// or a plain refusal code.
+/// it: a socket as the canonical path of an existing socket with one name the user owns in
+/// a folder no other user can change, never with the owner's credentials, in the engine's
+/// data folder or a launchd listener, nor one of a container or VM host, a terminal or
+/// editor, or a key agent; a port below the dynamic range other than the owner's fixed
+/// ports, Docker's API and debugger ports, the model proxy ports and every IDE port the
+/// engine recorded; the temp folder only when it is the owner's private one. Inputs: the
+/// grant and the engine's data folder. Output: the grant to keep, or a plain refusal code.
 pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'static str> {
     match grant {
         AccessGrant::Socket { path } => {
@@ -209,12 +226,7 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
                 return Err("grant_socket_engine");
             }
             let text = real.to_str().ok_or("grant_socket_not_plain")?;
-            let folder = real
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if text.starts_with(LAUNCHD_LISTENERS) || folder.starts_with("tmux-") {
+            if text.starts_with(LAUNCHD_LISTENERS) {
                 return Err("grant_socket_agent");
             }
             if let Some(code) = escape_class(&real) {
@@ -228,6 +240,7 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
         AccessGrant::Port { port } => {
             let reserved = *port == 0
                 || OWNER_PORTS.contains(port)
+                || CONTROL_PORTS.contains(port)
                 || super::model_proxy::PROXY_PORTS.contains(port)
                 || ide_ports(data_root).contains(port);
             if reserved {
@@ -262,27 +275,20 @@ pub fn held_now(grants: &[AccessGrant], kept: &[u16], data_root: &Path) -> Vec<A
 }
 
 /// The class of host-escape or key socket a path names, judged by its folder and file
-/// names, lowercased: a container or VM host, or a key or password agent. Input: the
-/// canonical path. Output: `grant_socket_host`, `grant_socket_keys` or none.
+/// names, lowercased: a container or VM host, a terminal or editor that runs commands as
+/// the owner, or a key or password agent. Input: the canonical path. Output:
+/// `grant_socket_host`, `grant_socket_agent`, `grant_socket_keys` or none.
 fn escape_class(real: &Path) -> Option<&'static str> {
     let words: Vec<String> = real
         .components()
         .filter_map(|part| part.as_os_str().to_str())
         .map(|part| part.trim_start_matches('.').to_ascii_lowercase())
         .collect();
-    let named = |word: &str| {
-        HOST_ESCAPE_NAMES.iter().any(|name| {
-            word == *name
-                || ["-", "_", "."]
-                    .iter()
-                    .any(|cut| word.starts_with(&format!("{name}{cut}")))
-        })
-    };
-    let host = words
-        .iter()
-        .any(|word| named(word) || HOST_ESCAPE_WORDS.iter().any(|mark| word.contains(mark)));
-    if host {
+    if marked(&words, &HOST_ESCAPE_NAMES, &HOST_ESCAPE_WORDS) {
         return Some("grant_socket_host");
+    }
+    if marked(&words, &CONTROL_NAMES, &CONTROL_WORDS) {
+        return Some("grant_socket_agent");
     }
     let name = words.last().map(String::as_str).unwrap_or_default();
     let keys = words.iter().any(|word| {
@@ -292,18 +298,40 @@ fn escape_class(real: &Path) -> Option<&'static str> {
     keys.then_some("grant_socket_keys")
 }
 
+/// Whether any lowercased path part is one of the names, alone or followed by `-`, `_` or
+/// `.`, or holds one of the marks anywhere. Inputs: the parts, the names and the marks.
+/// Output: true when one part matches.
+fn marked(words: &[String], names: &[&str], marks: &[&str]) -> bool {
+    words.iter().any(|word| {
+        let named = names.iter().any(|name| {
+            word == name
+                || ["-", "_", "."]
+                    .iter()
+                    .any(|cut| word.starts_with(&format!("{name}{cut}")))
+        });
+        named || marks.iter().any(|mark| word.contains(mark))
+    })
+}
+
 #[cfg(unix)]
 fn socket_fit(real: &Path) -> Result<(), &'static str> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let socket = std::fs::symlink_metadata(real)
-        .ok()
+    let meta = std::fs::symlink_metadata(real).ok();
+    let socket = meta
+        .as_ref()
         .map(|meta| (meta.file_type().is_socket(), meta.uid()));
     let parent = real
         .parent()
         .and_then(|folder| std::fs::symlink_metadata(folder).ok())
         .map(|meta| (meta.uid(), meta.mode()))
         .ok_or("grant_socket_missing")?;
-    ownership(socket, parent, nix::unistd::getuid().as_raw())
+    ownership(socket, parent, nix::unistd::getuid().as_raw())?;
+    let links = meta.map_or(0, |meta| meta.nlink());
+    assert!(links >= 1);
+    if links != 1 {
+        return Err("grant_socket_owner");
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -592,10 +620,7 @@ pub fn request(
             Ok(Requested::Asked(question))
         }
         Err(problem) => {
-            let _ = db.execute(
-                "UPDATE access_requests SET status='denied' WHERE id=?1",
-                [id],
-            );
+            let _ = db.execute("DELETE FROM access_requests WHERE id=?1", [id]);
             Err(problem.0)
         }
     }

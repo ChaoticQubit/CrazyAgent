@@ -697,7 +697,7 @@ pub fn record_tool() -> Value {
 pub fn request_access_tool() -> Value {
     json!({
         "name": REQUEST_ACCESS_TOOL,
-        "description": "Ask the owner to allow one narrow extra your sandbox blocks: connecting to one unix socket, connecting to one TCP port on this computer, or using the owner's own temp folder as yours. The engine checks it and raises a question the owner answers in the Questions view; if allowed it joins the project's Agent access and agents restart at their next pause to get it. Use it instead of working around the sandbox. Container, VM, key and password agent sockets are never allowed, nor ports from 49152 up.",
+        "description": "Ask the owner to allow one narrow extra your sandbox blocks: connecting to one unix socket, connecting to one TCP port on this computer, or using the owner's own temp folder as yours. The engine checks it and raises a question the owner answers in the Questions view; if allowed it joins the project's Agent access and agents restart at their next pause to get it. Use it instead of working around the sandbox. Container, VM, terminal, editor, key and password agent sockets are never allowed, nor Docker or debugger ports, nor ports from 49152 up.",
         "inputSchema": {
             "type": "object",
             "properties": {
