@@ -71,6 +71,7 @@ fn case() -> Case {
     write(&repository.join("program").join("data.csv"), "a,b\n");
     write(&repository.join("build").join("out.txt"), "built\n");
     write(&repository.join("notes.txt"), "notes\n");
+    write(&repository.join(".env.example"), "TOKEN=\n");
     for secret in SECRETS {
         write(&repository.join(secret), "SECRET_VALUE_4471\n");
     }
@@ -148,7 +149,7 @@ fn with(scope: SharedScope, access: SharedAccess) -> SharedFolders {
 
 /// DEC-147.9 All with Read-only: every local folder reads, gitignored ones included, none is
 /// written, every secret kind stays closed in any letter case while its name stays listed,
-/// and the agent's own folder keeps its own `.env`.
+/// an env template reads, and the agent's own folder keeps its own `.env`.
 #[test]
 fn all_read_only_reads_every_local_folder_and_keeps_every_secret_closed() {
     let case = case();
@@ -158,6 +159,7 @@ fn all_read_only_reads_every_local_folder_and_keeps_every_secret_closed() {
         "build/out.txt",
         "notes.txt",
         "src/main.rs",
+        ".env.example",
     ] {
         assert!(
             reads(&case, &sandbox, &case.repository.join(open)),
@@ -204,7 +206,8 @@ fn all_read_only_reads_every_local_folder_and_keeps_every_secret_closed() {
 }
 
 /// Leader row: a link with a plain name that points at a secret is still closed, in the
-/// project folder and from the agent's own folder.
+/// project folder and from the agent's own folder, and so is a link named like an env
+/// template.
 #[test]
 fn a_link_with_a_plain_name_to_a_secret_is_still_closed() {
     let case = case();
@@ -215,6 +218,11 @@ fn a_link_with_a_plain_name_to_a_secret_is_still_closed() {
     .unwrap();
     std::os::unix::fs::symlink(case.repository.join(".env"), case.own.join("peek")).unwrap();
     std::os::unix::fs::symlink(
+        case.repository.join(".env"),
+        case.repository.join("config").join(".env.sample"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
         case.repository.join("keys"),
         case.repository.join("plain-folder"),
     )
@@ -224,6 +232,7 @@ fn a_link_with_a_plain_name_to_a_secret_is_still_closed() {
         case.repository.join("notes-link"),
         case.own.join("peek"),
         case.repository.join("plain-folder").join("server.pem"),
+        case.repository.join("config").join(".env.sample"),
     ] {
         let output = run(&case, &sandbox, &format!("cat {}", quoted(&link)));
         assert!(!output.status.success(), "{} read", link.display());

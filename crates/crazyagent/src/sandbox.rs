@@ -1608,7 +1608,8 @@ impl ProjectSandbox {
 
     /// The Seatbelt rules of [`Self::keep_project_secrets`]: the deny of secret names in the
     /// project folder outside `.git` and the agent's own writable roots there (never the
-    /// shared writable folders), then the read allow of each shared-back secret. Output: the
+    /// shared writable folders), then the read allow of env templates
+    /// ([`shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
     /// rules, empty when no folder was named.
     fn project_secret_rules(&self) -> String {
         let Some(root) = self
@@ -1640,6 +1641,11 @@ impl ProjectSandbox {
             ));
         }
         text.push_str("))\n");
+        text.push_str(&format!(
+            "(allow file-read-data file-read-xattr\n  (regex #\"^{}/(.*/)?{}$\"))\n",
+            seatbelt_pattern(root),
+            fold_case(shared_folders::SECRET_TEMPLATES)
+        ));
         let revealed: Vec<&PathBuf> = self
             .secrets_revealed
             .iter()

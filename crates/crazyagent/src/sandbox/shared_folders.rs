@@ -70,6 +70,11 @@ pub const SECRET_NAMES: &[&str] = &[
     r".*\.tfstate\..*",
 ];
 
+/// Env templates the secret deny gives back for reading, in any letter case, since they name
+/// variables and hold no values: `.env.example`, `.env.sample`, `.env.template`, `.env.dist`.
+/// A link with such a name to a real secret stays closed: the sandbox checks its target.
+pub const SECRET_TEMPLATES: &str = r"\.env\.(example|sample|template|dist)";
+
 /// Which of the project folder's local folders a project's agents see (DEC-147.9): All, the
 /// default, shares every one, gitignored ones included; Chosen folders shares only the
 /// top-level folders the owner named; None shares none, so an agent works in its worktree.
