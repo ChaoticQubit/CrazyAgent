@@ -184,10 +184,10 @@ test("App plugins: each action is a direct bridge call, and an entered key trave
   assert.match(view, /keyRef\.current\.value = ""/u, "the key field is cleared once its value is sent");
 });
 
-test("Settings lists App plugins and Search under App and opens each tab's own screen", async () => {
+test("Settings lists Notifications, App plugins and Search under App and opens each tab's own screen", async () => {
   const settings = await import("../src/screens/settings/index.tsx");
   const app = settings.SETTINGS_GROUPS.find((group) => group.title === "App");
-  assert.deepEqual(app.items, [{ id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "app-plugins", label: "App plugins" }, { id: "search", label: "Search" }]);
+  assert.deepEqual(app.items, [{ id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "notifications", label: "Notifications" }, { id: "app-plugins", label: "App plugins" }, { id: "search", label: "Search" }]);
   const index = source("../src/screens/settings/index.tsx");
   assert.match(index, /tab === "app-plugins" \? <AppPluginsSettings \/>/u);
   assert.match(index, /tab === "search" \? <SearchSettings \/>/u);
