@@ -6281,6 +6281,45 @@ auth = { method = "none" }"#;
         }
     }
 
+    /// Settles the fixture's first turn, has the owner add an account outside the master's
+    /// pool and sends again, which rebinds the session (PA-6, DEC-092). Input: a registered
+    /// fixture. Output: the config id before the edit and the next turn's prepare command.
+    async fn rebind_after_outside_edit(case: &Fixture) -> (ConfigId, MasterRuntimeCommand) {
+        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
+        else {
+            panic!("the registered key must prepare the first turn");
+        };
+        fail_first(case, &first, MasterReason::RuntimeUnavailable).await;
+        let basis = owner_read(
+            &case.storage,
+            &case.started,
+            OwnerRead::ModelAccessPage {
+                collection: ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 1,
+            },
+        )
+        .await;
+        let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
+            panic!("actual model source basis missing");
+        };
+        owner_apply(
+            &case.storage,
+            &case.started,
+            "add-outside-account",
+            OwnerMutation::ModelAccess {
+                expected_config_id: basis.config_id.clone(),
+                expected_source_hash: source_hash,
+                edit: crate::config::ModelAccessEdit::AddAccount {
+                    account_ref: reference("outside-account"),
+                },
+            },
+        )
+        .await;
+        let prepare = next_turn(case, "after-settings-change").await;
+        (basis.config_id, prepare)
+    }
+
     /// Ends the fixture's first turn with a failure the runtime reported. Inputs: the
     /// fixture, the prepared turn and the reason. Output: none; the turn is Failed.
     async fn fail_first(case: &Fixture, prepared: &PreparedMasterTurn, reason: MasterReason) {
@@ -6363,43 +6402,12 @@ auth = { method = "none" }"#;
     async fn an_rcli_master_keeps_its_conversation_after_a_settings_change_outside_it() {
         let case = Fixture::kept().await;
         let registered = case.register().await;
-        let MasterRuntimeResult::Prepared(first) = case.runtime(case.prepare()).await.unwrap()
-        else {
-            panic!("the registered key must prepare the first turn");
-        };
-        fail_first(&case, &first, MasterReason::RuntimeUnavailable).await;
-        let basis = owner_read(
-            &case.storage,
-            &case.started,
-            OwnerRead::ModelAccessPage {
-                collection: ModelAccessCollection::Pools,
-                cursor: None,
-                limit: 1,
-            },
-        )
-        .await;
-        let OwnerData::ModelAccessPage { source_hash, .. } = basis.data else {
-            panic!("actual model source basis missing");
-        };
-        owner_apply(
-            &case.storage,
-            &case.started,
-            "add-outside-account",
-            OwnerMutation::ModelAccess {
-                expected_config_id: basis.config_id.clone(),
-                expected_source_hash: source_hash,
-                edit: crate::config::ModelAccessEdit::AddAccount {
-                    account_ref: reference("outside-account"),
-                },
-            },
-        )
-        .await;
-        let prepare = next_turn(&case, "after-settings-change").await;
+        let (before, prepare) = rebind_after_outside_edit(&case).await;
         let (session, _) = case.view().await;
         assert_eq!(session.session_id, case.session.session_id);
         assert_eq!(session.rebound.len(), 1);
         assert!(session.rebinds_valid());
-        assert_ne!(session.binding().0, &basis.config_id);
+        assert_ne!(session.binding().0, &before);
         let MasterRuntimeResult::Prepared(second) = case.runtime(prepare).await.unwrap() else {
             panic!("the rebound RCLI master must prepare its next turn");
         };
@@ -6417,6 +6425,60 @@ auth = { method = "none" }"#;
         assert_ne!(record.proof.registration_id, registered.registration_id);
         assert_eq!(&record.proof.config_id, session.binding().0);
         assert_eq!(record.proof.custody_id, registered.custody_id);
+        drop(tx);
+        case.close().await;
+    }
+
+    /// PA-6: a rebound RCLI master reads each turn under a binding it held and no other: a
+    /// live turn needs the current binding, a settled one may keep the Open binding, and a
+    /// pair the session never held is refused, also by the turn's preparation check.
+    #[tokio::test]
+    async fn a_rebound_rcli_master_admits_each_turn_only_under_a_binding_it_held() {
+        let case = Fixture::kept().await;
+        case.register().await;
+        let (before, prepare) = rebind_after_outside_edit(&case).await;
+        let MasterRuntimeResult::Prepared(_) = case.runtime(prepare).await.unwrap() else {
+            panic!("the rebound RCLI master must prepare its next turn");
+        };
+        let (session, turns) = case.view().await;
+        let open = (&case.session.config_id, case.session.source_hash.as_str());
+        let now = session.binding();
+        assert_eq!(open.0, &before);
+        assert_ne!(now, open);
+        assert!(session.admits_binding(now.0, now.1, true));
+        assert!(session.admits_binding(now.0, now.1, false));
+        assert!(
+            session.admits_binding(open.0, open.1, false),
+            "a settled turn keeps the Open binding"
+        );
+        assert!(
+            !session.admits_binding(open.0, open.1, true),
+            "a live turn needs the current binding"
+        );
+        assert!(!session.admits_binding(now.0, open.1, false));
+        assert!(!session.admits_binding(open.0, now.1, false));
+        let settled = turns
+            .iter()
+            .find(|turn| turn.phase == MasterTurnPhase::Failed)
+            .expect("the first turn settled before the edit");
+        let live = turns
+            .iter()
+            .find(|turn| turn.phase == MasterTurnPhase::Prepared)
+            .expect("the turn after the rebind is prepared");
+        let mut db = case.db();
+        let tx = db.transaction().unwrap();
+        assert!(preparation(&tx, &session, settled).is_ok());
+        assert!(preparation(&tx, &session, live).is_ok());
+        let mut unbound = session.clone();
+        unbound.rebound.clear();
+        assert_eq!(
+            preparation(&tx, &unbound, live)
+                .err()
+                .map(|failure| failure.0)
+                .as_deref(),
+            Some("master_preparation_record"),
+            "a live turn prepared on a binding the session does not hold now is refused"
+        );
         drop(tx);
         case.close().await;
     }
