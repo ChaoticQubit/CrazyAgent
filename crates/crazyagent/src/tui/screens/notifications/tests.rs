@@ -570,6 +570,27 @@ fn a_marks_every_item_of_the_picked_project_read() {
 }
 
 #[test]
+fn a_clears_the_marks_once_every_item_read_stands_and_keeps_them_when_refused() {
+    let mut shell = loaded(vec![question(1), question(2)]);
+    shell.key(Key::Char(' '));
+    shell.key(Key::Char('a'));
+    let all = sent(&mut shell).remove(0);
+    assert!(screen(&mut shell).contains("1 selected"));
+    shell.arrive(reply(all, Err("notification_ids_invalid".into())));
+    assert!(
+        screen(&mut shell).contains("1 selected"),
+        "a refused read keeps them"
+    );
+    shell.key(Key::Char('a'));
+    let all = sent(&mut shell).remove(0);
+    shell.arrive(reply(all, Ok(NoticesReply::Done)));
+    assert!(
+        !screen(&mut shell).contains("selected"),
+        "every item read clears the marks, as the desktop panel does"
+    );
+}
+
+#[test]
 fn a_change_of_more_rows_than_one_action_holds_goes_out_in_chunks() {
     let rows = usize::from(PAGE_MAX) + 3;
     let items: Vec<Notice> = (1..=i64::try_from(rows).unwrap()).map(question).collect();
