@@ -447,14 +447,14 @@ fn a_test_records_verified_and_failed_and_leaves_a_pending_id_pending_with_its_r
         )
         .unwrap();
         let Reply::Tested {
-            tested,
+            tested: outcome,
             reason,
             models,
         } = reply
         else {
             panic!("not tested: {reply:?}");
         };
-        assert_eq!((tested, reason), decision, "{id}");
+        assert_eq!((outcome, reason), decision, "{id}");
         assert_eq!(origin(&models, id), after, "{id}");
         assert_eq!(handed.borrow_mut().take(), Some(pool()));
     }
@@ -469,12 +469,15 @@ fn a_test_whose_id_was_removed_while_it_ran_stays_undecided_and_a_busy_test_is_r
         assert!(store::custom_remove(&db, "codex", "gpt-a").unwrap());
         Ok((Tested::Verified, None))
     });
-    let Reply::Tested { tested, reason, .. } =
-        tested(&root, "codex", "gpt-a", Some(&pool()), None, removing).unwrap()
+    let Reply::Tested {
+        tested: outcome,
+        reason,
+        ..
+    } = tested(&root, "codex", "gpt-a", Some(&pool()), None, removing).unwrap()
     else {
         panic!("not tested");
     };
-    assert_eq!(tested, Tested::Pending);
+    assert_eq!(outcome, Tested::Pending);
     assert!(reason.unwrap().contains("changed"));
 
     added(&root, "gpt-b");
