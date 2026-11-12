@@ -4,7 +4,7 @@ use super::launch::{
     Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id,
     route, validate,
 };
-use super::leftovers::{FOLLOWER_PACE, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
+use super::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
@@ -80,8 +80,7 @@ pub struct TerminalSession {
     unconfined: bool,
     #[cfg(target_os = "macos")]
     unkept: bool,
-    lineage: Option<Result<Lineage, Unstopped>>,
-    followed: Instant,
+    lineage: Option<Follower>,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
@@ -369,8 +368,7 @@ impl TerminalSession {
             unconfined: request.unconfined,
             #[cfg(target_os = "macos")]
             unkept,
-            lineage: lineage_of(pane.pid, unkept, request.unconfined, Some(token.clone())),
-            followed: Instant::now(),
+            lineage: follower_of(pane.pid, unkept, request.unconfined, Some(token.clone())),
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
@@ -655,12 +653,7 @@ impl TerminalSession {
     /// [`Unstopped::Left`] naming what a Full access pane, or one run without the keeper, left
     /// running.
     pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
-        let lineage = self.lineage.take().map(|lineage| {
-            lineage.map(|mut lineage| {
-                lineage.before_stop();
-                lineage
-            })
-        });
+        let lineage = self.lineage.take().map(Follower::stop);
         self.halt();
         if self.uncertain {
             return Err(Unstopped::Uncertain);
@@ -916,13 +909,6 @@ impl TerminalSession {
                 self.queue.push_back(LaunchEvent::Exited { code: None });
             }
         }
-        if !self.exited
-            && self.followed.elapsed() >= FOLLOWER_PACE
-            && let Some(Ok(lineage)) = &mut self.lineage
-        {
-            lineage.follow();
-            self.followed = Instant::now();
-        }
         Ok(())
     }
 
@@ -1007,6 +993,20 @@ fn lineage_of(
     } else {
         unconfined.then(|| Lineage::of(pid, token))
     }
+}
+
+/// Follows the lineage [`lineage_of`] reads at a pane's start on a thread of its own, so a
+/// stretch in which nobody reads the pane's events, as while its first prompt waits for the
+/// harness to draw, leaves no gap its stop must report unchecked (BL-PANE-FOLLOW-GAP).
+/// Inputs: as for [`lineage_of`]. Output: the follower, or none where no lineage is checked.
+fn follower_of(
+    pid: u32,
+    unkept: bool,
+    unconfined: bool,
+    token: Option<LineageToken>,
+) -> Option<Follower> {
+    lineage_of(pid, unkept, unconfined, token.clone())
+        .map(|first| Follower::following(pid, token, first))
 }
 
 impl Drop for TerminalSession {
