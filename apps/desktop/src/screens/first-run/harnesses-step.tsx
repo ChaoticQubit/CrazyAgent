@@ -4,7 +4,7 @@ import { harnessVersions, installHarnesses, queuedHarnesses, updateCopy, UPDATE_
 import { installDependency, loadSetupStatus } from "../../api-intake";
 import { openLink } from "../../api-projects";
 import { Button, StatusBadge } from "../../ui";
-import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
+import { HARNESS_WORDS, OFFERED, harnessRow, installable, nodeNeeded, nodeOffer, nodeWaits, progress, progressLine, retry, rowBadge, rowLine, tickable, type HarnessRow, type NodeOffer } from "./harnesses";
 import "../intake/intake.css";
 
 type Rows = Readonly<Record<string, HarnessRow>>;
@@ -71,7 +71,7 @@ export function HarnessesStepView({ rows, picks, started, busy, problem, node = 
  * failed read becomes a refused row with Try again instead of a row that never loads, and setup's
  * Node row for the Node.js offer. Output: the rows by id, the Node offer and the problem line,
  * empty when every read worked. */
-async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: NodeOffer; problem: string }> {
+async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: NodeOffer; waits: boolean; problem: string }> {
   const ids = OFFERED.map(({ id }) => id).filter((id) => id !== "rcli");
   const [catalog, queued, setup, ...reads] = await Promise.all([harnessCatalog(false), queuedHarnesses(), loadSetupStatus(), ...ids.map((id) => harnessVersions(id, false))]);
   assert(reads.length === ids.length, "one versions read per offered harness");
@@ -86,7 +86,8 @@ async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: Nod
   const problem = catalog.kind !== "ok" ? failure(catalog) : queued.kind !== "ok" ? failure(queued) : "";
   const found = setup.kind === "ok" ? setup.value.dependencies.find((item) => item.name === "node") : undefined;
   const needed = nodeNeeded(reads.map((read) => read.kind === "ok" ? read.value : null));
-  return { rows, node: nodeOffer(needed, found?.state ?? null, setup.kind === "ok" && setup.value.running), problem };
+  return { rows, node: nodeOffer(needed, found?.state ?? null, setup.kind === "ok" && setup.value.running),
+    waits: nodeWaits(needed, found?.state ?? null), problem };
 }
 
 function failure(result: Exclude<Result<unknown>, { kind: "ok" }>): string {
@@ -108,11 +109,12 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const [node, setNode] = useState<NodeOffer>({ kind: "none" });
+  const [waits, setWaits] = useState(false);
   const [reads, setReads] = useState(0);
   const [reading, setReading] = useState(false);
   const [polls, setPolls] = useState(0);
   const pending = Object.values(rows).some((row) => row.kind === "waiting" || row.kind === "installing") || (started && progress(installable(picks), rows).running)
-    || node.kind === "installing";
+    || node.kind === "installing" || waits;
 
   useEffect(() => {
     let live = true;
@@ -121,6 +123,7 @@ export function HarnessesStep({ onContinue }: { onContinue: () => void }) {
       if (!live) return;
       setRows(read.rows);
       setNode(read.node);
+      setWaits(read.waits);
       if (read.problem) setProblem(read.problem);
       setReading(false);
     });

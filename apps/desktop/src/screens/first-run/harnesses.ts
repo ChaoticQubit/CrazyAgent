@@ -159,6 +159,14 @@ export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean 
   return reads.some((read) => read !== null && (read.refusal === NEEDS_NODE || read.needs?.program === "node"));
 }
 
+/** Tells whether the step reads again for Node while a harness needs it: setup's Node row is still
+ * being checked, or it reads found or installed while the harness read still needs Node, as when it
+ * was read just before Node was linked. Inputs: the need and the Node row's state, null while
+ * unread. Output: the answer. */
+export function nodeWaits(_needed: boolean, _node: DependencyState | null): boolean {
+  return false;
+}
+
 /** What the step offers for Node.js, from whether a harness needs it and setup's Node row. A row
  * not settled while a setup run goes on reads installing, since setup finds Node before it marks
  * the row. Inputs: the need, the Node row's state, null while unread, and whether a setup run goes

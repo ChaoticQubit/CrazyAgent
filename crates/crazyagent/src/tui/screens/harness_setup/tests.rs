@@ -157,6 +157,24 @@ fn answer(
     claude: HarnessVersions,
     queued: &[&str],
 ) {
+    answer_with(
+        shell,
+        catalog,
+        codex,
+        claude,
+        queued,
+        DependencyState::Missing,
+    );
+}
+
+fn answer_with(
+    shell: &mut Shell,
+    catalog: &Entries,
+    codex: HarnessVersions,
+    claude: HarnessVersions,
+    queued: &[&str],
+    state: DependencyState,
+) {
     shell.arrive(arrival(SettingsEvent::Harnesses(Ok(catalog.all.clone()))));
     shell.arrive(arrival(SettingsEvent::HarnessQueue(Ok(queued
         .iter()
@@ -170,7 +188,7 @@ fn answer(
         "claude-code".into(),
         Ok(claude),
     )));
-    shell.arrive(node(DependencyState::Missing));
+    shell.arrive(node(state));
 }
 
 fn read_step(width: u16, height: u16) -> (Shell, Entries) {
@@ -851,4 +869,126 @@ fn a_node_install_begun_while_reads_are_out_reads_again_once_they_land() {
         reads(),
         "reads from before the install began are read again"
     );
+}
+
+#[test]
+fn the_step_reads_again_while_the_node_row_is_checked_or_settled_but_a_harness_still_needs_node() {
+    let version = || Version::parse("26.13.1").unwrap();
+    for (needed, node, waits) in [
+        (true, Some(DependencyState::Checking), true),
+        (
+            true,
+            Some(DependencyState::Found { version: version() }),
+            true,
+        ),
+        (
+            true,
+            Some(DependencyState::Installed { version: version() }),
+            true,
+        ),
+        (true, Some(DependencyState::Missing), false),
+        (
+            true,
+            Some(DependencyState::Failed {
+                reason: NODE_FAILED.into(),
+            }),
+            false,
+        ),
+        (true, None, false),
+        (false, Some(DependencyState::Checking), false),
+        (
+            false,
+            Some(DependencyState::Installed { version: version() }),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            node_waits(needed, node.as_ref()),
+            waits,
+            "needed {needed}, {node:?}"
+        );
+    }
+}
+
+#[test]
+fn on_a_fresh_engine_whose_node_row_is_still_checked_the_offer_shows_once_the_check_ends() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer_with(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        DependencyState::Checking,
+    );
+    assert!(!bar(&render(&mut shell, 120, 36)).contains(INSTALL_NODE));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "a Node row still checked is read again"
+    );
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    let rows = render(&mut shell, 120, 36);
+    assert!(
+        bar(&rows).contains(&format!("n {INSTALL_NODE}")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn node_read_installed_before_the_harness_saw_it_reads_again_until_the_row_leaves_cant_run() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert_eq!(sent(&mut shell), reads());
+    let installed = || DependencyState::Installed {
+        version: Version::parse("26.13.1").unwrap(),
+    };
+    answer_with(
+        &mut shell,
+        &found,
+        needs_node("codex"),
+        claude(),
+        &[],
+        installed(),
+    );
+    assert!(shows(&render(&mut shell, 120, 36), "Can't run"));
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "Node is in but the Codex read came before it: read again"
+    );
+    let runs = HarnessVersions {
+        installed: Some("0.52.0".into()),
+        ..versions("codex", None, None)
+    };
+    answer_with(
+        &mut shell,
+        &found,
+        runs,
+        versions(
+            "claude-code",
+            Some(LINE),
+            Some("harness_update_not_installed"),
+        ),
+        &[],
+        installed(),
+    );
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, INSTALLED), "{rows:#?}");
+    assert!(!shows(&rows, "Can't run"), "{rows:#?}");
+    shell.refresh();
+    assert!(sent(&mut shell).is_empty(), "nothing needs Node any more");
 }
