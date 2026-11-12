@@ -357,7 +357,11 @@ fn a_newer_codex_release_is_named_once_in_the_agents_messages() {
     ));
     assert!(warned(&mut refused, first));
     assert_eq!(notices(first).len(), 2);
-    assert!(notices(first).iter().all(|text| !text.contains("codex_cli_rs")));
+    assert!(
+        notices(first)
+            .iter()
+            .all(|text| !text.contains("codex_cli_rs"))
+    );
 }
 
 /// K2b: messages delivered or typed to an agent whose session stopped or failed go back

@@ -244,9 +244,9 @@ fn deliver_to(
         }
         (Some(HarnessKind::Codex), Delivery::TypingOnly) => messages.as_slice(),
         (Some(HarnessKind::Codex), _) => {
-            if let Some(done) =
-                bridge(db, agent, &status, &messages, delivery, now, reach, refused)?
-            {
+            if let Some(done) = bridge(
+                db, project, agent, &status, &messages, delivery, now, reach, refused,
+            )? {
                 return Ok(done);
             }
             messages.as_slice()
@@ -273,14 +273,16 @@ fn deliver_to(
 
 /// Hands a Codex agent's waiting messages to its app-server bridge (DEC-104 Q13), keeping
 /// the turn they went into with them (b19 P2); the owner's notices alone only steer a turn
-/// the agent runs while its status is working. Takes the database, the agent, its status,
-/// the messages, the Delivery setting, the time, the reach and the memory of refused
-/// bridges, which writes a refusal to the engine log once until it changes or the bridge
-/// takes a message. Returns what [`deliver_to`] answers once the bridge took them or they
-/// wait, or none when they fall back to typing.
+/// the agent runs while its status is working. Takes the database, the project, the agent,
+/// its status, the messages, the Delivery setting, the time, the reach and the memory of
+/// refused bridges, which writes a refusal to the engine log once until it changes or the
+/// bridge takes a message, and a bridge on a newer Codex release once ([`warn_newer`]).
+/// Returns what [`deliver_to`] answers once the bridge took them or they wait, or none when
+/// they fall back to typing.
 #[allow(clippy::too_many_arguments)]
 fn bridge(
     db: &Connection,
+    project: &ProjectId,
     agent: AgentId,
     status: &str,
     messages: &[Message],
@@ -296,11 +298,23 @@ fn bridge(
     let (text, carried) = batch(db, agent, messages)?;
     let home = crate::team::runtime::agent_home(reach.state, agent);
     match codex::deliver(&home, &text, !alone, pane_of(reach, agent)) {
-        Bridged::Delivered(turn) => {
-            note_refusal(refused, agent, None);
+        Bridged::Delivered(turn, newer) => {
             mark_all(db, &carried, Receipt::Delivered, now)?;
             if let Some(turn) = turn {
                 super::messages::delivered_into(db, &carried, &turn)?;
+            }
+            match newer {
+                Some(newer) => {
+                    if let Err(problem) = warn_newer(db, project, agent, newer, refused, now) {
+                        eprintln!(
+                            "codex bridge newer release notice not kept for agent {agent}: {}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                }
+                None => {
+                    note_refusal(refused, agent, None);
+                }
             }
             return Ok(Some(carried.len() == messages.len()));
         }
@@ -314,6 +328,43 @@ fn bridge(
         return Ok(Some(false));
     }
     Ok(None)
+}
+
+/// The code [`warn_newer`] keeps in the memory of refused bridges for an agent whose bridge
+/// runs on a newer Codex release, so its notice is written once.
+const BRIDGE_NEWER: &str = "codex_bridge_version_newer";
+
+/// Leaves one engine notice in a Codex agent's Messages timeline, and one engine log line,
+/// when its bridge runs on a release newer than the checked ones (F38); the same release
+/// on later deliveries writes nothing until a refusal or a checked release replaces it.
+/// Takes the database, the project, the agent, the release, the memory of refused bridges
+/// and the time. Returns whether the notice was written now.
+fn warn_newer(
+    db: &Connection,
+    project: &ProjectId,
+    agent: AgentId,
+    newer: (u64, u64, u64),
+    refused: &mut BTreeMap<AgentId, &'static str>,
+    now: i64,
+) -> Result<bool, EngineError> {
+    assert!(agent > 0);
+    if !note_refusal(refused, agent, Some(BRIDGE_NEWER)) {
+        return Ok(false);
+    }
+    let (major, minor, patch) = newer;
+    eprintln!("codex bridge runs on a newer release for agent {agent}: {major}.{minor}.{patch}");
+    let tx = db.unchecked_transaction().map_err(state)?;
+    crate::team::agent_messages::record(
+        &tx,
+        project,
+        agent,
+        crate::team::agent_messages::Said::Notice,
+        &codex::newer_notice(newer),
+        now,
+    )?;
+    tx.commit().map_err(state)?;
+    assert_eq!(refused.get(&agent), Some(&BRIDGE_NEWER));
+    Ok(true)
 }
 
 /// Remembers why something was refused for an agent, so the engine log names a refusal

@@ -414,7 +414,7 @@ pub(super) fn save_settings(
 /// keeps none. The project's oldest kept messages make room first, down to its kept count.
 /// Takes the transaction, the project, the agent, what was said, the text and the time.
 /// Returns the row id.
-pub(super) fn record(
+pub(crate) fn record(
     tx: &Transaction<'_>,
     project: &ProjectId,
     agent: i64,

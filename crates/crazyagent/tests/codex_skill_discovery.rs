@@ -50,13 +50,14 @@ fn installed_codex() -> PathBuf {
     )
     .unwrap();
     let version = String::from_utf8(output.stdout).unwrap();
-    let release = version
-        .trim()
-        .strip_prefix("codex-cli ")
-        .and_then(|text| {
-            let mut parts = text.split(['.', '-']).map(str::parse::<u64>);
-            Some((parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?))
-        });
+    let release = version.trim().strip_prefix("codex-cli ").and_then(|text| {
+        let mut parts = text.split(['.', '-']).map(str::parse::<u64>);
+        Some((
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+            parts.next()?.ok()?,
+        ))
+    });
     assert!(
         release.is_some_and(|release| codex::support(release) != codex::Support::Refused),
         "UNAVAILABLE: {version:?} is a Codex release the bridge refuses"

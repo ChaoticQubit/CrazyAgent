@@ -198,7 +198,13 @@ fn an_oversized_ping_from_the_socket_is_refused_without_a_panic() {
 /// Takes the length. Returns what `deliver` answered and the payload of the pong the
 /// server read back, none when no pong came.
 #[cfg(target_os = "macos")]
-fn ping_of(length: usize) -> (Result<Option<String>, &'static str>, Option<Vec<u8>>) {
+#[allow(clippy::type_complexity)]
+fn ping_of(
+    length: usize,
+) -> (
+    Result<(Option<String>, Option<(u64, u64, u64)>), &'static str>,
+    Option<Vec<u8>>,
+) {
     use std::io::{Read, Write};
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
