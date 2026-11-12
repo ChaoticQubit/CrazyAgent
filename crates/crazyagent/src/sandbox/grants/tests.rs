@@ -718,3 +718,82 @@ fn a_request_the_questions_cap_refuses_leaves_no_row() {
     }
     assert!(case.status().is_empty(), "{:?}", case.status());
 }
+
+/// The warning every socket and port Allow carries: the list of refused names is a floor,
+/// so the owner is told that a program behind the grant can act on agents' requests as the
+/// owner, outside the sandbox.
+const RUN_AS_YOU: &str = "If that program can run commands or change files (a database, a debugger, an editor, a terminal or a remote shell), agents can then do anything you can, outside their sandbox.";
+
+/// L2 r2 L2-M1: every socket and port meaning, and so the owner question an access request
+/// raises, says the program behind it can let agents act as the owner outside their sandbox;
+/// Don't allow stays the recommended answer and the temp folder keeps its own meaning.
+#[test]
+fn every_socket_and_port_allow_warns_the_agent_can_act_as_you() {
+    for grant in [
+        AccessGrant::Socket {
+            path: PathBuf::from("/private/tmp/app/app.sock"),
+        },
+        AccessGrant::Port { port: 5_432 },
+    ] {
+        assert!(meaning(&grant).contains(RUN_AS_YOU), "{grant:?}");
+    }
+    assert!(!meaning(&AccessGrant::TempFolder).contains(RUN_AS_YOU));
+    let case = Case::new();
+    let question = case.ask_port(5_432);
+    let pending = crate::questions::pending(&case.db, &case.project).unwrap();
+    let asked = pending.iter().find(|q| q.id == question).unwrap();
+    let context = asked.context.as_deref().unwrap_or_default();
+    assert!(context.contains(RUN_AS_YOU), "{context}");
+    assert_eq!(asked.recommended.as_deref(), Some(DONT_ALLOW));
+}
+
+/// L2 r2 L2-M1 floor: Kakoune, dtach and abduco sessions and an ssh ControlMaster socket
+/// named by its `%C` hash are refused as control sockets; a shorter hex name is kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_floor_also_refuses_kakoune_dtach_abduco_and_ssh_mux_sockets() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-gf-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let data = Path::new("/nonexistent");
+    let rows: [&str; 5] = [
+        "kakoune/me/work",
+        "work.dtach",
+        "abduco/main",
+        "mux/0123456789abcdef0123456789abcdef01234567",
+        "cm-0123456789ABCDEF0123456789ABCDEF01234567",
+    ];
+    for relative in rows {
+        let path = base.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert_eq!(
+            checked(&AccessGrant::Socket { path }, data),
+            Err("grant_socket_agent"),
+            "{relative}"
+        );
+    }
+    let short = base.join("0123456789abcdef0123456789abcdef0123456");
+    assert_eq!(escape_class(&short), None);
+}
+
+/// L2 r2 L2-M1 floor: the Java (JDWP 5005), Python (debugpy 5678) and Go (Delve 2345)
+/// debugger ports are reserved like Docker's and the browser's.
+#[test]
+fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
+    let data = Path::new("/nonexistent-engine-data");
+    for port in [5005, 5678, 2345] {
+        assert_eq!(
+            checked(&AccessGrant::Port { port }, data),
+            Err("grant_port_reserved"),
+            "port {port}"
+        );
+    }
+    assert_eq!(
+        checked(&AccessGrant::Port { port: 5_432 }, data),
+        Ok(AccessGrant::Port { port: 5_432 }),
+        "a database port stays the owner's informed choice"
+    );
+}

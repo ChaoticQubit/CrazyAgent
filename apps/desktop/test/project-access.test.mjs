@@ -316,6 +316,14 @@ test("F08: Agent access shows the extras with what each means, the apply choice 
   const body = grants.slice(grants.indexOf("pub fn refusal_text"), grants.indexOf("\n}\n", grants.indexOf("pub fn refusal_text")));
   const pairs = [...body.matchAll(/"([a-z_]+)" => \{?\s*"((?:[^"\\]|\\.)*)"/g)];
   assert.ok(pairs.length >= 17, `${pairs.length} refusals`);
+  const RUN_AS_YOU = "If that program can run commands or change files (a database, a debugger, an editor, a terminal or a remote shell), agents can then do anything you can, outside their sandbox.";
+  const meanings = grants.slice(grants.indexOf("pub fn meaning"), grants.indexOf("\n}\n", grants.indexOf("pub fn meaning")));
+  assert.equal(meanings.split(RUN_AS_YOU).length - 1, 2, "the engine's question warns for a socket and a port");
+  for (const kind of ["socket", "port"]) {
+    assert.ok(access.GRANT_MEANINGS[kind].includes(RUN_AS_YOU), kind);
+    assert.match(access.GRANT_MEANINGS[kind], /other programs can be just as powerful/, kind);
+  }
+  assert.ok(!access.GRANT_MEANINGS.temp_folder.includes(RUN_AS_YOU));
   for (const [, code, text] of pairs) assert.equal(api.plainError(code), text.replace(/\\'/g, "'"), code);
   assert.match(api.plainError("agent_grant_revoked"), /was removed, so the agent was stopped/);
 });
