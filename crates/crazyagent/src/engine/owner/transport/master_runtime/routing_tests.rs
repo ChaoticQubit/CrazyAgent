@@ -2661,6 +2661,7 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         account_ref.clone(),
+        prepared.session.project_id.clone(),
         clock,
         ResourceBudget::unit(),
     )
