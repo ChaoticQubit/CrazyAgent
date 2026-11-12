@@ -1,6 +1,6 @@
 use super::reconcile::{Condition, sync};
 use super::*;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 
 const NOW_MS: i64 = 1_800_000_000_000;
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
@@ -1363,4 +1363,110 @@ fn a_fold_change_with_no_folds_too_many_or_a_negative_bound_is_refused() {
         1
     );
     assert_eq!(rows(&connection), 1);
+}
+
+fn token() -> String {
+    ["gh", "p_", &"a1B2c3D4".repeat(5)].concat()
+}
+
+fn stored_texts(connection: &Connection) -> Vec<String> {
+    let mut statement = connection
+        .prepare("SELECT text FROM owner_notices ORDER BY id")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn an_agent_item_with_a_token_is_stored_and_served_without_it() {
+    let (_folder, mut connection) = store();
+    let secret = token();
+    let text = format!("Sub-agent 2 finished: pushed with {secret} to main");
+    let tx = connection.transaction().unwrap();
+    let id = record(
+        &tx,
+        &InfoNotice {
+            kind: NoticeKind::AgentFinished,
+            project_id: Some(&project("p1")),
+            subject: "agent:2",
+            text: &text,
+            target: NoticeTarget::Agents {
+                project_id: project("p1"),
+            },
+        },
+        NOW_MS,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(id.is_some());
+    let page = listed(&connection, &query(NoticeFilter::All));
+    assert_eq!(
+        texts(&page),
+        vec!["Sub-agent 2 finished: pushed with [hidden] to main"]
+    );
+    assert!(stored_texts(&connection).iter().all(|text| !text.contains(&secret)));
+}
+
+#[test]
+fn a_question_with_a_credential_line_never_reaches_the_store_or_a_client() {
+    let (_folder, mut connection) = store();
+    let secret = token();
+    synced(
+        &mut connection,
+        &[NoticeKind::Question],
+        &[question(
+            "p1",
+            "question:c9",
+            &format!("Master asks: deploy now?\nANTHROPIC_API_KEY={secret}"),
+        )],
+        NOW_MS,
+    );
+    let page = listed(&connection, &query(NoticeFilter::All));
+    assert_eq!(texts(&page), vec!["[hidden: this line may contain a secret]"]);
+    let stored = stored_texts(&connection);
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].contains(&secret));
+    assert!(!stored[0].contains("ANTHROPIC_API_KEY"));
+}
+
+#[test]
+fn a_row_stored_with_a_token_before_redaction_is_served_without_it() {
+    let (_folder, connection) = store();
+    let secret = token();
+    let target = target_text(&NoticeTarget::Agents {
+        project_id: project("p1"),
+    })
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO owner_notices(kind,action,project,subject,text,target,created_ms)
+             VALUES ('agent_finished',0,'p1','agent:3',?1,?2,?3)",
+            params![format!("Sub-agent 3 used {secret}"), target, NOW_MS],
+        )
+        .unwrap();
+    let page = listed(&connection, &query(NoticeFilter::All));
+    assert_eq!(texts(&page), vec!["Sub-agent 3 used [hidden]"]);
+    let mut folded = query(NoticeFilter::All);
+    folded.fold = true;
+    assert_eq!(texts(&listed(&connection, &folded)), vec!["Sub-agent 3 used [hidden]"]);
+}
+
+#[test]
+fn item_text_shown_again_is_unchanged() {
+    let secret = token();
+    for text in [
+        "Master asks: which database?".to_owned(),
+        format!("pushed with {secret} to main"),
+        format!("first line\npassword: {secret}"),
+        format!("-----BEGIN PRIVATE KEY-----\n{secret}\n-----END PRIVATE KEY-----"),
+        format!("token: {secret} and /Users/me/work/app/notes.md"),
+        "x".repeat(400),
+    ] {
+        let once = shown(&text);
+        assert!(!once.contains(&secret), "{once}");
+        assert_eq!(shown(&once), once, "shown twice differs for {text:?}");
+    }
 }

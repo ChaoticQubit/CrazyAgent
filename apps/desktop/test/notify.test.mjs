@@ -27,45 +27,94 @@ test("only a window in the background sends a system notification, and only wher
 
 test("an app start notifies nothing already in the store and starts after its newest item", () => {
   assert.deepEqual(notify.bannerQuery(null), { filter: "all", project_id: null, kind: null, fold: false, before: null, after: null, limit: 1 });
-  const start = notify.freshNotices(null, page([3, 4], 9), true);
+  const start = notify.freshNotices(null, page([3, 4], 9), true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(start, { kept: 9, send: [] });
-  assert.deepEqual(notify.bannerQuery(9), { filter: "all", project_id: null, kind: null, fold: false, before: null, after: 9, limit: 50 });
+  assert.deepEqual(notify.bannerQuery(9), { filter: "all", project_id: null, kind: null, fold: false, before: 60, after: 9, limit: 50 }, "one page of ids just past the cursor, the oldest first");
 });
 
 test("each new item the engine marks for a banner is sent once, oldest first", () => {
-  const next = notify.freshNotices(4, page([6, 5]), true);
+  const next = notify.freshNotices(4, page([6, 5]), true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(next, { kept: 6, send: [5, 6] });
-  assert.deepEqual(notify.freshNotices(next.kept, page([6, 5]), true).send, [], "an item read again is not sent again");
+  assert.deepEqual(notify.freshNotices(next.kept, page([6, 5]), true, notify.NOTIFY_PER_READ_MAX).send, [], "an item read again is not sent again");
 });
 
 test("an item without a banner, already read or already resolved is passed over, never sent later", () => {
-  const read = notify.freshNotices(4, page([5, 6, 7, 8], 8, { 5: { banner: false }, 6: { read_ms: 1 }, 7: { resolved_ms: 1 } }), true);
+  const read = notify.freshNotices(4, page([5, 6, 7, 8], 8, { 5: { banner: false }, 6: { read_ms: 1 }, 7: { resolved_ms: 1 } }), true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(read, { kept: 8, send: [8] });
 });
 
 test("a burst goes out a few per read, oldest first, and the rest wait without being skipped", () => {
   assert.equal(notify.NOTIFY_PER_READ_MAX, 3);
   const burst = page([9, 4, 8, 5, 7, 6], 9, { 5: { banner: false } });
-  const first = notify.freshNotices(3, burst, true);
+  const first = notify.freshNotices(3, burst, true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(first, { kept: 7, send: [4, 6, 7] }, "the cursor stops at the last item sent");
-  const second = notify.freshNotices(first.kept, page([9, 8], 9), true);
+  const second = notify.freshNotices(first.kept, page([9, 8], 9), true, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(second, { kept: 9, send: [8, 9] });
 });
 
 test("the cursor moves past the store's newest id once every listed item is handled", () => {
-  assert.deepEqual(notify.freshNotices(4, page([5], 12), true), { kept: 12, send: [5] }, "items past the last listed are deleted ones");
-  assert.deepEqual(notify.freshNotices(12, page([], 12), true), { kept: 12, send: [] });
+  assert.deepEqual(notify.freshNotices(4, page([5], 12), true, notify.NOTIFY_PER_READ_MAX), { kept: 12, send: [5] }, "items past the last listed are deleted ones");
+  assert.deepEqual(notify.freshNotices(12, page([], 12), true, notify.NOTIFY_PER_READ_MAX), { kept: 12, send: [] });
 });
 
 test("a focused window sends nothing and leaves nothing waiting", () => {
-  const focused = notify.freshNotices(0, page([1, 2, 3, 4]), false);
+  const focused = notify.freshNotices(0, page([1, 2, 3, 4]), false, notify.NOTIFY_PER_READ_MAX);
   assert.deepEqual(focused, { kept: 4, send: [] });
-  assert.deepEqual(notify.freshNotices(focused.kept, page([1, 2, 3, 4]), true).send, [], "an item seen while focused is never sent later");
+  assert.deepEqual(notify.freshNotices(focused.kept, page([1, 2, 3, 4]), true, notify.NOTIFY_PER_READ_MAX).send, [], "an item seen while focused is never sent later");
 });
 
 test("a store whose newest id fell below the cursor, purged or replaced, starts over from it and sends nothing old", () => {
-  assert.deepEqual(notify.freshNotices(9, page([], 5), true), { kept: 5, send: [] });
-  assert.deepEqual(notify.freshNotices(5, page([6]), true), { kept: 6, send: [6] }, "the next new item is sent");
+  assert.deepEqual(notify.freshNotices(9, page([], 5), true, notify.NOTIFY_PER_READ_MAX), { kept: 5, send: [] });
+  assert.deepEqual(notify.freshNotices(5, page([6]), true, notify.NOTIFY_PER_READ_MAX), { kept: 6, send: [6] }, "the next new item is sent");
+});
+
+const NEWEST_FIRST = (a, b) => b - a;
+const store = (ids, banners) => {
+  const reads = [];
+  const load = async (query) => {
+    reads.push(query);
+    const inside = ids.filter((id) => (query.after === null || id > query.after) && (query.before === null || id < query.before)).sort(NEWEST_FIRST);
+    const items = inside.slice(0, query.limit).map((id) => item(id, { banner: banners.includes(id) }));
+    return { kind: "ok", value: { items, counts: { unread: ids.length, pending: 0 }, more: inside.length > query.limit, newest: Math.max(0, ...ids) } };
+  };
+  return { load, reads };
+};
+const upTo = (count) => Array.from({ length: count }, (_, at) => at + 1);
+
+test("a backlog past one page goes out oldest first over windows and looks, and no item is skipped", async () => {
+  const { load } = store(upTo(130), [7, 60, 61, 120]);
+  const first = await notify.pickBanners(0, true, load);
+  assert.deepEqual(first, { kept: 61, send: [7, 60, 61] }, "the oldest first, a read's worth, the cursor at the last sent");
+  const second = await notify.pickBanners(first.kept, true, load);
+  assert.deepEqual(second, { kept: 130, send: [120] });
+  assert.deepEqual(await notify.pickBanners(second.kept, true, load), { kept: 130, send: [] });
+});
+
+test("one look reads at most a few windows of the store and the next look goes on from there", async () => {
+  assert.equal(notify.BANNER_WINDOWS_PER_READ_MAX, 4);
+  const { load, reads } = store(upTo(300), [290]);
+  const first = await notify.pickBanners(0, true, load);
+  assert.deepEqual(first, { kept: 200, send: [] });
+  assert.equal(reads.length, 4, "a look is bounded");
+  assert.deepEqual(reads.map((query) => [query.after, query.before, query.limit]), [[0, 51, 50], [50, 101, 50], [100, 151, 50], [150, 201, 50]]);
+  assert.deepEqual(await notify.pickBanners(first.kept, true, load), { kept: 300, send: [290] });
+});
+
+test("the first look and a focused window read once and send nothing, and a failed read keeps what came before it", async () => {
+  const { load, reads } = store(upTo(130), [7]);
+  assert.deepEqual(await notify.pickBanners(null, true, load), { kept: 130, send: [] });
+  assert.deepEqual(await notify.pickBanners(0, false, load), { kept: 130, send: [] });
+  assert.equal(reads.length, 2);
+  let served = 0;
+  const failing = async (query) => (served++ === 0 ? load(query) : { kind: "error", code: "engine_unreachable", message: "" });
+  assert.deepEqual(await notify.pickBanners(0, true, failing), { kept: 50, send: [7] }, "the next look starts after the first window");
+  assert.deepEqual(await notify.pickBanners(0, true, async () => ({ kind: "not_ready" })), { kept: 0, send: [] });
+});
+
+test("a window lists only ids past the cursor, never more than one page of them", () => {
+  assert.throws(() => notify.freshNotices(3, page([2], 9), true, notify.NOTIFY_PER_READ_MAX), /past the cursor/);
+  assert.throws(() => notify.freshNotices(3, page([60]), true, notify.NOTIFY_PER_READ_MAX), /past the cursor/);
+  assert.throws(() => notify.freshNotices(3, page([4]), true, 0), /at least one/);
 });
 
 test("a click on a banner opens the item's exact page and marks only that item read", async () => {
