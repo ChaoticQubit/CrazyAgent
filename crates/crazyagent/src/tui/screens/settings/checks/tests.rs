@@ -212,10 +212,7 @@ fn a_project_override_shows_over_the_app_value_and_u_resets_it() {
         .unwrap();
     let mut shell = page(&mut engine, project());
     assert!(shows(&mut shell, "Accept gate", "App value (Warn)"));
-    assert!(says(
-        &mut shell,
-        "Only Fieldnotes Mobile follows the values set here"
-    ));
+    assert!(says(&mut shell, "for this project only."));
 
     shell.key(Key::Enter);
     shell.key(Key::Right);
@@ -515,7 +512,7 @@ fn a_project_without_profiles_says_how_one_arrives() {
     let mut engine = Engine::new();
     let mut shell = page(&mut engine, project());
     assert!(says(&mut shell, "Check profiles"));
-    assert!(says(&mut shell, "No profile yet."));
+    assert!(says(&mut shell, "No check profile yet."));
     let mut app = page(&mut engine, Scope::App);
     assert!(!says(&mut app, "Check profiles"));
 }
@@ -648,4 +645,84 @@ fn listed_states(engine: &Engine) -> Vec<ProfileState> {
         .iter()
         .map(|profile| profile.state)
         .collect()
+}
+
+/// The help bar as an 80x24 window draws it, every row of it. Takes the shell. Returns the
+/// bar rows joined by newlines.
+fn bar_at_80(shell: &mut Shell) -> String {
+    crate::tui::screens::settings_accounts::tests::bar_rows(&render(shell, 80, 24)).join("\n")
+}
+
+#[test]
+fn every_check_settings_key_stays_in_the_hint_bar_at_80_columns() {
+    let mut engine = Engine::new();
+    engine
+        .save_settings(
+            Some(&fieldnotes()),
+            &ChecksChoice {
+                gate: Some(crate::checks::settings::GateMode::Warn),
+                ..ChecksChoice::default()
+            },
+            0,
+        )
+        .unwrap();
+    let mut own = page(&mut engine, project());
+    let bar = bar_at_80(&mut own);
+    for key in [
+        "Enter Change",
+        "u Use the app value",
+        "a App values",
+        "Move",
+        "r Read again",
+        "Esc Back",
+        "? Help",
+    ] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+    let mut app = page(&mut engine, Scope::App);
+    let bar = bar_at_80(&mut app);
+    for key in ["Enter Change", "Move", "r Read again", "Esc Back", "? Help"] {
+        assert!(bar.contains(key), "{key}:\n{bar}");
+    }
+}
+
+#[test]
+fn check_settings_use_the_desktop_words() {
+    let mut engine = Engine::new();
+    let mut app = page(&mut engine, Scope::App);
+    let rows = render(&mut app, 120, 40);
+    let at = |text: &str| {
+        rows.iter()
+            .position(|row| row.contains(text))
+            .unwrap_or_else(|| panic!("{text}:\n{}", rows.join("\n")))
+    };
+    let title = rows
+        .iter()
+        .position(|row| row.trim() == "Checks")
+        .unwrap_or_else(|| panic!("a Checks title row:\n{}", rows.join("\n")));
+    let purpose = at("The check settings every project starts from");
+    let rules = at("Check rules");
+    let effect = at("Changes apply to check runs queued after you save and to the next Accept.");
+    let table = at("Accept gate");
+    assert!(title < purpose && purpose < rules && rules < effect && effect < table);
+    assert!(!says(&mut app, "for this project only."));
+    assert!(!says(&mut app, "Check settings"));
+
+    let mut own = page(&mut engine, project());
+    assert!(says(&mut own, "Check rules"));
+    assert!(says(
+        &mut own,
+        "Changes apply to check runs queued after you save and to the next Accept."
+    ));
+    assert!(says(&mut own, "for this project only."));
+    assert!(says(&mut own, "Check profiles"));
+    assert!(says(
+        &mut own,
+        "A check runs only under a profile you approved. Agents can propose one; nothing runs until you approve it here."
+    ));
+    assert!(says(&mut own, "No check profile yet."));
+    assert!(!says(
+        &mut own,
+        "The check settings every project starts from"
+    ));
 }
