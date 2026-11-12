@@ -8,11 +8,14 @@ import { noticeWatch } from "./notify";
 import { NoticeBell } from "./screens/notifications/panel";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
+import { DemoPage } from "./screens/demo/offer";
+import { useLearningVisits } from "./screens/dashboard/learn";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
 import { OnboardingReview } from "./screens/intake/onboarding";
 import { AppMetrics } from "./screens/metrics";
+import { useResetNotice } from "./screens/metrics/extras";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
@@ -136,6 +139,7 @@ export function Screen({ route, session }: { route: Route; session: Session }) {
       : <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} harness={route.harness} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
+    case "demo": return <DemoPage />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "metrics": return <AppMetrics projects={projects ?? []} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;
@@ -333,15 +337,18 @@ export function pageUnder(route: Route, hash: string, kept: PageUnder): PageUnde
 }
 
 /** The desktop app: one engine session, the hash route, the app-wide shortcuts, the team
- * notification and question watch and the TUI's "open in IDE" focus. */
+ * notification and question watch, the new free reset notice and the TUI's "open in IDE"
+ * focus. */
 export function App() {
   const session = useSession();
   const route = useRoute();
   const under = useRef<PageUnder>({ route: { name: "home" } });
-  under.current = pageUnder(route, window.location.hash, under.current);
+  under.current = pageUnder(route, typeof window === "undefined" ? "" : window.location.hash, under.current);
   useShortcuts();
   useUpdateWatch(session.showToast);
   const { alerts, working } = useTeamAlerts(session.engine === "running", session.showToast);
+  useResetNotice(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
+  useLearningVisits(route, session.engine === "running");
   return <AppView session={session} route={route} alerts={alerts} working={working} under={under.current.route} back={under.current.hash} />;
 }

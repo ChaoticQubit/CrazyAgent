@@ -94,6 +94,9 @@ test("the four numbers show with their targets and the records behind each", () 
   for (const words of ["Real tasks 3", "Target 10", "Clean 2 of 3", "Target 8 of 10", "Coordination per task 3", "Baseline 4, 25% less", "Target 25% less",
     "Chose CrazyAgent 4 of 5 days", "Target 7 of 10 answered days"]) assert.ok(shown.includes(words), `${words} in: ${shown}`);
   assert.equal(shown.split("Target met").length, 2, "only coordination is met");
+  const tiles = [...render().matchAll(/<div class="mx-tile"><span class="mx-tile-key">([^<]*)<\/span><span class="mx-tile-value">/gu)].map((match) => match[1]);
+  assert.deepEqual(tiles, ["Real tasks", "Clean", "Coordination per task", "Chose CrazyAgent"], "the numbers use the Metrics page tiles");
+  assert.doesNotMatch(render(), /usage-tile/u);
   for (const words of ["CA-12", "Sort the inbox by sender", "cs-2, cs-3", "A change set was discarded; Its first check batch didn't pass",
     "Harbor Notes", "Edit", "src/inbox.rs", "3 h ago", "2026-11-02 Yes", "2026-11-01 No", "Showing the newest 2 of 3"]) assert.ok(shown.includes(words), `${words} in: ${shown}`);
   const quiet = text(render({ card: { kind: "ok", value: card({ real: 0, clean: 0, tasks: [], acts: [], days: [], chosen_days: 0, answered_days: 0,

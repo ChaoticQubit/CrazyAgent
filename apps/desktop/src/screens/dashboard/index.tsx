@@ -1,14 +1,16 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { PROJECT_LIST_MAX, harnessCatalog, listAccounts, poolSummaries, type AccountView, type HarnessEntry, type PoolSummary, type Result } from "../../api";
 import { loadSetupStatus } from "../../api-intake";
+import { loadLearningProgress, setLearningMark, type LearningProgress } from "../../api-learning";
 import { loadResearch, loadTeamStatus, type TeamStatus } from "../../api-projects";
 import type { ResearchJob, SetupStatus } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded, type ProjectRow } from "../../state";
-import { EmptyState, Icon, LoadError, NotReady, PageHeader, Panel, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
+import { EmptyState, Icon, LoadError, NotReady, PageHeader, Skeleton, agentsWorking, formatRoute, type IconName } from "../../ui";
 import { displayText } from "../conversation";
 import { FoundProjects } from "../intake/found";
 import { SETUP_POLL_MS, setupBusy, toolsChecking, toolsStep } from "../intake/intake";
 import { waitingLine } from "../project/research";
+import { LearnPanel, learnSteps } from "./learn";
 
 export interface SetupItem {
   id: "accounts" | "pools" | "harnesses" | "tools";
@@ -104,9 +106,10 @@ function accountStep(owned: number, usable: AccountView[]): Pick<SetupItem, "bod
  * Accounts that exist but none ready send the owner to Accounts. The panel shows until those
  * three are done, and never while one of the four reads is still loading or, once an account and
  * a pool are ready, while the tools are still being checked, so it cannot flash in and out beside
- * the projects (OP-35). Inputs: the four engine reads. Output: items and whether the panel shows. */
+ * the projects (OP-35). Inputs: the four engine reads. Output: items, whether the panel shows and
+ * whether every read settled. */
 export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
-  tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
+  tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean; settled: boolean } {
   const owned = accounts.kind === "ok" ? accounts.value : [];
   const usable = owned.filter((account) => READY_ACCOUNT.has(account.status));
   const accountsDone = usable.length > 0;
@@ -125,20 +128,7 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
   ];
   const settled = [accounts, pools, harnesses, tools].every((read) => read.kind !== "loading");
   const checking = tools.kind === "ok" && toolsChecking(tools.value);
-  return { items, visible: settled && !(accountsDone && poolsDone && (installTools.done || checking)) };
-}
-
-function SetupPanel({ items }: { items: SetupItem[] }) {
-  return <Panel title="Get set up" padded={false} className="setup-panel">
-    <ol>
-      {items.map((item) => <li key={item.id}>
-        <span className="row"><Icon name={item.icon} /><strong className="grow">{item.title}</strong>
-          {item.done && <span className="done"><Icon name="circle-check" size={14} />Done</span>}</span>
-        <p className="secondary">{item.body}</p>
-        {!item.done && <span><a className={`btn${item.id === "harnesses" ? " quiet" : ""} small`} href={item.href}>{item.action}</a></span>}
-      </li>)}
-    </ol>
-  </Panel>;
+  return { items, visible: settled && !(accountsDone && poolsDone && (installTools.done || checking)), settled };
 }
 
 function ProjectCard({ project, activity }: { project: ProjectRow; activity: CardActivity | undefined }) {
@@ -167,11 +157,13 @@ function Projects({ projects, more, activity, onRetry }: { projects: Loaded<Proj
 
 /** Home as a view of its engine reads: the Add actions (new, clone from GitHub, existing folder),
  * the projects folder section, project cards with their live work or the empty state, a note
- * when the list stops at its bound, and the Get set up panel while setup is incomplete; what
- * needs the owner is in the bell. Inputs: the four reads, whether the engine holds more
- * projects than listed, each card's activity, the projects folder section and a retry for the
- * project list. */
-export function HomeView({ projects, moreProjects = false, accounts, pools, harnesses, tools, activity, found, onRetryProjects }: {
+ * when the list stops at its bound, and the Get set up or Learn CrazyAgent panel
+ * (learnSteps); what needs the owner is in the bell. Inputs: the five reads (an engine
+ * without the learning read counts as not ready), whether the engine holds more projects
+ * than listed, each card's activity, the projects folder section, what Hide guide does and
+ * a retry for the project list. */
+export function HomeView({ projects, moreProjects = false, accounts, pools, harnesses, tools, learning = { kind: "not_ready" }, activity, found,
+  onHideLearning, onRetryProjects }: {
   projects: Loaded<ProjectRow[]>;
   moreProjects?: boolean;
   onRetryProjects: () => void;
@@ -179,10 +171,12 @@ export function HomeView({ projects, moreProjects = false, accounts, pools, harn
   pools: Loaded<PoolSummary[]>;
   harnesses: Loaded<HarnessEntry[]>;
   tools: Loaded<SetupStatus>;
+  learning?: Loaded<LearningProgress>;
+  onHideLearning?: () => void;
   activity?: Map<string, CardActivity>;
   found?: ReactNode;
 }) {
-  const setup = setupSteps(accounts, pools, harnesses, tools);
+  const setup = learnSteps(setupSteps(accounts, pools, harnesses, tools), learning, projects.kind === "ok" ? projects.value : []);
   return <>
     <PageHeader title="Projects" actions={<>
       <a className="btn" href={formatRoute({ name: "add-project", way: "clone" })}><Icon name="git-branch" size={15} />Clone from GitHub</a>
@@ -192,7 +186,7 @@ export function HomeView({ projects, moreProjects = false, accounts, pools, harn
     {found}
     <div className={`home${setup.visible ? " with-setup" : ""}`}>
       <Projects projects={projects} more={moreProjects} activity={activity} onRetry={onRetryProjects} />
-      {setup.visible && <SetupPanel items={setup.items} />}
+      {setup.visible && <LearnPanel model={setup} onHide={onHideLearning} />}
     </div>
   </>;
 }
@@ -210,16 +204,24 @@ export function useToolsStatus(): Loaded<SetupStatus> {
   return tools;
 }
 
-/** Home: loads accounts, pools, harnesses and tool setup for the setup panel and each
- * project's live work, and renders HomeView with the session's projects. */
+/** Home: loads accounts, pools, harnesses, tool setup and the learning steps for the side panel
+ * and each project's live work, and renders HomeView with the session's projects. Hide guide
+ * sets the skipped mark and reads the steps again. */
 export function Home() {
   const session = useAppSession();
   const [accounts] = useLoad(listAccounts, [], "accounts");
   const [pools] = useLoad(poolSummaries, [], "pool-summaries");
   const [harnesses] = useLoad(harnessCatalog, [], "harness-catalog");
   const tools = useToolsStatus();
+  const [learning, reloadLearning] = useLoad(loadLearningProgress, [], "learning-progress");
+  const hideLearning = async () => {
+    const hidden = await setLearningMark("skipped", true);
+    if (hidden.kind === "error") session.showToast(hidden.message);
+    reloadLearning();
+  };
   const projects = session.projects.kind === "ok" ? session.projects.value : [];
   const activity = useProjectActivity(projects.map((project) => project.id));
-  return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} activity={activity}
-    moreProjects={session.projectsMore} found={<FoundProjects />} onRetryProjects={() => void session.refreshProjects()} />;
+  return <HomeView projects={session.projects} accounts={accounts} pools={pools} harnesses={harnesses} tools={tools} learning={learning}
+    onHideLearning={() => void hideLearning()} activity={activity} moreProjects={session.projectsMore} found={<FoundProjects />}
+    onRetryProjects={() => void session.refreshProjects()} />;
 }

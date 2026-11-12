@@ -252,6 +252,9 @@ dialog.drawer .dialog-body { flex: 1; overflow: auto; align-content: start; }
 .setup-panel li { display: grid; gap: var(--space-2); padding: 14px var(--space-4); border-top: 1px solid var(--border); }
 .setup-panel li:first-child { border-top: 0; }
 .setup-panel .done { display: inline-flex; align-items: center; gap: 6px; color: var(--ok); font-weight: 600; }
+.setup-panel h3 { margin: 0; padding: var(--space-3) var(--space-4) var(--space-1); border-top: 1px solid var(--border); color: var(--text-2); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.setup-panel section:first-of-type h3 { border-top: 0; }
+.setup-panel .learn-progress { margin: 0; padding: var(--space-2) var(--space-4) 0; }
 
 .welcome { display: grid; grid-template-columns: 300px minmax(0, 560px); gap: 48px; height: 100%; overflow: auto; padding: 56px max(var(--space-6), calc((100% - 960px) / 2 + var(--space-6))) var(--space-10); }
 .welcome .intro { display: grid; gap: var(--space-3); align-content: start; }

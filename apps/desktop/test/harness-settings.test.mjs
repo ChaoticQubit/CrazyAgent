@@ -25,7 +25,7 @@ const readOnly = (reason, extra = {}) => setting({ key: "spinnerTips", label: "S
 const page = (keys, extra = {}) => ({
   harness: "claude-code", name: "Claude Code", installed: "2.1.4", qualified: true, qualified_versions: ["2.1.4"], project_id: null, keys, ...extra,
 });
-const row = (item, extra = {}) => renderToStaticMarkup(createElement(view.SettingRow, {
+const row = (item, extra = {}) => renderToStaticMarkup(createElement(view.HarnessSettingRow, {
   setting: item, scope: "app", draft: item.access.kind === "editable" ? client.draftOf(item) : null, busy: false, note: "",
   onDraft: () => {}, onSave: () => {}, onReset: () => {}, ...extra,
 }));
@@ -139,7 +139,9 @@ test("the page groups keys in catalog order, filters them and says when changes 
   const markup = screen({ kind: "ok", value: page(keys) });
   assert.match(markup, />Claude Code 2.1.4 is qualified. You can change the settings below.</);
   assert.match(markup, />Changes apply the next time a master or agent starts with this harness. Running ones keep their settings.</);
-  assert.match(markup, /aria-label="Settings"[\s\S]*aria-label="Set by CrazyAgent"[\s\S]*aria-label="Read-only"/);
+  assert.match(markup, /class="pj set-groups"/);
+  assert.match(markup, />Settings \(2\)<[\s\S]*>Set by CrazyAgent \(1\)<[\s\S]*>Read-only \(1\)</, "each group is a Settings section with its count");
+  assert.equal((markup.match(/class="set-row"/g) ?? []).length, 4, "one Settings row per key");
   assert.match(screen({ kind: "ok", value: page(keys) }, { query: "zulu" }), />No setting matches the filter.</);
   assert.match(screen({ kind: "ok", value: page([]) }), />This harness lists no settings.</);
   const project = screen({ kind: "ok", value: page(keys, { project_id: "p-1" }) }, { scope: "project" });

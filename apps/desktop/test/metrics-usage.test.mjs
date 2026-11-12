@@ -411,3 +411,23 @@ test("a key, URL or local account says what it has in place of limits, every acc
   const read = panel([limits({ account: "k" })]);
   assert.equal(read.split(key).length - 1, 0, "an account with a read of its own shows that read, not the sentence");
 });
+
+test("each limits card and each key, URL or local card ends with the account's free resets and credits line (DEC-154)", () => {
+  const controls = { pools: new Map(), failure: "", busy: null, next: null, revision: 0, onRefresh: forbidden, onSetReset: forbidden };
+  const names = { s: "Work Claude", k: "Team key" };
+  const base = { may_break: false, resets: null, credits: null, spend: { kind: "not_reported" }, resets_checked_ms: null, credits_checked_ms: null };
+  const extras = new Map([
+    ["s", { ...base, harness: "Claude Code", adapter: "claude", may_break: true, not_reported: "not reported by Claude Code", resets: { count: 3, kinds: [], next_expiry_ms: null } }],
+    ["k", { ...base, harness: "OpenRouter", adapter: "open_router", not_reported: "not reported by OpenRouter", credits: "$3.10 left", spend: { kind: "elsewhere", place: "openrouter.ai" } }],
+  ]);
+  const words = text(renderToStaticMarkup(createElement(limitsView.AccountLimitsPanel, {
+    limits: [limits({ account: "s" })], name: (id) => names[id] ?? id, nowMs: NOW, controls,
+    noWindow: [{ account: "k", note: "Keys have no 5-hour or weekly window." }], extras,
+  })));
+  assert.ok(words.includes("3 free resets (may break) · Credits: not reported by Claude Code"), words);
+  assert.ok(words.includes("Free resets: not reported by OpenRouter · Credits: $3.10 left · Spend at openrouter.ai"), words);
+  const without = text(renderToStaticMarkup(createElement(limitsView.AccountLimitsPanel, {
+    limits: [limits({ account: "s" })], name: (id) => names[id] ?? id, nowMs: NOW, controls,
+  })));
+  assert.doesNotMatch(without, /free reset|Credits:/u, "no extras read, no line made up");
+});

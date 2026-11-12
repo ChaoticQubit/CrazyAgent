@@ -152,8 +152,9 @@ pub enum Asker {
 
 /// The engine steps that raise their own questions, stored as `engine:mapping`,
 /// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning`,
-/// `engine:checks`, `engine:scorecard`, the go/no-go scorecard's daily question, and
-/// `engine:access:<request>` for an agent's access request (F08).
+/// `engine:checks`, `engine:scorecard`, the go/no-go scorecard's daily question,
+/// `engine:access:<request>` for an agent's access request (F08) and `engine:demo` for the
+/// question planted in the demo project (DEC-153).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineSource {
     Mapping,
@@ -163,6 +164,7 @@ pub enum EngineSource {
     Checks,
     Scorecard,
     Access(String),
+    Demo,
 }
 
 /// Where a question stands. It waits for the owner until answered or dismissed; a box the
@@ -350,6 +352,7 @@ impl EngineSource {
             Self::Planning => Some("engine:planning".into()),
             Self::Checks => Some("engine:checks".into()),
             Self::Scorecard => Some("engine:scorecard".into()),
+            Self::Demo => Some("engine:demo".into()),
             Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
             Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
             Self::Access(request) if named(request) => Some(format!("engine:access:{request}")),
@@ -500,6 +503,7 @@ pub fn asker_label(asker: &str) -> String {
         ("engine", "planning") => "roadmap planning".into(),
         ("engine", "checks") => "check profiles".into(),
         ("engine", "scorecard") => "the go/no-go scorecard".into(),
+        ("engine", "demo") => "the demo".into(),
         ("engine", rest) => match rest.split_once(':') {
             Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
             Some(("landing", set)) => format!("landing change set {set}"),
