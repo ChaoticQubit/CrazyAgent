@@ -15,8 +15,10 @@ const COMMIT_SHOWN: usize = 12;
 /// (DEC-100): the harness's waiting change set lands through
 /// landing's `accept_into` as one squash commit with the owner's git identity, locally and
 /// never pushed, with Accept's own refusals for a dirty, busy or detached checkout and a
-/// conflict. When the owner's "Ask me before merging" setting is on, nothing lands: the
-/// change set stays in Changes and the owner gets a notification instead. Each outcome is
+/// conflict. When the owner's "Master accepts change sets" setting is Only when I click or
+/// say accept all (DEC-147.7), nothing lands unless the owner sent accept all to the team
+/// since the set last changed: the change set stays in Changes and the owner gets a
+/// notification instead. Each outcome is
 /// also noted in the team conversation for the owner. Takes the engine database, what the
 /// answers need and the harness's name. Returns the sentence the master reads and whether
 /// it is a refusal, or a SQLite failure.
@@ -162,9 +164,17 @@ pub(super) fn merge(
         }
     };
     let target = bound_text(&target, crate::landing::BRANCH_BYTES_MAX);
-    if crate::team::ask_before_merge(connection, project)? {
+    let said = if crate::team::ask_before_merge(connection, project)? {
+        let since = i64::try_from(set.updated_ms).unwrap_or(i64::MAX);
+        Some(crate::team::owner_said_accept_all(
+            connection, project, since,
+        )?)
+    } else {
+        None
+    };
+    if said == Some(false) {
         let text = format!(
-            "{label} finished {task}. Its change set waits in Changes for your Accept into {target}."
+            "{label} finished {task}. Its change set waits in Changes for your Accept into {target}, or send accept all to the team."
         );
         note(connection, project, &text)?;
         let notified = crate::team::events::escalate(connection, project, &text, now_ms())?;
@@ -175,7 +185,7 @@ pub(super) fn merge(
         };
         return Ok((
             format!(
-                "Waiting for the owner: the owner's setting asks before merging into {target}. {label}'s change set waits in Changes. {told}"
+                "Waiting for the owner: the owner's setting lets the master merge into {target} only after the owner clicks Accept or sends accept all to the team. {label}'s change set waits in Changes. {told}"
             ),
             false,
         ));
@@ -195,9 +205,14 @@ pub(super) fn merge(
         Ok(AcceptOutcome::Landed { commit, branch }) => {
             let branch = branch.strip_prefix("refs/heads/").unwrap_or(&branch);
             let text = format!(
-                "The master merged {label}'s work from {task} into {} as {}. Nothing was pushed.",
+                "The master merged {label}'s work from {task} into {} as {}{}. Nothing was pushed.",
                 bound_text(branch, crate::landing::BRANCH_BYTES_MAX),
-                bound_text(&commit, COMMIT_SHOWN)
+                bound_text(&commit, COMMIT_SHOWN),
+                if said == Some(true) {
+                    " because you said accept all"
+                } else {
+                    ""
+                }
             );
             note(connection, project, &text)?;
             (

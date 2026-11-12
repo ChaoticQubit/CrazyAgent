@@ -2008,7 +2008,8 @@ impl TeamView {
         })
     }
 
-    /// Flips "Ask me before merging into the master's branch" between Off and On.
+    /// Flips "Master accepts change sets" between Itself and Only when I click or say accept
+    /// all (DEC-147.7).
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn ask_before_merge(&mut self) -> TeamReply {
         if self.status.is_some() && self.still_saving() {
@@ -2021,9 +2022,9 @@ impl TeamView {
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
-                "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+                "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
             } else {
-                "The master now merges a finished harness without asking."
+                "The master now accepts change sets itself."
             }
             .to_owned(),
         );
@@ -3106,7 +3107,7 @@ impl TeamView {
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
     /// harness change applies, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Live terminal, Max teammates, Spread accounts,
-    /// Token budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// Token budget, Master's branch, Land on, Master accepts change sets, New folder limit, Background
     /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
@@ -3235,8 +3236,13 @@ impl TeamView {
                     .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
-                "Ask before merge",
-                if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
+                "Master accepts change sets",
+                if status.ask_before_merge {
+                    "Only when I click or say accept all"
+                } else {
+                    "Itself"
+                }
+                .to_owned(),
             ),
         ];
         let master_lands = status.master_lands.map(|lands| {
@@ -3626,7 +3632,7 @@ impl TeamView {
             ),
             ("m", "Master's branch"),
             ("L", "Land on"),
-            ("g", "Ask before merge"),
+            ("g", "Master accepts change sets"),
             ("E", "Master merges"),
             ("R", "Re-ask empty reply"),
             ("I", "Stop the master when idle after"),

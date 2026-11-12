@@ -2575,7 +2575,7 @@ fn m_edits_the_masters_branch_and_an_empty_name_goes_back_to_the_default() {
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
     assert!(!view.typing());
     assert!(view.branch_edit.is_none());
-    assert!(view.help().contains(&("g", "Ask before merge")));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
 }
 
 #[test]
@@ -2689,8 +2689,8 @@ fn g_turns_ask_before_merge_on_and_off() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(view.help().contains(&("g", "Ask before merge")));
-    assert!(shows(&view, "Ask before merge  Off"));
+    assert!(view.help().contains(&("g", "Master accepts change sets")));
+    assert!(shows(&view, "Master accepts change sets  Itself"));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2703,13 +2703,16 @@ fn g_turns_ask_before_merge_on_and_off() {
     assert_eq!(
         view.notice,
         Some(Notice::plain(
-            "The master now waits for your Accept before merging a harness, and before landing its own conflict fixes."
+            "The master now merges a harness only after you click Accept or send accept all to the team, and waits for your Accept on its own conflict fixes."
         ))
     );
     let mut asking = team();
     asking.ask_before_merge = true;
     reread(&mut view, asking, NOW + 10);
-    assert!(shows(&view, "Ask before merge  On"));
+    assert!(shows(
+        &view,
+        "Master accepts change sets  Only when I click or say accept all"
+    ));
     let reply = view.key(press(KeyCode::Char('g')));
     assert_eq!(
         reply,
@@ -2721,9 +2724,7 @@ fn g_turns_ask_before_merge_on_and_off() {
     applied(&mut view, reply);
     assert_eq!(
         view.notice,
-        Some(Notice::plain(
-            "The master now merges a finished harness without asking."
-        ))
+        Some(Notice::plain("The master now accepts change sets itself."))
     );
 }
 
@@ -4467,7 +4468,7 @@ fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
         ("p", "Stop teammate"),
         ("z", "Stop agent"),
         ("m", "Master's branch"),
-        ("g", "Ask before merge"),
+        ("g", "Master accepts change sets"),
         ("T", "Token budget"),
     ] {
         assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
