@@ -9982,6 +9982,7 @@ fn live_adopted(
 /// and flags, whether a later engine may take the pane over, and the account's credential
 /// copy and lease the session holds, if any, which the stop settles (see [`settle_stop`]).
 /// Returns the problem that ended it, if any, a stop's own problem first.
+#[allow(clippy::too_many_arguments)]
 fn live_serve(
     mut session: TerminalSession,
     orders: &Receiver<Order>,
@@ -10228,6 +10229,7 @@ fn turn_closed(reports: &Sender<Report>, taken: bool, cause: Option<String>) {
 /// session, so its pane record, server and teammates outlive a turn. Later turns carry no
 /// account. Takes the plan, the lead's home and the worker's channels and flags. Returns the
 /// problem that ended it, if any.
+#[allow(clippy::too_many_arguments)]
 fn native_session(
     plan: &Plan,
     home: &Path,
@@ -10579,6 +10581,7 @@ fn next_lead_turn(
 /// left. A stop its warden did not confirm keeps both for the engine's life and ends the
 /// agent with that problem; a Full access stop that left processes running keeps both
 /// until they end, names them and ends the agent.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     mut session: AgentSession,
     kept: Option<Kept>,

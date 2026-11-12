@@ -23433,6 +23433,7 @@ fn a_team_launch_whose_folder_screen_never_shows_ends_instead_of_waiting() {
             &leave,
             false,
             None,
+            &test_by(),
         );
         let _ = ended.send(());
         problem
@@ -28255,7 +28256,16 @@ fn a_live_harness_that_closes_with_a_command_left_reports_both_with_the_close_la
                     cancelling.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             });
-            let problem = live_serve(*session, &receive, &reports, &cancel, &leave, false, None);
+            let problem = live_serve(
+                *session,
+                &receive,
+                &reports,
+                &cancel,
+                &leave,
+                false,
+                None,
+                &test_by(),
+            );
             let _ = ended.send(());
             let left = reported
                 .try_iter()

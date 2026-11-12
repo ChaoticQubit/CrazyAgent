@@ -2396,7 +2396,7 @@ pub(crate) mod tests {
 
     /// Waits up to `wait` for `done`. Inputs: the bound and the condition. Output: whether it
     /// held in time.
-    fn within(wait: Duration, done: impl Fn() -> bool) -> bool {
+    fn within(wait: Duration, mut done: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
             if done() {
