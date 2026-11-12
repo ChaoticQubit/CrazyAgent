@@ -199,6 +199,8 @@
     "allow-desktop-set-cleanup-settings",
     "allow-desktop-quit-settings",
     "allow-desktop-set-quit-settings",
+    "allow-desktop-learning-progress",
+    "allow-desktop-set-learning-mark",
     "allow-desktop-pool-summaries",
     "allow-desktop-account-schedule",
     "allow-desktop-account-ranking",
