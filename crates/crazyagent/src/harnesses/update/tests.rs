@@ -1864,6 +1864,7 @@ fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the
             updates.drain(
                 move |id| {
                     seen.lock().unwrap().push((id, worker.idle()));
+                    assert_eq!(worker.queued().first().map(String::as_str), Some(id));
                     match id {
                         "aider" => {
                             let bin = bin.clone();
