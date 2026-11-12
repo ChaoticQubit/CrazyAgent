@@ -30,6 +30,26 @@ impl OwnerController {
         }
     }
 
+    /// Sets or clears one learning mark: a page opened, or the guide skipped and shown
+    /// again. Sends nothing when the engine already holds it that way. Takes the mark,
+    /// whether it is set and the client generation. Returns None when nothing was sent,
+    /// else the actual owner response.
+    pub async fn set_learning_mark(
+        &mut self,
+        step: crate::learning::MarkStep,
+        on: bool,
+        generation: u64,
+    ) -> Result<Option<OwnerResponse>, EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        if self.learning_progress().await?.marked(step) == on {
+            return Ok(None);
+        }
+        self.begin_mutation(OwnerMutation::SetLearningMark { step, on }, generation)?;
+        self.send_pending().await.map(Some)
+    }
+
     /// Installs the missing tools and the ticked default-pack entries; the ticked
     /// MCP servers count as approved by the owner.
     /// Takes the ticked entry ids and the client generation.

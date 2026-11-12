@@ -1194,33 +1194,40 @@ async fn full_project_history_drops_the_oldest_message_keeps_the_brief_and_exact
 /// The Learn CrazyAgent read through the real owner sockets (DEC-153): a fresh engine has
 /// nothing done, a project and one owner message tick Create a project and Talk to the
 /// master on both clients, and a brief alone does not count as a message.
+async fn learning(
+    service: &Service,
+    kind: OwnerClientKind,
+) -> crazyagent::learning::LearningProgress {
+    let client = service.owner(kind);
+    let OwnerData::LearningProgress { progress } = service
+        .read(&client, OwnerRead::LearningProgress)
+        .await
+        .data
+    else {
+        panic!("missing learning progress");
+    };
+    progress
+}
+
+fn learned(
+    progress: &crazyagent::learning::LearningProgress,
+    id: crazyagent::learning::StepId,
+) -> bool {
+    progress
+        .steps
+        .iter()
+        .find(|step| step.id == id)
+        .unwrap()
+        .done()
+}
+
 #[tokio::test]
 async fn learning_progress_ticks_a_project_and_a_message_to_the_master_on_both_clients() {
-    use crazyagent::learning::{LearningProgress, StepId};
+    use crazyagent::learning::StepId;
     let root = private_root();
     let service = Service::start(root.path()).await;
-    let read = |kind| {
-        let client = service.owner(kind);
-        let service = &service;
-        async move {
-            let OwnerData::LearningProgress { progress } = service
-                .read(&client, OwnerRead::LearningProgress)
-                .await
-                .data
-            else {
-                panic!("missing learning progress");
-            };
-            progress
-        }
-    };
-    let done = |progress: &LearningProgress, id: StepId| {
-        progress
-            .steps
-            .iter()
-            .find(|step| step.id == id)
-            .unwrap()
-            .done()
-    };
+    let read = |kind| learning(&service, kind);
+    let done = learned;
     let fresh = read(OwnerClientKind::Desktop).await;
     assert!(fresh.steps.iter().all(|step| !step.done()), "{fresh:?}");
     service.create("p").await;
@@ -1238,5 +1245,75 @@ async fn learning_progress_ticks_a_project_and_a_message_to_the_master_on_both_c
     assert!(done(&desktop, StepId::Master));
     assert!(!done(&desktop, StepId::ChangeSet));
     assert_eq!(read(OwnerClientKind::Tui).await, desktop);
+    service.stop().await;
+}
+
+#[tokio::test]
+async fn learning_marks_from_either_owner_client_show_on_both_and_the_ordinary_wire_cannot_set_one()
+{
+    use crazyagent::learning::{MarkStep, StepId};
+    let root = private_root();
+    let service = Service::start(root.path()).await;
+    let mark = |kind, id: &'static str, step, on| {
+        let client = service.owner(kind);
+        let service = &service;
+        async move {
+            let operation = OwnerOperation::Apply {
+                mutation: OwnerMutation::SetLearningMark { step, on },
+            };
+            let reply = client
+                .request(request(id, service.revision().await, operation))
+                .await
+                .unwrap();
+            assert!(
+                matches!(reply.response, OwnerResponse::Applied { .. }),
+                "{reply:?}"
+            );
+        }
+    };
+    mark(
+        OwnerClientKind::Tui,
+        "mark-process",
+        MarkStep::Process,
+        true,
+    )
+    .await;
+    let desktop = learning(&service, OwnerClientKind::Desktop).await;
+    assert!(learned(&desktop, StepId::Process));
+    assert!(!learned(&desktop, StepId::Usage));
+    assert!(!desktop.skipped);
+    mark(
+        OwnerClientKind::Desktop,
+        "mark-skip",
+        MarkStep::Skipped,
+        true,
+    )
+    .await;
+    assert!(learning(&service, OwnerClientKind::Tui).await.skipped);
+    mark(OwnerClientKind::Tui, "mark-again", MarkStep::Skipped, false).await;
+    let again = learning(&service, OwnerClientKind::Desktop).await;
+    assert!(!again.skipped);
+    assert!(
+        learned(&again, StepId::Process),
+        "showing the guide again keeps the ticks"
+    );
+    assert_eq!(learning(&service, OwnerClientKind::Tui).await, again);
+    let wire = WireRequest {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: ClientId::new("ordinary").unwrap(),
+        request_id: RequestId::new("ordinary-mark").unwrap(),
+        expected_revision: Cursor::new(service.revision().await),
+        command: Command::OwnerLearningMark {
+            step: MarkStep::Skipped,
+            on: true,
+        },
+    };
+    let body = serde_json::to_value(&wire).unwrap();
+    assert!(serde_json::from_value::<WireRequest>(body).is_err());
+    assert_eq!(
+        service.engine.apply(wire).await.unwrap_err().0,
+        "owner_authentication_required"
+    );
+    assert!(!learning(&service, OwnerClientKind::Desktop).await.skipped);
     service.stop().await;
 }
