@@ -1053,11 +1053,7 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
-    let trusted = crate::trust::Enforcement::for_level(super::workspace::project_trust(
-        data,
-        launch.project,
-    )?)
-    .ide_workspace_trust;
+    let trusted = policy.trusted;
     let confined = policy.access != AgentAccess::Full;
     let hooks = (confined && policy.hooks && trusted).then_some(launch.root);
     let index_project = confined.then_some(launch.root);

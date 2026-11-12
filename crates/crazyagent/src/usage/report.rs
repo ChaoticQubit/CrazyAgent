@@ -125,6 +125,8 @@ pub struct UsageReport {
     pub activity: Vec<ActivityRow>,
     #[serde(default)]
     pub models: Vec<ModelRow>,
+    #[serde(default)]
+    pub spend: super::spend::SpendView,
 }
 
 /// Tells whether the engine counts a harness's usage: from its session records (Claude
@@ -646,6 +648,7 @@ pub fn report(
         counting_notice: recount::counting_notice(db)?,
         activity,
         models,
+        spend: super::spend::view(db)?,
     })?;
     if report.money.settings.prices == PriceSource::Off {
         report

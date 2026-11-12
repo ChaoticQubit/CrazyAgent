@@ -1,14 +1,17 @@
 use super::intake::{ask, event, not_ready};
 use super::new_project::display_path;
 use super::new_project_page::kept_draft;
-use super::settings_accounts::{load_accounts, send};
+use super::settings_accounts::{load_accounts, plain, send};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::accounts::AccountStatus;
+use crate::learning::{LearningProgress, MarkStep, StepId, Topic};
 use crate::pools::PoolSummary;
 use crate::projects_home::{FoundProject, FoundState, ProjectsHome};
 use crate::setup::{Dependency, DependencyState, SetupStatus};
+use crate::tui::client::OwnerEvent;
 use crate::tui::client::app_setup::AppSetupJob;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
+use crate::tui::client::learning::LearningQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::clock;
 use crate::tui::ctx::{Ctx, Link, Load};
@@ -27,11 +30,124 @@ const PANEL_WIDE: usize = 38;
 const PANEL_NARROW: usize = 30;
 const FILTER_CHARS_MAX: usize = 100;
 const TOOLS_TEXT_CHARS: usize = 24;
+const SETUP_ITEMS: usize = 4;
+const TOPICS: [(Topic, &str); 4] = [
+    (Topic::Basics, "Basics"),
+    (Topic::CoreLoop, "Core loop"),
+    (Topic::IdeAndTerminals, "IDE and terminals"),
+    (Topic::ProcessMetricsUsage, "Process, Metrics and Usage"),
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Panel {
     Projects,
     Setup,
+}
+
+/// Where Enter on a row of Home's side panel goes: a place, or a step only the desktop app
+/// has, which Enter explains instead of opening.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Place(Place),
+    Desktop,
+}
+
+/// One row of Home's side panel: a setup item or a learning step, whether it is done, its
+/// title and wrapped words, what Enter says and does, and whether the progress line counts it.
+#[derive(Clone, Debug)]
+struct GuideItem {
+    done: bool,
+    title: String,
+    body: Vec<String>,
+    action: String,
+    target: Target,
+    counted: bool,
+}
+
+/// Home's side panel: "Get set up" with the setup items, or "Learn CrazyAgent" with the
+/// setup items under Basics and the engine's learning steps under their topics.
+#[derive(Clone, Debug)]
+struct Guide {
+    learning: bool,
+    groups: Vec<(Option<&'static str>, Vec<GuideItem>)>,
+}
+
+impl Guide {
+    /// Every row in panel order. Input: none. Output: the rows.
+    fn items(&self) -> impl Iterator<Item = &GuideItem> {
+        self.groups.iter().flat_map(|(_, items)| items)
+    }
+
+    /// The counted rows done and in all; the harness check is not counted, as on the
+    /// desktop. Input: none. Output: done and total.
+    fn progress(&self) -> (usize, usize) {
+        self.items()
+            .filter(|item| item.counted)
+            .fold((0, 0), |(done, total), item| {
+                (done + usize::from(item.done), total + 1)
+            })
+    }
+}
+
+/// True while the learning guide has something to show: the owner has not hidden it and a
+/// step is not done. Input: the learning read. Output: whether the guide shows.
+fn learning_open(progress: &LearningProgress) -> bool {
+    !progress.skipped && progress.steps.iter().any(|step| !step.done())
+}
+
+/// Says where Enter on one learning step goes in the TUI: the first project's page for the
+/// project steps, New project while there is none, Settings or Usage for the rest. The IDE
+/// is in the desktop app only. Inputs: the step and the first project. Output: the words
+/// Enter shows and its target.
+fn step_target(id: StepId, project: Option<&ProjectCard>) -> (&'static str, Target) {
+    let new_project = ("New project", Target::Place(Place::NewProject));
+    let tab = |action: &'static str, page: ProjectTab| match project {
+        Some(card) => (
+            action,
+            Target::Place(Place::Project {
+                id: card.id.clone(),
+                name: card.name.clone(),
+                tab: page,
+            }),
+        ),
+        None => new_project.clone(),
+    };
+    match id {
+        StepId::Project => new_project.clone(),
+        StepId::Master => tab("Open conversation", ProjectTab::Conversation),
+        StepId::Agents => tab("Open agents", ProjectTab::Agents),
+        StepId::Question => tab("Open questions", ProjectTab::Questions),
+        StepId::ChangeSet => tab("Open changes", ProjectTab::Changes),
+        StepId::Ide => ("Open IDE", Target::Desktop),
+        StepId::Terminal => match project {
+            Some(card) => (
+                "Open team",
+                Target::Place(Place::Team {
+                    id: card.id.clone(),
+                    name: card.name.clone(),
+                }),
+            ),
+            None => new_project.clone(),
+        },
+        StepId::Process => (
+            "Open process",
+            Target::Place(Place::Settings(SettingsSection::Process)),
+        ),
+        StepId::Metrics | StepId::Usage => ("Open usage", Target::Place(Place::Usage)),
+    }
+}
+
+/// Hides the learning guide until the owner asks to see it again: sets the engine's skipped
+/// mark. Input: the context. Output: the generation the mark went with; the panel goes once
+/// the next learning read, which a set mark asks for, shows the mark.
+fn hide(ctx: &mut Ctx) -> u64 {
+    let generation = ctx.next_generation();
+    ctx.request(Request::Learning(Box::new(LearningQuery::Mark {
+        step: MarkStep::Skipped,
+        on: true,
+        generation,
+    })));
+    generation
 }
 
 /// One row of the project list: the New project draft kept after leaving the
@@ -155,6 +271,7 @@ pub struct Home {
     filtering: bool,
     was_done: Option<bool>,
     owner_moved: bool,
+    hiding: Option<u64>,
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
 }
@@ -178,6 +295,7 @@ impl Home {
             filtering: false,
             was_done: None,
             owner_moved: false,
+            hiding: None,
             folder: Load::Idle,
             found: Load::Idle,
         }
@@ -224,8 +342,75 @@ impl Home {
             .map(|pools| Setup::of(pools, accounts, tools_ready))
     }
 
-    fn panel_visible(ctx: &Ctx) -> bool {
-        Self::setup(ctx).is_some_and(|setup| !setup.done())
+    /// Works out Home's side panel. Setup keeps its rule: "Get set up" shows while setup is
+    /// not done. The learning steps join it as "Learn CrazyAgent", setup under Basics, while
+    /// the engine reports a step not done and the owner has not hidden the guide; a hidden
+    /// guide, every step done or an engine without the learning read leaves "Get set up".
+    /// Nothing shows until the learning read settles. Input: the context. Output: the
+    /// panel, or None while it does not show.
+    fn guide(ctx: &Ctx) -> Option<Guide> {
+        let setup = Self::setup(ctx)?;
+        let basics: Vec<GuideItem> = Self::items(ctx)
+            .into_iter()
+            .map(|(done, title, body, place)| GuideItem {
+                done,
+                title: title.into(),
+                body,
+                action: title.into(),
+                counted: place != Place::Settings(SettingsSection::Harnesses),
+                target: Target::Place(place),
+            })
+            .collect();
+        let Some(progress) = ctx
+            .store
+            .learning
+            .ready()
+            .filter(|read| learning_open(read))
+        else {
+            let settled = !matches!(ctx.store.learning, Load::Idle | Load::Loading);
+            if !settled || setup.done() {
+                return None;
+            }
+            return Some(Guide {
+                learning: false,
+                groups: vec![(None, basics)],
+            });
+        };
+        let project = ctx.store.projects.ready().and_then(|cards| cards.first());
+        let mut groups = Vec::with_capacity(TOPICS.len());
+        let mut basics = Some(basics);
+        for (topic, heading) in TOPICS {
+            let mut items = if topic == Topic::Basics {
+                basics.take().unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            for step in progress.steps.iter().filter(|step| step.topic == topic) {
+                let (action, target) = step_target(step.id, project);
+                items.push(GuideItem {
+                    done: step.done(),
+                    title: step.title.clone(),
+                    body: wrap(&step.body, TOOLS_TEXT_CHARS),
+                    action: action.into(),
+                    target,
+                    counted: true,
+                });
+            }
+            groups.push((Some(heading), items));
+        }
+        assert!(basics.is_none(), "the setup items sit under Basics");
+        Some(Guide {
+            learning: true,
+            groups,
+        })
+    }
+
+    /// Keeps the picked panel row inside the panel, which grows to the learning steps and
+    /// shrinks back to the setup items as reads arrive. Input: the context. Output: none.
+    fn clamp(&mut self, ctx: &Ctx) {
+        let rows = Self::guide(ctx).map_or(SETUP_ITEMS, |guide| guide.items().count());
+        assert!(rows >= SETUP_ITEMS);
+        self.setup_selected = self.setup_selected.min(rows - 1);
     }
 
     fn entries(&self, ctx: &Ctx) -> Vec<Entry> {
@@ -691,48 +876,89 @@ impl Home {
         }
     }
 
-    fn setup_column(&self, ctx: &Ctx) -> Vec<Line<'static>> {
+    /// Draws Home's side panel. "Get set up" lists each item with its words and says Enter
+    /// opens Settings. "Learn CrazyAgent" says how many rows are done, lists one line per row
+    /// under its topic and shows the words of the picked row, scrolled to keep it in view.
+    /// Inputs: the panel, the rows it may take and the context. Output: the lines.
+    fn guide_column(&self, guide: &Guide, height: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         let theme = &ctx.theme;
         let focused = self.panel == Panel::Setup;
-        let mut lines = vec![
-            styled(
-                "Get set up",
-                if focused { Role::Accent } else { Role::Heading },
+        let title = if guide.learning {
+            "Learn CrazyAgent"
+        } else {
+            "Get set up"
+        };
+        let mut head = vec![styled(
+            title,
+            if focused { Role::Accent } else { Role::Heading },
+            theme,
+        )];
+        if guide.learning {
+            let (done, total) = guide.progress();
+            head.push(styled(
+                format!("{done} of {total} done"),
+                Role::Muted,
                 theme,
-            ),
-            Line::default(),
-        ];
-        for (index, (done, label, description, _)) in Self::items(ctx).into_iter().enumerate() {
-            let selected = focused && index == self.setup_selected;
-            let gutter = || {
-                if selected {
-                    Span::styled(ctx.glyphs.bar, theme.accent)
-                } else {
-                    Span::raw(" ")
-                }
-            };
-            lines.push(Line::from(vec![
-                gutter(),
-                Span::raw(" "),
-                if done {
-                    Span::styled("[x]", theme.success)
-                } else {
-                    Span::raw("[ ]")
-                },
-                Span::raw(" "),
-                Span::styled(label, if selected { theme.accent } else { theme.text }),
-            ]));
-            for part in description {
-                lines.push(Line::from(vec![
-                    gutter(),
-                    Span::raw("     "),
-                    Span::styled(part, theme.muted),
-                ]));
-            }
-            lines.push(Line::default());
+            ));
+        } else {
+            head.push(Line::default());
         }
-        lines.push(styled("Enter opens Settings", Role::Muted, theme));
-        lines
+        let mut body = Vec::new();
+        let mut picked = 0..0;
+        let mut index = 0;
+        for (heading, items) in &guide.groups {
+            if let Some(heading) = heading {
+                body.push(styled(*heading, Role::Heading, theme));
+            }
+            for item in items {
+                let selected = focused && index == self.setup_selected;
+                let start = body.len();
+                let gutter = || {
+                    if selected {
+                        Span::styled(ctx.glyphs.bar, theme.accent)
+                    } else {
+                        Span::raw(" ")
+                    }
+                };
+                body.push(Line::from(vec![
+                    gutter(),
+                    Span::raw(" "),
+                    if item.done {
+                        Span::styled("[x]", theme.success)
+                    } else {
+                        Span::raw("[ ]")
+                    },
+                    Span::raw(" "),
+                    Span::styled(
+                        item.title.clone(),
+                        if selected { theme.accent } else { theme.text },
+                    ),
+                ]));
+                if selected || !guide.learning {
+                    for part in &item.body {
+                        body.push(Line::from(vec![
+                            gutter(),
+                            Span::raw("     "),
+                            Span::styled(part.clone(), theme.muted),
+                        ]));
+                    }
+                }
+                if !guide.learning {
+                    body.push(Line::default());
+                }
+                if selected {
+                    picked = start..body.len();
+                }
+                index += 1;
+            }
+        }
+        if !guide.learning {
+            body.push(styled("Enter opens Settings", Role::Muted, theme));
+        }
+        let room = height.saturating_sub(head.len());
+        let skip = picked.end.saturating_sub(room).min(picked.start);
+        head.extend(body.into_iter().skip(skip).take(room));
+        head
     }
 
     /// True once the tools check has a final answer: every tool checked, or the
@@ -750,6 +976,7 @@ impl Home {
     /// switch, the moves in the focused panel and Enter. Inputs: the key and the context.
     /// Output: the flow the key leads to.
     fn steer(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        self.clamp(ctx);
         if self.filtering {
             match key {
                 Key::Esc => {
@@ -772,7 +999,12 @@ impl Home {
             }
             return Flow::Handled;
         }
-        let panel_visible = Self::panel_visible(ctx);
+        let guide = Self::guide(ctx);
+        let panel_visible = guide.is_some();
+        let learning = guide.as_ref().is_some_and(|guide| guide.learning);
+        let rows = guide
+            .as_ref()
+            .map_or(SETUP_ITEMS, |guide| guide.items().count());
         if !panel_visible {
             self.panel = Panel::Projects;
         }
@@ -804,9 +1036,13 @@ impl Home {
                 };
                 Flow::Handled
             }
+            Key::Char('h') if self.panel == Panel::Setup && learning => {
+                self.hiding = Some(hide(ctx));
+                Flow::Handled
+            }
             Key::Up | Key::Down if self.panel == Panel::Setup => {
                 self.setup_selected = if matches!(key, Key::Down) {
-                    (self.setup_selected + 1).min(Self::items(ctx).len() - 1)
+                    (self.setup_selected + 1).min(rows - 1)
                 } else {
                     self.setup_selected.saturating_sub(1)
                 };
@@ -867,9 +1103,24 @@ impl Home {
         self.was_done = Some(setup.done());
     }
 
-    fn open_selected(&self, ctx: &Ctx) -> Flow {
-        if self.panel == Panel::Setup && Self::panel_visible(ctx) {
-            return Flow::Open(Self::items(ctx)[self.setup_selected].3.clone());
+    fn open_selected(&self, ctx: &mut Ctx) -> Flow {
+        if self.panel == Panel::Setup
+            && let Some(guide) = Self::guide(ctx)
+        {
+            return match guide.items().nth(self.setup_selected) {
+                Some(GuideItem {
+                    target: Target::Place(place),
+                    ..
+                }) => Flow::Open(place.clone()),
+                Some(GuideItem {
+                    target: Target::Desktop,
+                    ..
+                }) => {
+                    ctx.say(Message::warning("The IDE opens in the desktop app.", ""));
+                    Flow::Handled
+                }
+                None => Flow::Handled,
+            };
         }
         match self.entries(ctx).into_iter().nth(self.selected) {
             Some(Entry::Draft(_)) => Flow::Open(Place::NewProject),
@@ -924,9 +1175,19 @@ impl Screen for Home {
             ];
         }
         let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-        if self.panel == Panel::Setup && Self::panel_visible(ctx) {
-            return vec![
-                hint("Enter", Self::items(ctx)[self.setup_selected].1),
+        if self.panel == Panel::Setup
+            && let Some(guide) = Self::guide(ctx)
+        {
+            let mut hints = Vec::new();
+            if let Some(item) = guide.items().nth(self.setup_selected)
+                && item.target != Target::Desktop
+            {
+                hints.push(hint("Enter", &item.action));
+            }
+            if guide.learning {
+                hints.push(hint("h", "Hide guide"));
+            }
+            hints.extend([
                 hint("n", "New project"),
                 hint("a", "Add project"),
                 hint(&arrows, "Move"),
@@ -934,7 +1195,8 @@ impl Screen for Home {
                 hint("s", "Settings"),
                 hint("Ctrl-K", "Go to"),
                 hint("Ctrl-Q", "Quit"),
-            ];
+            ]);
+            return hints;
         }
         let mut hints = vec![
             hint("n", "New project"),
@@ -973,11 +1235,25 @@ impl Screen for Home {
         if self.focus() != before {
             self.owner_moved = true;
         }
-        assert!(self.setup_selected < Self::items(ctx).len());
+        let rows = Self::guide(ctx).map_or(SETUP_ITEMS, |guide| guide.items().count());
+        assert!(self.setup_selected < rows);
         flow
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        if let Arrival::Owner(owner) = arrival
+            && let OwnerEvent::Learning(reply) = owner.as_ref()
+            && let LearningQuery::Mark { generation, .. } = reply.query
+            && self.hiding == Some(generation)
+        {
+            self.hiding = None;
+            if let Err(code) = &reply.result {
+                ctx.say(Message::error(
+                    "Your Learn CrazyAgent progress was not saved.",
+                    plain(code),
+                ));
+            }
+        }
         if let Some(reply) = event(arrival) {
             match (&reply.query, &reply.result) {
                 (IntakeQuery::Home, Ok(IntakeView::Home(home))) => {
@@ -1011,6 +1287,7 @@ impl Screen for Home {
         }
         match arrival {
             Arrival::Pools(Ok(_)) | Arrival::Owner(_) => {
+                self.clamp(ctx);
                 self.notice(ctx);
                 Flow::Handled
             }
@@ -1045,15 +1322,26 @@ impl Screen for Home {
         if !Self::checked(ctx) || matches!(ctx.store.setup, Load::Failed(_)) {
             send(ctx, SettingsJob::AppSetup(AppSetupJob::Status));
         }
+        let learning = match &ctx.store.learning {
+            Load::Idle | Load::Failed(_) => true,
+            Load::Ready(progress) => learning_open(progress),
+            Load::Loading | Load::NotReady => false,
+        };
+        if learning {
+            if matches!(ctx.store.learning, Load::Idle) {
+                ctx.store.learning = Load::Loading;
+            }
+            ctx.request(Request::Learning(Box::new(LearningQuery::Progress)));
+        }
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let width = area.width as usize;
-        let (lines, cursor) = if Self::panel_visible(ctx) {
+        let (lines, cursor) = if let Some(guide) = Self::guide(ctx) {
             let right = if ctx.wide() { PANEL_WIDE } else { PANEL_NARROW };
             let left = width - 4 - 3 - right;
             let (projects, cursor) = self.projects_column(left, ctx);
-            let setup = self.setup_column(ctx);
+            let setup = self.guide_column(&guide, area.height as usize, ctx);
             let lines = (0..area.height as usize)
                 .map(|index| {
                     join([
@@ -1134,11 +1422,15 @@ fn activity_corner(notifications: usize, suggestions: usize, width: usize) -> St
 #[cfg(test)]
 pub(in crate::tui) mod tests {
     use super::*;
+    use crate::learning::LearningProgress;
     use crate::pools::{MemberKind, MemberStatus, PoolMember};
     use crate::protocol::CredentialRef;
+    use crate::protocol::ProjectId;
     use crate::setup::{Dependency, DependencyStatus, Version};
+    use crate::terminal::{AgentId, TerminalFrame};
     use crate::tui::client::OwnerEvent;
     use crate::tui::client::app_setup::AppSetupEvent;
+    use crate::tui::client::learning::{LearningEvent, LearningReply};
     use crate::tui::client::settings::SettingsEvent;
     use crate::tui::screens::settings_accounts::tests::{ctx, render};
     use crate::tui::shell::Shell;
@@ -1472,5 +1764,419 @@ pub(in crate::tui) mod tests {
             rows.iter().all(|row| !row.contains("Get set up")),
             "the panel hides once accounts, a pool and tools are done: {rows:#?}"
         );
+    }
+
+    /// A learning read from a fresh engine with the given steps done and the guide hidden
+    /// or not. Inputs: the done steps and the skip. Output: the read.
+    fn learning(done: &[StepId], skipped: bool) -> LearningProgress {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let tx = db.transaction().unwrap();
+        let mut progress = crate::learning::progress(&tx).unwrap();
+        assert_eq!(progress.steps.len(), 10);
+        for step in &mut progress.steps {
+            if done.contains(&step.id) {
+                step.count = 1;
+            }
+        }
+        progress.skipped = skipped;
+        progress
+    }
+
+    fn reply(query: LearningQuery, result: Result<LearningReply, String>) -> Arrival {
+        Arrival::Owner(Box::new(OwnerEvent::Learning(Box::new(LearningEvent {
+            query,
+            result,
+        }))))
+    }
+
+    fn read(progress: LearningProgress) -> Arrival {
+        reply(
+            LearningQuery::Progress,
+            Ok(LearningReply::Progress(progress)),
+        )
+    }
+
+    fn mark(step: MarkStep, result: Result<LearningReply, String>) -> Arrival {
+        reply(
+            LearningQuery::Mark {
+                step,
+                on: true,
+                generation: 1,
+            },
+            result,
+        )
+    }
+
+    /// The learning requests waiting in the queue, the rest dropped.
+    /// Input: the shell. Output: the queries in order.
+    fn learning_requests(shell: &mut Shell) -> Vec<LearningQuery> {
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .filter_map(|request| match request {
+                Request::Learning(query) => Some(*query),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn marks(shell: &mut Shell) -> Vec<MarkStep> {
+        learning_requests(shell)
+            .into_iter()
+            .filter_map(|query| match query {
+                LearningQuery::Mark { step, on: true, .. } => Some(step),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn card() -> ProjectCard {
+        ProjectCard {
+            id: ProjectId::new("notes-cli").unwrap(),
+            name: "Notes CLI".into(),
+            about: String::new(),
+            platforms: Vec::new(),
+            pool: None,
+            pool_id: None,
+            research: Default::default(),
+            created_ms: None,
+            activity: Default::default(),
+        }
+    }
+
+    /// A Home whose setup is done or not, with the projects and learning read given.
+    /// Inputs: whether an account, a pool and the tools are ready, the projects and the
+    /// learning state. Output: the shell on Home, its first requests taken.
+    fn guide_home(
+        setup_done: bool,
+        projects: Vec<ProjectCard>,
+        learning: Load<LearningProgress>,
+    ) -> Shell {
+        let mut ctx = ctx(80, 24);
+        ctx.store.projects = Load::Ready(projects);
+        ctx.store.setup = Load::Ready(tools(&[]));
+        if setup_done {
+            ctx.store.pools = Load::Ready(vec![pool("Main", &[MemberStatus::SetUp])]);
+            ctx.store.accounts = Load::Ready(vec![account(1, "Team key", AccountStatus::KeySaved)]);
+        } else {
+            ctx.store.pools = Load::Ready(Vec::new());
+            ctx.store.accounts = Load::Ready(Vec::new());
+        }
+        ctx.store.learning = learning;
+        let mut shell = Shell::with(ctx, Box::new(Home::new()));
+        while shell.ctx.next_request().is_some() {}
+        shell
+    }
+
+    fn shows(rows: &[String], text: &str) -> bool {
+        rows.iter().any(|row| row.contains(text))
+    }
+
+    #[test]
+    fn learn_crazyagent_lists_setup_under_basics_and_every_topic_with_its_progress_at_80x24() {
+        let mut shell = guide_home(
+            true,
+            Vec::new(),
+            Load::Ready(learning(&[StepId::Project], false)),
+        );
+        let rows = render(&mut shell, 80, 24);
+        for wanted in [
+            "Learn CrazyAgent",
+            "4 of 13 done",
+            "Basics",
+            "[x] Add an account",
+            "[x] Create a pool",
+            "[ ] Check your harnesses",
+            "[x] Install tools",
+            "[x] Create a project",
+            "Core loop",
+            "[ ] Talk to the master",
+            "IDE and terminals",
+            "[ ] Open the IDE",
+            "Process, Metrics and Usage",
+            "[ ] Check your usage",
+        ] {
+            assert!(shows(&rows, wanted), "{wanted:?} in {rows:#?}");
+        }
+        assert!(!shows(&rows, "Get set up"), "{rows:#?}");
+        assert!(!shows(&rows, "Enter opens Settings"), "{rows:#?}");
+        assert!(
+            !shows(&rows, "Each project has a master"),
+            "a row's words show only while it is picked: {rows:#?}"
+        );
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= 80),
+            "{rows:#?}"
+        );
+
+        shell.key(Key::Tab);
+        for _ in 0..20 {
+            shell.key(Key::Down);
+        }
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            shows(&rows, "Learn CrazyAgent"),
+            "the title stays on top: {rows:#?}"
+        );
+        assert!(shows(&rows, "4 of 13 done"), "{rows:#?}");
+        assert!(shows(&rows, "Process, Metrics and Usage"), "{rows:#?}");
+        assert!(shows(&rows, "[ ] Check your usage"), "{rows:#?}");
+        assert!(shows(&rows, "Usage shows how much of"), "{rows:#?}");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= 80),
+            "{rows:#?}"
+        );
+        let footer = rows.last().unwrap();
+        assert!(footer.contains("Enter Open usage"), "{footer}");
+        assert!(footer.contains("h Hide guide"), "{footer}");
+        assert_eq!(
+            TOPICS.map(|(_, heading)| heading),
+            [
+                "Basics",
+                "Core loop",
+                "IDE and terminals",
+                "Process, Metrics and Usage"
+            ],
+            "the same words as the desktop's TOPIC_HEADINGS"
+        );
+    }
+
+    #[test]
+    fn the_guide_waits_for_the_learning_read_and_a_hidden_guide_or_an_older_engine_keeps_get_set_up()
+     {
+        let mut ctx = ctx(80, 24);
+        ctx.store.projects = Load::Ready(Vec::new());
+        ctx.store.pools = Load::Ready(Vec::new());
+        ctx.store.accounts = Load::Ready(Vec::new());
+        ctx.store.setup = Load::Ready(tools(&[]));
+        ctx.store.learning = Load::Idle;
+        let mut shell = Shell::with(ctx, Box::new(Home::new()));
+        assert_eq!(learning_requests(&mut shell), [LearningQuery::Progress]);
+        assert_eq!(shell.ctx.store.learning, Load::Loading);
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            !shows(&rows, "Get set up") && !shows(&rows, "Learn CrazyAgent"),
+            "no panel until the learning read settles: {rows:#?}"
+        );
+
+        shell.arrive(read(learning(&[], true)));
+        let rows = render(&mut shell, 80, 24);
+        assert!(shows(&rows, "Get set up"), "{rows:#?}");
+        assert!(!shows(&rows, "Learn CrazyAgent"), "{rows:#?}");
+        assert!(shows(&rows, "Enter opens Settings"), "{rows:#?}");
+        shell.refresh();
+        assert!(
+            learning_requests(&mut shell).is_empty(),
+            "a hidden guide is not read again on every refresh"
+        );
+
+        for learning in [Load::NotReady, Load::Failed("owner_busy".into())] {
+            let mut shell = guide_home(false, Vec::new(), learning.clone());
+            let rows = render(&mut shell, 80, 24);
+            assert!(shows(&rows, "Get set up"), "{learning:?}: {rows:#?}");
+            assert!(!shows(&rows, "Learn CrazyAgent"), "{learning:?}: {rows:#?}");
+        }
+
+        let mut shell = guide_home(false, Vec::new(), Load::Ready(learning(&[], false)));
+        shell.arrive(reply(LearningQuery::Progress, Err("owner_busy".into())));
+        let rows = render(&mut shell, 80, 24);
+        assert!(
+            shows(&rows, "Learn CrazyAgent"),
+            "a failed read keeps the last good one: {rows:#?}"
+        );
+
+        let all = [
+            StepId::Project,
+            StepId::Master,
+            StepId::Agents,
+            StepId::Question,
+            StepId::ChangeSet,
+            StepId::Ide,
+            StepId::Terminal,
+            StepId::Process,
+            StepId::Metrics,
+            StepId::Usage,
+        ];
+        for (learning, why) in [
+            (learning(&[], true), "a hidden guide"),
+            (learning(&all, false), "every step done"),
+        ] {
+            let mut shell = guide_home(true, Vec::new(), Load::Ready(learning));
+            let rows = render(&mut shell, 80, 24);
+            assert!(
+                !shows(&rows, "Get set up") && !shows(&rows, "Learn CrazyAgent"),
+                "{why} with setup done shows no panel: {rows:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn enter_on_a_step_opens_its_place_and_h_hides_the_guide_with_the_last_row_picked() {
+        let mut shell = guide_home(true, vec![card()], Load::Ready(learning(&[], false)));
+        shell.key(Key::Tab);
+        for _ in 0..5 {
+            shell.key(Key::Down);
+        }
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(footer.contains("Enter Open conversation"), "{footer}");
+        shell.key(Key::Enter);
+        assert_eq!(
+            shell.place(),
+            Some(Place::Project {
+                id: ProjectId::new("notes-cli").unwrap(),
+                name: "Notes CLI".into(),
+                tab: ProjectTab::Conversation,
+            })
+        );
+
+        let mut shell = guide_home(true, Vec::new(), Load::Ready(learning(&[], false)));
+        shell.key(Key::Tab);
+        for _ in 0..9 {
+            shell.key(Key::Down);
+        }
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(
+            !footer.contains("Enter"),
+            "the IDE has no TUI page: {footer}"
+        );
+        shell.key(Key::Enter);
+        assert_eq!(shell.place(), Some(Place::Home));
+        assert_eq!(
+            shell.ctx.message().map(|message| message.lead.clone()),
+            Some("The IDE opens in the desktop app.".into())
+        );
+        shell.key(Key::Down);
+        shell.key(Key::Enter);
+        assert_eq!(
+            shell.place(),
+            Some(Place::NewProject),
+            "with no project yet, a project step starts one"
+        );
+
+        let mut shell = guide_home(false, Vec::new(), Load::Ready(learning(&[], false)));
+        shell.key(Key::Tab);
+        for _ in 0..20 {
+            shell.key(Key::Down);
+        }
+        let footer = render(&mut shell, 80, 24).pop().unwrap();
+        assert!(footer.contains("Enter Open usage"), "{footer}");
+        shell.key(Key::Char('h'));
+        let sent = learning_requests(&mut shell);
+        let [
+            LearningQuery::Mark {
+                step: MarkStep::Skipped,
+                on: true,
+                generation,
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("h sets the skipped mark: {sent:?}");
+        };
+        let hide = |generation: u64| LearningQuery::Mark {
+            step: MarkStep::Skipped,
+            on: true,
+            generation,
+        };
+        shell.arrive(reply(hide(generation + 1), Err("owner_busy".into())));
+        assert!(
+            shell.ctx.message().is_none(),
+            "a skip another page sent is that page's to report"
+        );
+        shell.arrive(reply(hide(*generation), Err("owner_busy".into())));
+        assert_eq!(
+            shell.ctx.message().map(|message| message.lead.clone()),
+            Some("Your Learn CrazyAgent progress was not saved.".into())
+        );
+        shell.arrive(mark(MarkStep::Skipped, Ok(LearningReply::Marked)));
+        assert_eq!(
+            learning_requests(&mut shell),
+            [LearningQuery::Progress],
+            "a set mark reads the steps again"
+        );
+        shell.arrive(read(learning(&[], true)));
+        let rows = render(&mut shell, 80, 24);
+        assert!(shows(&rows, "Get set up"), "{rows:#?}");
+        assert!(
+            rows.last().unwrap().contains("Enter Install tools"),
+            "the picked row moves back inside the setup items: {rows:#?}"
+        );
+        shell.key(Key::Up);
+        shell.key(Key::Char('h'));
+        assert!(
+            learning_requests(&mut shell).is_empty(),
+            "Get set up has no guide to hide"
+        );
+    }
+
+    #[test]
+    fn usage_process_and_an_attached_terminal_each_set_their_mark_once_per_session() {
+        let mut shell = guide_home(true, Vec::new(), Load::Idle);
+        shell.key(Key::Char('u'));
+        assert_eq!(shell.place(), Some(Place::Usage));
+        assert_eq!(marks(&mut shell), [MarkStep::Metrics, MarkStep::Usage]);
+        shell.key(Key::Esc);
+        shell.key(Key::Char('u'));
+        assert!(marks(&mut shell).is_empty(), "once per session");
+        shell.arrive(mark(MarkStep::Usage, Err("owner_busy".into())));
+        shell.key(Key::Esc);
+        shell.key(Key::Char('u'));
+        assert_eq!(
+            marks(&mut shell),
+            [MarkStep::Usage],
+            "a refused mark goes again"
+        );
+        shell.arrive(mark(MarkStep::Usage, Ok(LearningReply::Marked)));
+        assert_eq!(learning_requests(&mut shell), [LearningQuery::Progress]);
+
+        let opened = |place: &Place, learning: Load<LearningProgress>| {
+            let mut context = ctx(80, 24);
+            context.store.learning = learning;
+            let screen = crate::tui::screens::open(place, &mut context);
+            let mut shell = Shell::with(context, screen);
+            marks(&mut shell)
+        };
+        for place in [
+            Place::Settings(SettingsSection::Process),
+            Place::ProjectProcess {
+                id: ProjectId::new("notes-cli").unwrap(),
+                name: "Notes CLI".into(),
+            },
+        ] {
+            assert_eq!(opened(&place, Load::Idle), [MarkStep::Process], "{place:?}");
+        }
+        assert!(
+            opened(
+                &Place::Settings(SettingsSection::Process),
+                Load::Ready(learning(&[StepId::Process], false)),
+            )
+            .is_empty(),
+            "a step the read shows done is not sent"
+        );
+        assert!(
+            opened(&Place::Usage, Load::NotReady).is_empty(),
+            "an engine without the learning read gets none"
+        );
+
+        let mut shell = guide_home(true, Vec::new(), Load::Idle);
+        let agent = AgentId::team(1).unwrap();
+        shell.arrive(Arrival::Terminal {
+            agent: agent.clone(),
+            frame: TerminalFrame::Rejected {
+                code: "owner_busy".into(),
+            },
+        });
+        assert!(
+            marks(&mut shell).is_empty(),
+            "a refused terminal opened nothing"
+        );
+        for _ in 0..2 {
+            shell.arrive(Arrival::Terminal {
+                agent: agent.clone(),
+                frame: TerminalFrame::Attached {
+                    agent_id: agent.clone(),
+                    cols: 74,
+                    rows: 17,
+                },
+            });
+        }
+        assert_eq!(marks(&mut shell), [MarkStep::Terminal]);
     }
 }

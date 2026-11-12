@@ -1276,6 +1276,48 @@ fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
         &none,
     )
     .unwrap();
+    runs_with_its_model_proxy_bound(&case);
+}
+
+/// CU-2: a tools-on research job of an untrusted project runs with its model proxy bound
+/// under the None network, as a reviewed one does, and under Open too, since an untrusted
+/// job gets only its model endpoint (threat model N2), so it never reaches any host on 443.
+#[test]
+fn an_untrusted_tools_on_research_job_runs_with_its_model_proxy_bound() {
+    use crazyagent::sandbox::policy::{AgentNetwork, AgentPolicy};
+    for network in [AgentNetwork::None, AgentNetwork::Open] {
+        let case = case("A plain project.");
+        let database = rusqlite::Connection::open(&case.database).unwrap();
+        crazyagent::sandbox::policy::save(
+            &database,
+            "project-a",
+            &AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS project_trust (project TEXT PRIMARY KEY,
+                 level TEXT NOT NULL, origin TEXT NOT NULL, changed_ms INTEGER NOT NULL);
+                 INSERT INTO project_trust (project, level, origin, changed_ms)
+                 VALUES ('project-a', 'untrusted', 'owner', 1)",
+            )
+            .unwrap();
+        assert_eq!(
+            crazyagent::trust::level(&database, "project-a").unwrap(),
+            crazyagent::trust::Trust::Untrusted
+        );
+        runs_with_its_model_proxy_bound(&case);
+    }
+}
+
+/// Runs one tools-on research job of the case's first project on an https endpoint through
+/// a harness that reports its reach, and checks that its launch names a model proxy, the
+/// proxy answers it and refuses a host off its list, and its profile reaches only the
+/// proxy's port. Input: the case, its project's policy and trust already saved.
+fn runs_with_its_model_proxy_bound(case: &Case) {
     let folder = harness_folder();
     let harness = proxy_reporting_harness(folder.path());
     let jobs = ResearchJobs::open(&case.database).unwrap();
@@ -1294,7 +1336,7 @@ fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
         limits(Duration::from_secs(60)),
     )
     .unwrap()
-    .run_once(&project(&case, Some(account)))
+    .run_once(&project(case, Some(account)))
     .unwrap()
     .unwrap();
     let name = format!("job-{id}-1");
