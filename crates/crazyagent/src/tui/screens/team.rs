@@ -173,9 +173,12 @@ pub struct Team {
     master_live: Option<bool>,
     want: Option<bool>,
     refused: Option<String>,
-    #[expect(
-        dead_code,
-        reason = "read by the overdue master wait that w-v240-l2 lands"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "read by the overdue master wait that w-v240-l2 lands"
+        )
     )]
     waiting_since: Option<i64>,
     paused: bool,
