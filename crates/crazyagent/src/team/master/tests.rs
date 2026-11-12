@@ -2993,11 +2993,12 @@ fn a_message_to_a_finished_agent_that_cannot_wake_is_refused_and_not_stored() {
 }
 
 /// A master's reply to a message from a worker that has since finished wakes that worker,
-/// as a message does, and the wake and the reply are one transaction: a worker whose
-/// worktree is gone stores neither (F16, HB "my reply didn't wake him").
+/// as a message does (F16, HB "my reply didn't wake him"). A refused wake, here a worker
+/// whose worktree is gone, pins nothing, but the reply stays and waits until the worker is
+/// woken, as it did before L6 (HB-S5-E).
 #[cfg(target_os = "macos")]
 #[test]
-fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_stores_no_reply() {
+fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_keeps_the_reply_waiting() {
     let mut fixture = Fixture::new();
     master_row(&fixture);
     let project = ProjectId::new(PROJECT).unwrap();
@@ -3062,9 +3063,20 @@ fn a_reply_to_a_finished_worker_wakes_it_and_a_refused_wake_stores_no_reply() {
         tool::UPDATE_WORK_TOOL,
         json!({"kind": "reply", "reply_to": earlier, "text": "Pick it up again."}),
     );
-    assert!(refused && said.starts_with("Not sent: "), "{said}");
-    assert_eq!(replies(&fixture), 0, "a refused wake keeps no reply");
-    assert!(pinned(&fixture, gone).is_empty());
+    let gone_label = super::super::events::label(&fixture.connection, gone).unwrap();
+    assert!(!refused, "{said}");
+    assert!(
+        said.starts_with("Sent reply #")
+            && said.contains(&format!(
+                "to message #{earlier}. {gone_label} has stopped, so it waits until {gone_label} is woken. Not woken: the worktree of {gone_label} was cleaned up."
+            )),
+        "{said}"
+    );
+    assert_eq!(replies(&fixture), 1, "a refused wake keeps the reply");
+    assert!(
+        pinned(&fixture, gone).is_empty(),
+        "the refused wake pins nothing"
+    );
 }
 
 /// A message to the handle the master gave a task that has not started names that task

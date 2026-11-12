@@ -468,12 +468,10 @@ pub(super) fn update_work(
 }
 
 /// Sends an `update_work` reply and wakes its receiver when that is a stopped agent the
-/// caller leads, as the master or the agent's own lead, the way a message does, so an
-/// answer to a finished worker never waits unseen (F16, HB "my reply didn't wake him").
-/// The reply and the wake share one transaction: a refused wake stores nothing and is
-/// answered "Not sent". Takes the database, what the answers need, the caller, whether it
-/// is the master, the message answered, the text and the time. Returns the sentence and
-/// whether it is a refusal.
+/// caller leads (F16, HB "my reply didn't wake him"). A refused wake, such as an owner stop,
+/// is undone alone: the reply stays and waits until the agent is woken (HB-S5-E). Takes the
+/// database, what the answers need, the caller, whether it is the master, the message
+/// answered, the text and the time. Returns the sentence and whether it is a refusal.
 fn reply_and_wake(
     connection: &mut Connection,
     answering: &Answering<'_>,
@@ -507,6 +505,7 @@ fn reply_and_wake(
         ));
     };
     let shown = target.to_string();
+    tx.execute_batch("SAVEPOINT reply_wake").map_err(state)?;
     let (said, refusal) = if master {
         super::wake_in(
             &tx,
@@ -521,8 +520,17 @@ fn reply_and_wake(
         super::lead_wake(&tx, answering, agent, &shown, WAKE_TASK)?
     };
     if refusal {
-        return Ok((not_sent(&said), true));
+        tx.execute_batch("ROLLBACK TO reply_wake; RELEASE reply_wake")
+            .map_err(state)?;
+        let waits = waits_for(&tx, project, to)?;
+        assert!(!waits.is_empty(), "the reply went to a stopped agent");
+        tx.commit().map_err(state)?;
+        return Ok((
+            format!("Sent reply #{id} to message #{earlier}.{waits} {said}"),
+            false,
+        ));
     }
+    tx.execute_batch("RELEASE reply_wake").map_err(state)?;
     tx.commit().map_err(state)?;
     Ok((
         format!("Sent reply #{id} to message #{earlier}. {said}"),
