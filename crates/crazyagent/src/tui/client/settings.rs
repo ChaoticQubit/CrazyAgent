@@ -68,7 +68,10 @@ pub(in crate::tui) enum SettingsJob {
     },
     SetMoney(MoneySettings),
     SetSpend(SpendSettings),
-    Spend(CredentialRef),
+    Spend {
+        account: CredentialRef,
+        confirmed: bool,
+    },
     DecideRecount(bool),
     SignIn(SignInJob),
     JoinPools {
@@ -241,7 +244,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Extras { .. } => "Extras",
             Self::SetMoney(_) => "SetMoney",
             Self::SetSpend(_) => "SetSpend",
-            Self::Spend(_) => "Spend",
+            Self::Spend { .. } => "Spend",
             Self::DecideRecount(_) => "DecideRecount",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
@@ -436,7 +439,7 @@ impl SettingsEvent {
             SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
             SettingsJob::SetSpend(_) => Self::SpendSet(Err(problem)),
-            SettingsJob::Spend(_) => Self::Spent(Err(problem)),
+            SettingsJob::Spend { .. } => Self::Spent(Err(problem)),
             SettingsJob::DecideRecount(_) => Self::RecountDecided(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
@@ -698,13 +701,15 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
-            SettingsJob::Spend(account) => SettingsEvent::Spent(match self.settings_controller() {
-                Ok(controller) => controller
-                    .usage_spend(account)
-                    .await
-                    .map_err(|error| problem(&error, lost)),
-                Err(error) => Err(error),
-            }),
+            SettingsJob::Spend { account, confirmed } => {
+                SettingsEvent::Spent(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_spend(account, confirmed)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::DecideRecount(use_new) => {
                 SettingsEvent::RecountDecided(match self.settings_controller() {
                     Ok(controller) => controller

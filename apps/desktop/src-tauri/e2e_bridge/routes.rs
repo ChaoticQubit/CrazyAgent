@@ -2937,12 +2937,13 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             #[serde(rename_all = "camelCase")]
             struct Args {
                 account: String,
+                confirmed: bool,
             }
-            let Args { account } = match parse(args) {
+            let Args { account, confirmed } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_spend(account)?; call.await }.await;
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.usage_spend(account, confirmed)?; call.await }.await;
             routed(result)
         }
         "desktop_usage_set_spend" => {

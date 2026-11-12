@@ -290,6 +290,7 @@ const REFUSALS: Record<string, string> = {
   usage_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
   usage_request_invalid: "The engine didn't accept this usage request. Reload the page and try again.",
   usage_spend_off: "Spending free resets is off. Turn it on in Settings, Pools.",
+  usage_spend_unconfirmed: "Spend confirmation now asks first. Use a free reset again and confirm it.",
   usage_unavailable: "Usage isn't available in this engine yet.",
   owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
 };
@@ -415,8 +416,8 @@ export function setManualReset(account: string, windowKind: WindowKind, atMs: nu
 
 /** Asks the engine to spend one free reset on an account; the outcome shows in the report's
  * spend view within one usage step. Input: the account id. Output: done once queued. */
-export function spendReset(account: string): Promise<Result<void>> {
-  return call<void>("desktop_usage_spend", { account });
+export function spendReset(account: string, confirmed: boolean): Promise<Result<void>> {
+  return call<void>("desktop_usage_spend", { account, confirmed });
 }
 
 /** Stores the owner's spend settings. Input: the settings. Output: done. */

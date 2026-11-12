@@ -24,6 +24,7 @@ pub const USAGE_CODES: &[&str] = &[
     "usage_request_bounds",
     "usage_request_invalid",
     "usage_spend_off",
+    "usage_spend_unconfirmed",
     "usage_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -69,6 +70,7 @@ enum Action {
     },
     Spend {
         account: CredentialRef,
+        confirmed: bool,
     },
     SetSpend {
         settings: SpendSettings,
@@ -203,12 +205,19 @@ impl OwnerClient {
         }
     }
 
-    /// Asks the engine to spend one free reset on an account (DEC-154 slice 3). The usage
-    /// thread sends it with a key the engine made and stored; its outcome appears in the
-    /// report's spend view. Input: the account. Output: done once queued, or
-    /// `usage_spend_off` when the owner turned spending off.
-    pub async fn usage_spend(&self, account: CredentialRef) -> Result<(), EngineError> {
-        match self.usage_exchange(Action::Spend { account }).await? {
+    /// Asks the engine to spend one free reset on an account (DEC-154 slice 3); the usage
+    /// thread sends it with a stored key and its outcome appears in the spend view. Inputs:
+    /// the account and whether the owner confirmed this spend. Output: done once queued,
+    /// `usage_spend_off`, or `usage_spend_unconfirmed` while each spend asks first.
+    pub async fn usage_spend(
+        &self,
+        account: CredentialRef,
+        confirmed: bool,
+    ) -> Result<(), EngineError> {
+        match self
+            .usage_exchange(Action::Spend { account, confirmed })
+            .await?
+        {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
@@ -294,7 +303,7 @@ enum Change {
     SetReset(CredentialRef, WindowKind, Option<i64>),
     SetMoney(MoneySettings),
     DecideRecount(bool),
-    Spend(CredentialRef),
+    Spend(CredentialRef, bool),
     SetSpend(SpendSettings),
 }
 
@@ -415,7 +424,9 @@ async fn prepare(
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
         Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
         Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
-        Action::Spend { account } => Prepared::Change(root, Change::Spend(account)),
+        Action::Spend { account, confirmed } => {
+            Prepared::Change(root, Change::Spend(account, confirmed))
+        }
         Action::SetSpend { settings } => Prepared::Change(root, Change::SetSpend(settings)),
     })
 }
@@ -513,7 +524,9 @@ async fn finish(
             Change::DecideRecount(use_new) => {
                 usage::recount::decide(&db, use_new, crate::team::now_ms())
             }
-            Change::Spend(account) => usage::spend::request(&db, &account, crate::team::now_ms()),
+            Change::Spend(account, confirmed) => {
+                usage::spend::request(&db, &account, confirmed, crate::team::now_ms())
+            }
             Change::SetSpend(settings) => usage::spend::write(&db, settings),
         }
     })

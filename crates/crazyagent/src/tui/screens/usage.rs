@@ -277,6 +277,9 @@ pub(in crate::tui) fn refusal(code: &str) -> &'static str {
     match code {
         "usage_unavailable" => "Usage isn't available in this engine yet.",
         "usage_spend_off" => "Spending free resets is off. Turn it on in Settings, Pools.",
+        "usage_spend_unconfirmed" => {
+            "Spend confirmation now asks first. Use a free reset again and confirm it."
+        }
         "usage_outcome_unknown" => {
             "CrazyAgent couldn't confirm what happened. Press r to read again."
         }

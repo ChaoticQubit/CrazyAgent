@@ -51,22 +51,22 @@ export function SpendReset({ account, name, inApp, mayBreak, resetsLeft, spend, 
   const attempt = spend?.attempts.find((line) => line.account === account);
   const flow = spendFlow({ settings, inApp, resetsLeft, attempt });
   if (flow.kind === "hidden") return null;
-  const go = () => {
+  const go = (confirmed: boolean) => {
     setPending(true);
-    void spendReset(account).then((result) => {
+    void spendReset(account, confirmed).then((result) => {
       setPending(false);
       setAsking(false);
       setRefused(result.kind === "ok" ? "" : usageRefusal(result.kind === "error" ? result : { code: "usage_unavailable" }));
-      if (result.kind === "ok") onDone();
+      onDone();
     });
   };
   const copy = confirmCopy(name, mayBreak);
   const line = refused || flow.line;
   return <div className="spend-reset">
     <Button size="small" icon="zap" pending={pending} disabled={flow.kind === "busy"}
-      onClick={() => (flow.kind === "ready" && flow.confirm ? setAsking(true) : go())}>Use a free reset</Button>
+      onClick={() => (flow.kind === "ready" && flow.confirm ? setAsking(true) : go(false))}>Use a free reset</Button>
     {line && <span className="spend-reset-line" role="status">{line}</span>}
-    <ConfirmDialog open={asking} title={copy.title} confirmLabel={copy.confirmLabel} pending={pending} onCancel={() => setAsking(false)} onConfirm={go}>
+    <ConfirmDialog open={asking} title={copy.title} confirmLabel={copy.confirmLabel} pending={pending} onCancel={() => setAsking(false)} onConfirm={() => go(true)}>
       {copy.body}
     </ConfirmDialog>
   </div>;

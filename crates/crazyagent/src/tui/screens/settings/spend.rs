@@ -311,7 +311,13 @@ impl Spend {
                 Key::Enter if ask.use_focused => {
                     let account = ask.account.clone();
                     self.asking = None;
-                    send(ctx, SettingsJob::Spend(account));
+                    send(
+                        ctx,
+                        SettingsJob::Spend {
+                            account,
+                            confirmed: true,
+                        },
+                    );
                 }
                 Key::Enter | Key::Esc => self.asking = None,
                 _ => {}
@@ -351,7 +357,13 @@ impl Spend {
                         use_focused: false,
                     });
                 } else {
-                    send(ctx, SettingsJob::Spend(account));
+                    send(
+                        ctx,
+                        SettingsJob::Spend {
+                            account,
+                            confirmed: false,
+                        },
+                    );
                 }
             }
             _ => return Flow::Ignored,
@@ -376,10 +388,13 @@ impl Spend {
                 ));
                 self.reload(ctx, crate::tui::clock::now_ms());
             }
-            Some(SettingsEvent::Spent(Err(code))) => ctx.say(Message::error(
-                "Could not use the free reset.",
-                refusal(code),
-            )),
+            Some(SettingsEvent::Spent(Err(code))) => {
+                ctx.say(Message::error(
+                    "Could not use the free reset.",
+                    refusal(code),
+                ));
+                self.reload(ctx, crate::tui::clock::now_ms());
+            }
             _ => {}
         }
     }

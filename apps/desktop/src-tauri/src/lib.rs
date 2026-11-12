@@ -3612,9 +3612,10 @@ async fn desktop_usage_spend(
     webview: Webview,
     state: State<'_, NativeState>,
     account: String,
+    confirmed: bool,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
-    let call = lock(&state).await?.usage_spend(account)?;
+    let call = lock(&state).await?.usage_spend(account, confirmed)?;
     call.await
 }
 

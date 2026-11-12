@@ -46,10 +46,14 @@ impl OwnerController {
     }
 
     /// Asks the engine to spend one free reset on an account; its outcome appears in the
-    /// report's spend view. Input: the account. Output: done once queued, or
-    /// `usage_spend_off`.
-    pub async fn usage_spend(&self, account: CredentialRef) -> Result<(), EngineError> {
-        self.usage_client()?.usage_spend(account).await
+    /// report's spend view. Inputs: the account and whether the owner confirmed this spend.
+    /// Output: done once queued, `usage_spend_off` or `usage_spend_unconfirmed`.
+    pub async fn usage_spend(
+        &self,
+        account: CredentialRef,
+        confirmed: bool,
+    ) -> Result<(), EngineError> {
+        self.usage_client()?.usage_spend(account, confirmed).await
     }
 
     /// Stores the owner's spend settings. Input: the settings. Output: done.

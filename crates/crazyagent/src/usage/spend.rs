@@ -313,14 +313,23 @@ fn plain_code(problem: &EngineError) -> &str {
     if shaped { code } else { "usage_spend_failed" }
 }
 
-/// Asks to spend one free reset on an account, as the owner's Spend does. One attempt per
-/// account is open at a time: asking again while one waits changes nothing, and asking
-/// again after a send whose reply never came sends that same attempt with its same key.
-/// Inputs: the store, the account and the time. Output: done, `usage_spend_off` when the
-/// owner turned spending off, or `usage_unavailable`.
-pub fn request(db: &Connection, account: &CredentialRef, now_ms: i64) -> Result<(), EngineError> {
-    if !read(db)?.spends() {
+/// Asks to spend one free reset on an account; the stored Spend confirmation decides (off
+/// refuses, confirm each takes only a confirmed spend). One attempt per account is open:
+/// asking again after a send whose reply never came sends it again with its same key.
+/// Inputs: the store, the account, whether the owner confirmed it and the time. Output:
+/// done, `usage_spend_off`, `usage_spend_unconfirmed`, or `usage_unavailable`.
+pub fn request(
+    db: &Connection,
+    account: &CredentialRef,
+    confirmed: bool,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let settings = read(db)?;
+    if !settings.spends() {
         return Err(failure("usage_spend_off"));
+    }
+    if settings.confirm == SpendConfirm::ConfirmEach && !confirmed {
+        return Err(failure("usage_spend_unconfirmed"));
     }
     let retried = db
         .execute(

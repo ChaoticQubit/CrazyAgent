@@ -121,12 +121,20 @@ impl NativeBridge {
     }
 
     /// Asks the engine to spend one free reset on an account, run without the bridge lock.
-    /// Input: the account id. Output: done once queued.
-    pub fn usage_spend(&self, account: String) -> Result<Unlocked<()>, BridgeError> {
+    /// Inputs: the account id and whether the owner confirmed this spend. Output: done once
+    /// queued.
+    pub fn usage_spend(
+        &self,
+        account: String,
+        confirmed: bool,
+    ) -> Result<Unlocked<()>, BridgeError> {
         let account = CredentialRef::new(account).map_err(|_| failure("usage_request_invalid"))?;
         let client = self.usage_client()?;
         Ok(Box::pin(async move {
-            client.usage_spend(account).await.map_err(usage_error)
+            client
+                .usage_spend(account, confirmed)
+                .await
+                .map_err(usage_error)
         }))
     }
 
