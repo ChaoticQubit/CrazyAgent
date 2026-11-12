@@ -6229,3 +6229,68 @@ fn inspect_work_quotes_every_line_of_a_message_whichever_break_opens_it() {
         "{seen}"
     );
 }
+
+/// `inspect_work` with a task reads that ended task's whole stored result (F32): the master
+/// reads any task of its project, a lead a task its worker ran and the worker its own,
+/// while another agent, a task still running and a task of another project are refused.
+#[test]
+fn inspect_work_with_a_task_reads_the_whole_result_for_the_master_the_runner_and_its_lead() {
+    let fixture = Fixture::new();
+    let db = &fixture.connection;
+    let (lead, worker, other) = (7, 8, 9);
+    let result = format!("FIRST LINE\n{}LAST LINE", "work\n".repeat(2000));
+    let task = |status: &str, project: &str| {
+        db.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,parent,result,error,created_ms)
+             VALUES (?1,'master','codex',1,'Work',?2,?3,?4,?5,'[owner] one test skipped',1)",
+            params![project, status, worker, lead, result],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let done = task("done", PROJECT);
+    let running = task("running", PROJECT);
+    let foreign = task("done", "another-project");
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: None,
+        host: None,
+    };
+    let read = |agent: i64, master: bool, task: i64| {
+        super::work::inspect_task(db, &answering, agent, master, task).unwrap()
+    };
+    let (whole, refused) = read(MASTER, true, done);
+    assert!(!refused, "{whole}");
+    assert!(
+        whole.starts_with(&format!(
+            "Task {done} (codex): Done\n> (owner) one test skipped\n> FIRST LINE\n"
+        )),
+        "{whole}"
+    );
+    assert!(
+        whole.ends_with("> LAST LINE\n"),
+        "the whole result, its end too"
+    );
+    assert_eq!(whole.matches("> work\n").count(), 2000);
+    assert_eq!(read(lead, false, done), (whole.clone(), false));
+    assert_eq!(read(worker, false, done), (whole, false));
+    for (agent, master, task) in [
+        (other, false, done),
+        (MASTER, true, running),
+        (MASTER, true, foreign),
+        (lead, false, foreign),
+    ] {
+        let (text, refused) = read(agent, master, task);
+        assert!(refused, "agent {agent} task {task}: {text}");
+        assert_eq!(
+            text,
+            format!("Not shown: task {task} is not an ended task you or an agent you lead ran.")
+        );
+    }
+}

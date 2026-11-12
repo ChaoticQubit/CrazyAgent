@@ -1462,6 +1462,141 @@ fn every_result_of_a_large_fan_out_reaches_the_master_across_whole_messages() {
     );
 }
 
+/// A results message gives each ended task the engine's facts that always fit (F32): the
+/// newest change set its agent moved since the task started, the newest test line it logged
+/// since then that is not undone, and its unfinished work, or "none" for each. A result too
+/// long for its share keeps its end under the engine's cut line and names `inspect_work`
+/// with the task for the whole, in the master's message and in a lead's smaller one.
+#[test]
+fn a_results_message_gives_each_task_the_engine_s_facts_and_a_cut_result_s_end() {
+    let fixture = Fixture::new(1);
+    let db = &fixture.connection;
+    drop(crate::landing::open(&fixture.base).unwrap());
+    let agent = 7;
+    let lines = format!(
+        "FIRST LINE\n{}All 12 tests pass; fix/login is ready.",
+        "work\n".repeat(900)
+    );
+    db.execute(
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,result,created_ms,started_ms,finished_ms)
+         VALUES (?1,'master','codex',0,'Work','done',?2,?3,1,50,80)",
+        params![PROJECT, agent, lines],
+    )
+    .unwrap();
+    let ran = db.last_insert_rowid();
+    db.execute(
+        "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,error,created_ms,finished_ms)
+         VALUES (?1,'master','codex',0,'Work','cancelled','Stopped before it started.',1,2)",
+        [PROJECT],
+    )
+    .unwrap();
+    let never = db.last_insert_rowid();
+    let set = |id: &str, state: &str, updated: i64| {
+        db.execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES (?1,?2,'sub',?3,'label','/repo',?4,'/repo/.git','b','0123456789abcdef0123',?5,'succeeded','task-1','line',3,40,2,'[]',?6,?6)",
+            params![id, PROJECT, agent.to_string(), format!("/worktrees/{id}"), state, updated],
+        )
+        .unwrap();
+    };
+    set("cs-old", "accepted", 10);
+    set("cs-new", "pending", 55);
+    db.execute(
+        "INSERT INTO landing_change_set_numbers(change_set,project,number) VALUES ('cs-new',?1,4)",
+        [PROJECT],
+    )
+    .unwrap();
+    let actor = crate::activity::agent_actor(db, agent).unwrap();
+    for (at, text, undone) in [
+        (10, "cargo test: 3 failed before this task", 0),
+        (60, "cargo test: 12 passed", 0),
+        (70, "cargo test: an undone run", 1),
+    ] {
+        db.execute(
+            "INSERT INTO project_activity(project,at_ms,kind,actor,text,undone) VALUES (?1,?2,'test',?3,?4,?5)",
+            params![PROJECT, at, actor, text, undone],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "INSERT INTO coord_work(project,title,owner_agent,state,version,created,updated) VALUES (?1,'Fix login',?2,'active',1,1,1)",
+        params![PROJECT, agent],
+    )
+    .unwrap();
+    let project = fixture.setup.project_id.clone();
+    assert_eq!(
+        task_facts(db, &project, ran).unwrap(),
+        "Change set: #4 pending, head 0123456789ab, 3 files +40 -2\nTests:\n> cargo test: 12 passed\nOpen: 1 unfinished work items, 0 questions waiting for the owner\n"
+    );
+    assert_eq!(
+        task_facts(db, &project, never).unwrap(),
+        "Change set: none\nTests: none logged\nOpen: none\n"
+    );
+    let ready: Vec<ReadyTask> = [ran, never]
+        .into_iter()
+        .map(|id| {
+            let (harness, status, result, problem): (
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+            ) = db
+                .query_row(
+                    "SELECT harness,status,result,error FROM team_tasks WHERE id=?1",
+                    [id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            (
+                id,
+                harness,
+                status,
+                result,
+                problem,
+                task_facts(db, &project, id).unwrap(),
+            )
+        })
+        .collect();
+    for (max, trailer) in [
+        (RESULTS_MESSAGE_BYTES_MAX, RESULTS_TRAILER),
+        (crate::coord::BODY_BYTES_MAX, LEAD_RESULTS_TRAILER),
+    ] {
+        let (text, held) = results_within(&ready, max, trailer);
+        assert_eq!(held, 2, "{max}");
+        assert!(text.len() <= max, "{max}: {}", text.len());
+        assert!(!text.contains("FIRST LINE"), "the cut start is gone");
+        assert!(
+            text.contains(&format!(
+                "\nTask {ran} (codex): Done\n{RESULT_CUT}\n> work\n"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "> All 12 tests pass; fix/login is ready.\n{}{WHOLE_RESULT} {ran}.\n",
+                ready[0].5
+            )),
+            "the result's end, then the facts, then where the whole is: {text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "\nTask {never} (codex): Cancelled\n> Stopped before it started.\n{}",
+                ready[1].5
+            )),
+            "{text}"
+        );
+        assert!(!text.contains(&format!("{WHOLE_RESULT} {never}")));
+        assert!(text.ends_with(trailer));
+    }
+    let long_line = format!("{}END", "x".repeat(5000));
+    let (kept, cut) = result_end(&crate::team::events::agent_text(&long_line), 1000);
+    assert!(cut);
+    assert!(kept.len() <= 1000);
+    assert!(kept.starts_with(&format!("{RESULT_CUT}\n> x")), "{kept}");
+    assert!(kept.ends_with("xEND"));
+    assert_eq!(result_end("> short", 1000), ("> short".to_owned(), false));
+}
+
 #[test]
 fn owner_notes_that_do_not_fit_wait_and_the_message_is_typed_whole() {
     let text = format!(
@@ -20308,7 +20443,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 mode: None,
             },
         ),
-        ("%77", crate::team::tool::Call::InspectWork),
+        ("%77", crate::team::tool::Call::InspectWork { task: None }),
         (
             "%77",
             crate::team::tool::Call::Remember {
@@ -20618,7 +20753,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
     std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = folder.path().join(crate::team::caller::CALLER_SOCKET);
     let mut callers = crate::team::caller::Callers::bind(&socket, None).unwrap();
-    let inspect = serde_json::to_vec(&crate::team::tool::Call::InspectWork).unwrap();
+    let inspect = serde_json::to_vec(&crate::team::tool::Call::InspectWork { task: None }).unwrap();
     let spawn = serde_json::to_vec(&crate::team::tool::Call::Spawn {
         task: "Write the docs.".into(),
         harness: None,
@@ -20728,7 +20863,7 @@ fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead(
     std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = folder.path().join(crate::team::caller::CALLER_SOCKET);
     let mut callers = crate::team::caller::Callers::bind(&socket, None).unwrap();
-    let call = serde_json::to_vec(&crate::team::tool::Call::InspectWork).unwrap();
+    let call = serde_json::to_vec(&crate::team::tool::Call::InspectWork { task: None }).unwrap();
     let digest = crate::team::tool::call_digest(&call);
     let id = format!("{:032x}", 1);
     let mut line = format!("{id} ");

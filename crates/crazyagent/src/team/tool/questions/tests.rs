@@ -190,7 +190,7 @@ fn one_reply_records_at_most_eight_question_calls() {
 fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
     let case = Case::new();
     let drop = case.drop_file();
-    let mut planted = serde_json::to_vec(&Call::InspectWork).unwrap();
+    let mut planted = serde_json::to_vec(&Call::InspectWork { task: None }).unwrap();
     planted.extend(b"\nnot json\n");
     planted.extend(serde_json::to_vec(&shipped()).unwrap());
     planted.push(b'\n');

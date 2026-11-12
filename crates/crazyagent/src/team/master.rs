@@ -1395,7 +1395,12 @@ fn answer_work(
         Call::StartWork { title, claims } => {
             work::start_work(connection, answering, agent, &title, &claims)
         }
-        Call::InspectWork => work::inspect_work(connection, answering, agent, master),
+        Call::InspectWork { task: None } => {
+            work::inspect_work(connection, answering, agent, master)
+        }
+        Call::InspectWork { task: Some(task) } => {
+            work::inspect_task(connection, answering, agent, master, task)
+        }
         Call::UpdateWork {
             kind,
             text,

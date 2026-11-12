@@ -63,8 +63,41 @@ const LEAD_RESULTS_TRAILER: &str =
 const LEAD_MERGES: &str = "Merge them into your task branch with merge(agent) once it is done.";
 /// What a lead hears when its worker's change set is ready, under the Lands setting Owner.
 const OWNER_ACCEPTS: &str = "The owner accepts them in Changes; you do not merge them.";
+/// The most bytes of one line of the engine's facts about an ended task (F32).
+const FACT_LINE_BYTES_MAX: usize = 160;
+/// The most bytes of the engine's facts about an ended task in a results message: its
+/// change set line, its tests heading and quoted line, and its open items line (F32).
+const FACTS_BYTES_MAX: usize = 4 * (FACT_LINE_BYTES_MAX + 1);
+/// How a results message says where a task's whole result is when its text was cut (F32).
+const WHOLE_RESULT: &str = "Whole result: inspect_work with task";
+/// The engine's line over a result whose start was cut so its end, which says how the
+/// work ended, still fits (F32).
+const RESULT_CUT: &str = "The start of this result was cut; its end follows:";
+const RESULTS_HEAD: &str = "Results from your sub-agents:\n";
+const TASK_HEAD_BYTES_MAX: usize = 128;
 const _: () = assert!(RESULTS_MESSAGE_BYTES_MAX + 8 <= super::master::INPUT_TEXT_MAX);
 const _: () = assert!(RESULT_IN_MESSAGE_BYTES_MAX * 2 + 256 < RESULTS_MESSAGE_BYTES_MAX);
+const _: () = assert!(
+    RESULTS_HEAD.len()
+        + TASK_HEAD_BYTES_MAX
+        + 2 * (RESULT_IN_MESSAGE_BYTES_MAX + 1)
+        + FACTS_BYTES_MAX
+        + WHOLE_RESULT.len()
+        + 32
+        + RESULTS_TRAILER.len()
+        <= RESULTS_MESSAGE_BYTES_MAX
+);
+const _: () = assert!(
+    RESULTS_HEAD.len()
+        + TASK_HEAD_BYTES_MAX
+        + 2 * (crate::coord::BODY_BYTES_MAX / 4 + 1)
+        + FACTS_BYTES_MAX
+        + WHOLE_RESULT.len()
+        + 32
+        + LEAD_RESULTS_TRAILER.len()
+        <= crate::coord::BODY_BYTES_MAX
+);
+const _: () = assert!(RESULT_CUT.len() + 64 < crate::coord::BODY_BYTES_MAX / 4);
 const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
@@ -5062,7 +5095,7 @@ impl TeamRuntime {
             return Ok(());
         }
         let live = crate::master_sessions::live_session(&self.connection, project)?;
-        let ready: Vec<ReadyTask> = {
+        let mut ready: Vec<ReadyTask> = {
             let mut statement = self
                 .connection
                 .prepare(
@@ -5082,6 +5115,7 @@ impl TeamRuntime {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        String::new(),
                     ))
                 })
                 .map_err(error)?
@@ -5090,6 +5124,9 @@ impl TeamRuntime {
         };
         if ready.is_empty() {
             return Ok(());
+        }
+        for task in &mut ready {
+            task.5 = task_facts(&self.connection, project, task.0)?;
         }
         let (text, held) = results_message(&ready);
         let tx = self
@@ -5149,7 +5186,7 @@ impl TeamRuntime {
             .map(|(id, _)| *id)
             .collect();
         for lead in leads {
-            let ready: Vec<ReadyTask> = {
+            let mut ready: Vec<ReadyTask> = {
                 let mut statement = self
                     .connection
                     .prepare(
@@ -5166,6 +5203,7 @@ impl TeamRuntime {
                             row.get(2)?,
                             row.get(3)?,
                             row.get(4)?,
+                            String::new(),
                         ))
                     })
                     .map_err(error)?
@@ -5174,6 +5212,9 @@ impl TeamRuntime {
             };
             if ready.is_empty() {
                 continue;
+            }
+            for task in &mut ready {
+                task.5 = task_facts(&self.connection, project, task.0)?;
             }
             let (text, held) =
                 results_within(&ready, crate::coord::BODY_BYTES_MAX, LEAD_RESULTS_TRAILER);
@@ -11041,7 +11082,9 @@ fn conversation_note(ended: &EndedTask) -> String {
     note
 }
 
-type ReadyTask = (i64, String, String, Option<String>, Option<String>);
+/// One ended task as a results message reads it: id, harness, status, result, problem and
+/// the engine's facts about it from `task_facts` (F32).
+type ReadyTask = (i64, String, String, Option<String>, Option<String>, String);
 /// One queued task as dispatch reads it: id, harness, prompt, the agent it is pinned to,
 /// whether the master handed it off, the lead whose worker runs it and the sub-agent mode
 /// the master asked for the lead that takes it.
@@ -11056,26 +11099,28 @@ type QueuedTask = (
 );
 
 /// Writes one results message for the finished master tasks that fit, oldest first: each
-/// task's line, then its problem and its result on lines of their own, every agent-written
-/// line quoted by `events::agent_text` so none can pose as the owner's. Takes the ready
-/// tasks, at least one.
+/// task's line, then its problem, its result and the engine's facts on lines of their own,
+/// every agent-written line quoted by `events::agent_text` so none can pose as the owner's.
+/// Takes the ready tasks, at least one.
 /// Returns the text, at most `RESULTS_MESSAGE_BYTES_MAX` bytes, and how many tasks it holds.
 fn results_message(ready: &[ReadyTask]) -> (String, usize) {
     results_within(ready, RESULTS_MESSAGE_BYTES_MAX, RESULTS_TRAILER)
 }
 
 /// Writes one results message as `results_message` does, within `max` bytes and closed by
-/// `trailer`, each problem and result cut to a quarter of `max` at most, so a lead's
-/// message fits what one terminal prompt takes. Takes the ready tasks, at least one, the
-/// bound and the closing line. Returns the text and how many tasks it holds.
+/// `trailer`, each problem and result cut to a quarter of `max` at most, a result keeping
+/// its end and naming `inspect_work` for the whole (F32), so a lead's message fits what one
+/// terminal prompt takes. Takes the ready tasks, at least one, the bound and the closing
+/// line. Returns the text and how many tasks it holds.
 fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, usize) {
     assert!(!ready.is_empty());
     let each = RESULT_IN_MESSAGE_BYTES_MAX.min(max / 4);
-    let mut text = String::from("Results from your sub-agents:\n");
+    let mut text = String::from(RESULTS_HEAD);
     let mut held = 0;
-    for (id, harness, status, result, problem) in ready {
+    for (id, harness, status, result, problem, facts) in ready {
         let label = super::TaskStatus::parse(status).map_or("Finished", TaskStatus::label);
         let mut part = format!("\nTask {id} ({}): {label}\n", excerpt(harness, 64));
+        assert!(part.len() <= TASK_HEAD_BYTES_MAX);
         if let Some(problem) = problem {
             part.push_str(&bound_text(
                 &super::events::agent_text(problem.trim()),
@@ -11083,9 +11128,17 @@ fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, us
             ));
             part.push('\n');
         }
+        let mut cut = false;
         if let Some(result) = result {
-            part.push_str(&bound_text(&super::events::agent_text(result.trim()), each));
+            let (kept, was_cut) = result_end(&super::events::agent_text(result.trim()), each);
+            part.push_str(&kept);
             part.push('\n');
+            cut = was_cut;
+        }
+        assert!(facts.len() <= FACTS_BYTES_MAX);
+        part.push_str(facts);
+        if cut {
+            part.push_str(&format!("{WHOLE_RESULT} {id}.\n"));
         }
         if held > 0 && text.len() + part.len() + trailer.len() > max {
             break;
@@ -11097,6 +11150,147 @@ fn results_within(ready: &[ReadyTask], max: usize, trailer: &str) -> (String, us
     assert!((1..=ready.len()).contains(&held));
     assert!(text.len() <= max);
     (text, held)
+}
+
+/// Keeps the end of a quoted result longer than `max` bytes (F32), since a sub-agent's last
+/// lines say how its work ended: the engine's cut line, then the result's last whole lines,
+/// or the end of its one long line quoted again. Takes the quoted text and the bound.
+/// Returns at most `max` bytes and whether the text was cut.
+fn result_end(quoted: &str, max: usize) -> (String, bool) {
+    assert!(RESULT_CUT.len() + 64 < max);
+    if quoted.len() <= max {
+        return (quoted.to_owned(), false);
+    }
+    let room = max - RESULT_CUT.len() - 1 - 2 * "> ".len();
+    let mut start = quoted.len() - room;
+    while !quoted.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = &quoted[start..];
+    let kept = match tail
+        .char_indices()
+        .find(|(_, c)| super::events::line_break(*c))
+    {
+        Some((at, c)) if at + c.len_utf8() < tail.len() => tail[at + c.len_utf8()..].to_owned(),
+        _ => super::events::agent_text(tail),
+    };
+    let text = format!("{RESULT_CUT}\n{kept}");
+    assert!(text.len() <= max);
+    (text, true)
+}
+
+/// Writes the engine's facts about one ended task for its results message (F32): the newest
+/// change set its agent moved since the task started, the newest test line that agent logged
+/// since then, quoted as its own text, and its unfinished work and waiting questions, each
+/// "none" when there is none. Takes the connection, the project and the task. Returns the
+/// lines, each ending in a line break, at most `FACTS_BYTES_MAX` bytes, or a SQLite failure.
+fn task_facts(
+    connection: &Connection,
+    project: &ProjectId,
+    task: i64,
+) -> Result<String, EngineError> {
+    let ran: Option<(Option<i64>, Option<i64>)> = connection
+        .query_row(
+            "SELECT agent,started_ms FROM team_tasks WHERE id=?1 AND project=?2",
+            params![task, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let mut changes = "Change set: none".to_owned();
+    let mut tests = "Tests: none logged".to_owned();
+    let mut open = "Open: none".to_owned();
+    if let Some((Some(agent), started)) = ran {
+        let since = started.unwrap_or(0);
+        let exists = |name: &str| super::history::table_exists(connection, name).map_err(error);
+        if exists("landing_change_sets")? && exists("landing_change_set_numbers")? {
+            let set: Option<(String, String, i64, i64, i64, Option<i64>)> = connection
+                .query_row(
+                    "SELECT c.state,c.head,c.files,c.added,c.removed,n.number FROM landing_change_sets c
+                     LEFT JOIN landing_change_set_numbers n ON n.change_set=c.id
+                     WHERE c.project=?1 AND c.agent_kind='sub' AND c.agent_id=?2 AND c.updated_ms>=?3
+                     ORDER BY c.updated_ms DESC LIMIT 1",
+                    params![project.as_str(), agent.to_string(), since],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(error)?;
+            if let Some((state, head, files, added, removed, number)) = set {
+                let number = number.map_or(String::new(), |number| format!("#{number} "));
+                changes = format!(
+                    "Change set: {number}{}, head {}, {files} files +{added} -{removed}",
+                    excerpt(&state, 16),
+                    bound_text(&excerpt(&head, 64), 12)
+                );
+            }
+        }
+        if exists("project_activity")? {
+            let actor = crate::activity::agent_actor(connection, agent)?;
+            let line: Option<String> = connection
+                .query_row(
+                    "SELECT text FROM project_activity WHERE project=?1 AND kind=?2 AND actor=?3 AND at_ms>=?4 AND undone=0
+                     ORDER BY at_ms DESC, id DESC LIMIT 1",
+                    params![
+                        project.as_str(),
+                        crate::activity::ActivityKind::Test.name(),
+                        actor,
+                        since
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            if let Some(line) = line {
+                let quoted = super::events::agent_text(&excerpt(&line, FACT_LINE_BYTES_MAX - 8));
+                tests = format!("Tests:\n{}", bound_text(&quoted, FACT_LINE_BYTES_MAX));
+            }
+        }
+        let work: i64 = if exists("coord_work")? {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM coord_work WHERE project=?1 AND owner_agent=?2
+                     AND state IN ('assigned','accepted','active','review_ready')",
+                    params![project.as_str(), agent],
+                    |row| row.get(0),
+                )
+                .map_err(error)?
+        } else {
+            0
+        };
+        let asked: i64 = if exists("questions_log")? {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM questions_log WHERE project=?1 AND asker=?2 AND status='pending'",
+                    params![
+                        project.as_str(),
+                        crate::questions::Asker::Agent(agent).name()
+                    ],
+                    |row| row.get(0),
+                )
+                .map_err(error)?
+        } else {
+            0
+        };
+        if work > 0 || asked > 0 {
+            open = format!(
+                "Open: {work} unfinished work items, {asked} questions waiting for the owner"
+            );
+        }
+    }
+    assert!(changes.len() <= FACT_LINE_BYTES_MAX && open.len() <= FACT_LINE_BYTES_MAX);
+    assert!(tests.len() <= "Tests:\n".len() + FACT_LINE_BYTES_MAX);
+    let facts = format!("{changes}\n{tests}\n{open}\n");
+    assert!(facts.len() <= FACTS_BYTES_MAX);
+    Ok(facts)
 }
 
 /// Settles a takeover of a session's conversation by a live master that started: a change

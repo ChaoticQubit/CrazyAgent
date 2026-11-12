@@ -946,7 +946,10 @@ fn agent_label(
     }
 }
 
-fn table_exists(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
+/// Tells whether the database has a table, so a reader of another feature's table works on
+/// a database that never made it. Takes the connection and the table name. Returns the
+/// answer, or the SQLite failure.
+pub(super) fn table_exists(connection: &Connection, name: &str) -> rusqlite::Result<bool> {
     connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
         [name],
