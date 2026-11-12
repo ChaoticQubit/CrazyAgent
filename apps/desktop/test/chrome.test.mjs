@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -24,6 +24,16 @@ const { chrome, profile } = startChrome(chromeExecutable());
 process.once("SIGUSR2", () => process.exit(0));
 process.stdout.write(JSON.stringify({ pid: chrome.pid, profile }) + "\\n");
 setInterval(() => {}, 1000);`;
+const BROWSER = new URL("./browser.mjs", import.meta.url).href;
+const IMPORT_MS = 10_000;
+const QUIT_CHROME = `#!/bin/sh
+printf '%s\\n' "$@" > "$CA_FAKE_CHROME_ARGS"
+exit 0
+`;
+const IMPORT_BROWSER = `await import(${JSON.stringify(BROWSER)}).then(
+  () => { console.log("browser.mjs loaded"); process.exitCode = 3; },
+  (error) => { console.log(error.message.split("\\n")[0]); process.exitCode = 1; },
+);`;
 const ENDINGS = [
   { send: "SIGTERM", end: { code: null, killed: "SIGTERM" }, how: "killed by SIGTERM" },
   { send: "SIGINT", end: { code: null, killed: "SIGINT" }, how: "killed by SIGINT" },
@@ -129,3 +139,37 @@ for (const { send, end, how } of ENDINGS) {
     }
   });
 }
+
+test("browser.mjs starts its Chrome through chrome.mjs: the spawned argv has both keychain flags, a Chrome that quits leaves no profile, and an unset CRAZYAGENT_CHROME fails naming it", () => {
+  const root = mkdtempSync(join(tmpdir(), "ca-kc-test-"));
+  try {
+    const temp = join(root, "tmp");
+    const fake = join(root, "chrome");
+    const argsFile = join(root, "args");
+    mkdirSync(temp);
+    writeFileSync(fake, QUIT_CHROME);
+    chmodSync(fake, 0o755);
+    const base = { PATH: "/usr/bin:/bin", HOME: root, TMPDIR: temp, CA_FAKE_CHROME_ARGS: argsFile };
+    const load = (env) => {
+      const run = spawnSync(process.execPath, ["--input-type=module", "-e", IMPORT_BROWSER], { env, encoding: "utf8", timeout: IMPORT_MS });
+      assert.equal(run.error, undefined, `importing browser.mjs ends within ${IMPORT_MS} ms`);
+      return run;
+    };
+
+    const quit = load({ ...base, CRAZYAGENT_CHROME: fake });
+    assert.equal(quit.status, 1, `${quit.stdout}${quit.stderr}`);
+    assert.equal(quit.stdout.trim(), "Chrome exited before it was ready");
+    const passed = readFileSync(argsFile, "utf8").split("\n");
+    for (const flag of KEYCHAIN) assert.ok(passed.includes(flag), `the Chrome browser.mjs spawned got ${flag}`);
+    assert.deepEqual(readdirSync(temp).filter((name) => name.startsWith("ca-chrome-")), [], "no ca-chrome-* profile is left");
+
+    rmSync(argsFile);
+    const unset = load(base);
+    assert.equal(unset.status, 1, `${unset.stdout}${unset.stderr}`);
+    assert.match(unset.stdout, /set CRAZYAGENT_CHROME to its executable/);
+    assert.equal(existsSync(argsFile), false, "no Chrome was started");
+    assert.deepEqual(readdirSync(temp), [], "no profile was made");
+  } finally {
+    rmSync(root, REMOVE);
+  }
+});
