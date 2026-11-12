@@ -1147,3 +1147,25 @@ fn a_sign_in_goes_on_after_another_account_changed_but_not_after_its_own() {
     assert_code(own.read(&fact), "native_profile_source_conflict");
     assert_eq!(own.snapshot(), before);
 }
+
+#[test]
+fn an_account_check_left_uncertain_keeps_its_fence_but_no_longer_counts_as_running() {
+    let mut case = HostCase::new();
+    let (fact, _work) = fresh_work(
+        case.begin(case.start("uncertain-running", "connection-a"))
+            .unwrap(),
+    );
+    assert!(
+        account_check_running(&case.db),
+        "a check of this engine run"
+    );
+    case.publish(&fact, NativeAuthHostUpdate::CustodyUncertain)
+        .unwrap();
+    let (operations, fences) = case.snapshot();
+    assert_eq!(operations[0].phase, "uncertain");
+    assert_eq!(fences.len(), 1, "the next engine start recovers it");
+    assert!(
+        !account_check_running(&case.db),
+        "an uncertain check holds its fence until the next engine start"
+    );
+}
