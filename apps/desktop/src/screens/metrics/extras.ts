@@ -41,7 +41,7 @@ export function expiryText(atMs: number, nowMs: number): string {
 /** The count an account holds now: its stored count, or null when not reported or when the
  * next expiry has passed, which the engine also reads as not reported until read again.
  * Inputs: the contract and now. Output: the resets, or null. */
-function liveResets(extras: LimitExtras, nowMs: number) {
+export function liveResets(extras: LimitExtras, nowMs: number) {
   const resets = extras.resets;
   if (resets === null) return null;
   if (!Number.isInteger(resets.count) || resets.count < 0) throw new Error(`a free reset count is a whole number from 0, got ${resets.count}`);

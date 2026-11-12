@@ -1,4 +1,5 @@
 use super::account_choice::ChoiceEditor;
+use super::spend::Spend;
 use super::{draw_page, step};
 use crate::config::{POOL_MEMBERS_MAX, plain_problem};
 use crate::pools::{MemberStatus, PoolSummary};
@@ -41,6 +42,7 @@ pub struct Pools {
     saving: Vec<u64>,
     ranking: Option<Result<Vec<PoolRanking>, String>>,
     choice: Option<ChoiceEditor>,
+    spend: Spend,
     extras: std::collections::HashMap<String, LimitExtras>,
     detail_asked_ms: Option<i64>,
 }
@@ -73,6 +75,7 @@ impl Pools {
             saving: Vec::new(),
             ranking: None,
             choice: None,
+            spend: Spend::new(),
             extras: std::collections::HashMap::new(),
             detail_asked_ms: None,
         }
@@ -282,7 +285,7 @@ impl Screen for Pools {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        match ctx.store.pools.ready() {
+        let mut hints = match ctx.store.pools.ready() {
             Some(pools) if pools.is_empty() => {
                 vec![
                     hint("Enter", "New pool"),
@@ -298,7 +301,11 @@ impl Screen for Pools {
                 sections_hint(ctx.glyphs),
                 hint("Esc", "Home"),
             ],
-        }
+        };
+        let tail = hints.split_off(hints.len() - 2);
+        hints.extend(self.spend.hints(ctx));
+        hints.extend(tail);
+        hints
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -307,6 +314,9 @@ impl Screen for Pools {
         }
         if self.choice.is_some() {
             return self.choice_key(key, ctx);
+        }
+        if self.spend.asking() {
+            return self.spend.key(key, ctx);
         }
         let count = ctx.store.pools.ready().map_or(0, Vec::len);
         match key {
@@ -362,7 +372,7 @@ impl Screen for Pools {
                 self.follow(count);
                 Flow::Handled
             }
-            _ => Flow::Ignored,
+            _ => self.spend.key(key, ctx),
         }
     }
 
@@ -371,6 +381,7 @@ impl Screen for Pools {
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        self.spend.arrive(arrival, ctx);
         match settings_event(arrival) {
             Some(SettingsEvent::Schedule(Ok(schedule))) if self.saving.is_empty() => {
                 self.schedule = Some(schedule.clone());
@@ -427,6 +438,9 @@ impl Screen for Pools {
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if let Some(asked) = self.spend.modal(ctx) {
+            return Some(asked);
+        }
         if let (Some(editor), Some(schedule), Some(pool)) =
             (&self.choice, &self.schedule, self.chosen_pool(ctx))
         {
@@ -483,7 +497,9 @@ impl Screen for Pools {
         ctx.request(Request::Projects);
         ctx.request(Request::Settings(Box::new(SettingsJob::Schedule)));
         ctx.request(Request::Settings(Box::new(SettingsJob::Ranking)));
-        self.ask_detail(ctx, crate::tui::clock::now_ms());
+        let now_ms = crate::tui::clock::now_ms();
+        self.spend.shown(ctx, now_ms);
+        self.ask_detail(ctx, now_ms);
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
@@ -506,13 +522,15 @@ impl Screen for Pools {
                 );
                 content.push(Line::default());
                 content.push(buttons(&["New pool"], Some(0), theme));
+                content.extend(self.spend.lines(ctx, limit));
                 content
             }
             Load::Ready(pools) => {
                 let wide = ctx.wide();
                 let widths = Self::widths(wide);
+                let spend = self.spend.lines(ctx, limit);
                 self.rows = (area.height as usize)
-                    .saturating_sub(TABS_HEIGHT + HEAD_HEIGHT)
+                    .saturating_sub(TABS_HEIGHT + HEAD_HEIGHT + spend.len())
                     .max(1);
                 self.follow(pools.len());
                 let windowed = pools.len() > self.rows;
@@ -577,6 +595,7 @@ impl Screen for Pools {
                 }
                 assert_eq!(content.len(), HEAD_HEIGHT);
                 content.extend(shown);
+                content.extend(spend);
                 content
             }
             Load::Failed(_) => vec![

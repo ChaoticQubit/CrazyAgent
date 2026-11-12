@@ -157,7 +157,48 @@ export interface UsageReport {
   money: MoneyView;
   recount?: RecountStatus | null;
   counting_notice?: string | null;
+  spend?: SpendView;
 }
+
+/** How the app spends a free reset: after a confirm each time, at one click, or never. */
+export type SpendConfirm = "confirm_each" | "one_click" | "off";
+
+/** What the app does when every account in a pool is limited. */
+export type AllLimited = "notice" | "no_hint" | "auto_spend";
+
+/** The owner's two spend settings (DEC-154 slice 3). */
+export interface SpendSettings {
+  confirm: SpendConfirm;
+  all_limited: AllLimited;
+}
+
+/** One account's latest spend: who asked, where it stands and its outcome code. */
+export interface SpendAttempt {
+  account: string;
+  origin: "owner" | "auto";
+  state: "queued" | "sent" | "settled";
+  outcome: string | null;
+  requested_ms: number;
+  settled_ms: number | null;
+}
+
+/** A pool whose every account was read at its limit, with the accounts holding a free reset. */
+export interface LimitedPool {
+  pool: string;
+  name: string | null;
+  since_ms: number;
+  with_resets: string[];
+}
+
+/** The report's spend part: the settings, each account's latest spend and the limited pools. */
+export interface SpendView {
+  settings: SpendSettings;
+  attempts: SpendAttempt[];
+  limited_pools: LimitedPool[];
+}
+
+/** The settings an engine that never stored any reads as. */
+export const SPEND_DEFAULTS: SpendSettings = { confirm: "confirm_each", all_limited: "notice" };
 
 export interface MetricsBucket {
   start_ms: number;
@@ -248,6 +289,8 @@ const REFUSALS: Record<string, string> = {
   usage_recount_not_ready: "This recount was already decided. Reload the page.",
   usage_outcome_unknown: "CrazyAgent couldn't confirm what happened. Check the page before you try again.",
   usage_request_invalid: "The engine didn't accept this usage request. Reload the page and try again.",
+  usage_spend_off: "Spending free resets is off. Turn it on in Settings, Pools.",
+  usage_spend_unconfirmed: "Spend confirmation now asks first. Use a free reset again and confirm it.",
   usage_unavailable: "Usage isn't available in this engine yet.",
   owner_busy: "CrazyAgent is busy with other requests. Try again in a moment.",
 };
@@ -269,6 +312,38 @@ const POLL_FAILURES: Record<string, string> = {
   native_profile_renewal_busy: "Another check of this account's sign-in is running. CrazyAgent tries again in 10 minutes.",
   native_profile_sign_in_revoked: "The provider ended this sign-in. Sign in again in Accounts.",
 };
+
+const SPEND_OUTCOMES: Record<string, string> = {
+  reset: "Free reset used. The limits update within a minute.",
+  nothing_to_reset: "Nothing to reset: no limit on this account is full now. The free reset is kept.",
+  no_credit: "This account has no free reset left.",
+  already_redeemed: "This free reset was already used.",
+  outcome_unknown: "The provider didn't say whether the reset was used. Check the limits after the next refresh.",
+  usage_spend_off: "Spending free resets is off. Turn it on in Settings, Pools.",
+  usage_spend_no_account: "This account is no longer in your settings.",
+  usage_spend_not_in_app: "This account can't spend a free reset from CrazyAgent.",
+  usage_spend_not_signed_in: "This account wasn't signed in or was busy. Sign in again in Accounts, then try again.",
+  usage_spend_unavailable: "Spending this free reset from the app isn't available yet. Use the provider's own app.",
+  usage_spend_failed: "The free reset couldn't be sent. Try again later.",
+  usage_spend_refused: "The provider turned this free reset down. None was used.",
+  usage_sign_in_lapsed: "The provider no longer accepts this sign-in. Sign in again in Accounts.",
+  usage_sign_in_rejected: "This account's sign-in was rejected. Sign in again in Accounts.",
+  usage_rate_limited: "The provider asked CrazyAgent to wait. Try again in a few minutes.",
+  usage_request_invalid: "CrazyAgent couldn't ask the provider to use a free reset.",
+  usage_reply_invalid: "The provider's answer wasn't one CrazyAgent can read. Check the limits after the next refresh.",
+};
+
+/** The spend outcome codes that have their own sentence. */
+export const SPEND_OUTCOMES_KNOWN = Object.keys(SPEND_OUTCOMES);
+
+/** One plain sentence for where an account's latest spend stands. Input: the attempt.
+ * Output: the sentence, or the plain fallback naming the code. */
+export function spendOutcome(attempt: SpendAttempt): string {
+  if (attempt.state === "queued") return "Using a free reset now.";
+  if (attempt.state === "sent") return "Sent. Waiting for the provider's answer.";
+  const code = attempt.outcome ?? "outcome_unknown";
+  return namedFailure(Object.hasOwn(SPEND_OUTCOMES, code) ? SPEND_OUTCOMES[code] : undefined, code);
+}
 
 /** The refusal codes of the usage protocol that have their own sentence. */
 export const USAGE_REFUSALS = Object.keys(REFUSALS);
@@ -337,6 +412,17 @@ export function decideRecount(useNew: boolean): Promise<Result<void>> {
  * account id, the window and the time in milliseconds, null to clear it. */
 export function setManualReset(account: string, windowKind: WindowKind, atMs: number | null): Promise<Result<void>> {
   return call<void>("desktop_usage_set_reset", { account, windowKind, atMs });
+}
+
+/** Asks the engine to spend one free reset on an account; the outcome shows in the report's
+ * spend view within one usage step. Input: the account id. Output: done once queued. */
+export function spendReset(account: string, confirmed: boolean): Promise<Result<void>> {
+  return call<void>("desktop_usage_spend", { account, confirmed });
+}
+
+/** Stores the owner's spend settings. Input: the settings. Output: done. */
+export function setSpendSettings(settings: SpendSettings): Promise<Result<void>> {
+  return call<void>("desktop_usage_set_spend", { settings });
 }
 
 /** Reads the notices for the code the app adapts from others. Output: the text. */

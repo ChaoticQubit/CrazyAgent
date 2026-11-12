@@ -4,6 +4,7 @@ use crate::usage::extras::LimitExtras;
 use crate::usage::metrics::Metrics;
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
+use crate::usage::spend::SpendSettings;
 use crate::usage::{self, WindowKind};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,8 @@ pub const USAGE_CODES: &[&str] = &[
     "usage_reply_bounds",
     "usage_request_bounds",
     "usage_request_invalid",
+    "usage_spend_off",
+    "usage_spend_unconfirmed",
     "usage_unavailable",
     "owner_authentication_failed",
     "owner_authority_unavailable",
@@ -64,6 +67,13 @@ enum Action {
     },
     DecideRecount {
         use_new: bool,
+    },
+    Spend {
+        account: CredentialRef,
+        confirmed: bool,
+    },
+    SetSpend {
+        settings: SpendSettings,
     },
 }
 
@@ -195,6 +205,33 @@ impl OwnerClient {
         }
     }
 
+    /// Asks the engine to spend one free reset on an account (DEC-154 slice 3); the usage
+    /// thread sends it with a stored key and its outcome appears in the spend view. Inputs:
+    /// the account and whether the owner confirmed this spend. Output: done once queued,
+    /// `usage_spend_off`, or `usage_spend_unconfirmed` while each spend asks first.
+    pub async fn usage_spend(
+        &self,
+        account: CredentialRef,
+        confirmed: bool,
+    ) -> Result<(), EngineError> {
+        match self
+            .usage_exchange(Action::Spend { account, confirmed })
+            .await?
+        {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Stores the owner's spend settings: Spend confirmation and When every pool account is
+    /// limited. Input: the settings. Output: done.
+    pub async fn usage_set_spend(&self, settings: SpendSettings) -> Result<(), EngineError> {
+        match self.usage_exchange(Action::SetSpend { settings }).await? {
+            Reply::Done => Ok(()),
+            _ => Err(unknown()),
+        }
+    }
+
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
             let read = read_kind(&action);
@@ -266,6 +303,8 @@ enum Change {
     SetReset(CredentialRef, WindowKind, Option<i64>),
     SetMoney(MoneySettings),
     DecideRecount(bool),
+    Spend(CredentialRef, bool),
+    SetSpend(SpendSettings),
 }
 
 /// Serves one usage request. The report is built first; then, under the owner barrier, the
@@ -385,6 +424,10 @@ async fn prepare(
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
         Action::SetMoney { settings } => Prepared::Change(root, Change::SetMoney(settings)),
         Action::DecideRecount { use_new } => Prepared::Change(root, Change::DecideRecount(use_new)),
+        Action::Spend { account, confirmed } => {
+            Prepared::Change(root, Change::Spend(account, confirmed))
+        }
+        Action::SetSpend { settings } => Prepared::Change(root, Change::SetSpend(settings)),
     })
 }
 
@@ -481,6 +524,10 @@ async fn finish(
             Change::DecideRecount(use_new) => {
                 usage::recount::decide(&db, use_new, crate::team::now_ms())
             }
+            Change::Spend(account, confirmed) => {
+                usage::spend::request(&db, &account, confirmed, crate::team::now_ms())
+            }
+            Change::SetSpend(settings) => usage::spend::write(&db, settings),
         }
     })
     .await
@@ -543,5 +590,24 @@ mod extras_request_tests {
             "{}",
             frame.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod spend_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_spend_request_must_say_whether_the_owner_confirmed_it() {
+        let bare = json!({ "usage": { "kind": "spend", "account": "codex-a" } });
+        assert!(serde_json::from_value::<Envelope>(bare).is_err());
+        let asked =
+            json!({ "usage": { "kind": "spend", "account": "codex-a", "confirmed": true } });
+        let Envelope { usage: action } = serde_json::from_value(asked).unwrap();
+        assert!(
+            matches!(action, Action::Spend { ref account, confirmed: true } if account.as_str() == "codex-a")
+        );
+        assert!(USAGE_CODES.contains(&"usage_spend_unconfirmed"));
     }
 }

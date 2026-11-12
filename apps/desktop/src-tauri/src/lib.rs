@@ -66,6 +66,7 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::metrics::Metrics;
 use crazyagent::usage::money::MoneySettings;
 use crazyagent::usage::report::UsageReport;
+use crazyagent::usage::spend::SpendSettings;
 use std::sync::Arc;
 use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
@@ -3653,6 +3654,29 @@ async fn desktop_usage_set_money(
 }
 
 #[tauri::command]
+async fn desktop_usage_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    account: String,
+    confirmed: bool,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_spend(account, confirmed)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_usage_set_spend(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    settings: SpendSettings,
+) -> Result<(), BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_set_spend(settings)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_decide_recount(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5082,6 +5106,8 @@ native_commands! {
     desktop_usage_set_money,
     desktop_usage_decide_recount,
     desktop_usage_set_reset,
+    desktop_usage_spend,
+    desktop_usage_set_spend,
     desktop_ide_extension_asks,
     desktop_ide_extension_approve,
     desktop_ide_extension_decline,
