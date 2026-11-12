@@ -153,7 +153,15 @@ fn find(root: &Path, name: &str) -> Result<Option<Found>, EngineError> {
     if !manifest::valid_name(name) {
         return Ok(None);
     }
-    Ok(folder::read(root, name)?.map(|read| user_found(name.to_owned(), read)))
+    let Some(read) = folder::read(root, name)? else {
+        return Ok(None);
+    };
+    let read = if folder::listed(root, name)? {
+        read
+    } else {
+        Err(Problem::new("app_plugin_past_cap", None, None))
+    };
+    Ok(Some(user_found(name.to_owned(), read)))
 }
 
 fn found(root: &Path, name: &str) -> Result<Found, EngineError> {
@@ -346,16 +354,16 @@ fn loopback_port(manifest: &Manifest) -> Option<u16> {
     loopback.then(|| http.url.port_or_known_default()).flatten()
 }
 
-/// The loopback ports every readable plugin would send to, trusted or not, on or off, for a
-/// tools-on sandbox to keep free of agent listeners (rv-code V3-PLUGINS-1 F1). Input: the
-/// engine root. Output: the ports sorted once each, or the folder's refusal, or
-/// `app_plugin_folder_unavailable` when there are more files than are read, so a launch
-/// fails closed instead of missing a port.
+/// The most loopback ports [`loopback_ports`] lists: one per bundled and listed user plugin.
+pub const LOOPBACK_PORTS_MAX: usize = BUNDLED.len() + USER_PLUGINS_MAX;
+
+/// The loopback ports every plugin that can run would send to, trusted or not, on or off,
+/// for a tools-on sandbox to keep free of agent listeners (rv-code V3-PLUGINS-1 F1). Files
+/// past the listed cap are skipped, since `ready` refuses them. Input: the engine root.
+/// Output: the nonzero ports sorted once each, at most `LOOPBACK_PORTS_MAX`, or the
+/// folder's refusal, so a launch fails closed instead of missing a port.
 pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
-    let (files, more) = folder::entries(root)?;
-    if more {
-        return Err(error("app_plugin_folder_unavailable"));
-    }
+    let (files, _) = folder::entries(root)?;
     let mut ports: Vec<u16> = BUNDLED
         .iter()
         .map(|(name, text)| bundled_found(name, text))
@@ -365,7 +373,8 @@ pub fn loopback_ports(root: &Path) -> Result<Vec<u16>, EngineError> {
         .collect();
     ports.sort_unstable();
     ports.dedup();
-    assert!(ports.len() <= BUNDLED.len() + USER_PLUGINS_MAX);
+    assert!(ports.len() <= LOOPBACK_PORTS_MAX);
+    assert!(!ports.contains(&0), "a manifest refuses port 0");
     Ok(ports)
 }
 
@@ -827,15 +836,9 @@ mod folder {
         let mut more = false;
         for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unavailable())? {
             let entry = entry.map_err(|_| unavailable())?;
-            let Ok(file) = std::str::from_utf8(entry.file_name().to_bytes()) else {
+            let Some(stem) = stem(entry.file_name().to_bytes()) else {
                 continue;
             };
-            let Some(stem) = file.strip_suffix(SUFFIX) else {
-                continue;
-            };
-            if stem.is_empty() || stem.starts_with('.') {
-                continue;
-            }
             stems.insert(stem.to_owned());
             if stems.len() > USER_PLUGINS_MAX {
                 stems.pop_last();
@@ -853,6 +856,33 @@ mod folder {
                 .collect(),
             more,
         ))
+    }
+
+    fn stem(file: &[u8]) -> Option<&str> {
+        let stem = std::str::from_utf8(file).ok()?.strip_suffix(SUFFIX)?;
+        (!stem.is_empty() && !stem.starts_with('.')).then_some(stem)
+    }
+
+    /// Whether a plugin file is among the first `USER_PLUGINS_MAX` by name, the ones
+    /// `entries` lists; a file past them is refused so it never runs with an unkept port.
+    /// Inputs: the engine root and a valid plugin name. Output: the answer, or the folder's
+    /// refusal.
+    pub(super) fn listed(root: &Path, name: &str) -> Result<bool, EngineError> {
+        let Some(directory) = open(root, false)? else {
+            return Ok(false);
+        };
+        let mut before = 0;
+        for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unavailable())? {
+            let entry = entry.map_err(|_| unavailable())?;
+            if stem(entry.file_name().to_bytes()).is_some_and(|stem| stem < name) {
+                before += 1;
+                if before >= USER_PLUGINS_MAX {
+                    return Ok(false);
+                }
+            }
+        }
+        assert!(before < USER_PLUGINS_MAX);
+        Ok(true)
     }
 
     /// One user plugin file. Inputs: the engine root and a valid plugin name. Output: none
@@ -931,6 +961,11 @@ mod folder {
         _root: &Path,
     ) -> Result<(Vec<(String, Result<Vec<u8>, Problem>)>, bool), EngineError> {
         Ok((Vec::new(), false))
+    }
+
+    /// No user plugins folder off Unix, so no file is past its cap. Output: true.
+    pub(super) fn listed(_root: &Path, _name: &str) -> Result<bool, EngineError> {
+        Ok(true)
     }
 
     /// No user plugins folder off Unix. Output: none.

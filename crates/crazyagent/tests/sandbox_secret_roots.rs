@@ -338,3 +338,40 @@ fn a_tools_on_sandbox_keeps_every_loopback_app_plugin_port_and_fails_closed_on_a
     }
     guarded(&case);
 }
+
+#[test]
+fn plugin_ports_have_their_own_room_so_full_owner_ports_and_a_port_zero_plugin_still_launch() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let folder = plugins_folder(&case, 0o700);
+    let zero = folder.join("zero.yaml");
+    fs::write(
+        &zero,
+        NEAR_PLUGIN
+            .replace("name: near", "name: zero")
+            .replace("127.0.0.1:9000", "127.0.0.1:0"),
+    )
+    .unwrap();
+    fs::set_permissions(&zero, fs::Permissions::from_mode(0o600)).unwrap();
+    let max = crazyagent::sandbox::KEPT_PORTS_MAX as u16;
+    let owner: Vec<u16> = (30_000..30_000 + max).collect();
+    let open = open_sandbox(&case)
+        .keep_ports(&owner)
+        .unwrap()
+        .guard_engine(&case.runtime)
+        .unwrap();
+    let profile = open.profile();
+    for rule in ["network-bind", "network-inbound"] {
+        let line = profile
+            .lines()
+            .find(|line| line.starts_with(&format!("(deny {rule}")))
+            .unwrap_or_else(|| panic!("no {rule} deny in {profile}"));
+        for port in [1234, 9000, 11434, 30_000, 30_000 + max - 1] {
+            assert!(
+                line.contains(&format!("(local ip \"*:{port}\")")),
+                "{rule} {port}: {line}"
+            );
+        }
+        assert!(!line.contains("(local ip \"*:0\")"), "{line}");
+    }
+}

@@ -85,6 +85,10 @@ pub const OWNER_PORTS_UNREADABLE: &str = "owner_ports_settings_unreadable";
 /// (rv-code V3-PLUGINS-1 F1).
 pub const APP_PLUGIN_PORTS_UNREADABLE: &str = "app_plugin_ports_unreadable";
 
+/// The most app plugin loopback ports one tools-on sandbox keeps free, in their own room
+/// beside the owner's `KEPT_PORTS_MAX`, so plugin files never make a launch refuse.
+pub const APP_PLUGIN_PORTS_MAX: usize = crate::app_plugins::store::LOOPBACK_PORTS_MAX;
+
 /// The owner's configured local model ports, read from the engine's two settings files at
 /// each tools-on launch, as [`owner_ports`] lists them; none when no file exists. A file that
 /// does not read fails closed and logs only the code, since its error text can carry the
@@ -843,6 +847,7 @@ pub struct ProjectSandbox {
     network: SandboxNetwork,
     linux_sockets: LinuxSockets,
     kept_ports: Vec<u16>,
+    plugin_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
@@ -930,6 +935,7 @@ impl ProjectSandbox {
             network,
             linux_sockets: LinuxSockets::default(),
             kept_ports: Vec::new(),
+            plugin_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
             checkout: None,
@@ -1165,7 +1171,7 @@ impl ProjectSandbox {
     /// saved account and plugin keys, the plugin secrets, the terminal server folder and every
     /// engine socket and socket folder found in it now; no root granted so far may hold or sit
     /// inside one. With an open network it also keeps every loopback app plugin port free of
-    /// agent listeners, failing closed when the plugins folder does not read.
+    /// agent listeners in their own room, failing closed when the plugins folder does not read.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
@@ -1185,7 +1191,12 @@ impl ProjectSandbox {
         if matches!(self.network, SandboxNetwork::Open) {
             let ports = crate::app_plugins::store::loopback_ports(&runtime)
                 .map_err(|_| invalid(APP_PLUGIN_PORTS_UNREADABLE))?;
-            self = self.keep_ports(&ports)?;
+            assert!(ports.len() <= APP_PLUGIN_PORTS_MAX);
+            assert!(!ports.contains(&0));
+            self.plugin_ports = ports
+                .into_iter()
+                .filter(|port| !OWNER_PORTS.contains(port))
+                .collect();
         }
         Ok(self)
     }
@@ -2632,6 +2643,7 @@ impl ProjectSandbox {
                 let owner = OWNER_PORTS
                     .iter()
                     .chain(&self.kept_ports)
+                    .chain(&self.plugin_ports)
                     .copied()
                     .chain(model_proxy::PROXY_PORTS)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
