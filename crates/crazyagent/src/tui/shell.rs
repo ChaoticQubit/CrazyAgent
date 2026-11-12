@@ -250,6 +250,13 @@ impl Shell {
         self.stack.len()
     }
 
+    /// Whether the top screen has a field that takes typed text.
+    /// Input: none. Output: true while a field types.
+    #[cfg(test)]
+    pub fn typing(&self) -> bool {
+        self.top().typing()
+    }
+
     fn top(&self) -> &dyn Screen {
         self.stack
             .last()
