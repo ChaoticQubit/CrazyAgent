@@ -228,10 +228,10 @@ fn start_run(
 
 /// Marks a setup run as going for the owner's explicit Set up tools, Install missing or a
 /// tool row's Try again, unless one is going: every tool and the ticked pack entries start
-/// over as installing. Inputs: the engine root and the ticked pack entries. Output: whether
-/// this run begins.
+/// over as installing, and the background probes look for tool folders again at once.
+/// Inputs: the engine root and the ticked pack entries. Output: whether this run begins.
 pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
-    progress::with(root, |state| {
+    let begun = progress::with(root, |state| {
         if state.running {
             return false;
         }
@@ -242,7 +242,11 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
             .map(|entry| (entry.id.clone(), PackState::Installing))
             .collect();
         true
-    })
+    });
+    if begun {
+        crate::tools::probe::refresh_now();
+    }
+    begun
 }
 
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
