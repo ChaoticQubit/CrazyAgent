@@ -126,13 +126,12 @@ fn engine_rows(rows: &mut [String], from: usize, saved_at: usize) {
 
 fn with_writes(rows: &mut Vec<String>, width: usize, hints: &str) {
     rows[5] = format!("{:<width$}", format!("  {SUBTITLE}"));
-    rows.insert(
-        6,
-        format!(
-            "{:<width$}",
-            "  Agent memory writes  ← Loading →  w to change"
-        ),
-    );
+    let settings = if width >= 120 {
+        "  Agent memory writes  ← Loading →  w to change   Saved in  ← Loading →  p to change"
+    } else {
+        "  Writes ← Loading →  w   Saved in ← Loading →  p"
+    };
+    rows.insert(6, format!("{settings:<width$}"));
     let spare = rows.len() - 2;
     assert!(
         rows[spare].trim().is_empty(),

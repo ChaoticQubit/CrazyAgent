@@ -412,14 +412,26 @@ impl Memory {
         } else {
             line = join([line, styled("  p to change", Role::Muted, theme)]);
         }
-        if line.width() > limit {
-            return Line::raw(cut(
-                &format!("Agent memory writes: {chosen}; saved in: {place}"),
-                limit,
-                ctx.glyphs.ellipsis,
-            ));
+        if line.width() <= limit {
+            return line;
         }
-        line
+        let (left, right) = (ctx.glyphs.left, ctx.glyphs.right);
+        let compact = join([
+            styled("Writes ", Role::Heading, theme),
+            Line::raw(format!("{left} {chosen} {right}")),
+            styled("  w", Role::Muted, theme),
+            styled("   Saved in ", Role::Heading, theme),
+            Line::raw(format!("{left} {place} {right}")),
+            styled("  p", Role::Muted, theme),
+        ]);
+        if compact.width() <= limit {
+            return compact;
+        }
+        Line::raw(cut(
+            &format!("Agent memory writes: {chosen}; saved in: {place}"),
+            limit,
+            ctx.glyphs.ellipsis,
+        ))
     }
 
     fn reload_suggestions(&mut self, ctx: &mut Ctx) {
@@ -1114,13 +1126,13 @@ impl Screen for Memory {
         }
         hints.push(hint("a", "Add"));
         hints.push(hint("w", "Agent memory writes"));
-        hints.push(hint("p", "Where agents save"));
         hints.push(hint("i", "Import"));
         if !self.memories.is_empty() || self.open().next().is_some() {
             hints.push(hint("/", "Filter"));
         }
         hints.push(sections_hint(ctx.glyphs));
         hints.push(hint("Esc", "Home"));
+        hints.push(hint("p", "Where agents save"));
         hints
     }
 
