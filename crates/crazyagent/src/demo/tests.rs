@@ -389,7 +389,7 @@ fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() 
     let (asker, source, question, status): (String, String, String, String) = db
         .query_row(
             "SELECT asker,source,question,status FROM questions_log WHERE id=?1",
-            [first],
+            [i64::try_from(first).unwrap()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
@@ -405,7 +405,7 @@ fn the_planted_question_is_the_engines_own_once_and_its_answer_ticks_the_step() 
     assert_eq!(crate::questions::asker_label(&asker), "the demo");
     db.execute(
         "UPDATE questions_log SET status='answered' WHERE id=?1",
-        [first],
+        [i64::try_from(first).unwrap()],
     )
     .unwrap();
     let tx = db.transaction().unwrap();
