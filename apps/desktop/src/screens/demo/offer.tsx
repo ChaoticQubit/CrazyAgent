@@ -83,7 +83,7 @@ export interface DemoPageProps {
   error: string | null;
   onPick: (id: string) => void;
   onCreate: () => void;
-  onRetry?: () => void;
+  onRetry: () => void;
 }
 
 /** The demo page as a view of its reads: the cost note first, what the demo makes, then the
@@ -96,7 +96,7 @@ export function DemoPageView(props: DemoPageProps) {
     <div className="demo-page">
       <Notice tone="warn" icon="zap">{DEMO_COST_NOTE}</Notice>
       <p className="secondary">{DEMO_ABOUT}</p>
-      <DemoBody {...props} onRetry={props.onRetry ?? (() => {})} />
+      <DemoBody {...props} />
     </div>
   </>;
 }

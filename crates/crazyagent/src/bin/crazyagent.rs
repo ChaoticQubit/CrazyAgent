@@ -834,6 +834,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                         std::env::current_exe().ok().as_deref(),
                         agents,
                         agent_terminal(&service),
+                        terminal_probe(&service),
                         service.owner_runtime().map(|handle| handle.reproving()),
                         service
                             .owner_runtime()
@@ -1192,9 +1193,24 @@ fn stop_background(
     }
 }
 
+/// Looks for the engine's terminal host again, as tmux is found now, for a team runtime
+/// that started without one, so tmux installed after the engine started runs the live
+/// master with no engine restart. Takes the engine service. Returns the probe, or none
+/// without an owner runtime.
+fn terminal_probe(
+    service: &crazyagent::engine::bootstrap::EngineService,
+) -> Option<crazyagent::team::runtime::TerminalProbe> {
+    let handle = service.owner_runtime()?.clone();
+    Some(Box::new(move || {
+        let host = handle.terminal().ok()?;
+        host.alive().ok()?;
+        Some(host)
+    }))
+}
+
 /// Opens the engine's terminal host for team and research agents when it can run now.
-/// Takes the engine service. Returns the host, or none after saying why on stderr; agents
-/// then run headless until the engine restarts with tmux available.
+/// Takes the engine service. Returns the host, or none after saying why on stderr; team
+/// agents then run headless until a live master start finds tmux ([`terminal_probe`]).
 fn agent_terminal(
     service: &crazyagent::engine::bootstrap::EngineService,
 ) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {
