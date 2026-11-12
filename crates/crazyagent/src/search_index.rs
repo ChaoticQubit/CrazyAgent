@@ -333,5 +333,53 @@ fn match_expression(query: &str) -> Option<String> {
     (!words.is_empty()).then(|| words.join(" "))
 }
 
+/// Tells whether sessions(query) of a project may read the index: full text works and the
+/// project's first full pass is done. Inputs: the database and the project. Output: the
+/// answer.
+pub(crate) fn sessions_ready(_connection: &Connection, _project: &ProjectId) -> bool {
+    unimplemented!("search index slice 2")
+}
+
+/// Tells whether recall(query) may read the index: full text works and every memory change
+/// is synced. Input: the database. Output: the answer.
+pub(crate) fn memories_ready(_connection: &Connection) -> bool {
+    unimplemented!("search index slice 2")
+}
+
+/// One stored chunk as a search shows it: its conversation or memory key, its message
+/// number and its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Chunk {
+    pub(crate) key: String,
+    pub(crate) ordinal: i64,
+    pub(crate) text: String,
+}
+
+/// Ranks a project's chunks of one source for a query: BM25 first, then the semantic
+/// ranking when a plugin gives one. Inputs: the database, the project, the source and the
+/// untrusted query. Output: the chunk ids best first and the ranking's note, or the failure.
+pub(crate) fn ranked(
+    _connection: &Connection,
+    _project: &ProjectId,
+    _source: Source,
+    _query: &str,
+) -> Result<(Vec<i64>, Option<&'static str>), EngineError> {
+    unimplemented!("search index slice 2")
+}
+
+/// Reloads one ranked chunk with the project and source it must belong to, so an id from
+/// any other place is never shown. Inputs: the database, the id, the project and the source.
+/// Output: the chunk, None for an id of another place, or the failure.
+pub(crate) fn chunk(
+    _connection: &Connection,
+    _id: i64,
+    _project: &ProjectId,
+    _source: Source,
+) -> Result<Option<Chunk>, EngineError> {
+    unimplemented!("search index slice 2")
+}
+
+pub(crate) mod indexer;
+
 #[cfg(test)]
 mod tests;

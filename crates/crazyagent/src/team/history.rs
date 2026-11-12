@@ -361,6 +361,20 @@ pub fn session(
     (text, false)
 }
 
+/// Shows the ranked chunks still in this project's listing as hit lines. Inputs: the
+/// database, the project, the listing, the words, the ranked ids and the bytes left.
+/// Output: the hit lines.
+fn indexed_hits(
+    _connection: &Connection,
+    _project: &ProjectId,
+    _found: &[Conversation],
+    _words: &[String],
+    _ids: &[i64],
+    _room: usize,
+) -> Vec<String> {
+    unimplemented!("search index slice 3")
+}
+
 /// Splits a query into at most `WORDS_MAX` lowercase words of at most `WORD_BYTES_MAX`
 /// bytes. Takes the query. Returns the words, none for an empty query.
 fn words(query: &str) -> Vec<String> {
