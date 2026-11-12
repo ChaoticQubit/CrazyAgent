@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 const REQUEST_BYTES_MAX: usize = crate::protocol::FRAME_BYTES_MAX;
 const KEY_BYTES_MAX: usize = 8192;
 const NAME_BYTES_MAX: usize = 64;
+const ACCOUNT_BYTES_MAX: usize = 128;
 pub(super) const APP_PLUGINS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Every code an App plugins or Search request can answer an owner client with: the
@@ -456,11 +457,7 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         | Action::Trust { name, .. }
         | Action::SetEnabled { name, .. }
         | Action::Remove { name } => &[name.as_str()],
-        Action::BindAccount {
-            name,
-            secret,
-            account,
-        } => &[name.as_str(), secret.as_str(), account.as_str()],
+        Action::BindAccount { name, secret, .. } => &[name.as_str(), secret.as_str()],
         Action::SetKey { name, secret } | Action::Unbind { name, secret } => {
             &[name.as_str(), secret.as_str()]
         }
@@ -469,6 +466,8 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
     if names
         .iter()
         .any(|name| name.is_empty() || name.len() > NAME_BYTES_MAX)
+        || matches!(&app_plugins, Action::BindAccount { account, .. }
+            if account.is_empty() || account.len() > ACCOUNT_BYTES_MAX)
     {
         return Err(failure("app_plugin_request_invalid"));
     }

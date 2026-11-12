@@ -181,8 +181,26 @@ fn requests_are_bounded_and_strict() {
         "app_plugin_request_invalid"
     );
     assert_eq!(
-        invalid(request(json!({"kind": "list", "extra": 1}))),
+        invalid(request(
+            json!({"kind": "remove", "name": "near", "extra": 1})
+        )),
         "app_plugin_request_invalid"
+    );
+    assert_eq!(
+        invalid(json!({"app_plugins": {"kind": "list"}, "secret_present": false, "extra": 1})),
+        "app_plugin_request_invalid"
+    );
+    assert!(
+        parse(
+            &serde_json::to_vec(&request(json!({
+                "kind": "bind_account",
+                "name": "openai",
+                "secret": "api_key",
+                "account": "a".repeat(ACCOUNT_BYTES_MAX),
+            })))
+            .unwrap()
+        )
+        .is_ok()
     );
     assert_eq!(
         invalid(request(json!({"kind": "run_plugin"}))),
@@ -203,7 +221,7 @@ fn requests_are_bounded_and_strict() {
             "kind": "bind_account",
             "name": "openai",
             "secret": "api_key",
-            "account": "a".repeat(NAME_BYTES_MAX + 1),
+            "account": "a".repeat(ACCOUNT_BYTES_MAX + 1),
         }))),
         "app_plugin_request_invalid"
     );
