@@ -900,6 +900,42 @@ fn current_holds_only_for_the_definition_install_would_write_now() {
     }
 }
 
+/// v2.4.0 owner update bug: the update's `service start` started the definition an install
+/// script wrote for an older engine. A definition running another program is told apart from
+/// one that only has another PATH, which still starts as it is.
+#[test]
+fn a_definition_that_runs_another_program_is_told_apart_from_one_with_another_path() {
+    let temp = tempfile::tempdir().unwrap();
+    for platform in [Platform::MacOs, Platform::Linux] {
+        let mut own = service(platform);
+        own.root = temp.path().join("engine");
+        own.executable = temp.path().join("CrazyAgent.app").join("crazyagent");
+        own.definition = temp.path().join(format!("{platform:?}.definition"));
+        assert!(!own.runs_another_program());
+        let mut script = own.clone();
+        script.executable = temp.path().join("bin").join("engine-start");
+        write_definition(
+            &own.definition,
+            &script.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(own.runs_another_program());
+        let mut elsewhere = own.clone();
+        elsewhere.path = OsString::from("/usr/bin:/bin");
+        write_definition(
+            &own.definition,
+            &elsewhere.definition_text().unwrap(),
+            platform,
+        )
+        .unwrap();
+        assert!(!own.current());
+        assert!(!own.runs_another_program());
+        write_definition(&own.definition, &own.definition_text().unwrap(), platform).unwrap();
+        assert!(!own.runs_another_program());
+    }
+}
+
 #[test]
 fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     let temp = tempfile::tempdir().unwrap();

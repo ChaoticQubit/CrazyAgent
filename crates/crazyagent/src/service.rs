@@ -11,8 +11,10 @@ pub const LAUNCHD_LABEL: &str = "dev.crazyagent.engine";
 pub const SYSTEMD_UNIT: &str = "crazyagent-engine.service";
 /// The logon scheduled task on Windows.
 pub const WINDOWS_TASK: &str = "CrazyAgent Engine";
-/// How long a client waits for a starting engine to answer.
-pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long a client waits for a starting engine to answer. An owner engine with months of
+/// data took up to 38 s from spawn to its socket (v2.4.0 update bug), so a 15 s bound reported
+/// "didn't start" for an engine that came up, and a retry stopped it mid-start.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(90);
 
 const LAUNCHCTL: &str = "/bin/launchctl";
 const SYSTEMCTL: &str = "systemctl";
@@ -555,6 +557,22 @@ WantedBy=default.target\n",
     /// that differs never stops or restarts a running engine. Input: the bundled engine.
     pub fn stale(&self, bundled: &Path) -> bool {
         self.executable != bundled && !self.current()
+    }
+
+    /// Whether the installed definition runs another program than this service's engine, as
+    /// an install script's layout or an older app location does: the line of
+    /// [`Self::definition_text`] naming the executable is not in the file. A different PATH
+    /// or setting does not count. Output: false when nothing readable is installed.
+    pub fn runs_another_program(&self) -> bool {
+        let Ok(text) = self.definition_text() else {
+            return false;
+        };
+        let executable = self.executable.to_string_lossy();
+        let Some(own) = text.lines().find(|line| line.contains(executable.as_ref())) else {
+            return false;
+        };
+        std::fs::read_to_string(&self.definition)
+            .is_ok_and(|installed| !installed.lines().any(|line| line == own))
     }
 
     fn loaded(&self) -> Result<bool, ServiceError> {
