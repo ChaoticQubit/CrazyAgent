@@ -270,6 +270,7 @@ fn versions_of(installed: &str, latest: Latest) -> HarnessVersions {
         guide: None,
         running: false,
         last: None,
+        needs: None,
     }
 }
 
@@ -945,6 +946,7 @@ fn missing(id: &str, install: Option<&str>, guide: &str) -> HarnessVersions {
         guide: Some(guide.into()),
         running: false,
         last: None,
+        needs: None,
     }
 }
 

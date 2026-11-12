@@ -1,4 +1,5 @@
 import type { HarnessEntry } from "../../api";
+import type { DependencyState } from "../../engine-client";
 import { updateCopy, type HarnessVersions } from "../../api-harness-updates";
 
 /** The Harnesses step's place in first run, in the same words as the TUI step: its label in the
@@ -31,6 +32,8 @@ export const HARNESS_WORDS = {
   install: "Install picked harnesses",
   skip: "Skip for now",
   next: "Continue",
+  installNode: "Install Node.js",
+  installingNode: "Installing Node.js.",
 };
 
 /** Where one offered harness stands on the step. */
@@ -43,7 +46,8 @@ export type HarnessRow =
   | { kind: "waiting" }
   | { kind: "installing" }
   | { kind: "done"; version: string | null }
-  | { kind: "failed"; reason: string };
+  | { kind: "failed"; reason: string }
+  | { kind: "blocked"; line: string };
 
 /** Where an offered harness stands, from the engine's catalog row, versions read and install
  * queue: RCLI always comes with the app; a running or queued install wins; a failed install of a
@@ -74,6 +78,7 @@ const BADGES: Record<HarnessRow["kind"], { word: string; tone: "ok" | "warn" | "
   installing: { word: "Installing", tone: "info" },
   done: { word: "Installed", tone: "ok" },
   failed: { word: "Failed", tone: "danger" },
+  blocked: { word: "Can't run", tone: "warn" },
 };
 
 /** The badge word and tone a row shows, the TUI's words. Input: the row. Output: the badge. */
@@ -95,6 +100,7 @@ export function rowLine(row: HarnessRow): string {
     case "installing": return HARNESS_WORDS.installing;
     case "done": return `${HARNESS_WORDS.done}${version(row.version)}`;
     case "failed": return row.reason;
+    case "blocked": return row.line;
   }
 }
 
@@ -137,4 +143,20 @@ export function progressLine(counts: { done: number; total: number; failed: numb
   if (counts.running) return `Installing: ${counts.done} of ${counts.total} done. You can continue; the installs keep going.`;
   const failed = counts.failed ? `, ${counts.failed} failed. Each failure shows its reason above` : "";
   return `Installs finished: ${counts.done} of ${counts.total} done${failed}.`;
+}
+
+/** Where the step's one Node.js install stands while an offered harness needs Node, the TUI's
+ * kinds: nothing to offer, the offer, the install running, or its failure with setup's reason. */
+export type NodeOffer = { kind: "none" } | { kind: "offer" } | { kind: "installing" } | { kind: "failed"; reason: string };
+
+/** Tells whether an offered harness needs Node.js: npm can't install it without Node, or the
+ * resolver found it but it can't run without Node. Input: the versions read. Output: the answer. */
+export function nodeNeeded(_reads: readonly (HarnessVersions | null)[]): boolean {
+  return false;
+}
+
+/** What the step offers for Node.js, from whether a harness needs it and setup's Node row.
+ * Inputs: the need and the Node row's state, null while unread. Output: the offer. */
+export function nodeOffer(_needed: boolean, _node: DependencyState | null): NodeOffer {
+  return { kind: "none" };
 }

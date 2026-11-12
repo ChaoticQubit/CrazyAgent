@@ -3,7 +3,10 @@ import { call, type Result } from "./api";
 export type UpdateMethod = { kind: "self_update" } | { kind: "homebrew"; cask: string } | { kind: "homebrew_formula"; formula: string } | { kind: "npm"; package: string } | { kind: "with_app" } | { kind: "unknown" };
 export type LatestVersion = { kind: "not_checked" } | { kind: "no_check" } | { kind: "up_to_date" } | { kind: "newer"; version: string } | { kind: "failed"; code: string };
 export interface LastUpdate { ok: boolean; code: string | null; output: string; from: string | null; to: string | null; ended_ms: number }
-export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null }
+/** What an installed harness lacks before it can run, as the engine's tool resolver reads it: the
+ * program its first line asks for, such as node, and the resolver's one owner line. */
+export interface HarnessNeeds { program: string | null; line: string }
+export interface HarnessVersions { id: string; method: UpdateMethod; installed: string | null; latest: LatestVersion; command: string | null; install: string | null; refusal: string | null; guide: string | null; running: boolean; last: LastUpdate | null; needs?: HarnessNeeds | null }
 export type UpdateMode = "check_and_update" | "check_only" | "off";
 export type CheckWhen = "on_button" | "on_open";
 export type OnlineLookup = "on" | "off";

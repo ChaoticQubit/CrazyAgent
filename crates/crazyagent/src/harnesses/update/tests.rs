@@ -17,8 +17,16 @@ impl Machine {
     fn roots(&self) -> Roots {
         let npm = self.root.path().join("brew/bin/npm");
         let engine = self.root.path().join("harnesses");
+        let home = self.root.path().join("home");
+        let places = crate::tools::Places::new(
+            vec![
+                self.root.path().join("setup/bin"),
+                self.root.path().join("brew/bin"),
+            ],
+            Some(home.clone()),
+        );
         Roots {
-            home: self.root.path().join("home"),
+            home,
             brew_prefixes: vec![self.root.path().join("brew")],
             casks: true,
             npm: npm.exists().then(|| NpmInstall {
@@ -26,6 +34,7 @@ impl Machine {
                 search: vec![self.root.path().join("brew/bin"), engine.join("bin")],
                 prefix: engine,
             }),
+            places,
         }
     }
     fn program(&self, relative: &str, mode: u32) -> PathBuf {
@@ -1911,6 +1920,40 @@ fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_
     assert_eq!(
         missing.versions(false).refusal.as_deref(),
         Some("harness_install_needs_node")
+    );
+}
+
+#[test]
+fn an_npm_codex_with_no_node_the_resolver_finds_reads_needs_node_until_node_is_in_setup() {
+    let machine = Machine::new();
+    let codex = machine.root.path().join("brew/bin/codex");
+    std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+    std::fs::write(&codex, "#!/usr/bin/env node\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let case = Case::new(machine, entry("codex", Some(codex)), None);
+    assert_eq!(
+        case.versions(false).needs,
+        Some(HarnessNeeds {
+            program: Some("node".into()),
+            line: "codex needs node, which is missing. Install Node.js from nodejs.org, or run \
+                   brew install node in Terminal. Then try again."
+                .into(),
+        }),
+        "a found Codex that cannot run is never read as installed and ready"
+    );
+    case.machine.program("setup/bin/node", 0o755);
+    assert_eq!(
+        case.versions(false).needs,
+        None,
+        "the Node setup installs runs the same Codex"
+    );
+    let other = Machine::new();
+    let plain = other.program("brew/bin/codex", 0o755);
+    let shell = Case::new(other, entry("codex", Some(plain)), None);
+    assert_eq!(
+        shell.versions(false).needs,
+        None,
+        "a file that runs as it is"
     );
 }
 

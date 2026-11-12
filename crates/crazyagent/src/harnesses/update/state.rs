@@ -116,9 +116,16 @@ pub fn set_settings(db: &Connection, settings: UpdateSettings) -> Result<(), Eng
 
 impl Roots {
     /// The roots of this machine: the engine's own HOME, the same one the harness search
-    /// uses, the usual Homebrew prefixes, and casks only on macOS.
-    /// Output: the roots; an unset or relative HOME is an empty home that matches nothing.
+    /// uses, the usual Homebrew prefixes, casks only on macOS and the resolver's places with
+    /// no engine root. Output: the roots; an unset or relative HOME is an empty home.
     pub fn system() -> Self {
+        Self::on(crate::tools::Places::from_environment(None))
+    }
+
+    /// The roots of this machine with the given resolver places: the engine's HOME, the
+    /// usual Homebrew prefixes, casks only on macOS and no npm yet. Input: the places.
+    /// Output: the roots; an unset or relative HOME is an empty home that matches nothing.
+    fn on(places: crate::tools::Places) -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
@@ -128,6 +135,7 @@ impl Roots {
             brew_prefixes: BREW_PREFIXES.iter().map(PathBuf::from).collect(),
             casks: cfg!(target_os = "macos"),
             npm: None,
+            places,
         }
     }
 
@@ -136,21 +144,18 @@ impl Roots {
     /// places, and the engine's own prefix `<engine root>/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
-        Self {
-            npm: engine_npm(engine_root),
-            ..Self::system()
-        }
+        let mut roots = Self::on(crate::tools::Places::from_environment(Some(engine_root)));
+        roots.npm = engine_npm(engine_root, &roots.places);
+        roots
     }
 }
 
 /// Finds the npm an npm harness installs with for one engine on the engine's own resolver
-/// places. Input: the engine root. Output: the npm, or none with no usable Node.
+/// places. Inputs: the engine root and those places. Output: the npm, or none with no
+/// usable Node.
 #[cfg(unix)]
-fn engine_npm(engine_root: &Path) -> Option<super::NpmInstall> {
-    engine_npm_at(
-        engine_root,
-        &crate::tools::Places::from_environment(Some(engine_root)),
-    )
+fn engine_npm(engine_root: &Path, places: &crate::tools::Places) -> Option<super::NpmInstall> {
+    engine_npm_at(engine_root, places)
 }
 
 /// Finds the npm an npm harness installs with: the Node setup's one test finds on the places
@@ -173,9 +178,10 @@ pub(crate) fn engine_npm_at(
     })
 }
 
-/// Finds no npm where setup has no Node. Input: the engine root, unused. Output: none.
+/// Finds no npm where setup has no Node. Inputs: the engine root and the places, unused.
+/// Output: none.
 #[cfg(not(unix))]
-fn engine_npm(_engine_root: &Path) -> Option<super::NpmInstall> {
+fn engine_npm(_engine_root: &Path, _places: &crate::tools::Places) -> Option<super::NpmInstall> {
     None
 }
 
@@ -274,6 +280,7 @@ fn missing(id: &str, roots: &Roots, settings: UpdateSettings) -> HarnessVersions
         guide: guide(id).map(str::to_owned),
         running: false,
         last: None,
+        needs: None,
     }
 }
 
@@ -544,6 +551,7 @@ impl Updates {
             install: None,
             running: false,
             last: None,
+            needs: None,
         }
     }
 

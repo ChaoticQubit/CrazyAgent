@@ -251,7 +251,7 @@ pub fn setup_plain(code: &str) -> String {
 /// The sentence for why a tool or default skill did not install.
 /// Input: the reason the engine sent, which is the setup sentence it already chose.
 /// Output: that sentence; a plain code instead gets the setup sentence for the code.
-fn setup_reason(reason: &str) -> String {
+pub(super) fn setup_reason(reason: &str) -> String {
     if plain_code(reason) {
         setup_plain(reason)
     } else {
@@ -2157,6 +2157,7 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
+            AppSetupEvent::Installed(_) => {}
             AppSetupEvent::PackChanged(result)
             | AppSetupEvent::HomeSet(result)
             | AppSetupEvent::SandboxSet(result)

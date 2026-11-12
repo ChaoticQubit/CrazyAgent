@@ -3,6 +3,7 @@ use super::settings_harnesses::plain_update;
 use super::{Flow, Place, Screen, open};
 use crate::harnesses::HarnessEntry;
 use crate::harnesses::update::HarnessVersions;
+use crate::setup::DependencyState;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, draw_lines, hint};
@@ -34,6 +35,8 @@ const GUIDE: &str = "How to install it yourself";
 const INSTALL: &str = "Install picked harnesses";
 const SKIP: &str = "Skip for now";
 const NEXT: &str = "Continue";
+const INSTALL_NODE: &str = "Install Node.js";
+const INSTALLING_NODE: &str = "Installing Node.js.";
 const NO_TOOL: &str = "harness_install_no_tool";
 const FAILED: &str = "harness_install_failed";
 const RCLI: &str = "rcli";
@@ -71,6 +74,9 @@ enum Row {
     Failed {
         reason: String,
     },
+    Blocked {
+        line: String,
+    },
 }
 
 impl Row {
@@ -97,6 +103,7 @@ impl Row {
             Self::Waiting => "Waiting",
             Self::Installing => "Installing",
             Self::Failed { .. } => "Failed",
+            Self::Blocked { .. } => "Can't run",
         }
     }
 
@@ -111,6 +118,7 @@ impl Row {
             Self::Installed { version: found } => format!("{INSTALLED}{}", version(found)),
             Self::Offer { line } => format!("{INSTALLS_WITH} {line}"),
             Self::Refused { reason, .. } | Self::Failed { reason } => reason.clone(),
+            Self::Blocked { line } => line.clone(),
             Self::Reading => READING.to_owned(),
             Self::Waiting => WAITING.to_owned(),
             Self::Installing => INSTALLING.to_owned(),
@@ -121,6 +129,24 @@ impl Row {
     fn retry(&self) -> bool {
         matches!(self, Self::Failed { .. } | Self::Refused { .. })
     }
+}
+
+/// Where the step's one Node.js install stands while an offered harness needs Node, the same
+/// kinds as the desktop step's: nothing to offer, the offer, the install running, or its
+/// failure with the reason setup gave.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum NodeOffer {
+    None,
+    Offer,
+    Installing,
+    Failed { reason: String },
+}
+
+/// What the step offers for Node.js, from whether an offered harness needs it and the Node
+/// row of setup. Inputs: the need and the Node row's state, none while unread.
+/// Output: the offer.
+fn node_offer(_needed: bool, _node: Option<&DependencyState>) -> NodeOffer {
+    NodeOffer::None
 }
 
 /// Where an offered harness stands, from the engine's catalog row, versions read and install
