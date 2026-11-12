@@ -87,6 +87,8 @@ test("the Node row installs Node alone through its own desktop command, which th
   assert.equal(match[1], "desktop_install_dependency");
   assert.ok(commands.includes("async fn desktop_install_dependency("), "the command exists");
   assert.match(commands, /native_commands! \{[^}]*\bdesktop_install_dependency,/, "the command is registered");
+  const capability = JSON.parse(readFileSync(new URL("../src-tauri/capabilities/main-window.json", import.meta.url), "utf8"));
+  assert.ok(capability.permissions.includes("allow-desktop-install-dependency"), "the main window may call it");
   assert.match(setup, /pub async fn install_dependency\([^)]*name: Dependency,\s*generation: u64,?\s*\) -> Result<SetupStatus, BridgeError>/);
   assert.match(setup, /pub async fn install_dependency\([^)]*\)[^{]*\{[^}]*self\.setup_change\(OwnerMutation::InstallDependency \{ name \}, generation\)/);
   assert.ok(bridge.includes(`=> ("install_dependency", None, None)`));
