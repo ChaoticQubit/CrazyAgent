@@ -72,6 +72,7 @@ pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
 pub mod scorecard;
+pub mod search_index;
 pub mod semantic;
 pub mod service;
 pub mod setup;

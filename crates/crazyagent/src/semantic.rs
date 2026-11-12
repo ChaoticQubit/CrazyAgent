@@ -1,14 +1,32 @@
 use crate::app_plugins::{Problem, RunsView};
+use crate::protocol::ProjectId;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 pub mod local;
 pub mod settings;
+
+/// The lowercase hex SHA-256 of some bytes. Input: the bytes. Output: 64 hex digits.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    use std::fmt::Write;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a String does not fail");
+    }
+    assert_eq!(hex.len(), 64);
+    hex
+}
 
 /// The wall clock in milliseconds since the Unix epoch, 0 before it.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// What agents' search ranks with: full text only, or full text fused with the vectors of
@@ -20,15 +38,16 @@ pub enum SearchChoice {
     Plugin { name: String },
 }
 
-/// One embedding plugin the Search settings can choose: its name and title, how it runs,
-/// whether it can be used now with the plain reason when not, and, for an HTTP plugin,
-/// what leaves this computer for its host once chosen (empty for the local runtime).
+/// One embedding plugin the Search settings can choose: its name and title, how it runs
+/// (none for a chosen plugin that is gone or refused), whether it can be used now with the
+/// plain reason when not, and, for an HTTP plugin, what leaves this computer for its host
+/// once chosen (empty for the local runtime).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchOption {
     pub name: String,
     pub title: String,
-    pub runs: RunsView,
+    pub runs: Option<RunsView>,
     pub usable: bool,
     pub reason: Option<String>,
     pub sends: Vec<String>,
@@ -53,14 +72,16 @@ pub struct Progress {
     pub total: u64,
 }
 
-/// The Search settings page: the saved choice at its version, every choosable plugin, the
-/// local model's download state and the embedding progress of the choice.
+/// The Search settings page: the saved choice at its version, every choosable plugin, a
+/// plain note when the choice fell back to full text, the local model's download state and
+/// the embedding progress of the choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchView {
     pub version: u64,
     pub choice: SearchChoice,
     pub options: Vec<SearchOption>,
+    pub note: Option<String>,
     pub model: ModelState,
     pub progress: Progress,
 }
@@ -73,3 +94,50 @@ pub const SENDS: [&str; 4] = [
     "Memories",
     "Search queries",
 ];
+
+/// How far the chosen plugin has embedded the indexed sessions and memories, for the
+/// Search settings page. Inputs: the connection and the engine root. Output: the counts;
+/// this stub reports none until the L3 vectors (feat/v3-hybrid) land.
+pub fn progress(connection: &Connection, root: &Path) -> Progress {
+    let _ = (connection, root);
+    Progress {
+        embedded: 0,
+        total: 0,
+    }
+}
+
+/// The search order after fusing full text with vectors: chunk ids best first, and a note
+/// the answer carries when the vector part could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hybrid {
+    pub ids: Vec<i64>,
+    pub note: Option<&'static str>,
+}
+
+/// Embeds the project's chunks that have no vector for the chosen plugin yet, on the
+/// indexer thread outside any transaction. Inputs: the indexer's connection, the engine
+/// root and the project. Output: how many chunks were embedded; this stub embeds none
+/// until the w-v3-plugins vectors land.
+pub fn embed_pending(connection: &mut Connection, root: &Path, project: &ProjectId) -> usize {
+    let _ = (connection, root, project);
+    0
+}
+
+/// Fuses the full-text order with the chosen plugin's vector order, on the tick and with
+/// no network. Inputs: the connection, the engine root, the project, the source, the query
+/// and the full-text chunk ids best first. Output: the fused ids and an optional note; this
+/// stub keeps the full-text order.
+pub fn hybrid(
+    connection: &Connection,
+    root: &Path,
+    project: &ProjectId,
+    source: crate::search_index::Source,
+    query: &str,
+    full_text: &[i64],
+) -> Hybrid {
+    let _ = (connection, root, project, source, query);
+    Hybrid {
+        ids: full_text.to_vec(),
+        note: None,
+    }
+}

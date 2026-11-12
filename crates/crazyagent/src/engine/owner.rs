@@ -20,6 +20,7 @@ pub use native_auth::{
 
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
+pub use transport::app_plugins::{APP_PLUGINS_CODES, SearchSaved};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::checks::{
     CHECKS_CODES, CheckGapView, CheckGateView, CheckJobView, CheckRunView, ChecksReply,
@@ -44,7 +45,6 @@ pub use transport::recovery::{
     RecoveryBanner, RunShown,
 };
 pub use transport::roadmap::ROADMAP_CODES;
-pub use transport::app_plugins::{APP_PLUGINS_CODES, SearchSaved};
 pub use transport::scorecard::{SCORECARD_CODES, Saved as ScorecardSaved};
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
 pub use transport::tracker::{
