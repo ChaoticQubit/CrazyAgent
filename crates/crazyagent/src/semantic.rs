@@ -4,6 +4,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -119,16 +120,32 @@ pub struct Hybrid {
 
 /// The most texts one call to the built-in local runtime embeds.
 const LOCAL_BATCH: usize = 64;
-/// The most document calls one project's turn sends to an HTTP plugin per indexer tick,
-/// the choice read again before each, so turning the plugin off stops the next send.
+/// The most document calls one project's turn sends to an HTTP plugin, the choice read
+/// again before each, so turning the plugin off stops the next send.
 const HTTP_CALLS_MAX: usize = 4;
+/// The most projects waiting for the HTTP embedding thread.
+const HTTP_WANTED_MAX: usize = 1_024;
 /// How long a local runtime whose open failed waits before the next open, since every open
 /// re-hashes the downloaded files.
 const LOCAL_RETRY_MS: i64 = 10 * 60 * 1000;
 
-/// The local runtime opened for one engine root, or the time its last open or embed failed.
-type LocalSlot = Option<(PathBuf, Result<Arc<local::LocalModel>, i64>)>;
+/// The local runtime opened for one engine root with the stamp of the files it opened, or
+/// the time its last open or embed failed.
+type LocalSlot = Option<(PathBuf, Result<(Stamp, Arc<local::LocalModel>), i64>)>;
 static LOCAL: Mutex<LocalSlot> = Mutex::new(None);
+
+/// The projects waiting for an HTTP plugin's turn, whether the embedding thread runs, and
+/// the wait after failed sends (rv-code2 HYB2-M1).
+struct HttpQueue {
+    wanted: BTreeSet<String>,
+    running: bool,
+    backoff: vectors::Backoff,
+}
+static HTTP: Mutex<HttpQueue> = Mutex::new(HttpQueue {
+    wanted: BTreeSet::new(),
+    running: false,
+    backoff: vectors::Backoff::new(),
+});
 
 /// The plugin as the vectors see it: its key, dimensions and batch, the built-in runtime's
 /// from [`local::DIMS`]. Input: the loaded manifest. Output: the plugin.
@@ -146,16 +163,6 @@ fn plugin_of(manifest: &Manifest) -> vectors::Plugin {
     }
 }
 
-/// The local runtime already open for `root`, never opening it, so a search on the tick
-/// never waits on the re-hash. Input: the engine root. Output: the model, or none.
-fn opened_local(root: &Path) -> Option<Arc<local::LocalModel>> {
-    let slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
-    match slot.as_ref() {
-        Some((at, Ok(model))) if at == root => Some(Arc::clone(model)),
-        _ => None,
-    }
-}
-
 /// What identifies the local runtime's files on disk: per pinned file its size, inode where
 /// the platform has one, and modified time.
 pub(crate) type Stamp = Vec<(u64, u64, Option<std::time::SystemTime>)>;
@@ -164,18 +171,47 @@ pub(crate) type Stamp = Vec<(u64, u64, Option<std::time::SystemTime>)>;
 /// read from metadata only, so a deleted or replaced model is never served from the cache
 /// (rv-code2 HYB2-L1). Input: the engine root. Output: the stamp, or none.
 pub(crate) fn local_stamp(root: &Path) -> Option<Stamp> {
-    let _ = root;
-    unimplemented!("rv-code2 HYB2-L1")
+    let place = local::folder(root);
+    let stamp: Stamp = local::PINNED
+        .iter()
+        .map(|pin| {
+            let found = std::fs::symlink_metadata(place.join(pin.name)).ok()?;
+            if !found.is_file() || found.len() != pin.bytes {
+                return None;
+            }
+            #[cfg(unix)]
+            let inode = std::os::unix::fs::MetadataExt::ino(&found);
+            #[cfg(not(unix))]
+            let inode = 0;
+            Some((found.len(), inode, found.modified().ok()))
+        })
+        .collect::<Option<_>>()?;
+    assert_eq!(stamp.len(), local::PINNED.len());
+    Some(stamp)
 }
 
-/// Whether both pinned files of the local runtime are on disk at their pinned sizes, read
-/// from metadata only. Input: the engine root. Output: the answer.
-fn local_present(root: &Path) -> bool {
-    let place = local::folder(root);
-    local::PINNED.iter().all(|pin| {
-        std::fs::symlink_metadata(place.join(pin.name))
-            .is_ok_and(|found| found.is_file() && found.len() == pin.bytes)
-    })
+/// The cached local runtime of `root` while its files still carry the stamp it was opened
+/// with; a deleted or replaced model empties the slot, which closes its file and frees the
+/// disk. Inputs: the locked slot and the root. Output: the model, or none.
+fn cached_local(slot: &mut LocalSlot, root: &Path) -> Option<Arc<local::LocalModel>> {
+    let Some((at, Ok((stamp, model)))) = slot.as_ref() else {
+        return None;
+    };
+    if at != root {
+        return None;
+    }
+    if local_stamp(root).as_ref() == Some(stamp) {
+        return Some(Arc::clone(model));
+    }
+    *slot = None;
+    None
+}
+
+/// The local runtime already open for `root`, never opening it, so a search on the tick
+/// never waits on the re-hash. Input: the engine root. Output: the model, or none.
+fn opened_local(root: &Path) -> Option<Arc<local::LocalModel>> {
+    let mut slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
+    cached_local(&mut slot, root)
 }
 
 /// Opens `root`'s local runtime on the indexer thread, outside the lock, and at most once
@@ -183,22 +219,21 @@ fn local_present(root: &Path) -> bool {
 /// the model, or none while it is missing or failing.
 fn open_local(root: &Path, now_ms: i64) -> Option<Arc<local::LocalModel>> {
     {
-        let slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
-        match slot.as_ref() {
-            Some((at, Ok(model))) if at == root => return Some(Arc::clone(model)),
-            Some((at, Err(failed))) if at == root && now_ms - failed < LOCAL_RETRY_MS => {
+        let mut slot = LOCAL.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(model) = cached_local(&mut slot, root) {
+            return Some(model);
+        }
+        if let Some((at, Err(failed))) = slot.as_ref() {
+            if at == root && now_ms - failed < LOCAL_RETRY_MS {
                 return None;
             }
-            _ => {}
         }
     }
-    if !local_present(root) {
-        return None;
-    }
+    let stamp = local_stamp(root)?;
     let opened = local::LocalModel::open(root)
-        .map(Arc::new)
+        .map(|model| (stamp, Arc::new(model)))
         .map_err(|_| now_ms);
-    let model = opened.as_ref().ok().cloned();
+    let model = opened.as_ref().ok().map(|(_, model)| Arc::clone(model));
     *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), opened));
     model
 }
@@ -209,64 +244,174 @@ fn local_failed(root: &Path, now_ms: i64) {
     *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = Some((root.to_owned(), Err(now_ms)));
 }
 
+/// Closes the cached local runtime, freeing its open file. Output: none.
+fn close_local() {
+    *LOCAL.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
 /// Embeds the project's chunks that have no vector for the chosen plugin yet, then the
-/// app-wide memories, on the indexer thread outside any transaction and within
-/// [`vectors::BOUNDS`]. No chosen plugin embeds nothing and keeps every vector (leader QB).
-/// Inputs: the indexer's connection, the engine root and the project. Output: how many
-/// chunks were embedded.
+/// app-wide memories, outside any transaction and within [`vectors::BOUNDS`]. The local
+/// runtime embeds here on the indexer thread; an HTTP plugin's sends run on their own
+/// thread, so a slow or failing host never holds up full-text indexing (rv-code2 HYB2-M1).
+/// No chosen plugin embeds nothing and keeps every vector (leader QB), and closes the local
+/// runtime. Inputs: the indexer's connection, the engine root and the project. Output: how
+/// many chunks were embedded here.
 pub fn embed_pending(connection: &mut Connection, root: &Path, project: &ProjectId) -> usize {
     let Some(loaded) = settings::chosen(connection, root) else {
+        close_local();
         return 0;
     };
     let plugin = plugin_of(&loaded.manifest);
-    match &loaded.manifest.runs {
-        Runs::Local { .. } => {
-            let Some(model) = open_local(root, now_ms()) else {
-                return 0;
-            };
-            let mut broke = false;
-            let mut embed = |texts: &[&str]| {
-                model.embed(texts).map_err(|code| {
-                    broke = true;
-                    EngineError(code.to_owned())
-                })
-            };
-            let embedded =
-                vectors::embed_round(connection, project, &plugin, &vectors::BOUNDS, &mut embed);
-            if broke {
-                local_failed(root, now_ms());
+    if matches!(loaded.manifest.runs, Runs::Http(_)) {
+        close_local();
+        want_http(root, project, &plugin.key);
+        return 0;
+    }
+    let Some(model) = open_local(root, now_ms()) else {
+        return 0;
+    };
+    let mut broke = false;
+    let mut embed = |texts: &[&str]| {
+        model.embed(texts).map_err(|code| {
+            broke = true;
+            EngineError(code.to_owned())
+        })
+    };
+    let embedded = vectors::embed_round(connection, project, &plugin, &vectors::BOUNDS, &mut embed);
+    if broke {
+        local_failed(root, now_ms());
+    }
+    embedded
+}
+
+/// Queues a project for the HTTP embedding thread and starts the thread when none runs,
+/// unless the plugin is waiting after failed sends. Inputs: the engine root, the project
+/// and the plugin key. Output: none.
+fn want_http(root: &Path, project: &ProjectId, key: &str) {
+    let mut queue = HTTP.lock().unwrap_or_else(PoisonError::into_inner);
+    if !queue.backoff.ready(key, now_ms()) {
+        return;
+    }
+    if queue.wanted.len() < HTTP_WANTED_MAX {
+        queue.wanted.insert(project.as_str().to_owned());
+    }
+    if queue.running {
+        return;
+    }
+    let root = root.to_owned();
+    let started = std::thread::Builder::new()
+        .name("search-embed".into())
+        .spawn(move || http_thread(&root));
+    queue.running = started.is_ok();
+}
+
+/// What one project's HTTP turn did: nothing to send, sends that worked, or a failed send
+/// to the plugin with that key.
+enum Turn {
+    Idle,
+    Sent(String),
+    Failed(String),
+}
+
+/// The HTTP embedding thread: its own connection, one turn per waiting project in name
+/// order until none waits; a failed send starts the plugin's backoff and empties the queue.
+/// Input: the engine root. Output: none.
+fn http_thread(root: &Path) {
+    let opened = Connection::open(root.join("engine.db")).and_then(|connection| {
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(connection)
+    });
+    let mut connection = opened.ok();
+    loop {
+        let next = {
+            let mut queue = HTTP.lock().unwrap_or_else(PoisonError::into_inner);
+            let next = connection.as_ref().and(queue.wanted.pop_first());
+            if next.is_none() {
+                queue.wanted.clear();
+                queue.running = false;
             }
-            embedded
-        }
-        Runs::Http(_) => {
-            let mut query = |texts: &[&str]| {
-                crate::app_plugins::http::embed(root, &loaded, texts, Purpose::Query)
-            };
-            vectors::embed_queries(connection, &plugin, &mut query);
-            let one_call = vectors::Bounds {
-                round_chunks: plugin.batch,
-                ..vectors::BOUNDS
-            };
-            let mut embedded = 0;
-            for _ in 0..HTTP_CALLS_MAX {
-                let still = settings::chosen(connection, root)
-                    .is_some_and(|now| plugin_of(&now.manifest) == plugin);
-                if !still {
-                    break;
-                }
-                let mut document = |texts: &[&str]| {
-                    crate::app_plugins::http::embed(root, &loaded, texts, Purpose::Document)
-                };
-                let sent =
-                    vectors::embed_round(connection, project, &plugin, &one_call, &mut document);
-                embedded += sent;
-                if sent < plugin.batch {
-                    break;
-                }
+            next
+        };
+        let (Some(name), Some(connection)) = (next, connection.as_mut()) else {
+            return;
+        };
+        let Ok(project) = ProjectId::new(&name) else {
+            continue;
+        };
+        let turn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            http_turn(connection, root, &project)
+        }));
+        let mut queue = HTTP.lock().unwrap_or_else(PoisonError::into_inner);
+        match turn {
+            Ok(Turn::Failed(key)) => {
+                queue.backoff.failed(&key, now_ms());
+                queue.wanted.clear();
             }
-            assert!(embedded <= HTTP_CALLS_MAX * plugin.batch);
-            embedded
+            Ok(Turn::Sent(key)) => queue.backoff.succeeded(&key),
+            Ok(Turn::Idle) | Err(_) => {}
         }
+    }
+}
+
+/// One project's HTTP turn: the waiting queries, then at most [`HTTP_CALLS_MAX`] one-batch
+/// document calls, the chosen plugin and its confirmed host read again before every call,
+/// queries included (rv-v3sec note 1). Inputs: the thread's connection, the engine root
+/// and the project. Output: what the turn did.
+fn http_turn(connection: &mut Connection, root: &Path, project: &ProjectId) -> Turn {
+    let http_chosen = |connection: &Connection| {
+        settings::chosen(connection, root)
+            .filter(|loaded| matches!(loaded.manifest.runs, Runs::Http(_)))
+    };
+    let Some(loaded) = http_chosen(connection) else {
+        return Turn::Idle;
+    };
+    let plugin = plugin_of(&loaded.manifest);
+    let still = |connection: &Connection| {
+        http_chosen(connection).is_some_and(|now| plugin_of(&now.manifest) == plugin)
+    };
+    let mut failed = false;
+    let mut sent = false;
+    let per_call = plugin.batch.min(vectors::QUERY_ROUND_MAX);
+    for _ in 0..vectors::QUERY_ROUND_MAX.div_ceil(per_call) {
+        if failed || !still(connection) {
+            break;
+        }
+        let mut query = |texts: &[&str]| {
+            let reply = crate::app_plugins::http::embed(root, &loaded, texts, Purpose::Query);
+            failed |= reply.is_err();
+            reply
+        };
+        let answered = vectors::embed_queries_up_to(connection, &plugin, per_call, &mut query);
+        sent |= answered > 0;
+        if answered < per_call {
+            break;
+        }
+    }
+    let one_call = vectors::Bounds {
+        round_chunks: plugin.batch,
+        ..vectors::BOUNDS
+    };
+    for _ in 0..HTTP_CALLS_MAX {
+        if failed || !still(connection) {
+            break;
+        }
+        let mut document = |texts: &[&str]| {
+            let reply = crate::app_plugins::http::embed(root, &loaded, texts, Purpose::Document);
+            failed |= reply.is_err();
+            reply
+        };
+        let stored = vectors::embed_round(connection, project, &plugin, &one_call, &mut document);
+        sent |= stored > 0;
+        if stored < plugin.batch {
+            break;
+        }
+    }
+    if failed {
+        Turn::Failed(plugin.key)
+    } else if sent {
+        Turn::Sent(plugin.key)
+    } else {
+        Turn::Idle
     }
 }
 
@@ -306,10 +451,10 @@ pub fn hybrid(
                 None => return words_only(Some(vectors::NOTE_UNAVAILABLE)),
             }
         }
-        Runs::Http(_) => match vectors::cached_query(connection, &plugin, &text) {
+        Runs::Http(_) => match vectors::cached_query(connection, &plugin, query) {
             Some(vector) => vector,
             None => {
-                let _ = vectors::ask_query(connection, &plugin.key, &text, now_ms());
+                let _ = vectors::ask_query(connection, &plugin.key, query, now_ms());
                 return words_only(Some(vectors::NOTE_QUERY_PENDING));
             }
         },

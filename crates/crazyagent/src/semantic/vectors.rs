@@ -147,22 +147,32 @@ impl Backoff {
     /// Whether a send to the plugin may go now. Inputs: the key and the time. Output: the
     /// answer; another key is never held.
     pub(crate) fn ready(&self, key: &str, now_ms: i64) -> bool {
-        let _ = (key, now_ms);
-        unimplemented!("rv-code2 HYB2-M1")
+        match &self.held {
+            Some((held, _, until)) if held == key => now_ms >= *until,
+            _ => true,
+        }
     }
 
     /// Records a failed send: the wait doubles from [`BACKOFF_FIRST_MS`] up to
     /// [`BACKOFF_MAX_MS`]. Inputs: the key and the time. Output: none.
     pub(crate) fn failed(&mut self, key: &str, now_ms: i64) {
-        let _ = (key, now_ms);
-        unimplemented!("rv-code2 HYB2-M1")
+        let failures = match &self.held {
+            Some((held, failures, _)) if held == key => failures.saturating_add(1),
+            _ => 1,
+        };
+        let wait = BACKOFF_FIRST_MS
+            .saturating_mul(1_i64 << (failures - 1).min(20))
+            .min(BACKOFF_MAX_MS);
+        assert!((BACKOFF_FIRST_MS..=BACKOFF_MAX_MS).contains(&wait));
+        self.held = Some((key.to_owned(), failures, now_ms.saturating_add(wait)));
     }
 
     /// Records a send that worked, ending the wait for that key. Input: the key. Output:
     /// none.
     pub(crate) fn succeeded(&mut self, key: &str) {
-        let _ = key;
-        unimplemented!("rv-code2 HYB2-M1")
+        if self.held.as_ref().is_some_and(|(held, ..)| held == key) {
+            self.held = None;
+        }
     }
 }
 
@@ -687,9 +697,10 @@ pub(crate) fn query_text(query: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_owned())
 }
 
-/// Records a query an HTTP plugin must embed on the indexer thread, keeping at most
-/// [`QUERY_ROWS_MAX`] per plugin key, newest asked first. Inputs: the connection, the plugin
-/// key, the masked query and the time. Output: done, or the failure.
+/// Records a query an HTTP plugin must embed off the tick, masked here with [`query_text`]
+/// so no caller can store or send it unmasked, keeping at most [`QUERY_ROWS_MAX`] per plugin
+/// key, newest asked first. Inputs: the connection, the plugin key, the untrusted query and
+/// the time. Output: done, nothing stored when nothing is left, or the failure.
 pub(crate) fn ask_query(
     connection: &Connection,
     key: &str,
@@ -697,7 +708,9 @@ pub(crate) fn ask_query(
     now_ms: i64,
 ) -> Result<(), EngineError> {
     assert!(!key.is_empty() && key.len() <= KEY_BYTES_MAX);
-    assert!(!query.is_empty() && query.len() <= CHUNK_BYTES_MAX);
+    let Some(query) = query_text(query) else {
+        return Ok(());
+    };
     connection
         .execute(
             "INSERT INTO search_query_vectors(plugin_key, query_sha, query, asked_ms)
@@ -726,7 +739,21 @@ pub(crate) fn embed_queries(
     plugin: &Plugin,
     embed: &mut Embed<'_>,
 ) -> usize {
-    let Ok(waiting) = waiting_queries(connection, &plugin.key) else {
+    embed_queries_up_to(connection, plugin, QUERY_ROUND_MAX, embed)
+}
+
+/// Embeds at most `most` waiting queries, newest first, as [`embed_queries`] does, so a
+/// caller can re-check the chosen plugin before each call. Inputs: the connection, the
+/// plugin, the most queries, 1 to [`QUERY_ROUND_MAX`], and the embed call. Output: how many
+/// were embedded.
+pub(crate) fn embed_queries_up_to(
+    connection: &mut Connection,
+    plugin: &Plugin,
+    most: usize,
+    embed: &mut Embed<'_>,
+) -> usize {
+    assert!((1..=QUERY_ROUND_MAX).contains(&most));
+    let Ok(waiting) = waiting_queries(connection, &plugin.key, most) else {
         return 0;
     };
     let mut embedded = 0;
@@ -748,11 +775,12 @@ pub(crate) fn embed_queries(
     embedded
 }
 
-/// The queries waiting for a plugin key, newest asked first, at most [`QUERY_ROUND_MAX`].
-/// Inputs: the connection and the key. Output: each query's SHA-256 and text.
+/// The queries waiting for a plugin key, newest asked first. Inputs: the connection, the
+/// key and the most to read. Output: each query's SHA-256 and text.
 fn waiting_queries(
     connection: &Connection,
     key: &str,
+    most: usize,
 ) -> Result<Vec<(String, String)>, EngineError> {
     let mut statement = connection
         .prepare(
@@ -762,12 +790,12 @@ fn waiting_queries(
         )
         .map_err(storage)?;
     let rows = statement
-        .query_map(params![key, QUERY_ROUND_MAX as i64], |row| {
+        .query_map(params![key, most as i64], |row| {
             Ok((row.get(0)?, row.get(1)?))
         })
         .map_err(storage)?;
     let found = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
-    assert!(found.len() <= QUERY_ROUND_MAX);
+    assert!(found.len() <= most);
     Ok(found)
 }
 
@@ -814,13 +842,15 @@ fn forget_queries(
     tx.commit().map_err(storage)
 }
 
-/// The stored vector of a masked query, once the indexer embedded it. Inputs: the
-/// connection, the plugin and the masked query. Output: the vector, or none.
+/// The stored vector of a query, masked here as [`ask_query`] masks it, once it was
+/// embedded. Inputs: the connection, the plugin and the untrusted query. Output: the
+/// vector, or none.
 pub(crate) fn cached_query(
     connection: &Connection,
     plugin: &Plugin,
     query: &str,
 ) -> Option<Vec<f32>> {
+    let query = query_text(query)?;
     let bytes: Vec<u8> = connection
         .query_row(
             "SELECT vector FROM search_query_vectors
