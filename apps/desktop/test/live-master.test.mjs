@@ -216,14 +216,39 @@ test("the wait for the master's terminal is bounded: overdue a minute after the 
   assert.equal(live.openOverdue(1_000, 61_000), true);
   const node = { id: "m", kind: "master", parent: null, label: "m", harness: "codex", status: null, status_label: null, account: null, terminal: "team-1" };
   const bare = { ...node, terminal: null };
-  assert.deepEqual(live.runningState({ kind: "starting" }, null, 5), { kind: "running", node: null, since: 5 });
-  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, bare, 9), { kind: "running", node: null, since: 5 }, "a master with no terminal yet keeps the clock");
-  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9), { kind: "running", node, since: null });
-  assert.deepEqual(live.runningState({ kind: "running", node, since: null }, null, 12), { kind: "running", node: null, since: 12 });
+  assert.deepEqual(live.runningState({ kind: "starting" }, null, 5, false), { kind: "running", node: null, since: 5 });
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, bare, 9, false), { kind: "running", node: null, since: 5 }, "a master with no terminal yet keeps the clock");
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, true), { kind: "running", node, since: null });
+  assert.deepEqual(live.runningState({ kind: "running", node, since: null }, null, 12, false), { kind: "running", node: null, since: 12 });
   const refused = { kind: "refused", code: "x", copy: "y" };
-  assert.equal(live.runningState(refused, node, 9), refused, "a refused start stays refused");
+  assert.equal(live.runningState(refused, node, 9, true), refused, "a refused start stays refused");
   const missing = { kind: "not_ready" };
-  assert.equal(live.runningState(missing, node, 9), missing);
+  assert.equal(live.runningState(missing, node, 9, true), missing);
+});
+
+test("the wait for the master's terminal ends only when it opens: a listed terminal keeps the clock until its first frame and one that closes with the switch on starts it again, as the TUI (rv-code V240-MASTER-UI N1, DEC-141)", () => {
+  const node = { id: "m", kind: "master", parent: null, label: "m", harness: "codex", status: null, status_label: null, account: null, terminal: "team-1" };
+  assert.deepEqual(live.runningState({ kind: "running", node: null, since: 5 }, node, 9, false), { kind: "running", node, since: 5 }, "listed with no first frame: the clock runs on");
+  assert.deepEqual(live.runningState({ kind: "running", node, since: 5 }, node, 9, true), { kind: "running", node, since: null }, "the first frame ends the wait");
+  assert.deepEqual(live.runningState({ kind: "running", node, since: null }, node, 12, false), { kind: "running", node, since: 12 }, "a terminal that closed with the switch on starts a new wait");
+  assert.deepEqual(live.runningState({ kind: "running", node, since: 12 }, node, 20, false), { kind: "running", node, since: 12 }, "a later read keeps that wait's start");
+});
+
+test("a listed master terminal with no first frame a minute on says so with Try again and keeps the terminal mounted for a late frame (rv-code V240-MASTER-UI N1, owner 11-12)", async () => {
+  const quiet = { kind: "ok", value: teamStatus({ live_master: true, live_problem: null }) };
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("overdue-listed", "", ${JSON.stringify(quiet)})`);
+    const overdue = await evaluate("Fixture.shown()");
+    const mounted = await evaluate('Boolean(document.querySelector(".tg-terminal"))');
+    const retried = await evaluate('Fixture.click("Try again")');
+    const asked = await evaluate("Fixture.startsAsked()");
+    return { overdue, mounted, retried, asked };
+  });
+  assert.ok(seen.overdue.text.includes(OVERDUE), seen.overdue.text);
+  assert.ok(seen.overdue.buttons.includes("Try again"), seen.overdue.buttons.join(", "));
+  assert.equal(seen.mounted, true, "the terminal stays mounted so a late first frame ends the note");
+  assert.equal(seen.retried, true);
+  assert.equal(seen.asked, 1, "Try again starts the live master once");
 });
 
 test("opening the master area starts a stopped or never-set live master once and leaves a running one alone", async () => {
