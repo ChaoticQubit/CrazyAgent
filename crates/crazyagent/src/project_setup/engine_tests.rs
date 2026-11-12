@@ -180,8 +180,8 @@ async fn new_project_creates_its_folder_documents_team_and_research_jobs() {
         catalog.default_team.master, "codex",
         "codex has no sign-in in this engine, and RCLI never leads the default team"
     );
-    assert_eq!(catalog.default_team.sub_harnesses[0].harness, "codex");
-    assert_eq!(catalog.default_team.sub_harnesses[0].agents, 2);
+    assert!(catalog.default_team.sub_harnesses.is_empty());
+    assert_eq!(catalog.default_team.max_agents, TEAM_AGENTS_MAX);
     assert_eq!(
         catalog.default_team_status, None,
         "Codex can run on the pool's keyless endpoint"
