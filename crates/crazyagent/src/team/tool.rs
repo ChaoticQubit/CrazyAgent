@@ -378,10 +378,10 @@ pub enum Proposal {
 }
 
 /// Serves the master's `delegate`, `ask`, `record_answer` and `wake` tools, with a mailbox its
-/// `MEMORY_TOOLS`, less the ones left out, over stdio until the client closes input. Takes the
-/// client's input and output, the absolute drop file and optional mailbox folder in the
-/// master's private temporary folder, and the tools left out. Returns an input or output
-/// failure or a refusal of a mailbox that is not a plain folder; drop calls are taken after the turn.
+/// `MEMORY_TOOLS`, less the ones left out, over stdio until the client closes input; drop
+/// calls are taken after the turn. Takes the client's input and output, the absolute drop
+/// file, the optional mailbox folder and the tools left out. Returns an input or output
+/// failure, or a refusal of a mailbox that is not a plain folder.
 pub fn serve(
     input: impl BufRead,
     output: impl Write,
@@ -1772,13 +1772,11 @@ fn proposal(recorded: Recorded) -> Option<Proposal> {
     }))
 }
 
-/// Reads the `crazyagent-task` blocks of a reply from a master without team tools (L6,
-/// F16): each opens with a line that is exactly `BLOCK_FENCE`, at the start of the line,
-/// so a quoted line never opens one, holds one JSON object of at most `BLOCK_BYTES_MAX`
-/// bytes read through the same schema and checks as a tool record, with a role checked as
-/// the `delegate` tool checks it, and closes with a line that is exactly ```. No other text
-/// of the reply is read. Takes the reply. Returns at most eight proposals in reply order
-/// and the distinct reasons blocks were not read.
+/// Reads the `crazyagent-task` blocks of a tools-off master's reply (L6, F16): a line exactly
+/// `BLOCK_FENCE` at its start, one JSON object of at most `BLOCK_BYTES_MAX` bytes read through
+/// the tool record's schema and checks, and a line exactly ```. No other reply text is read.
+/// Takes the reply. Returns at most eight proposals in reply order and the distinct reasons
+/// blocks were not read.
 pub fn reply_blocks(reply: &str) -> (Vec<Proposal>, Vec<&'static str>) {
     let mut found = Vec::new();
     let mut unread: Vec<&'static str> = Vec::new();

@@ -9308,13 +9308,11 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Ends a non-live master's turn on an owner or engine message: a failed turn marks the
-    /// message and notes why; a finished one stores the reply and hands out what the master
-    /// proposed with its `delegate` and `wake` tools or, without team tools, in its
-    /// `crazyagent-task` blocks (L6), never from other reply text, within the rounds one
-    /// owner message allows. Takes the project, the message, the reply text, how the turn
-    /// ended, its cause, the proposals and why any block was not read. Returns any SQLite
-    /// failure.
+    /// Ends a non-live master's message turn: a failed turn marks the message; a finished one
+    /// stores the reply and, within the owner message's rounds, hands out what the master
+    /// proposed by tool or `crazyagent-task` block (L6), never from other reply text. Takes
+    /// the project, the message, the reply, how and why the turn ended, the proposals and
+    /// why any block was not read. Returns any SQLite failure.
     #[allow(clippy::too_many_arguments)]
     fn finish_message(
         &mut self,
