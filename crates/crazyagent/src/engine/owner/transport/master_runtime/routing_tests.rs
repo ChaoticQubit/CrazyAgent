@@ -4017,7 +4017,10 @@ async fn the_master_gets_the_resolve_prompt_and_later_turns_show_the_engine_line
             .ends_with("Do not run git commit; CrazyAgent records your changes when you finish."),
         "{text}"
     );
-    assert_eq!(ended.changes.as_deref(), Some(CHANGES_WAITING));
+    assert_eq!(
+        ended.changes, None,
+        "the turn before it took the updating set back to pending, so the resolve turn only grows it (F31)"
+    );
     assert_eq!(reviewed.len(), 1, "{reviewed:?}");
     assert_eq!(reviewed[0].id, pending.id);
     assert_eq!(reviewed[0].state, crate::landing::ChangeState::Pending);

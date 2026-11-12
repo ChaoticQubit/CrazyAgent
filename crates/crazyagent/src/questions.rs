@@ -288,6 +288,7 @@ enum How<'a> {
     Withdraw { own: bool },
     Replace,
     Relay { text: &'a str, key: i64, own: bool },
+    Carried(Option<&'a str>),
 }
 
 impl ClosedBy {
@@ -862,19 +863,11 @@ pub(crate) fn settle_linked(
     let reply = reply
         .map(crate::memory::visible_text)
         .and_then(|text| plain(&bound_text(&text, ANSWER_BYTES_MAX), ANSWER_BYTES_MAX, true));
-    let settled = match reply.as_deref() {
-        Some(text) => settle(
-            tx,
-            question,
-            How::Answer(text, AnsweredBy::Owner),
-            &owner(),
-            0,
-        )?,
-        None => {
-            let writer = asker_writer(&question.asker).unwrap_or_else(owner);
-            settle(tx, question, How::Dismiss, &writer, 0)?
-        }
+    let writer = match reply {
+        Some(_) => owner(),
+        None => asker_writer(&question.asker).unwrap_or_else(owner),
     };
+    let settled = settle(tx, question, How::Carried(reply.as_deref()), &writer, 0)?;
     Ok((settled == Settlement::Settled).then_some(project))
 }
 
@@ -1426,10 +1419,20 @@ fn settle(
             None,
             Some(ClosedBy::Relay),
         ),
+        How::Carried(Some(text)) => (
+            QuestionStatus::Answered,
+            Some(text),
+            Some(AnsweredBy::Owner),
+            None,
+        ),
+        How::Carried(None) => (QuestionStatus::Dismissed, None, None, None),
     };
     let linked = coord_link(tx, question.id)?;
+    let carried = matches!(how, How::Carried(_));
+    assert!(!carried || linked.is_some());
     let by_owner = matches!(how, How::Answer(..) | How::Dismiss);
     let told = match linked {
+        Some(_) if carried => true,
         Some(coord) if by_owner => tell_coord(tx, coord, answer)?,
         Some(coord) => {
             end_coord(tx, coord)?;

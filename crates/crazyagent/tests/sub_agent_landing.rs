@@ -106,6 +106,11 @@ impl Team {
         crazyagent::coord::ensure(&db).unwrap();
         db.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
             .unwrap();
+        db.execute(
+            "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+            [PROJECT],
+        )
+        .unwrap();
         crazyagent::activity::initialize(&db).unwrap();
         let worktree = project.join(".crazyagent/worktrees/agent-1");
         let branch = landing::claim_task_branch(&db, &project, &worktree, "lead").unwrap();

@@ -3146,9 +3146,10 @@ impl TeamView {
     /// Draws the Team view for the Team screen's settings box and the Team settings screen,
     /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
-    /// blank rows before the panel and before the tasks go first, then the plan line while
-    /// every harness can run, then the settings summary folds toward its first row, so every
-    /// setting shows while blank rows or the plan line can make room.
+    /// blank rows before the panel and before the tasks go first, then the focused agent's
+    /// Tools and Working copy rows, then the plan line while every harness can run, then the
+    /// settings summary folds toward its first row, so every setting shows while blank rows,
+    /// those panel rows or the plan line can make room.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -3213,6 +3214,7 @@ impl TeamView {
         let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
         let picking = self.master_pick.is_some();
+        let mut detail = false;
         let (panel, caret) = match (&self.draft, &self.branch_edit, self.wake, self.message_row) {
             _ if picking => (self.pick_rows(content, look), None),
             (Some(draft), _, _, _) => {
@@ -3227,7 +3229,10 @@ impl TeamView {
             (None, None, None, Some(row)) => (self.message_setting_rows(row, content, look), None),
             (None, None, None, None) => match &self.coord {
                 Some(edit) => self.coord_rows(edit, content, look),
-                None => (self.panel(content, accounts, look), None),
+                None => {
+                    detail = true;
+                    (self.panel(content, accounts, false, look), None)
+                }
             },
         };
         let footer = self.footer(content, look);
@@ -3235,13 +3240,21 @@ impl TeamView {
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
         let spacers = over.min(2);
+        let whole = panel.len();
+        let panel = if detail && over > spacers {
+            self.panel(content, accounts, true, look)
+        } else {
+            panel
+        };
+        let briefed = whole - panel.len();
+        let left = (over - spacers).saturating_sub(briefed);
         let plan_can_go = status.harnesses.iter().all(|harness| harness.runnable)
             && status
                 .harnesses
                 .iter()
                 .any(|harness| harness.role == AgentRole::Master);
-        let plan_gives_way = usize::from(plan_can_go && over > spacers);
-        let folded = (over - spacers - plan_gives_way).min(summary_rows.saturating_sub(1));
+        let plan_gives_way = usize::from(plan_can_go && left > 0);
+        let folded = (left - plan_gives_way).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
@@ -3257,7 +3270,7 @@ impl TeamView {
         if folded > 0 {
             lines.drain(1..=folded);
         }
-        let fixed = fixed - spacers - plan_gives_way - folded;
+        let fixed = fixed - spacers - briefed - plan_gives_way - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -3600,7 +3613,11 @@ impl TeamView {
         rows
     }
 
-    fn panel(&self, content: usize, accounts: &[AccountRow], look: &Look) -> Vec<Row> {
+    /// The panel under the lists for the focused agent or task. When `brief`, for a short
+    /// window, an agent's Tools and Working copy rows give way; a task's panel stays whole.
+    /// Takes the content width, the accounts, whether to be brief and the look. Returns the
+    /// rows.
+    fn panel(&self, content: usize, accounts: &[AccountRow], brief: bool, look: &Look) -> Vec<Row> {
         let entry =
             |label: &str, value: String| Row::of(label, look.muted).pad(14).push(value, look.fg);
         let mut rows = Vec::new();
@@ -3629,7 +3646,9 @@ impl TeamView {
                     "Account",
                     account_name(agent.account.as_deref(), accounts),
                 ));
-                rows.push(entry("Tools", tools_word(agent.tools).into()));
+                if !brief {
+                    rows.push(entry("Tools", tools_word(agent.tools).into()));
+                }
                 if agent.owner_stopped {
                     rows.push(Row::of(
                         "Stopped by you. Wake it from Finished to start it again.",
@@ -3670,7 +3689,9 @@ impl TeamView {
                         if let Some(last) = self.last_task(agent) {
                             rows.push(entry("Last task", title(&last.prompt)));
                         }
-                        if let Some(path) = &agent.worktree {
+                        if let Some(path) = &agent.worktree
+                            && !brief
+                        {
                             rows.push(entry("Working copy", short_path(path)));
                         }
                     }

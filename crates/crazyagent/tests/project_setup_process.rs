@@ -169,7 +169,11 @@ async fn real_engine_process_creates_and_keeps_a_project_folder_and_research_job
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.team.sub_harnesses[0].agents, 3);
+    assert!(stored.team.sub_harnesses.is_empty(), "{:?}", stored.team);
+    assert_eq!(
+        stored.team.max_agents,
+        crazyagent::project_setup::TEAM_AGENTS_MAX
+    );
     let context = controller.project_context(project).await.unwrap();
     assert_eq!(
         context.items.iter().map(|i| i.kind).collect::<Vec<_>>(),
