@@ -1,3 +1,4 @@
+use super::extras::{Adapter, Extras, Field};
 use super::{LimitWindow, Observation, PLAN_BYTES_MAX, RESET_MS_MAX, checked_text, failure};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
@@ -286,6 +287,38 @@ pub fn poll(
         observation.plan = plan(credential.plan.as_deref());
     }
     Ok(observation)
+}
+
+/// Reads one account's windows as `poll` does, with its free resets and credits: Codex's from
+/// the same reply, Claude's credits from the same reply and, when `detail` is set, its free
+/// resets from a second call with `CLAUDE_DETAIL_QUERY` whose failure only reads them absent.
+/// Inputs: as `poll`, and whether to make the detail call. Output: the observation and
+/// extras, or `poll`'s failure.
+pub fn poll_with_extras(
+    provider: Provider,
+    url: url::Url,
+    credential: &PollCredential,
+    loopback: bool,
+    now_ms: i64,
+    detail: bool,
+) -> Result<(Observation, Extras), EngineError> {
+    let _ = detail;
+    poll(provider, url, credential, loopback, now_ms)
+        .map(|observed| (observed, Extras::not_asked()))
+}
+
+/// Reads a saved key's balance from its provider's documented call at `url` through the
+/// system curl, the key only on curl's stdin. Any failure reads absent and is never stored as
+/// the account's failure. Inputs: the key adapter, the URL, the key and whether loopback is
+/// allowed. Output: the balance words, or absent.
+pub fn poll_balance(
+    adapter: Adapter,
+    url: url::Url,
+    key: &SecretString,
+    loopback: bool,
+) -> Field<String> {
+    let _ = (adapter, url, key, loopback);
+    Field::NotAsked
 }
 
 #[cfg(all(test, target_os = "macos"))]

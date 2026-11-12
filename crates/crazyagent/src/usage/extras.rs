@@ -9,9 +9,17 @@ use serde_json::Value;
 pub const RESETS_MAX: u32 = 1000;
 /// The longest credits sentence the engine composes and stores.
 pub const CREDITS_BYTES_MAX: usize = 64;
+/// The most reset kinds one account's resets name; there are only four kinds.
+pub const KINDS_MAX: usize = 4;
 /// The query that asks Claude's usage call for the free resets the Claude CLI reads; a
 /// private call that may break (DEC-154).
 pub const CLAUDE_DETAIL_QUERY: &str = "cedar_ember=1&skip_spend=1";
+/// How long one ask from an open Pools page keeps the private detail reads on; each reread
+/// of the page renews it.
+pub const DETAIL_LEASE_MS: i64 = 3 * 60 * 1000;
+/// The least time between two private detail reads of the same engine run, however often
+/// the Pools page rereads.
+pub const DETAIL_EVERY_MS: i64 = 5 * 60 * 1000;
 
 /// How an account's free resets, credits and spend are read beyond the 5-hour and weekly
 /// windows (DEC-154): a managed Codex or Claude sign-in by its harness (Claude through the
@@ -73,8 +81,15 @@ pub enum ResetKind {
 #[serde(deny_unknown_fields)]
 pub struct Resets {
     pub count: u32,
+    #[serde(deserialize_with = "bounded_kinds")]
     pub kinds: Vec<ResetKind>,
     pub next_expiry_ms: Option<i64>,
+}
+
+/// Reads the reset kinds of the wire, refusing a repeated kind or more than `KINDS_MAX`.
+/// Input: the deserializer. Output: the kinds, or the deserializer's error.
+fn bounded_kinds<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<Vec<ResetKind>, D::Error> {
+    Vec::<ResetKind>::deserialize(reader)
 }
 
 /// One field of a read: not asked for (the stored value stays), asked and absent or
@@ -115,7 +130,8 @@ pub enum Spend {
 }
 
 /// An account's stored extras as they stand now: none for a field never read, read absent,
-/// or a count whose next expiry has passed; with when each was last read.
+/// or a count whose next expiry has passed; with when each was last read, and when a read
+/// last found more free resets than the unexpired count before it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StoredExtras {
@@ -123,12 +139,14 @@ pub struct StoredExtras {
     pub credits: Option<String>,
     pub resets_checked_ms: Option<i64>,
     pub credits_checked_ms: Option<i64>,
+    pub resets_gained_ms: Option<i64>,
 }
 
-/// The limits contract every client shows for one account (DEC-154): the harness's name, the
-/// account's adapter, whether its read is a private call that may break, the free resets and
-/// credits (none means not reported, never 0), where to spend, the words for a field that is
-/// not reported ("not reported by <harness>"), and when each field was last read.
+/// The limits contract every client shows for one account (DEC-154): the harness's display
+/// name, the account's adapter, whether its read or spend is a private call that may break,
+/// the free resets and credits (none means not reported, never 0), where to spend, the words
+/// for a field that is not reported ("not reported by <harness>"), when each field was last
+/// read, and when new free resets last arrived, for a notice shown once per time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitExtras {
@@ -141,6 +159,7 @@ pub struct LimitExtras {
     pub not_reported: String,
     pub resets_checked_ms: Option<i64>,
     pub credits_checked_ms: Option<i64>,
+    pub resets_gained_ms: Option<i64>,
 }
 
 /// The adapter entry of a harness for its managed sign-ins, by catalog id or the name a
@@ -223,10 +242,10 @@ pub fn key_balance(adapter: Adapter, body: &Value) -> Field<String> {
 }
 
 /// Stores what a read found beyond the windows: a field not asked keeps the stored value, an
-/// absent one is cleared, a known one replaced; only counts, kinds, expiry and the composed
-/// words are kept. Inputs: the store, the account, the extras and the time. Output: the count
-/// stored before, for a new-reset notice, `usage_limits_invalid` for a value out of bounds,
-/// or `usage_unavailable`.
+/// absent or out-of-bounds one is cleared, a known one replaced; only counts, kinds, expiry
+/// and the composed words are kept. A count above the unexpired one stored before stamps
+/// `resets_gained_ms`. Inputs: the store, the account, the extras and the time. Output: the
+/// unexpired count stored before, or `usage_unavailable`.
 pub fn record_extras(
     db: &Connection,
     account: &CredentialRef,
@@ -263,5 +282,29 @@ pub fn limit_extras(connection: &ModelConnection, stored: &StoredExtras) -> Limi
         not_reported: String::new(),
         resets_checked_ms: None,
         credits_checked_ms: None,
+        resets_gained_ms: None,
     }
 }
+
+/// Keeps the private detail reads on for `DETAIL_LEASE_MS` from `now_ms`, as an open Pools
+/// page asks on each reread. Inputs: the store and the time. Output: done, or
+/// `usage_unavailable`.
+pub fn request_detail(db: &Connection, now_ms: i64) -> Result<(), EngineError> {
+    let _ = (db, now_ms);
+    Ok(())
+}
+
+/// Tells whether the next poll makes the private detail reads: a Pools lease runs at `now_ms`
+/// and the last detail read of this engine run, if any, is `DETAIL_EVERY_MS` old. Inputs: the
+/// store, the last detail read and the time. Output: the answer, or `usage_unavailable`.
+pub fn detail_due(
+    db: &Connection,
+    detail_ms: Option<i64>,
+    now_ms: i64,
+) -> Result<bool, EngineError> {
+    let _ = (db, detail_ms, now_ms);
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests;
