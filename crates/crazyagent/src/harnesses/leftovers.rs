@@ -85,26 +85,44 @@ const TABLE_POLL: Duration = Duration::from_millis(5);
 #[cfg(unix)]
 const TABLE_GRACE: Duration = Duration::from_millis(100);
 /// The longest a Full access stop spends finding and checking what the agent left: one
-/// listing before the kill, the listing of its token's processes after it and the
-/// settling, whose last listing may start one poll after `SETTLE` ends.
+/// listing before the kill, the listing of its token's processes after it, the settling,
+/// whose last listing may start one poll after `SETTLE` ends, and the listing that names
+/// what is left.
 #[cfg(unix)]
 pub(crate) const STOP_TIME: Duration = TABLE_TIME
     .saturating_add(TABLE_GRACE)
-    .saturating_mul(3)
+    .saturating_mul(4)
     .saturating_add(SETTLE)
     .saturating_add(SETTLE_POLL);
 /// No Full access stop looks for leftovers where no process table is read.
 #[cfg(not(unix))]
 pub(crate) const STOP_TIME: Duration = Duration::ZERO;
-/// The command that lists every process with what the lineage needs of it.
+/// The command that lists every process with what the lineage needs of it: fixed fields
+/// only, none of which an agent can put text in, so one line is always one process
+/// (L1 r1 F1). Names come from [`PS_NAMES`], never from this table.
 #[cfg(unix)]
 const PS_TABLE: &[&str] = &[
     "/bin/ps",
     "-A",
     "-ww",
     "-o",
-    "pid=,ppid=,uid=,stat=,lstart=,comm=",
+    "pid=,ppid=,uid=,stat=,lstart=",
 ];
+/// The fields of one [`PS_TABLE`] line: id, parent, user, state and the five of the start.
+#[cfg(unix)]
+const TABLE_FIELDS: usize = 9;
+/// The command, before its `-p` list, that names the processes a report shows.
+#[cfg(unix)]
+const PS_NAMES: &[&str] = &["/bin/ps", "-ww", "-o", "pid=,comm="];
+/// The command, before its `-p` list, that checks the processes a hold is about to signal
+/// right before it does, with fixed fields only: id, user and the five of the start.
+#[cfg(unix)]
+const PS_RECHECK: &[&str] = &["/bin/ps", "-o", "pid=,uid=,lstart="];
+#[cfg(unix)]
+const RECHECK_FIELDS: usize = 7;
+/// The most processes one hold signals in one pass, so the `-p` list stays bounded.
+#[cfg(unix)]
+const SIGNALLED_MAX: usize = 256;
 /// The command that lists every process with its environment as macOS shows it to its
 /// user, the same as KERN_PROCARGS2.
 #[cfg(target_os = "macos")]
@@ -628,6 +646,7 @@ fn watch(key: u64, mut lineage: Lineage) {
         if lineage.known.is_empty() && (checked || begun.elapsed() >= UNCHECKED_HOLD_MAX) {
             break;
         }
+        lineage.name();
         named(key, lineage.names_now(), lineage.report_now());
         std::thread::sleep(if state == HoldState::Ending {
             ENDING_POLL
@@ -754,15 +773,17 @@ impl Lineage {
         None
     }
 
-    /// Sends `signal` to each target [`targets`] picks from `rows`, one process at a time,
-    /// never to a group. Inputs: the lineage, a table read in this pass and the signal.
-    /// Output: how many were signalled.
+    /// Sends `signal` to each target [`targets`] picks from `rows` that [`Self::recheck`] still
+    /// finds as known right before, one process at a time, never to a group. Inputs: the
+    /// lineage, a table read in this pass and the signal. Output: how many were signalled.
     #[cfg(unix)]
     fn signal(&self, rows: &[Row], signal: Ending) -> usize {
         let Ok(own) = i32::try_from(std::process::id()) else {
             return 0;
         };
-        let picked = targets(&self.known, rows, own, &parents(rows));
+        let mut picked = targets(&self.known, rows, own, &parents(rows));
+        picked.truncate(SIGNALLED_MAX);
+        let picked = self.recheck(&picked);
         let sent = match signal {
             Ending::Term => rustix::process::Signal::TERM,
             Ending::Kill => rustix::process::Signal::KILL,
@@ -774,6 +795,89 @@ impl Lineage {
         }
         picked.len()
     }
+
+    /// Reads, right before a signal, each picked process's id, user and start alone in a
+    /// [`PS_RECHECK`] listing of fixed fields, and keeps only those that show this user and
+    /// the start they are known by, so neither a reused id nor a line an agent wrote is ever
+    /// signalled. A listing that fails or is malformed keeps none. Inputs: the lineage and the
+    /// picked ids. Output: the ids to signal now.
+    #[cfg(unix)]
+    fn recheck(&self, picked: &[i32]) -> Vec<i32> {
+        if picked.is_empty() {
+            return Vec::new();
+        }
+        let user = rustix::process::getuid().as_raw();
+        let mut argv = owned(PS_RECHECK);
+        argv.push("-p".to_owned());
+        argv.push(
+            picked
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let Ok(output) = read_bounded(argv, &mut None, None) else {
+            return Vec::new();
+        };
+        let Some(found) = rechecked(&String::from_utf8_lossy(&output), picked) else {
+            return Vec::new();
+        };
+        let confirmed: Vec<i32> = picked
+            .iter()
+            .copied()
+            .filter(|pid| {
+                found.get(pid).is_some_and(|(owner, started)| {
+                    *owner == user
+                        && self
+                            .known
+                            .iter()
+                            .any(|known| known.pid == *pid && known.started == *started)
+                })
+            })
+            .collect();
+        assert!(confirmed.len() <= picked.len());
+        confirmed
+    }
+
+    /// Names the first `NAMED_MAX` known processes by what they run now, from one
+    /// [`PS_NAMES`] listing of only those ids. A listing that fails or is malformed keeps the
+    /// names they had. Input: the lineage. Output: none.
+    #[cfg(unix)]
+    fn name(&mut self) {
+        let asked: Vec<i32> = self
+            .known
+            .iter()
+            .take(NAMED_MAX)
+            .map(|process| process.pid)
+            .collect();
+        if asked.is_empty() {
+            return;
+        }
+        let mut argv = owned(PS_NAMES);
+        argv.push("-p".to_owned());
+        argv.push(
+            asked
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let Ok(output) = read_bounded(argv, &mut None, None) else {
+            return;
+        };
+        let Some(named) = names(&String::from_utf8_lossy(&output), &asked) else {
+            return;
+        };
+        for process in &mut self.known {
+            if let Some(program) = named.get(&process.pid) {
+                process.program.clone_from(program);
+            }
+        }
+    }
+
+    /// Names nothing where no process table is read. Input: unused. Output: none.
+    #[cfg(not(unix))]
+    fn name(&mut self) {}
 
     /// Finds a Full access agent's processes before its group is killed. Inputs: the
     /// group's leader, whose id is also its session's, and the launch's token, if it gave
@@ -911,6 +1015,7 @@ impl Lineage {
                 return Ok(());
             }
             if self.known.is_empty() || self.pending.is_some() || Instant::now() >= until {
+                self.name();
                 return Err(Unstopped::Left(Leftovers(Box::new(self))));
             }
             std::thread::sleep(SETTLE_POLL);
@@ -933,7 +1038,7 @@ impl Lineage {
     }
 
     /// Applies one table read: keeps each known process still running with the same start,
-    /// under the program it runs now, then adds this user's processes in the leader's session
+    /// under the name it was last read by, then adds this user's processes in the leader's session
     /// and those whose parent is kept. Session members join only while the leader runs with
     /// the start its first read found, so a stranger that reuses a dead leader's id never
     /// joins (SECAUDIT-SETSID-LEFTOVER r1 L1). Inputs: the lineage and the rows. Output: none.
@@ -945,8 +1050,15 @@ impl Lineage {
         });
         let mut kept: Vec<Process> = rows
             .iter()
-            .filter(|(process, ..)| self.known.iter().any(|known| same(known, process)))
-            .map(|(process, ..)| process.clone())
+            .filter_map(|(process, ..)| {
+                self.known
+                    .iter()
+                    .find(|known| same(known, process))
+                    .map(|known| Process {
+                        program: known.program.clone(),
+                        ..process.clone()
+                    })
+            })
             .collect();
         loop {
             let found = rows.iter().find(|(process, parent, member)| {
@@ -1136,7 +1248,7 @@ fn table(
     argv: &'static [&'static str],
     pending: &mut Option<Listing>,
 ) -> Result<Vec<(Process, i32)>, Unstopped> {
-    let output = read_bounded(argv, pending, None)?;
+    let output = read_bounded(owned(argv), pending, None)?;
     let listing = String::from_utf8_lossy(&output);
     let user = rustix::process::getuid().as_raw();
     let own = i32::try_from(std::process::id()).map_err(|_| Unstopped::Uncertain)?;
@@ -1218,7 +1330,7 @@ fn carrying(
     pending: &mut Option<Listing>,
 ) -> Result<Vec<(i32, String)>, Unstopped> {
     let word = format!("{LINEAGE_VARIABLE}={}", token.as_str());
-    let output = read_bounded(PS_ENVIRONMENT, pending, Some(word))?;
+    let output = read_bounded(owned(PS_ENVIRONMENT), pending, Some(word))?;
     let listing = String::from_utf8_lossy(&output);
     let user = rustix::process::getuid().as_raw();
     let own = i32::try_from(std::process::id()).map_err(|_| Unstopped::Uncertain)?;
@@ -1260,7 +1372,7 @@ fn carrying(
 /// Output: the output of a run that exited 0 within both bounds, or uncertain.
 #[cfg(unix)]
 fn read_bounded(
-    argv: &'static [&'static str],
+    argv: Vec<String>,
     pending: &mut Option<Listing>,
     keep: Option<String>,
 ) -> Result<Vec<u8>, Unstopped> {
@@ -1276,7 +1388,7 @@ fn read_bounded(
     std::thread::Builder::new()
         .name("lineage-table".into())
         .spawn(move || {
-            let _ = sender.send(run_listing(argv, deadline, keep));
+            let _ = sender.send(run_listing(&argv, deadline, keep));
         })
         .map_err(|_| Unstopped::Uncertain)?;
     match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()) + TABLE_GRACE) {
@@ -1295,7 +1407,7 @@ fn read_bounded(
 /// deadline and the word to keep lines by, if any. Output: the output of a run that exited
 /// 0 within both bounds, or none.
 #[cfg(unix)]
-fn run_listing(argv: &[&str], deadline: Instant, keep: Option<String>) -> Option<Vec<u8>> {
+fn run_listing(argv: &[String], deadline: Instant, keep: Option<String>) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let (program, arguments) = argv.split_first()?;
@@ -1353,15 +1465,25 @@ fn run_listing(argv: &[&str], deadline: Instant, keep: Option<String>) -> Option
     }
 }
 
+/// Copies a listing command into the owned arguments [`read_bounded`] takes. Input: the
+/// command. Output: its arguments.
+#[cfg(unix)]
+fn owned(argv: &[&str]) -> Vec<String> {
+    argv.iter().map(|argument| (*argument).to_owned()).collect()
+}
+
 /// Reads a listing line by line, at most `ENVIRONMENT_BYTES_MAX` bytes, and keeps of each
 /// line that holds `word` as a whole field only its first `KEPT_FIELDS` fields, so no
-/// environment text is kept. Inputs: the listing, the word and where to keep. Output: Ok,
-/// or the read's error, an overlong listing included.
+/// environment text is kept. A listing in which two lines start with the same process id is
+/// refused whole: a line that copies a real process's id can only come from text an agent
+/// put in its arguments or environment (L1 r1 F1). Inputs: the listing, the word and where
+/// to keep. Output: Ok, or the read's error, an overlong or forged listing included.
 #[cfg(unix)]
 fn kept_lines(listing: impl std::io::Read, word: &[u8], kept: &mut Vec<u8>) -> std::io::Result<()> {
     use std::io::BufRead;
     let mut lines = std::io::BufReader::new(listing.take(ENVIRONMENT_BYTES_MAX + 1));
     let (mut line, mut total) = (Vec::new(), 0u64);
+    let mut seen: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
     loop {
         line.clear();
         let read = lines.read_until(b'\n', &mut line)?;
@@ -1375,6 +1497,18 @@ fn kept_lines(listing: impl std::io::Read, word: &[u8], kept: &mut Vec<u8>) -> s
         let fields = line
             .split(u8::is_ascii_whitespace)
             .filter(|field| !field.is_empty());
+        if let Some(pid) = fields
+            .clone()
+            .next()
+            .and_then(|field| std::str::from_utf8(field).ok())
+            .and_then(|field| field.parse::<i32>().ok())
+            && !seen.insert(pid)
+        {
+            return Err(std::io::Error::other("listing_pid_twice"));
+        }
+        if seen.len() > TABLE_ROWS_MAX {
+            return Err(std::io::Error::other("listing_too_long"));
+        }
         if fields.clone().any(|field| field == word) {
             for field in fields.take(KEPT_FIELDS) {
                 kept.extend_from_slice(field);
@@ -1385,14 +1519,17 @@ fn kept_lines(listing: impl std::io::Read, word: &[u8], kept: &mut Vec<u8>) -> s
     }
 }
 
-/// Picks from a `ps -o pid=,ppid=,uid=,stat=,lstart=,comm=` listing the processes of `user`
-/// other than `own` that are not zombies. Inputs: the listing, the user id and the engine's
-/// id. Output: each process with its parent's id, or uncertain past `TABLE_ROWS_MAX` rows.
+/// Picks from a [`PS_TABLE`] listing the processes of `user` other than `own` that are not
+/// zombies. Every line must be one process in the table's fixed fields, and no id may show
+/// twice; otherwise the whole listing is refused, never read around (L1 r1 F1). The
+/// processes carry no name: [`Lineage::name`] reads names apart. Inputs: the listing, the
+/// user id and the engine's id. Output: each process with its parent's id, or uncertain.
 #[cfg(unix)]
 fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unstopped> {
     let mut rows = Vec::new();
+    let mut seen: std::collections::BTreeSet<i32> = std::collections::BTreeSet::new();
     for line in listing.lines() {
-        if rows.len() == TABLE_ROWS_MAX {
+        if seen.len() == TABLE_ROWS_MAX {
             return Err(Unstopped::Uncertain);
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -1401,19 +1538,41 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
             fields.get(1).and_then(|field| field.parse::<i32>().ok()),
             fields.get(2).and_then(|field| field.parse::<u32>().ok()),
         ) else {
-            continue;
+            return Err(Unstopped::Uncertain);
         };
-        if fields.len() < 10
-            || owner != user
-            || pid == own
-            || pid <= 1
-            || fields[3].starts_with('Z')
-        {
+        if fields.len() != TABLE_FIELDS || !seen.insert(pid) {
+            return Err(Unstopped::Uncertain);
+        }
+        if owner != user || pid == own || pid <= 1 || fields[3].starts_with('Z') {
             continue;
         }
-        let path = fields[9..].join(" ");
+        rows.push((
+            Process {
+                pid,
+                started: fields[4..TABLE_FIELDS].join(" "),
+                program: String::new(),
+            },
+            parent,
+        ));
+    }
+    assert!(rows.len() <= seen.len());
+    Ok(rows)
+}
+
+/// Reads the names a [`PS_NAMES`] listing gives the processes it was asked for: each line one
+/// asked-for id, then its program's path, cut to the basename's visible characters. A line
+/// that is not an asked-for id, or an id named twice, refuses every name. Inputs: the listing
+/// and the asked-for ids. Output: each id's name, or none.
+#[cfg(unix)]
+fn names(listing: &str, asked: &[i32]) -> Option<BTreeMap<i32, String>> {
+    let mut named = BTreeMap::new();
+    for line in listing.lines() {
+        let line = line.trim_start();
+        let (pid, path) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+        let pid = pid.parse::<i32>().ok().filter(|pid| asked.contains(pid))?;
         let program: String = crate::memory::visible_text(
             &path
+                .trim()
                 .rsplit('/')
                 .next()
                 .unwrap_or_default()
@@ -1424,34 +1583,55 @@ fn parse(listing: &str, user: u32, own: i32) -> Result<Vec<(Process, i32)>, Unst
         .chars()
         .take(PROGRAM_CHARS_MAX)
         .collect();
-        rows.push((
-            Process {
-                pid,
-                started: fields[4..9].join(" "),
-                program,
-            },
-            parent,
-        ));
+        if named.insert(pid, program).is_some() {
+            return None;
+        }
     }
-    Ok(rows)
+    assert!(named.len() <= asked.len());
+    Some(named)
+}
+
+/// Reads a [`PS_RECHECK`] listing: each line one asked-for id with its user and start, no id
+/// twice and nothing else. Inputs: the listing and the asked-for ids. Output: each id's user
+/// and start, or none when any line is not so.
+#[cfg(unix)]
+fn rechecked(listing: &str, asked: &[i32]) -> Option<BTreeMap<i32, (u32, String)>> {
+    let mut found = BTreeMap::new();
+    for line in listing.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() != RECHECK_FIELDS {
+            return None;
+        }
+        let pid = fields[0]
+            .parse::<i32>()
+            .ok()
+            .filter(|pid| asked.contains(pid))?;
+        let owner = fields[1].parse::<u32>().ok()?;
+        if found
+            .insert(pid, (owner, fields[2..RECHECK_FIELDS].join(" ")))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    assert!(found.len() <= asked.len());
+    Some(found)
 }
 
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
     use super::*;
 
-    const LISTING: &str = "  501   1 501 Ss   Wed Oct 28 03:10:00 2026     /usr/bin/perl\n\
-        602 501 501 S Wed Oct 28 03:10:01 2026 /Applications/My Tool.app/Contents/MacOS/my tool\n\
-        603 501   0 S Wed Oct 28 03:10:01 2026 /usr/sbin/root-owned\n\
-        604 501 501 R+ Wed Oct 28 03:10:01 2026 /tmp/\u{202e}evil\n\
-        605 501 501 Z Wed Oct 28 03:10:01 2026 <defunct>\n\
-        700   1 501 S Wed Oct 28 03:10:02 2026 /bin/engine\n\
-        garbage line\n";
+    const LISTING: &str = "  501   1 501 Ss   Wed Oct 28 03:10:00 2026\n\
+        602 501 501 S Wed Oct 28 03:10:01 2026\n\
+        603 501   0 S Wed Oct 28 03:10:01 2026\n\
+        605 501 501 Z Wed Oct 28 03:10:01 2026\n\
+        700   1 501 S Wed Oct 28 03:10:02 2026\n";
 
     #[test]
-    fn the_table_keeps_this_users_other_running_processes_with_visible_program_names() {
+    fn the_table_keeps_this_users_other_running_processes_by_fixed_fields_only() {
         let rows = parse(LISTING, 501, 700).unwrap();
-        let named: Vec<(i32, i32, &str, &str)> = rows
+        let read: Vec<(i32, i32, &str, &str)> = rows
             .iter()
             .map(|(process, parent)| {
                 (
@@ -1463,13 +1643,82 @@ pub(crate) mod tests {
             })
             .collect();
         assert_eq!(
-            named,
+            read,
             [
-                (501, 1, "Wed Oct 28 03:10:00 2026", "perl"),
-                (602, 501, "Wed Oct 28 03:10:01 2026", "my tool"),
-                (604, 501, "Wed Oct 28 03:10:01 2026", "\\u202eevil"),
+                (501, 1, "Wed Oct 28 03:10:00 2026", ""),
+                (602, 501, "Wed Oct 28 03:10:01 2026", ""),
             ]
         );
+        assert!(
+            PS_TABLE
+                .last()
+                .is_some_and(|fields| !fields.contains("comm")
+                    && !fields.contains("command")
+                    && !fields.contains("args"))
+        );
+    }
+
+    /// A table line an agent could forge, by putting a newline and a made-up row in its
+    /// arguments or program path, copies a real process's id, or breaks the fixed fields;
+    /// either refuses the whole table, so no forged row is ever read (L1 r1 F1).
+    #[test]
+    fn a_table_with_an_id_twice_or_a_line_out_of_its_fixed_fields_is_refused_whole() {
+        let forged = format!("{LISTING}  602 501 501 S Wed Oct 28 03:10:01 2026\n");
+        assert!(matches!(
+            parse(&forged, 501, 700),
+            Err(Unstopped::Uncertain)
+        ));
+        for broken in [
+            format!("{LISTING}garbage line\n"),
+            format!("{LISTING}  800 501 501 S Wed Oct 28 03:10:01 2026 /opt/tool\n"),
+            format!("{LISTING}  801 501 501 S Wed Oct 28 03:10:01\n"),
+        ] {
+            assert!(
+                matches!(parse(&broken, 501, 700), Err(Unstopped::Uncertain)),
+                "{broken}"
+            );
+        }
+        assert_eq!(parse(LISTING, 501, 700).unwrap().len(), 2);
+    }
+
+    /// Names come apart from the table, only for the ids asked, each id once: a name that
+    /// carries a newline and a made-up line refuses every name rather than misname a
+    /// process, and names keep only their basename's visible characters (L1 r1 F1).
+    #[test]
+    fn names_are_read_only_for_the_asked_ids_and_a_forged_line_refuses_them_all() {
+        let named = names(
+            "  602 /Applications/My Tool.app/Contents/MacOS/my tool\n  604 /tmp/\u{202e}evil\n",
+            &[602, 604],
+        )
+        .unwrap();
+        assert_eq!(named[&602], "my tool");
+        assert_eq!(named[&604], "\\u202eevil");
+        assert_eq!(
+            names("  602 /tmp/a\n  604 /tmp/b\n  602 /tmp/c\n", &[602, 604]),
+            None
+        );
+        assert_eq!(names("  602 /tmp/a\n  999 /tmp/b\n", &[602, 604]), None);
+        assert_eq!(names("  602 /tmp/a\nnot an id\n", &[602]), None);
+    }
+
+    /// The recheck right before a signal reads fixed fields only and refuses any line that
+    /// is not one asked-for id with its user and start (L1 r1 F1).
+    #[test]
+    fn a_recheck_listing_reads_each_asked_id_once_or_refuses() {
+        let found = rechecked(
+            "  602 501 Wed Oct 28 03:10:01 2026\n  604   0 Wed Oct 28 03:10:02 2026\n",
+            &[602, 604],
+        )
+        .unwrap();
+        assert_eq!(found[&602], (501, "Wed Oct 28 03:10:01 2026".to_owned()));
+        assert_eq!(found[&604].0, 0);
+        for forged in [
+            "  602 501 Wed Oct 28 03:10:01 2026\n  602 501 Wed Oct 28 03:10:01 2026\n",
+            "  602 501 Wed Oct 28 03:10:01 2026\n  777 501 Wed Oct 28 03:10:01 2026\n",
+            "  602 501 Wed Oct 28 03:10:01 2026 extra\n",
+        ] {
+            assert_eq!(rechecked(forged, &[602, 604]), None, "{forged}");
+        }
     }
 
     #[test]
@@ -1558,7 +1807,8 @@ pub(crate) mod tests {
                 let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
             }
         };
-        let lineage = Lineage::of(leader.id(), None).unwrap();
+        let mut lineage = Lineage::of(leader.id(), None).unwrap();
+        lineage.name();
         assert!(
             lineage
                 .known
@@ -1862,6 +2112,32 @@ pub(crate) mod tests {
                 other => panic!("a stop with no known leader was reported {other:?}"),
             }
         }
+    }
+
+    /// An agent whose arguments hold a newline and a made-up line with an unrelated process's
+    /// id and the token makes that id show twice in the environment listing, which is then
+    /// refused whole, never read as a carrier (L1 r1 F1).
+    #[test]
+    fn a_token_listing_with_an_id_twice_is_refused_whole() {
+        let ours = LineageToken::new().unwrap();
+        let word = format!("{LINEAGE_VARIABLE}={}", ours.as_str());
+        let listing = format!(
+            "  601   501 S    Tue Nov 10 16:32:13 2026     /opt/tool x\n\
+             900   501 S    Tue Nov 10 16:30:00 2026 {word}\n\
+             900   501 S    Tue Nov 10 16:30:00 2026     /Applications/Owner.app/owner\n"
+        );
+        let mut kept = Vec::new();
+        assert!(kept_lines(listing.as_bytes(), word.as_bytes(), &mut kept).is_err());
+        let mut kept = Vec::new();
+        let honest = format!(
+            "  601   501 S    Tue Nov 10 16:32:13 2026     /opt/tool {word}\n\
+             900   501 S    Tue Nov 10 16:30:00 2026     /Applications/Owner.app/owner\n"
+        );
+        kept_lines(honest.as_bytes(), word.as_bytes(), &mut kept).unwrap();
+        assert_eq!(
+            String::from_utf8(kept).unwrap(),
+            "601 501 S Tue Nov 10 16:32:13 2026 \n"
+        );
     }
 
     #[test]
@@ -2357,6 +2633,77 @@ pub(crate) mod tests {
         assert!(
             unrelated_runs,
             "an unrelated parent-1 process without the token was signalled"
+        );
+    }
+
+    /// An agent process whose arguments carry a newline, then a made-up listing line with an
+    /// unrelated process's real id, user and start and the launch's token, never gets that
+    /// process signalled under End them, whatever `ps` makes of the newline (L1 r1 F1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_newline_in_an_agents_arguments_never_gets_an_unrelated_process_signalled() {
+        let folder = tempfile::tempdir().unwrap();
+        let ours = LineageToken::new().unwrap();
+        let (_, unrelated) = detached_with(folder.path(), "unrelated.pid", None, ("UNUSED", "x"));
+        let started = crate::spawn_gate::output(
+            std::process::Command::new("/bin/ps")
+                .args(["-o", "lstart=", "-p", &unrelated.to_string()])
+                .env_clear()
+                .env("LC_ALL", "C")
+                .env("TZ", "UTC0")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let started = String::from_utf8_lossy(&started.stdout).trim().to_owned();
+        assert!(!started.is_empty(), "the unrelated sleeper is not running");
+        let user = rustix::process::getuid().as_raw();
+        let forged = format!(
+            "x\n{unrelated} {user} S {started} {LINEAGE_VARIABLE}={}\n{unrelated} {unrelated} {user} S {started}",
+            ours.as_str()
+        );
+        let mut shell = crate::spawn_gate::spawn(
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(
+                    "/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $f, \">\", \"forger.pid\") or exit 1; print $f \"$$\\n\"; close($f); sleep 300' \"$0\" < /dev/null > /dev/null 2>&1 &",
+                )
+                .arg(&forged)
+                .env_clear()
+                .env(LINEAGE_VARIABLE, ours.as_str())
+                .current_dir(folder.path())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        let leader = shell.id();
+        assert!(shell.wait().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let forger = loop {
+            if let Some(pid) = std::fs::read_to_string(folder.path().join("forger.pid"))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+            {
+                break pid;
+            }
+            assert!(Instant::now() < deadline, "the forging agent never started");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let lineage = Lineage::of(leader, Some(ours)).unwrap();
+        if let Err(Unstopped::Left(left)) = lineage.settle() {
+            let (held, _released) = std::sync::mpsc::channel::<()>();
+            left.hold(None, held, by_in("project-forged"), LeftoverMode::End);
+        }
+        std::thread::sleep(LEFTOVER_GRACE + Duration::from_secs(3));
+        let unrelated_runs = runs(unrelated);
+        end_pid(forger);
+        end_pid(unrelated);
+
+        assert!(
+            unrelated_runs,
+            "a line forged in an agent's arguments got an unrelated process signalled"
         );
     }
 
