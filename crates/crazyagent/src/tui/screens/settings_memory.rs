@@ -307,7 +307,7 @@ impl Memory {
             if !self.setting && self.project.is_none() {
                 send(ctx, SettingsJob::AgentWrites { set: None });
             }
-            if !self.scoping {
+            if !self.scoping && self.project.is_none() {
                 send(ctx, SettingsJob::AgentScope { set: None });
             }
         }
