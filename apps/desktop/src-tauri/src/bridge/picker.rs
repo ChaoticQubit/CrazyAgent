@@ -27,6 +27,8 @@ const DOCUMENTS_TITLE: &str = "Choose documents to add";
 const INSTRUCTIONS_TITLE: &str =
     "Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.";
 #[cfg(target_os = "linux")]
+const APP_PLUGIN_TITLE: &str = "Choose an app plugin manifest, a .yaml file.";
+#[cfg(target_os = "linux")]
 const HARNESS_FILE_TITLE: &str = "Choose the harness program file, such as codex or claude.";
 const REPLY_BYTES_MAX: usize = 64 * 1024;
 const PATHS_MAX: usize = 64;
@@ -65,7 +67,8 @@ pub const INSTRUCTIONS_SCRIPT: &str = "POSIX path of (choose file with prompt \"
 
 /// The macOS file chooser for one app plugin manifest whose text goes to its trust screen.
 /// Fixed text.
-pub const APP_PLUGIN_SCRIPT: &str = "";
+pub const APP_PLUGIN_SCRIPT: &str =
+    "POSIX path of (choose file with prompt \"Choose an app plugin manifest, a .yaml file.\")";
 
 /// The macOS file chooser for the program file of a harness CrazyAgent did not find, hidden
 /// folders such as `~/.nvm` shown. Fixed text.
@@ -95,6 +98,10 @@ pub const WINDOWS_DOCUMENTS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.En
 
 /// The Windows instructions file chooser, a fixed PowerShell script that prints the chosen path.
 pub const WINDOWS_INSTRUCTIONS_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose an instructions file to import, such as CLAUDE.md or AGENTS.md.'; $d.Multiselect = $false; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName + [char]10) }";
+
+/// The Windows app plugin manifest chooser, a fixed PowerShell script that prints the chosen
+/// path. Nothing the owner or the web view sends is ever placed into it.
+pub const WINDOWS_APP_PLUGIN_SCRIPT: &str = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; $d.Title = 'Choose an app plugin manifest, a .yaml file.'; $d.Filter = 'YAML manifest (*.yaml;*.yml)|*.yaml;*.yml'; $d.Multiselect = $false; if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName + [char]10) }";
 
 /// What a folder chooser is for: a skill folder, an existing project folder to add, the
 /// folder that holds the owner's projects, a folder of memory files to import, or a plugin
@@ -190,6 +197,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
             || script == DOCUMENTS_SCRIPT
             || script == INSTRUCTIONS_SCRIPT
             || script == HARNESS_FILE_SCRIPT
+            || script == APP_PLUGIN_SCRIPT
     );
     #[cfg(target_os = "macos")]
     {
@@ -221,6 +229,11 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 None if script == HARNESS_FILE_SCRIPT => {
                     command.arg(format!("--title={HARNESS_FILE_TITLE}"));
                 }
+                None if script == APP_PLUGIN_SCRIPT => {
+                    command
+                        .arg(format!("--title={APP_PLUGIN_TITLE}"))
+                        .arg("--file-filter=*.yaml *.yml");
+                }
                 None => {
                     command
                         .args(["--multiple", "--separator=\n"])
@@ -240,6 +253,9 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
             } else if script == HARNESS_FILE_SCRIPT {
                 command.args(["--getopenfilename", "."]);
                 command.args(["--title", HARNESS_FILE_TITLE]);
+            } else if script == APP_PLUGIN_SCRIPT {
+                command.args(["--getopenfilename", ".", "*.yaml *.yml"]);
+                command.args(["--title", APP_PLUGIN_TITLE]);
             } else {
                 command.args(["--getopenfilename", ".", "--multiple", "--separate-output"]);
                 command.args(["--title", DOCUMENTS_TITLE]);
@@ -271,6 +287,7 @@ pub fn chooser_command(script: &'static str) -> Result<Command, BridgeError> {
                 Some(FolderPurpose::Plugin) => WINDOWS_PLUGIN_FOLDER_SCRIPT,
                 None if script == INSTRUCTIONS_SCRIPT => WINDOWS_INSTRUCTIONS_SCRIPT,
                 None if script == HARNESS_FILE_SCRIPT => WINDOWS_HARNESS_FILE_SCRIPT,
+                None if script == APP_PLUGIN_SCRIPT => WINDOWS_APP_PLUGIN_SCRIPT,
                 None => WINDOWS_DOCUMENTS_SCRIPT,
             })
             .creation_flags(CREATE_NO_WINDOW);

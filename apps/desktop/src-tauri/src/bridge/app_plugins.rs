@@ -4,6 +4,7 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{APP_PLUGINS_CODES, AccountSecret, OwnerClient, SearchSaved};
 use crazyagent::semantic::{SearchChoice, SearchView};
 use serde::Serialize;
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -20,29 +21,69 @@ pub enum SearchSave {
 }
 
 impl From<SearchSaved> for SearchSave {
-    fn from(_saved: SearchSaved) -> Self {
-        SearchSave::Stale { current: 0 }
+    fn from(saved: SearchSaved) -> Self {
+        match saved {
+            SearchSaved::Saved(search) => SearchSave::Saved { search },
+            SearchSaved::Stale(current) => SearchSave::Stale { current },
+        }
     }
 }
 
 /// The bridge failure for an engine app plugins error: a known code reaches the window as
 /// itself, anything else is an unknown outcome with the engine code behind it.
 /// Input: the engine error. Output: the bridge failure.
-fn app_plugin_error(_error: EngineError) -> BridgeError {
-    failure("unknown")
+fn app_plugin_error(error: EngineError) -> BridgeError {
+    if error.0 == "controller_disconnected" {
+        return failure("not_connected");
+    }
+    caused(
+        APP_PLUGINS_CODES
+            .iter()
+            .copied()
+            .find(|known| *known == error.0)
+            .unwrap_or("app_plugin_outcome_unknown"),
+        &error.0,
+    )
 }
 
 /// Reads one manifest file the owner chose in the native chooser: a regular file, at most
 /// `MANIFEST_BYTES_MAX` bytes, UTF-8 text. Input: the chosen path. Output: the text, or
 /// `app_plugin_file_unreadable`, `app_plugin_request_bounds` or `app_plugin_file_not_text`.
-pub fn read_manifest(_path: &Path) -> Result<String, BridgeError> {
-    Err(failure("unknown"))
+pub fn read_manifest(path: &Path) -> Result<String, BridgeError> {
+    let unreadable = || failure("app_plugin_file_unreadable");
+    if !std::fs::metadata(path).map_err(|_| unreadable())?.is_file() {
+        return Err(unreadable());
+    }
+    let file = std::fs::File::open(path).map_err(|_| unreadable())?;
+    if !file.metadata().map_err(|_| unreadable())?.is_file() {
+        return Err(unreadable());
+    }
+    let mut bytes = Vec::new();
+    file.take(MANIFEST_BYTES_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| unreadable())?;
+    if bytes.len() as u64 > MANIFEST_BYTES_MAX {
+        return Err(failure("app_plugin_request_bounds"));
+    }
+    String::from_utf8(bytes).map_err(|_| failure("app_plugin_file_not_text"))
+}
+
+/// Reads the manifest at the path the native chooser returned off the async runtime, as
+/// `read_manifest` reads it. Input: the chosen path. Output: the text, or its failure, or
+/// `picker_failed` when the read could not run.
+pub async fn read_picked(path: String) -> Result<String, BridgeError> {
+    tokio::task::spawn_blocking(move || read_manifest(Path::new(&path)))
+        .await
+        .map_err(|_| failure("picker_failed"))?
 }
 
 /// Turns the key the owner typed into the engine's secret type, refusing an empty one.
 /// Input: the typed key. Output: the secret, or `app_plugin_key_invalid`.
-fn entered_key(_key: String) -> Result<AccountSecret, BridgeError> {
-    Err(failure("unknown"))
+fn entered_key(key: String) -> Result<AccountSecret, BridgeError> {
+    if key.is_empty() {
+        return Err(failure("app_plugin_key_invalid"));
+    }
+    AccountSecret::new(key.into_bytes()).map_err(|_| failure("app_plugin_key_invalid"))
 }
 
 impl NativeBridge {
@@ -55,6 +96,210 @@ impl NativeBridge {
             .ok_or_else(|| failure("not_connected"))?
             .shared_client()
             .map_err(app_plugin_error)
+    }
+
+    /// Reads every app plugin, built-in first, run without the bridge lock. Output: the
+    /// listing.
+    pub fn app_plugins(&self) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client.app_plugins().await.map_err(app_plugin_error)
+        }))
+    }
+
+    /// Reads a manifest's trust screen without saving it, run without the bridge lock.
+    /// Input: the manifest text. Output: ready or refused.
+    pub fn app_plugin_preview(&self, yaml: String) -> Result<Unlocked<Preview>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_preview(yaml)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Reads the trust screen of a file in the owner's plugins folder, run without the
+    /// bridge lock. Input: the plugin name. Output: ready or refused.
+    pub fn app_plugin_review(&self, name: String) -> Result<Unlocked<Preview>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_review(name)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Adds a manifest the owner confirmed, run without the bridge lock. Inputs: the text,
+    /// the SHA-256 its trust screen showed and whether it replaces the owner's plugin of that
+    /// name. Output: the listing.
+    pub fn app_plugin_add(
+        &self,
+        yaml: String,
+        sha256: String,
+        replace: bool,
+    ) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_add(yaml, sha256, replace)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Trusts a reviewed file in the owner's plugins folder, run without the bridge lock.
+    /// Inputs: the name and the SHA-256 its trust screen showed. Output: the listing.
+    pub fn app_plugin_trust(
+        &self,
+        name: String,
+        sha256: String,
+    ) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_trust(name, sha256)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Turns a plugin on or off, run without the bridge lock. Inputs: the name and the
+    /// switch. Output: the listing.
+    pub fn app_plugin_set_enabled(
+        &self,
+        name: String,
+        enabled: bool,
+    ) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_set_enabled(name, enabled)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Removes one of the owner's plugins, run without the bridge lock. Input: the name.
+    /// Output: the listing.
+    pub fn app_plugin_remove(&self, name: String) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_remove(name)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Lets a declared secret use an API-key account's saved key, run without the bridge
+    /// lock. Inputs: the plugin, the secret and the account id. Output: the listing.
+    pub fn app_plugin_bind_account(
+        &self,
+        name: String,
+        secret: String,
+        account: String,
+    ) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_bind_account(name, secret, account)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Saves a key the owner entered for a declared secret; it goes to the engine in its own
+    /// frame and the bridge keeps no copy. Run without the bridge lock. Inputs: the plugin,
+    /// the secret and the key. Output: the listing.
+    pub fn app_plugin_set_key(
+        &self,
+        name: String,
+        secret: String,
+        key: String,
+    ) -> Result<Unlocked<Listing>, BridgeError> {
+        let key = entered_key(key)?;
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_set_key(name, secret, key)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Clears where a secret's key comes from, run without the bridge lock. Inputs: the
+    /// plugin and the secret. Output: the listing.
+    pub fn app_plugin_unbind(
+        &self,
+        name: String,
+        secret: String,
+    ) -> Result<Unlocked<Listing>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .app_plugin_unbind(name, secret)
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Reads the Search settings page, run without the bridge lock. Output: the page.
+    pub fn search_settings(&self) -> Result<Unlocked<SearchView>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client.search_settings().await.map_err(app_plugin_error)
+        }))
+    }
+
+    /// Saves what search ranks with, naming the version the window read and, for an HTTP
+    /// plugin, the host its confirm named. Run without the bridge lock. Inputs: the choice,
+    /// the host and the version. Output: saved with the page, or stale.
+    pub fn set_search(
+        &self,
+        choice: SearchChoice,
+        confirm_host: Option<String>,
+        version: u64,
+    ) -> Result<Unlocked<SearchSave>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .set_search(choice, confirm_host, version)
+                .await
+                .map(SearchSave::from)
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Starts the built-in model download the owner confirmed, run without the bridge lock.
+    /// Output: the Search page.
+    pub fn search_model_download(&self) -> Result<Unlocked<SearchView>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client
+                .search_model_download()
+                .await
+                .map_err(app_plugin_error)
+        }))
+    }
+
+    /// Cancels the running built-in model download, run without the bridge lock. Output:
+    /// the Search page.
+    pub fn search_model_cancel(&self) -> Result<Unlocked<SearchView>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client.search_model_cancel().await.map_err(app_plugin_error)
+        }))
+    }
+
+    /// Deletes the downloaded built-in model, run without the bridge lock. Output: the
+    /// Search page.
+    pub fn search_model_delete(&self) -> Result<Unlocked<SearchView>, BridgeError> {
+        let client = self.app_plugins_client()?;
+        Ok(Box::pin(async move {
+            client.search_model_delete().await.map_err(app_plugin_error)
+        }))
     }
 }
 
@@ -101,7 +346,10 @@ mod tests {
     fn a_picked_manifest_is_read_within_its_bounds() {
         let folder = tempfile::tempdir().unwrap();
         let at_cap = folder.path().join("at-cap.yaml");
-        let text = format!("schema: 1\n{}", "#".repeat(MANIFEST_BYTES_MAX as usize - 10));
+        let text = format!(
+            "schema: 1\n{}",
+            "#".repeat(MANIFEST_BYTES_MAX as usize - 10)
+        );
         assert_eq!(text.len() as u64, MANIFEST_BYTES_MAX);
         std::fs::write(&at_cap, &text).unwrap();
         assert_eq!(read_manifest(&at_cap).unwrap(), text);
@@ -150,6 +398,8 @@ mod tests {
         assert!(super::super::picker::APP_PLUGIN_SCRIPT.contains("choose file"));
         assert!(super::super::picker::APP_PLUGIN_SCRIPT.contains(".yaml"));
         #[cfg(target_os = "macos")]
-        assert!(super::super::picker::chooser_command(super::super::picker::APP_PLUGIN_SCRIPT).is_ok());
+        assert!(
+            super::super::picker::chooser_command(super::super::picker::APP_PLUGIN_SCRIPT).is_ok()
+        );
     }
 }

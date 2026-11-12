@@ -71,6 +71,10 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugin_account_has_no_key: "That account has no saved API key to share. Pick another one or enter a key.",
   app_plugin_key_invalid: "That key can't be used: it is empty, too long or has spaces or control characters.",
   app_plugin_key_store_unavailable: "CrazyAgent couldn't save the key. Nothing was saved; try again.",
+  app_plugin_file_unreadable: "CrazyAgent couldn't read that file. Pick a manifest file you can open.",
+  app_plugin_file_not_text: "That file isn't text. A manifest is a UTF-8 .yaml file.",
+  picker_failed: "Couldn't open the file chooser. Paste the manifest instead.",
+  picker_unavailable: "This computer has no file chooser CrazyAgent can use. Paste the manifest instead.",
 };
 
 /** What the Search page says after a save named a version another window had replaced. */
