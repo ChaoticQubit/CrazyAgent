@@ -14,6 +14,8 @@ import { filterAccounts } from "./accounts";
 import { takePoolDraft } from "./pool-draft";
 import { AppOrder, KeepRowFocus, PoolOrderPicker, RowControls, SchedulePanel, applyHeld, usePoolChanges, type ApplyChange, type MadeChange } from "./pool-controls";
 import { HELD_HEAD, heldLine, holdLine, isNear, orderLine, usageBars, whyLine } from "./pool-order";
+import { spendsInApp } from "./spend-reset";
+import { LimitedPoolsNotice, SpendSettingsSection } from "./spend-settings";
 
 export const POOL_FULL = "A pool can hold up to 15 accounts. Remove one to add another.";
 
@@ -581,6 +583,8 @@ export function Pools({ creating }: { creating: boolean }) {
     return () => clearInterval(timer);
   }, []);
   const limits: Loaded<AccountLimits[]> = usage.kind === "ok" ? { kind: "ok", value: usage.value.limits } : usage;
+  const spend = usage.kind === "ok" ? usage.value.spend : undefined;
+  const known = accounts.kind === "ok" ? accounts.value : [];
   const reread = () => { reload(); rerank(); };
 
   const prepareAll = async (pool: PoolSummary) => {
@@ -632,10 +636,12 @@ export function Pools({ creating }: { creating: boolean }) {
     </div>
     <div>
       {refusal && <div className="pool-refusal"><Notice tone="danger" alert><span className="grow">{refusal}</span></Notice></div>}
+      <LimitedPoolsNotice spend={spend} names={accountLabels(known)} inApp={(id) => spendsInApp(known.find((account) => account.id === id)?.provider)} onDone={rereadUsage} />
       <PoolsScreenView pools={pools} accounts={accounts} schedule={schedule} ranking={ranking} limits={limits} nowMs={nowMs} selected={selected} draft={draft} adding={adding} onRetryOrder={rerank} onRetrySchedule={rereadSchedule} saved={saved} apply={apply}
         onSelect={(id) => { edits.drop(); setAdding(false); setRefusal(undefined); setSelected(id); }} onNew={() => { edits.open(read.map((item) => item.name)); setRefusal(undefined); setAdding(true); }}
         onToggleAdd={() => setAdding(!adding)} onDoneAdd={closeAdd} onAdd={(pool, account) => (draft ? edits.addToDraft(account) : edits.add(pool, account))} onRemove={edits.remove} onRename={edits.rename} onDraftName={edits.setName}
         onDelete={(pool) => void askDelete(pool)} onRetry={reload} onPrepare={(pool) => void prepareAll(pool)} preparing={preparing} />
+      <div className="pool-spend"><SpendSettingsSection spend={spend} onDone={rereadUsage} /></div>
     </div>
     <ConfirmDialog open={Boolean(deleting)} title={`Delete ${deleting?.name ?? "pool"}?`} confirmLabel={copy?.confirmLabel ?? "Delete pool"} pending={removing}
       onCancel={() => setDeleting(undefined)} onConfirm={() => void remove()}>
