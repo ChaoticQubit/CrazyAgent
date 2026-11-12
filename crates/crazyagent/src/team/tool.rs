@@ -89,6 +89,9 @@ const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60)
 const SPAWN_INVALID: &str = "Not started: give a task of plain text up to 4000 bytes and, if you choose one, a harness name such as codex or claude-code.";
 const MODE_INVALID: &str =
     "Not started: mode is native or app_spawned, or left out for the owner's setting.";
+const MODEL_INVALID: &str = "Not started: model is a model id from the owner's list, such as gpt-5.6-sol, given with a reason of one plain line up to 240 bytes; leave both out for the default model.";
+/// The longest reason the master or a lead gives for the model it picked, one plain line.
+pub const MODEL_REASON_BYTES_MAX: usize = 240;
 const ROLE_INVALID: &str =
     "Not started: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
 const START_INVALID: &str = "Not started: give a title of one plain line up to 200 bytes and at most 32 claims, each a file, folder/, glob, module:<name> or domain:<name> of up to 512 bytes.";
@@ -210,6 +213,8 @@ pub enum Call {
         role: Option<String>,
         mode: Option<crate::coord::settings::SubagentMode>,
         ticket: Option<String>,
+        #[serde(default)]
+        model: Option<ModelPick>,
     },
     Stop {
         agent: String,
@@ -290,6 +295,16 @@ impl Call {
 
 /// What an `update_work` call sends: a message that asks something of its recipient, a
 /// note that asks nothing, a tagged question (Q14b) or a reply to an earlier message.
+/// A model the master or a lead picked for the agent it starts (DEC-150), with the short
+/// reason the owner sees beside it. The engine runs it only when it is on the owner's
+/// allowed list for the agent's harness, or is that harness's default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelPick {
+    pub model: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Update {
@@ -572,6 +587,8 @@ fn spec(name: &str) -> Value {
                 "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
                 "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
                 "ticket": {"type": "string", "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$", "description": "Optional ticket this task works on, such as CA-12; the engine links the task to it."},
+                "model": {"type": "string", "description": "Optional model for this agent, one of the models the owner allows for its harness, listed in your instructions; left out, the owner's default. Give a reason with it."},
+                "reason": {"type": "string", "description": "With model: why this model fits the task, one short line the owner sees."},
             }, "required": ["task"], "additionalProperties": false}),
         ),
         STOP_TOOL => (
@@ -936,6 +953,15 @@ fn spawn_call(arguments: Option<&Value>) -> Result<Call, &'static str> {
         },
         Some(_) => return Err(tracker::TICKET_ID_INVALID),
     };
+    let model = model_pick(argument("model"), argument("reason"))?;
+    for key in ["model", "reason"] {
+        if arguments
+            .and_then(|arguments| arguments.get(key))
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(MODEL_INVALID);
+        }
+    }
     assert!(!proposed.prompt.is_empty());
     assert!(ticket.as_deref().is_none_or(|id| !id.is_empty()));
     Ok(Call::Spawn {
@@ -944,7 +970,37 @@ fn spawn_call(arguments: Option<&Value>) -> Result<Call, &'static str> {
         role,
         mode,
         ticket,
+        model,
     })
+}
+
+/// Reads a spawn's model pick (DEC-150): a model id the store's check accepts for some
+/// harness, given with a reason of one plain line, no control or hidden characters, up to
+/// `MODEL_REASON_BYTES_MAX` bytes; both blank or left out is no pick. Takes the model and
+/// reason text. Returns the pick, or the sentence the agent reads when one is refused.
+fn model_pick(
+    model: Option<&str>,
+    reason: Option<&str>,
+) -> Result<Option<ModelPick>, &'static str> {
+    let model = model.map(str::trim).filter(|model| !model.is_empty());
+    let reason = reason.map(str::trim).filter(|reason| !reason.is_empty());
+    let (model, reason) = match (model, reason) {
+        (None, None) => return Ok(None),
+        (Some(model), Some(reason)) => (model, reason),
+        _ => return Err(MODEL_INVALID),
+    };
+    let known = crate::model_choice::model_valid("claude-code", model)
+        || crate::model_choice::model_valid("codex", model);
+    let plain = reason.len() <= MODEL_REASON_BYTES_MAX
+        && !reason.chars().any(char::is_control)
+        && !crate::memory::hidden_text(reason);
+    if !known || !plain {
+        return Err(MODEL_INVALID);
+    }
+    Ok(Some(ModelPick {
+        model: model.to_owned(),
+        reason: reason.to_owned(),
+    }))
 }
 
 /// Reads one `ask` call: a question with its options, recommendation and context, each
@@ -1048,9 +1104,12 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             role,
             mode,
             ticket,
-        } => {
-            json!({"task": task, "harness": harness, "role": role, "mode": mode, "ticket": ticket})
-        }
+            model,
+        } => json!({
+            "task": task, "harness": harness, "role": role, "mode": mode, "ticket": ticket,
+            "model": model.as_ref().map(|pick| &pick.model),
+            "reason": model.as_ref().map(|pick| &pick.reason),
+        }),
         Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
         Call::Sessions { query } => json!({"query": query}),
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),

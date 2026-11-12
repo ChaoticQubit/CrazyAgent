@@ -150,6 +150,18 @@ pub fn model_valid(harness: &str, model: &str) -> bool {
         })
 }
 
+/// Lists the model ids a harness's model catalog offers, the candidates the store checks
+/// every choice against beside the owner's verified ids. None are listed until the catalog
+/// source is settled (DEC-150 Q1), so only ids the owner added and a test launch passed
+/// are offered. Input: the harness name. Output: the ids, valid and distinct.
+pub fn catalog(harness: &str) -> Vec<String> {
+    let ids: Vec<String> = Vec::new();
+    if let Some(id) = harness_id(harness) {
+        assert_catalog(id, &ids);
+    }
+    ids
+}
+
 /// Names the catalog harness id of a harness name or alias, such as `claude` for
 /// `claude-code`. Input: the name. Output: the id, none for an unknown harness.
 pub fn harness_id(name: &str) -> Option<&'static str> {

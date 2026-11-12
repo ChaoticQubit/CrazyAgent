@@ -63,13 +63,14 @@ pub fn values(
 ) -> Result<Models, EngineError> {
     let harness = known(harness)?;
     assert_catalog(harness, catalog);
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(unavailable)?;
-    project_known(&tx, scope)?;
-    let candidates = candidates(&tx, harness, catalog)?;
+    let own = snapshot(db)?;
+    let tx = own.as_deref().unwrap_or(db);
+    project_known(tx, scope)?;
+    let candidates = candidates(tx, harness, catalog)?;
     let usable = usable(&candidates);
     let mut rows = Vec::with_capacity(Slot::ALL.len());
     for slot in Slot::ALL {
-        rows.push(row(&tx, harness, scope, slot, &usable)?);
+        rows.push(row(tx, harness, scope, slot, &usable)?);
     }
     assert_eq!(rows.len(), Slot::ALL.len());
     Ok(Models {
@@ -129,9 +130,10 @@ pub fn launch_model(
         return Ok(None);
     };
     assert_catalog(harness, catalog);
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(unavailable)?;
-    let usable = usable(&candidates(&tx, harness, catalog)?);
-    let (value, _) = effective(&tx, harness, project, slot, &usable)?;
+    let own = snapshot(db)?;
+    let tx = own.as_deref().unwrap_or(db);
+    let usable = usable(&candidates(tx, harness, catalog)?);
+    let (value, _) = effective(tx, harness, project, slot, &usable)?;
     assert!(value.is_null() || value.is_string());
     Ok(value.as_str().map(str::to_owned))
 }
@@ -156,11 +158,12 @@ pub fn pick(
         });
     };
     assert_catalog(harness, catalog);
-    let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(unavailable)?;
-    let usable = usable(&candidates(&tx, harness, catalog)?);
-    let (default, _) = effective(&tx, harness, Some(project), Slot::Agent, &usable)?;
+    let own = snapshot(db)?;
+    let tx = own.as_deref().unwrap_or(db);
+    let usable = usable(&candidates(tx, harness, catalog)?);
+    let (default, _) = effective(tx, harness, Some(project), Slot::Agent, &usable)?;
     let default = default.as_str().map(str::to_owned);
-    let (allowed, _) = effective(&tx, harness, Some(project), Slot::Allowed, &usable)?;
+    let (allowed, _) = effective(tx, harness, Some(project), Slot::Allowed, &usable)?;
     let allowed: Vec<String> = allowed
         .as_array()
         .map(|ids| {
@@ -497,6 +500,18 @@ fn usable(candidates: &[Candidate]) -> Vec<String> {
         .filter(|candidate| candidate.origin.usable())
         .map(|candidate| candidate.id.clone())
         .collect()
+}
+
+/// Opens a deferred transaction for one read snapshot, none when the caller already holds
+/// one, so a spawn checks its pick inside the transaction that admits its task. Input: the
+/// connection. Output: the transaction, or `model_choice_unavailable`.
+fn snapshot(db: &Connection) -> Result<Option<Transaction<'_>>, EngineError> {
+    if !db.is_autocommit() {
+        return Ok(None);
+    }
+    Transaction::new_unchecked(db, TransactionBehavior::Deferred)
+        .map(Some)
+        .map_err(unavailable)
 }
 
 fn known(harness: &str) -> Result<&'static str, EngineError> {
