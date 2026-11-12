@@ -812,9 +812,10 @@ pub fn check_command(id: &str, real: &Path, roots: &Roots) -> Result<Option<Fixe
     }
 }
 
-/// Tells whether the tool resolver finds no Node.js in the roots' Homebrew folders or the
-/// HOME folders the harness catalog uses, nvm's versions included. Input: the roots.
-/// Output: true when no usable node is there.
+/// Tells whether the tool resolver finds no Node.js in the roots' Homebrew folders or in
+/// the resolver's own folders under the roots' HOME: nvm, fnm and the real installs of
+/// volta, asdf and mise, never their shims. Input: the roots. Output: true when no usable
+/// node is there.
 fn node_missing(roots: &Roots) -> bool {
     let mut folders: Vec<PathBuf> = roots
         .brew_prefixes
@@ -822,13 +823,17 @@ fn node_missing(roots: &Roots) -> bool {
         .map(|prefix| prefix.join("bin"))
         .collect();
     if roots.home.is_absolute() {
-        folders.extend(harnesses::home_places(&roots.home));
+        let engine = crate::tools::Places::engine(None, None, Some(roots.home.clone()), None);
+        folders.extend(
+            engine
+                .folders()
+                .iter()
+                .filter(|folder| folder.starts_with(&roots.home))
+                .cloned(),
+        );
     }
-    crate::tools::resolve(
-        "node",
-        &crate::tools::Places::new(folders, Some(roots.home.clone())),
-    )
-    .is_err()
+    let places = crate::tools::Places::new(folders, Some(roots.home.clone()));
+    crate::tools::resolve("node", &places).is_err()
 }
 
 /// Builds the one install command of a harness that is not installed: Homebrew first with
