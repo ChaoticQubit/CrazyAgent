@@ -25,7 +25,7 @@ test("every design route parses to its screen and formats back to the same hash"
   for (const tab of SETTINGS_TABS) assert.deepEqual(parseRoute(formatRoute({ name: "settings", tab })), { name: "settings", tab });
   for (const tab of PROJECT_TABS) assert.deepEqual(parseRoute(formatRoute({ name: "project", id: "p 1/é", tab })), { name: "project", id: "p 1/é", tab });
   for (const step of NEW_PROJECT_STEPS) assert.deepEqual(parseRoute(formatRoute({ name: "new-project", step })), { name: "new-project", step });
-  assert.deepEqual(SETTINGS_TABS, ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "profile", "updates"]);
+  assert.deepEqual(SETTINGS_TABS, ["accounts", "pools", "harnesses", "plugins", "process", "tickets", "pack", "checks", "finished", "quit", "master", "home", "github", "sandbox", "memory", "alerts", "app-plugins", "search", "profile", "updates"]);
   assert.deepEqual(PROJECT_TABS, ["overview", "conversation", "agents", "changes", "tests", "questions", "tickets", "roadmap", "context", "process", "metrics", "settings", "ide"]);
   assert.deepEqual(NEW_PROJECT_STEPS, ["basics", "documents", "work", "pool", "team"]);
 });
