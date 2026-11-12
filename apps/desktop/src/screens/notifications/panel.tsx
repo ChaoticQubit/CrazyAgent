@@ -169,7 +169,7 @@ export function highlight(anchor: string | null): void {
 }
 
 /** Goes to one location hash, as a click on a link would. Input: the hash. Output: none. */
-function goTo(hash: string): void {
+export function goTo(hash: string): void {
   window.location.hash = hash;
 }
 

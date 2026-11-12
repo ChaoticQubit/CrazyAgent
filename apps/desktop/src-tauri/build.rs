@@ -265,7 +265,7 @@ fn main() {
         "desktop_dismiss_question",
         "desktop_dismiss_questions",
         "desktop_question_counts",
-        "desktop_notify_question",
+        "desktop_notify_notice",
         "desktop_notification_target",
         "desktop_system_notifications",
         "desktop_process_text",

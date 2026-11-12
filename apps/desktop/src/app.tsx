@@ -4,7 +4,7 @@ import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, 
 import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
-import { questionWatch } from "./notify";
+import { noticeWatch } from "./notify";
 import { NoticeBell } from "./screens/notifications/panel";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
@@ -239,10 +239,9 @@ export interface TeamAlerts {
  * 10 s it reads them, shows a new notification as a toast, with Open to the Agents tab's
  * Questions for you drawer on an urgent question or an agent waiting in its terminal, keeps
  * the app icon badge at the unseen notifications plus the pending questions, and asks for
- * attention when a notification is new; a Normal question only counts toward the badge. The
- * same counts read drives the question notification watch, so the counts are read once per
- * look. Inputs: whether the engine runs and the toast action. Output: what each project's
- * sidebar flag counts and how many agents each has at work, none when a read fails or the
+ * attention when a notification is new; a Normal question only counts toward the badge. Each
+ * read also drives the macOS banner watch over the notification store. Inputs: whether the
+ * engine runs and the toast action. Output: what each project's sidebar flag counts and how many agents each has at work, none when a read fails or the
  * engine stops. */
 export function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): TeamAlerts {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
@@ -258,7 +257,7 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
     let last: number | null = null;
     let shown = 0;
     let timer = 0;
-    const watch = questionWatch((line) => toast.current(line));
+    const watch = noticeWatch((line) => toast.current(line));
     const read = async () => {
       const [result, questions] = await Promise.all([loadTeamEvents(), loadQuestionCounts()]);
       if (!live) return;
@@ -276,7 +275,7 @@ export function useTeamAlerts(running: boolean, showToast: (message: string, ope
       } else {
         setWorking(NONE_WORKING);
       }
-      if (questions.kind === "ok") await watch.look(questions.value);
+      await watch.look();
       if (live && (result.kind !== "not_ready" || questions.kind !== "not_ready")) timer = window.setTimeout(read, ALERT_READ_MS);
     };
     void read();

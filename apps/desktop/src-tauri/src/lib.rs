@@ -4182,41 +4182,52 @@ async fn desktop_update_change(
     call.await
 }
 
-/// Shows one macOS notification for a pending question while the window is in the
-/// background, at most once per question. The text is built here from the engine's record
-/// and the project's name; the window names only the project and the question.
+/// Shows one macOS notification for an item of the notification store while the window is
+/// in the background, at most once per item and only for an unread, unresolved item the
+/// engine marks for a banner under the owner's settings. The text is built here from the
+/// engine's item and the project's name; the window names only the item.
 #[tauri::command]
-async fn desktop_notify_question(
+async fn desktop_notify_notice(
     webview: Webview,
     state: State<'_, NativeState>,
     notices: State<'_, Notices>,
-    project_id: String,
-    question_id: u64,
+    id: i64,
 ) -> Result<(), BridgeError> {
     main_window(&webview)?;
     bridge::notify::available()?;
+    let query = bridge::notify::one_item(id)?;
     if webview.window().is_focused().unwrap_or(false) {
         return Ok(());
     }
-    let call = read(&state)
-        .await?
-        .notified_question(project_id.clone(), question_id)?;
-    let question = call.await?;
-    let setup = read(&state).await?.project_setup(&project_id).await;
-    let name = setup.ok().flatten().map(|setup| setup.name);
-    let notice = bridge::notify::notice(name.as_deref(), &question);
-    let Some(id) = notices.claim(question.id, question.project.as_str())? else {
+    let page = read(&state).await?.notifications(query).await?;
+    let Some(item) = bridge::notify::bannered(page, id) else {
         return Ok(());
     };
-    bridge::notify::show(tauri::Manager::app_handle(&webview), id, &notice)
-        .inspect_err(|_| notices.release(question.id, id))
+    let name = match &item.project_id {
+        Some(project) => read(&state)
+            .await?
+            .project_setup(project.as_str())
+            .await
+            .ok()
+            .flatten()
+            .map(|setup| setup.name),
+        None => None,
+    };
+    let notice = bridge::notify::notice(name.as_deref(), &item);
+    let Some(shown) = notices.claim(item.id, item.target.clone())? else {
+        return Ok(());
+    };
+    bridge::notify::show(tauri::Manager::app_handle(&webview), shown, &notice)
+        .inspect_err(|_| notices.release(item.id, shown))
 }
 
+/// Takes the store item of the last notification click, once, so the window opens its page
+/// and marks it read. Output: the item and its page, or None when no click waits.
 #[tauri::command]
 async fn desktop_notification_target(
     webview: Webview,
     notices: State<'_, Notices>,
-) -> Result<Option<String>, BridgeError> {
+) -> Result<Option<bridge::notify::Clicked>, BridgeError> {
     main_window(&webview)?;
     Ok(notices.take())
 }
@@ -5254,7 +5265,7 @@ native_commands! {
     desktop_dismiss_question,
     desktop_dismiss_questions,
     desktop_question_counts,
-    desktop_notify_question,
+    desktop_notify_notice,
     desktop_notification_target,
     desktop_system_notifications,
     desktop_process_text,
