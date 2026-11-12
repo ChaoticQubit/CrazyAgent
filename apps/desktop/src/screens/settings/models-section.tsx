@@ -4,7 +4,8 @@ import type { SettingScope } from "../../api-harness-settings";
 import {
   ALLOWED_MAX, FALLBACK_HELP, FALLBACK_OPTIONS, MODEL_BYTES_MAX, MODEL_STALE_LINE, PICK_HELP, PICK_OPTIONS, SLOT_HELP, SLOT_LABELS,
   addModel, addedLine, allowedChange, allowedDraft, canResetModel, catalogLine, choiceChange, choiceDraft, choiceOptions,
-  loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, originWord, passedOverLine,
+  loadModelRules, loadModels, modelChoiceRefusal, modelSourceLine, modelsNotReady, modelsStale, nativeChange, nativeDraft, nativeHelp,
+  nativeOptions, originWord, passedOverLine,
   removeModel, removedLine, resetModelChoice, resetModelLabel, setModelChoice, setModelRule, tickable, toggleAllowed, uncheckedLine,
   valueText,
 } from "../../api-model-choice";
@@ -18,12 +19,13 @@ function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-/** The drafts of one Models section: a choice for the master and agent slots, ticks for the
- * allowed list; a missing slot shows what is saved. */
+/** The drafts of one Models section: a choice for the master and agent slots and the Native
+ * sub-agent model, ticks for the allowed list; a missing slot shows what is saved. */
 export interface ModelDrafts {
   master?: string;
   agent?: string;
   allowed?: string[];
+  native?: string;
 }
 
 /** One slot's line and what it can do, without engine calls. */
@@ -59,7 +61,7 @@ function SlotLine({ row, candidates, scope, draft, busy, note, onDraft, onSave, 
   if (row.access.kind !== "editable") {
     return <SettingLine label={label} help={SLOT_HELP[row.slot]}>
       <div className="models-ctl">
-        <span className="mono">{valueText(row.effective)}</span>
+        {row.slot !== "native" && <span className="mono">{valueText(row.effective)}</span>}
         <p className="helper">{displayText(row.access.reason)}</p>
         {lines}
         <Actions row={row} scope={scope} label={label} changed={false} busy={busy} onSave={onSave} onReset={onReset} />
@@ -87,6 +89,20 @@ function SlotLine({ row, candidates, scope, draft, busy, note, onDraft, onSave, 
     </SettingLine>;
   }
   assert(draft === undefined || typeof draft === "string", "a model choice draft is one id");
+  if (row.slot === "native") {
+    const picked = draft ?? nativeDraft(row, scope);
+    const changed = nativeChange(row, picked, scope).kind !== "none";
+    const help = nativeHelp(row, picked);
+    return <SettingLine label={label} help={SLOT_HELP.native} changed={changedHere} htmlFor="models-native">
+      <div className="models-ctl">
+        <Select id="models-native" label={label} hideLabel value={picked} options={nativeOptions(scope)} onValue={onDraft} />
+        {help && <span className="small muted">{help}</span>}
+        <span className="small muted">{modelSourceLine(row, scope)}</span>
+        {lines}
+        <Actions row={row} scope={scope} label={label} changed={changed} busy={busy} onSave={onSave} onReset={onReset} />
+      </div>
+    </SettingLine>;
+  }
   const choice = draft ?? choiceDraft(row, candidates);
   const changed = choiceChange(row, candidates, choice).kind !== "none";
   const id = `models-${row.slot}`;
@@ -115,13 +131,13 @@ export interface ModelsViewProps {
 }
 
 /** One harness's Models section as a pure view of the page read: what the model list was
- * checked against, then the master model, the agent default and the allowed list, each with
- * where its value comes from, Save when it changed and its reset when one is stored. A slot
- * the harness does not support shows the reason and no control. Input: the view props.
- * Output: the section. */
+ * checked against, then the master model, the agent default, the allowed list and the Native
+ * sub-agent model, each with where its value comes from, Save when it changed and its reset
+ * when one is stored. A slot the harness does not support shows the reason and no control.
+ * Input: the view props. Output: the section. */
 export function ModelsView(props: ModelsViewProps) {
   const { page, name, scope, drafts, busy, notes } = props;
-  if (page.kind === "loading") return <Skeleton shape="row" count={3} />;
+  if (page.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (page.kind === "not_ready" || modelsNotReady(page)) return <NotReady what="Model choice" compact />;
   if (page.kind === "error") return <LoadError message={modelChoiceRefusal(page)} onRetry={props.onRetry} />;
   const value = page.value;
@@ -255,6 +271,15 @@ export function ModelsSection({ harness, name, projectId }: { harness: string; n
   async function save(row: ModelRow) {
     if (page.kind !== "ok") return;
     const candidates = page.value.models.candidates;
+    if (row.slot === "native") {
+      const scope: SettingScope = projectId === null ? "app" : "project";
+      const change = nativeChange(row, drafts.native ?? nativeDraft(row, scope), scope);
+      if (change.kind === "none") return;
+      setBusy(row.slot);
+      return settle(row.slot, change.kind === "reset"
+        ? await resetModelChoice(harness, projectId, row.slot, row.version)
+        : await setModelChoice(harness, projectId, row.slot, change.value, row.version));
+    }
     if (row.slot === "allowed") {
       const change = allowedChange(row, candidates, drafts.allowed ?? allowedDraft(row));
       if (change.kind !== "set") return;

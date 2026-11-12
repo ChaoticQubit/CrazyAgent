@@ -4,8 +4,13 @@ import type { SettingAccess, SettingScope, SettingSource } from "./api-harness-s
 import { failureCopy } from "./api-projects";
 import { displayText } from "./screens/conversation";
 
-/** A model slot of one harness: the master's model, the agents' default, the allowed list. */
-export type ModelSlot = "master" | "agent" | "allowed";
+/** A model slot of one harness: the master's model, the agents' default, the allowed list,
+ * and what the sub-agents a native lead starts itself run on. */
+export type ModelSlot = "master" | "agent" | "allowed" | "native";
+
+/** A Native sub-agent model option: native sub-agents run on their lead's model, or the
+ * harness picks each one's model. */
+export type NativeModel = "follow" | "harness";
 
 /** Where a candidate id comes from: the harness's list, or an id the owner added that waits
  * for its test launch, passed it or failed it. */
@@ -90,6 +95,7 @@ export const SLOT_LABELS: Record<ModelSlot, string> = {
   master: "Master model",
   agent: "Agent default model",
   allowed: "Allowed models",
+  native: "Native sub-agent model",
 };
 
 /** Each slot's help line. */
@@ -97,7 +103,22 @@ export const SLOT_HELP: Record<ModelSlot, string> = {
   master: "The model the master runs on with this harness.",
   agent: "The model an agent runs on when the master picks none.",
   allowed: "The models the master may pick for an agent, with a short reason.",
+  native: "What the sub-agents a native lead starts itself run on.",
 };
+
+/** The Native sub-agent model's choices, in page order. */
+export const NATIVE_OPTIONS: { value: NativeModel; label: string }[] = [
+  { value: "follow", label: "Follow the agent's model" },
+  { value: "harness", label: "Let the harness choose" },
+];
+
+/** What each Native sub-agent model option does, in one line. */
+export const NATIVE_HELP: Record<NativeModel, string> = {
+  follow: "Every sub-agent a native lead starts runs on the lead's model.",
+  harness: "The harness picks each sub-agent's model, so one may run a model your allowed list leaves out.",
+};
+
+const NATIVE_DEFAULT = "Nothing set: native sub-agents follow the agent's model.";
 
 /** The pick rule's choices, in page order. */
 export const PICK_OPTIONS: { value: PickRule; label: string }[] = [
@@ -220,6 +241,24 @@ export function valueText(value: ModelValue): string {
   return displayText(value);
 }
 
+function nativeModel(value: ModelValue): NativeModel | null {
+  return value === "follow" || value === "harness" ? value : null;
+}
+
+/** A Native sub-agent model value in words: its option's label, or the stored word itself
+ * when it names no option. Input: the value. Output: the words. */
+export function nativeText(value: ModelValue): string {
+  const model = nativeModel(value);
+  if (model === null) return valueText(value);
+  const option = NATIVE_OPTIONS.find((one) => one.value === model);
+  assert(option !== undefined, "every Native sub-agent model is an option");
+  return option.label;
+}
+
+function slotText(slot: ModelSlot, value: ModelValue): string {
+  return slot === "native" ? nativeText(value) : valueText(value);
+}
+
 /** Where a slot's value comes from, in one line. Inputs: the row and the page's scope.
  * Output: the line. */
 export function modelSourceLine(row: Pick<ModelRow, "slot" | "source" | "effective">, scope: SettingScope): string {
@@ -228,9 +267,10 @@ export function modelSourceLine(row: Pick<ModelRow, "slot" | "source" | "effecti
     case "project":
       return list && Array.isArray(row.effective) && row.effective.length === 0 ? "Set for this project. None ticked: only the agent default runs." : "Set for this project.";
     case "app":
-      if (scope === "project") return `Uses the app value: ${valueText(row.effective)}.`;
+      if (scope === "project") return `Uses the app value: ${slotText(row.slot, row.effective)}.`;
       return list && Array.isArray(row.effective) && row.effective.length === 0 ? "Set here for every project. None ticked: only the agent default runs." : "Set here for every project.";
     case "default":
+      if (row.slot === "native") return NATIVE_DEFAULT;
       return list ? "None ticked: only the agent default runs." : "Nothing set: the account's own model runs.";
     case "engine":
       return "Set by CrazyAgent.";
@@ -243,7 +283,10 @@ export function modelSourceLine(row: Pick<ModelRow, "slot" | "source" | "effecti
  * slot that doesn't apply. Inputs: the row and the candidates. Output: the line, or "". */
 export function passedOverLine(row: ModelRow, candidates: readonly ModelCandidate[]): string {
   if (row.here === null) return "";
-  if (row.access.kind !== "editable") return `Saved ${valueText(row.here)} isn't used here.`;
+  if (row.access.kind !== "editable") return `Saved ${slotText(row.slot, row.here)} isn't used here.`;
+  if (row.slot === "native") {
+    return nativeModel(row.here) !== null ? "" : `Saved ${valueText(row.here)} isn't an option, so ${nativeText(row.effective)} runs.`;
+  }
   const ids = usableIds(candidates);
   if (Array.isArray(row.here)) {
     const gone = row.here.filter((id) => !ids.includes(id));
@@ -263,20 +306,21 @@ export function canResetModel(row: Pick<ModelRow, "here">): boolean {
 export function resetModelLabel(row: Pick<ModelRow, "slot" | "access">, scope: SettingScope): string {
   if (row.access.kind !== "editable") return "Clear saved value";
   if (row.slot === "allowed") return scope === "app" ? "Clear the list" : "Use the app list";
+  if (row.slot === "native") return scope === "app" ? "Use the default" : APP_VALUE;
   return scope === "app" ? "Use the account's own model" : APP_VALUE;
 }
 
 /** The choice a master or agent slot starts on: its stored id when the harness offers it,
  * else "" for the account's own model or the app value. */
 export function choiceDraft(row: ModelRow, candidates: readonly ModelCandidate[]): string {
-  assert(row.slot !== "allowed", "a choice is a master or agent slot");
+  assert(row.slot === "master" || row.slot === "agent", "a choice is a master or agent slot");
   return typeof row.here === "string" && usableIds(candidates).includes(row.here) ? row.here : "";
 }
 
 /** The choices of a master or agent slot: the account's own model on the app page or the app
  * value on a project page, then every usable id. */
 export function choiceOptions(row: ModelRow, candidates: readonly ModelCandidate[], scope: SettingScope): { value: string; label: string }[] {
-  assert(row.slot !== "allowed", "a choice is a master or agent slot");
+  assert(row.slot === "master" || row.slot === "agent", "a choice is a master or agent slot");
   const first = { value: "", label: scope === "app" ? ACCOUNT_MODEL : APP_VALUE };
   return [first, ...usableIds(candidates).map((id) => ({ value: id, label: displayText(id) }))];
 }
@@ -288,6 +332,46 @@ export function choiceChange(row: ModelRow, candidates: readonly ModelCandidate[
   if (draft === "") return row.here === null ? { kind: "none" } : { kind: "reset" };
   assert(usableIds(candidates).includes(draft), "a choice is a usable id");
   return { kind: "set", value: draft };
+}
+
+/** The option a Native sub-agent model starts on: its stored option, else "" for the app
+ * value on a project page or the option in force on the app page. Inputs: the row and the
+ * scope. Output: the option, or "". */
+export function nativeDraft(row: ModelRow, scope: SettingScope): NativeModel | "" {
+  assert(row.slot === "native", "a native choice is the Native sub-agent model");
+  const here = nativeModel(row.here);
+  if (here !== null) return here;
+  if (scope === "project") return "";
+  return nativeModel(row.effective) ?? "follow";
+}
+
+/** The Native sub-agent model's choices: both options, after the app value on a project
+ * page. Input: the scope. Output: the choices in page order. */
+export function nativeOptions(scope: SettingScope): { value: NativeModel | ""; label: string }[] {
+  const options = [...NATIVE_OPTIONS];
+  return scope === "app" ? options : [{ value: "", label: APP_VALUE }, ...options];
+}
+
+/** What Save sends for the Native sub-agent model: nothing when the choice is unchanged, a
+ * reset when a project goes back to the app value, else the option. Inputs: the row, the
+ * draft and the scope. Output: the change. */
+export function nativeChange(row: ModelRow, draft: string, scope: SettingScope): ModelChange<NativeModel> {
+  if (draft === nativeDraft(row, scope)) return { kind: "none" };
+  if (draft === "") {
+    assert(scope === "project", "only a project page offers the app value");
+    return row.here === null ? { kind: "none" } : { kind: "reset" };
+  }
+  const model = nativeModel(draft);
+  assert(model !== null, "a native choice is one of its options");
+  return { kind: "set", value: model };
+}
+
+/** The help of the Native sub-agent model option a line shows: the one picked, else the one
+ * in force for the app value. Inputs: the row and the draft. Output: the help, or "". */
+export function nativeHelp(row: Pick<ModelRow, "slot" | "effective">, draft: string): string {
+  assert(row.slot === "native", "the help is the Native sub-agent model's");
+  const model = draft === "" ? nativeModel(row.effective) : nativeModel(draft);
+  return model === null ? "" : NATIVE_HELP[model];
 }
 
 /** The ticks an allowed list starts on: the list in force, the app's on a project that keeps

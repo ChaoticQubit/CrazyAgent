@@ -4,7 +4,7 @@ use crate::engine::owner::ModelAdded;
 use crate::harness_settings::{Access, Source};
 use crate::model_choice::rules::{FallbackRule, PickRule, Rule, RuleWritten, Rules};
 use crate::model_choice::{
-    ALLOWED_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, Origin, Row, Slot,
+    ALLOWED_MAX, Candidate, MODEL_BYTES_MAX, Models, NOT_SUPPORTED, NativeModel, Origin, Row, Slot,
     UNQUALIFIED_REASON_BYTES_MAX, Written, model_valid, shipped,
 };
 use crate::protocol::ProjectId;
@@ -55,6 +55,21 @@ const PICK_OPTIONS: [(PickRule, &str, &str); 3] = [
     ),
 ];
 
+const NATIVE_OPTIONS: [(NativeModel, &str, &str); 2] = [
+    (
+        NativeModel::Follow,
+        "Follow the agent's model",
+        "Every sub-agent a native lead starts runs on the lead's model.",
+    ),
+    (
+        NativeModel::Harness,
+        "Let the harness choose",
+        "The harness picks each sub-agent's model, so one may run a model your allowed list leaves out.",
+    ),
+];
+
+const NATIVE_DEFAULT: &str = "Nothing set: native sub-agents follow the agent's model.";
+
 const FALLBACK_OPTIONS: [(FallbackRule, &str, &str); 3] = [
     (
         FallbackRule::Notice,
@@ -95,11 +110,16 @@ enum Item {
 }
 
 /// A change the owner is making to the selected row: a model for the master or agent slot
-/// (index 0 is no model), the ticks of the allowed list, a rule option, or a typed id.
-/// `from` is where the change started, so an unchanged choice sends nothing.
+/// (index 0 is no model), a Native sub-agent model option (index 0 is the app value on a
+/// project page), the ticks of the allowed list, a rule option, or a typed id. `from` is
+/// where the change started, so an unchanged choice sends nothing.
 #[derive(Debug)]
 enum Edit {
     Choice {
+        at: usize,
+        from: usize,
+    },
+    Native {
         at: usize,
         from: usize,
     },
@@ -236,6 +256,64 @@ fn source_word(source: Source) -> &'static str {
     }
 }
 
+/// A Native sub-agent model value as the page shows it: its option's label, or the stored
+/// word itself when it names no option. Input: the value. Output: one line of text.
+fn native_text(value: &Value) -> String {
+    match NativeModel::from_value(value) {
+        Some(model) => {
+            let (_, label, _) = NATIVE_OPTIONS[native_index(model)];
+            assert!(!label.is_empty());
+            label.to_owned()
+        }
+        None => shown(value),
+    }
+}
+
+fn native_index(model: NativeModel) -> usize {
+    let at = NATIVE_OPTIONS
+        .iter()
+        .position(|(option, ..)| *option == model)
+        .expect("every Native sub-agent model is an option");
+    assert!(at < NATIVE_OPTIONS.len());
+    at
+}
+
+/// The Native sub-agent model option at one place of the choice: on a project page index
+/// 0 is the app value. Inputs: the index and whether the page is a project's. Output: the
+/// option, None for the app value.
+fn native_choice(at: usize, project: bool) -> Option<(NativeModel, &'static str, &'static str)> {
+    let offset = usize::from(project);
+    assert!(at < NATIVE_OPTIONS.len() + offset);
+    let option = at.checked_sub(offset).map(|index| NATIVE_OPTIONS[index]);
+    assert_eq!(option.is_none(), project && at == 0);
+    option
+}
+
+/// Where a Native sub-agent model choice starts: the stored option, else the app value on
+/// a project page or the option in effect on the app page. Inputs: the row and whether the
+/// page is a project's. Output: the index.
+fn native_start(row: &Row, project: bool) -> usize {
+    assert_eq!(row.slot, Slot::Native);
+    let offset = usize::from(project);
+    let stored = row.here.as_ref().and_then(NativeModel::from_value);
+    let at = match stored {
+        Some(model) => native_index(model) + offset,
+        None if project => 0,
+        None => NativeModel::from_value(&row.effective).map_or(0, native_index),
+    };
+    assert!(at < NATIVE_OPTIONS.len() + offset);
+    at
+}
+
+/// A slot's value as the page shows it: the Native sub-agent model by its option's label,
+/// any other slot by `value_text`. Inputs: the slot and the value. Output: one line of text.
+fn slot_text(slot: Slot, value: &Value) -> String {
+    match slot {
+        Slot::Native => native_text(value),
+        Slot::Master | Slot::Agent | Slot::Allowed => value_text(value),
+    }
+}
+
 /// A slot value as the page shows it: the account's own model for none, "None ticked" for
 /// an empty list, the ids joined otherwise. Input: the value. Output: one line of text.
 fn value_text(value: &Value) -> String {
@@ -255,10 +333,14 @@ fn source_line(row: &Row, project: bool) -> String {
     match row.source {
         Source::Project if empty => format!("Set for this project. {none}"),
         Source::Project => "Set for this project.".into(),
-        Source::App if project => format!("Uses the app value: {}.", value_text(&row.effective)),
+        Source::App if project => format!(
+            "Uses the app value: {}.",
+            slot_text(row.slot, &row.effective)
+        ),
         Source::App if empty => format!("Set here for every project. {none}"),
         Source::App => "Set here for every project.".into(),
         Source::Default if row.slot == Slot::Allowed => none.into(),
+        Source::Default if row.slot == Slot::Native => NATIVE_DEFAULT.into(),
         Source::Default => "Nothing set: the account's own model runs.".into(),
         Source::Engine => "Set by CrazyAgent.".into(),
         Source::NotApplied => format!("{NOT_SUPPORTED}."),
@@ -279,7 +361,19 @@ fn usable(models: &Models) -> Vec<&str> {
 fn passed_over(row: &Row, models: &Models) -> Option<String> {
     let here = row.here.as_ref()?;
     if row.access != Access::Editable {
-        return Some(format!("Saved {} isn't used here.", value_text(here)));
+        return Some(format!(
+            "Saved {} isn't used here.",
+            slot_text(row.slot, here)
+        ));
+    }
+    if row.slot == Slot::Native {
+        return NativeModel::from_value(here).is_none().then(|| {
+            format!(
+                "Saved {} isn't an option, so {} runs.",
+                shown(here),
+                native_text(&row.effective)
+            )
+        });
     }
     let ids = usable(models);
     match here {
@@ -398,11 +492,11 @@ fn row_of(models: &Models, slot: Slot) -> Option<&Row> {
     models.rows.iter().find(|row| row.slot == slot)
 }
 
-/// One harness's Models page (DEC-150): the master model, the agent default and the
-/// allowed list with where each value comes from, at app scope from Settings > Harnesses
-/// or as one project's overrides. The app page also holds the two app-wide model rules
-/// and the owner's own model ids. Every change names the version read; one request runs
-/// at a time, and a harness whose model CrazyAgent does not choose shows the reason only.
+/// One harness's Models page (DEC-150): the master model, the agent default, the allowed
+/// list and the Native sub-agent model with where each comes from, app-wide or as one
+/// project's overrides; the app page also holds the two model rules and the owner's ids.
+/// Every change names the version read, one request runs at a time, and a slot CrazyAgent
+/// does not choose for the harness shows the reason only.
 pub(in crate::tui) struct ModelsPage {
     harness: String,
     name: String,
@@ -525,7 +619,10 @@ impl ModelsPage {
                 if refuse(&row.access, ctx) {
                     return;
                 }
-                if slot != Slot::Allowed {
+                if slot == Slot::Native {
+                    let from = native_start(row, self.project().is_some());
+                    Edit::Native { at: from, from }
+                } else if slot != Slot::Allowed {
                     let from = choice_start(row, models);
                     Edit::Choice { at: from, from }
                 } else if models.candidates.is_empty() {
@@ -633,6 +730,7 @@ impl ModelsPage {
         };
         let ids = usable(models);
         let choices = ids.len() + 1;
+        let native = NATIVE_OPTIONS.len() + usize::from(project.is_some());
         let options = PICK_OPTIONS.len();
         let last = models.candidates.len().saturating_sub(1);
         let step = match (edit, key) {
@@ -661,6 +759,32 @@ impl ModelsPage {
                         version: row.version,
                     }),
                     (_, None) => Step::Close,
+                },
+                _ => Step::Close,
+            },
+            (Edit::Native { at, .. }, Key::Left) => {
+                *at = (*at + native - 1) % native;
+                Step::Stay
+            }
+            (Edit::Native { at, .. }, Key::Right) => {
+                *at = (*at + 1) % native;
+                Step::Stay
+            }
+            (Edit::Native { at, from }, Key::Enter) => match row {
+                Some(row) if *at != *from => match native_choice(*at, project.is_some()) {
+                    None => Step::Send(ModelChoiceQuery::Reset {
+                        harness: self.harness.clone(),
+                        project,
+                        slot: Slot::Native,
+                        version: row.version,
+                    }),
+                    Some((model, ..)) => Step::Send(ModelChoiceQuery::Set {
+                        harness: self.harness.clone(),
+                        project,
+                        slot: Slot::Native,
+                        value: Value::from(model.as_str()),
+                        version: row.version,
+                    }),
                 },
                 _ => Step::Close,
             },
@@ -911,6 +1035,25 @@ impl ModelsPage {
         ]
     }
 
+    /// The help of the Native sub-agent model option the row shows: the one under the
+    /// cursor while choosing, else the one in force, as for the app value. Input: the row.
+    /// Output: the help, none for another slot or a read-only row.
+    fn native_help(&self, row: &Row) -> Option<&'static str> {
+        if row.slot != Slot::Native || row.access != Access::Editable {
+            return None;
+        }
+        let model = match &self.edit {
+            Some(Edit::Native { at, .. }) => {
+                native_choice(*at, self.project().is_some()).map(|(model, ..)| model)
+            }
+            _ => None,
+        }
+        .or_else(|| NativeModel::from_value(&row.effective))?;
+        let (_, _, help) = NATIVE_OPTIONS[native_index(model)];
+        assert!(!help.is_empty());
+        Some(help)
+    }
+
     fn rule_value(&self, item: Item, rules: Option<&Rules>, selected: bool) -> String {
         let editing = match (&self.edit, selected) {
             (Some(Edit::Rule { at, .. }), true) => Some(*at),
@@ -974,7 +1117,12 @@ impl ModelsPage {
                         };
                         Line::raw(around(&choice))
                     }
-                    (Access::Editable, _) => Line::raw(value_text(&row.effective)),
+                    (Access::Editable, Some(Edit::Native { at, .. })) if selected => {
+                        let choice = native_choice(*at, self.project().is_some())
+                            .map_or(APP_VALUE, |(_, label, _)| label);
+                        Line::raw(around(choice))
+                    }
+                    (Access::Editable, _) => Line::raw(slot_text(slot, &row.effective)),
                 };
                 vec![
                     Line::raw(slot_label(slot)),
@@ -1043,6 +1191,9 @@ impl ModelsPage {
                             &source_line(row, self.project().is_some()),
                             Some(Role::Muted),
                         )),
+                    }
+                    if let Some(help) = self.native_help(row) {
+                        out.extend(lines(help, Some(Role::Muted)));
                     }
                     if let Some(line) = passed_over(row, models) {
                         out.extend(lines(&line, Some(Role::Warning)));
@@ -1331,7 +1482,7 @@ impl Screen for ModelsPage {
         let sides = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         let moves = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
         match &self.edit {
-            Some(Edit::Choice { .. } | Edit::Rule { .. }) => {
+            Some(Edit::Choice { .. } | Edit::Native { .. } | Edit::Rule { .. }) => {
                 return vec![
                     hint(&sides, "Pick"),
                     hint("Enter", "Save"),
