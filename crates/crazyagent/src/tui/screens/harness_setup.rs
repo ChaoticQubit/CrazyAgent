@@ -32,13 +32,14 @@ const READING: &str = "Reading what's on this Mac.";
 const WAITING: &str = "Waiting to install.";
 const INSTALLING: &str = "Installing now.";
 const DONE: &str = "Installed.";
-const TRY_AGAIN: &str = "Try again";
+pub(super) const TRY_AGAIN: &str = "Try again";
 const GUIDE: &str = "How to install it yourself";
 const INSTALL: &str = "Install picked harnesses";
 const SKIP: &str = "Skip for now";
 const NEXT: &str = "Continue";
-const INSTALL_NODE: &str = "Install Node.js";
-const INSTALLING_NODE: &str = "Installing Node.js.";
+pub(super) const INSTALL_NODE: &str = "Install Node.js";
+pub(super) const INSTALLING_NODE: &str = "Installing Node.js.";
+pub(super) const CANT_RUN: &str = "Can't run";
 const NO_TOOL: &str = "harness_install_no_tool";
 const NEEDS_NODE: &str = "harness_install_needs_node";
 const FAILED: &str = "harness_install_failed";
@@ -107,7 +108,7 @@ impl Row {
             Self::Waiting => "Waiting",
             Self::Installing => "Installing",
             Self::Failed { .. } => "Failed",
-            Self::Blocked { .. } => "Can't run",
+            Self::Blocked { .. } => CANT_RUN,
         }
     }
 
@@ -142,7 +143,7 @@ impl Row {
 /// kinds as the desktop step's: nothing to offer, the offer, the install running, or its
 /// failure with the reason setup gave.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum NodeOffer {
+pub(super) enum NodeOffer {
     None,
     Offer,
     Installing,
@@ -153,7 +154,7 @@ enum NodeOffer {
 /// row of setup. A row not settled while a setup run goes on reads installing, since setup
 /// finds Node before it marks the row. Inputs: the need, the Node row's state, none while
 /// unread, and whether a setup run goes on. Output: the offer.
-fn node_offer(needed: bool, node: Option<&DependencyState>, busy: bool) -> NodeOffer {
+pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: bool) -> NodeOffer {
     if !needed {
         return NodeOffer::None;
     }
@@ -172,7 +173,7 @@ fn node_offer(needed: bool, node: Option<&DependencyState>, busy: bool) -> NodeO
 /// Tells whether an offered harness needs Node.js: npm can't install it without Node, or the
 /// resolver found it but it can't run without Node. Input: its versions read.
 /// Output: the answer.
-fn node_needed(versions: &HarnessVersions) -> bool {
+pub(super) fn node_needed(versions: &HarnessVersions) -> bool {
     versions.refusal.as_deref() == Some(NEEDS_NODE)
         || versions
             .needs
