@@ -1683,6 +1683,67 @@ fn a_leftover_the_engine_cannot_delete_keeps_the_agent_offered_and_a_later_remov
     drop(unlocked);
 }
 
+/// F10 (L3 r1 F2): when git drops an agent's worktree record but leaves a file behind,
+/// the removal still forgets the worktree's agent branch record and drops the branch, as a
+/// full removal does, so a fresh start of the same agent at the same `agent-<id>` path in
+/// Named mode never inherits the old branch and fails with `changes_agent_branch_exists`.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_leftover_removal_forgets_the_agent_branch_record_and_drops_the_branch() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    crate::landing::claim_task_branch(&case.db, &case.repo, &case.worktree(1), "fix-footer")
+        .unwrap();
+    let branch = crate::landing::name_agent_branch(
+        &case.db,
+        &case.repo,
+        &case.worktree(1),
+        &case.git_dir(1),
+    )
+    .unwrap();
+    let path = case.worktree(1).to_str().unwrap().to_owned();
+    let recorded = |case: &Case| -> i64 {
+        case.db
+            .query_row(
+                "SELECT COUNT(*) FROM landing_agent_branches WHERE worktree=?1",
+                [&path],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(recorded(&case), 1);
+    let stuck = case.worktree(1).join("target/stuck.bin");
+    write(&stuck, b"locked\n");
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unlocked = Unlocked(stuck.clone());
+    assert!(chflags("uchg", &stuck));
+    assert_eq!(case.remove(&[1]), refused("cleanup_worktree_leftover"));
+    assert!(!case.git_dir(1).exists() && stuck.exists());
+    assert_eq!(recorded(&case), 0, "the branch record is forgotten");
+    let gone = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ])
+            .current_dir(&case.repo)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &case.home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(!gone.status.success(), "the branch {branch} is dropped");
+    assert!(chflags("nouchg", &stuck));
+    drop(unlocked);
+}
+
 /// What a Delete everything would lose, read before anything stops: uncommitted edits,
 /// unlanded commits and an open change set each keep their plain reason, a running agent's
 /// edits count too, a clean agent is not listed, and an agent's own clone whose git config
