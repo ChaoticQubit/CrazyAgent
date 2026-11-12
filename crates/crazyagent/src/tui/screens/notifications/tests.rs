@@ -1,6 +1,6 @@
 use crate::notifications::{
-    ACTION_IDS_MAX, FOLD_IDS_MAX, Notice, NoticeAction, NoticeClass, NoticeCounts, NoticeFilter,
-    NoticeKind, NoticePage, NoticeQuery, NoticeTarget, PAGE_MAX,
+    FOLD_IDS_MAX, FoldChange, Notice, NoticeAction, NoticeClass, NoticeCounts, NoticeFilter,
+    NoticeFold, NoticeKind, NoticePage, NoticeQuery, NoticeTarget, PAGE_MAX,
 };
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
@@ -64,6 +64,15 @@ fn question(number: i64) -> Notice {
             agent: None,
         },
     )
+}
+
+fn fold(newest: i64, filter: NoticeFilter) -> NoticeFold {
+    NoticeFold {
+        kind: NoticeKind::Question,
+        project_id: Some(id(TIDEPOOL)),
+        filter,
+        newest,
+    }
 }
 
 fn list(filter: NoticeFilter, project: Option<&str>, before: Option<i64>) -> NoticesQuery {
@@ -318,8 +327,8 @@ fn enter_opens_each_items_page_and_marks_an_unread_item_read() {
         assert_eq!(shell.place(), Some(place), "{target:?}");
         assert_eq!(
             changes(&mut shell),
-            vec![NoticeAction::Read { ids: vec![7, 8] }],
-            "{target:?}"
+            vec![NoticeAction::Read { ids: vec![7] }],
+            "{target:?}: one item reads only that item"
         );
     }
 
@@ -333,6 +342,40 @@ fn enter_opens_each_items_page_and_marks_an_unread_item_read() {
     assert_eq!(changes(&mut shell), Vec::new(), "a read item stays read");
     shell.key(Key::Esc);
     assert_eq!(shell.place(), Some(Place::Notifications), "Esc returns");
+}
+
+#[test]
+fn enter_on_a_fold_reads_every_item_it_holds_under_the_listed_filter() {
+    let mut big = question(70);
+    big.folded = 40;
+    big.unread = 40;
+    big.ids = (39..=70).rev().collect();
+    assert_eq!(big.ids.len(), FOLD_IDS_MAX);
+    let mut shell = loaded(vec![big.clone()]);
+    shell.key(Key::Enter);
+    assert_eq!(
+        changes(&mut shell),
+        vec![NoticeAction::Folds {
+            folds: vec![fold(70, NoticeFilter::All)],
+            change: FoldChange::Read,
+        }],
+        "a fold of more items than its row names reads them all"
+    );
+
+    let mut shell = loaded(Vec::new());
+    shell.key(Key::Char('f'));
+    let read = sent(&mut shell);
+    assert_eq!(read, vec![list(NoticeFilter::Pending, None, None)]);
+    shell.arrive(page(read[0].clone(), vec![big], false));
+    shell.key(Key::Enter);
+    assert_eq!(
+        changes(&mut shell),
+        vec![NoticeAction::Folds {
+            folds: vec![fold(70, NoticeFilter::Pending)],
+            change: FoldChange::Read,
+        }],
+        "the fold names the filter it was listed under"
+    );
 }
 
 #[test]
@@ -359,7 +402,7 @@ fn enter_stays_and_says_why_for_an_update_or_a_project_no_longer_listed() {
 }
 
 #[test]
-fn space_marks_rows_and_r_u_d_act_on_every_id_of_the_marked_items() {
+fn space_marks_rows_and_r_u_d_act_on_every_item_of_the_marked_folds() {
     let mut folded = question(5);
     folded.ids = vec![5, 6, 7];
     folded.folded = 3;
@@ -370,25 +413,14 @@ fn space_marks_rows_and_r_u_d_act_on_every_id_of_the_marked_items() {
         shell.key(Key::Char(' '));
         shell
     };
+    let folds = |change| NoticeAction::Folds {
+        folds: vec![fold(1, NoticeFilter::All), fold(5, NoticeFilter::All)],
+        change,
+    };
     for (key, action) in [
-        (
-            'r',
-            NoticeAction::Read {
-                ids: vec![1, 5, 6, 7],
-            },
-        ),
-        (
-            'u',
-            NoticeAction::Unread {
-                ids: vec![1, 5, 6, 7],
-            },
-        ),
-        (
-            'd',
-            NoticeAction::Delete {
-                ids: vec![1, 5, 6, 7],
-            },
-        ),
+        ('r', folds(FoldChange::Read)),
+        ('u', folds(FoldChange::Unread)),
+        ('d', folds(FoldChange::Delete)),
     ] {
         let mut shell = fresh();
         assert!(screen(&mut shell).contains("2 selected"));
@@ -406,7 +438,10 @@ fn space_marks_rows_and_r_u_d_act_on_every_id_of_the_marked_items() {
     shell.key(Key::Char('u'));
     assert_eq!(
         changes(&mut shell),
-        vec![NoticeAction::Unread { ids: vec![9] }],
+        vec![NoticeAction::Folds {
+            folds: vec![fold(9, NoticeFilter::All)],
+            change: FoldChange::Unread,
+        }],
         "no marks act on the row under the cursor"
     );
 }
@@ -432,29 +467,29 @@ fn a_marks_every_item_of_the_picked_project_read() {
 }
 
 #[test]
-fn a_change_of_more_ids_than_one_action_holds_goes_out_in_chunks() {
-    let items: Vec<Notice> = (0..10)
-        .map(|row| {
-            let first = row * 100;
-            let mut item = question(first + 1);
-            item.ids = (first + 1..=first + i64::try_from(FOLD_IDS_MAX).unwrap()).collect();
-            item
-        })
+fn a_change_of_more_rows_than_one_action_holds_goes_out_in_chunks() {
+    let rows = usize::from(PAGE_MAX) + 3;
+    let items: Vec<Notice> = (1..=i64::try_from(rows).unwrap()).map(question).collect();
+    let every: Vec<NoticeFold> = items
+        .iter()
+        .map(|item| fold(item.id, NoticeFilter::All))
         .collect();
-    let every: Vec<i64> = items.iter().flat_map(|item| item.ids.clone()).collect();
-    assert!(every.len() > ACTION_IDS_MAX);
     let mut shell = loaded(items);
-    for _ in 0..10 {
+    for _ in 0..rows {
         shell.key(Key::Char(' '));
         shell.key(Key::Down);
     }
     shell.key(Key::Char('r'));
     let sent = changes(&mut shell);
+    assert_eq!(sent.len(), 2);
     assert_eq!(
         sent,
         every
-            .chunks(ACTION_IDS_MAX)
-            .map(|ids| NoticeAction::Read { ids: ids.to_vec() })
+            .chunks(usize::from(PAGE_MAX))
+            .map(|folds| NoticeAction::Folds {
+                folds: folds.to_vec(),
+                change: FoldChange::Read,
+            })
             .collect::<Vec<_>>()
     );
 }
