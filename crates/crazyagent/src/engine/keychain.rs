@@ -680,7 +680,7 @@ mod tests {
         assert_ne!(fresh, earlier.path());
         assert_eq!(fresh.parent(), earlier.path().parent());
         assert!(!earlier.path().exists());
-        assert_eq!(keychain_files(&home), [fresh.clone()]);
+        assert_eq!(keychain_files(&home), std::slice::from_ref(&fresh));
         let keychain = TestKeychain::adopt(&home, fresh.clone());
         let text = fresh.to_str().unwrap();
         for which in ["default-keychain", "list-keychains"] {
