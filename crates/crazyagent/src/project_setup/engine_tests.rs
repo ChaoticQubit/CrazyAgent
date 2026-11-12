@@ -1533,6 +1533,8 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
             INSERT INTO team_agent_conversations(agent,project,harness,connection,conversation,record)
             VALUES (1,'setup-pooled','codex','connection-1','conversation-1','/tmp/record.jsonl');
             INSERT INTO team_owner_turns(message,project) VALUES (1,'setup-pooled');
+            INSERT INTO team_task_roles(task,project,role) VALUES (1,'setup-pooled','docs');
+            INSERT INTO team_handles(project,handle,agent,held_ms) VALUES ('setup-pooled','docs',1,0);
             INSERT INTO team_master_idle_stop(project,choice) VALUES ('setup-pooled','off');
             INSERT INTO team_master_live_terminal(project,terminal) VALUES ('setup-pooled',0);
             INSERT INTO team_events(project,agent,task,kind,text,state,created_ms)
@@ -1596,6 +1598,16 @@ async fn owner_removes_a_project_and_keeps_its_folder() {
         engine.rows("SELECT count(*) FROM team_owner_turns WHERE project='setup-pooled'"),
         0,
         "the owner's chat turns go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_task_roles WHERE project='setup-pooled'"),
+        0,
+        "the roles of its tasks go with it"
+    );
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM team_handles WHERE project='setup-pooled'"),
+        0,
+        "its handle registry goes with it, so a reused project id reaches no old agent"
     );
     assert!(
         crate::questions::count_pending(&questions)

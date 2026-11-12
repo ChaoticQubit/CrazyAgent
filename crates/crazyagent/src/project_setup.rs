@@ -2479,7 +2479,7 @@ const DELETE_NAME_BYTES_MAX: usize = 1024;
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 47] = [
+const REMOVED_WITH_PROJECT: [&str; 49] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2512,6 +2512,8 @@ const REMOVED_WITH_PROJECT: [&str; 47] = [
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
+    "team_task_roles",
+    "team_handles",
     "team_wake_requests",
     "team_owner_stops",
     "team_status_log",
