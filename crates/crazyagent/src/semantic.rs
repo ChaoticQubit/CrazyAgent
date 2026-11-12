@@ -1,4 +1,4 @@
-use crate::app_plugins::manifest::{Manifest, Runs};
+use crate::app_plugins::manifest::{Manifest, Purpose, Runs};
 use crate::app_plugins::{Problem, RunsView};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
@@ -117,6 +117,9 @@ pub struct Hybrid {
 
 /// The most texts one call to the built-in local runtime embeds.
 const LOCAL_BATCH: usize = 64;
+/// The most document calls one project's turn sends to an HTTP plugin per indexer tick,
+/// the choice read again before each, so turning the plugin off stops the next send.
+const HTTP_CALLS_MAX: usize = 4;
 /// How long a local runtime whose open failed waits before the next open, since every open
 /// re-hashes the downloaded files.
 const LOCAL_RETRY_MS: i64 = 10 * 60 * 1000;
@@ -221,7 +224,35 @@ pub fn embed_pending(connection: &mut Connection, root: &Path, project: &Project
             }
             embedded
         }
-        Runs::Http(_) => 0,
+        Runs::Http(_) => {
+            let mut query = |texts: &[&str]| {
+                crate::app_plugins::http::embed(root, &loaded, texts, Purpose::Query)
+            };
+            vectors::embed_queries(connection, &plugin, &mut query);
+            let one_call = vectors::Bounds {
+                round_chunks: plugin.batch,
+                ..vectors::BOUNDS
+            };
+            let mut embedded = 0;
+            for _ in 0..HTTP_CALLS_MAX {
+                let still = settings::chosen(connection, root)
+                    .is_some_and(|now| plugin_of(&now.manifest) == plugin);
+                if !still {
+                    break;
+                }
+                let mut document = |texts: &[&str]| {
+                    crate::app_plugins::http::embed(root, &loaded, texts, Purpose::Document)
+                };
+                let sent =
+                    vectors::embed_round(connection, project, &plugin, &one_call, &mut document);
+                embedded += sent;
+                if sent < plugin.batch {
+                    break;
+                }
+            }
+            assert!(embedded <= HTTP_CALLS_MAX * plugin.batch);
+            embedded
+        }
     }
 }
 
