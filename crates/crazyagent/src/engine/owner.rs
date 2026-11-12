@@ -39,7 +39,7 @@ pub use transport::recovery::{
 };
 pub use transport::roadmap::ROADMAP_CODES;
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
-pub use transport::usage::USAGE_CODES;
+pub use transport::usage::{AccountExtras, USAGE_CODES};
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,
 };

@@ -27,8 +27,8 @@ use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
-    NativeAuthMethod,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountExtras, AccountPage, AccountSecret,
+    ModelAccessCollection, NativeAuthMethod,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -3570,6 +3570,17 @@ async fn desktop_usage_metrics(
 }
 
 #[tauri::command]
+async fn desktop_usage_extras(
+    webview: Webview,
+    state: State<'_, NativeState>,
+    detail: bool,
+) -> Result<Vec<AccountExtras>, BridgeError> {
+    main_window(&webview)?;
+    let call = lock(&state).await?.usage_extras(detail)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_refresh(
     webview: Webview,
     state: State<'_, NativeState>,
@@ -5039,6 +5050,7 @@ native_commands! {
     desktop_usage_report,
     desktop_usage_metrics,
     desktop_usage_refresh,
+    desktop_usage_extras,
     desktop_usage_notices,
     desktop_usage_set_money,
     desktop_usage_decide_recount,

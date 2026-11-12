@@ -1,5 +1,6 @@
 use super::*;
 use crate::protocol::{CredentialRef, ProjectId, encode_frame};
+use crate::usage::extras::LimitExtras;
 use crate::usage::metrics::Metrics;
 use crate::usage::money::MoneySettings;
 use crate::usage::report::UsageReport;
@@ -9,6 +10,9 @@ use serde::{Deserialize, Serialize};
 
 const REQUEST_BYTES_MAX: usize = 1024;
 pub(super) const USAGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The most accounts one extras reply holds, the same bound as the report's limits, so the
+/// reply always fits one frame.
+pub const EXTRAS_ACCOUNTS_MAX: usize = crate::usage::report::LIMITS_MAX;
 
 /// Every code a Usage request can answer an owner client with: the usage store's
 /// refusals, this protocol's own, and the owner connection's it travels on.
@@ -48,6 +52,10 @@ enum Action {
         since_ms: i64,
     },
     Refresh,
+    Extras {
+        #[serde(default)]
+        detail: bool,
+    },
     SetReset {
         account: CredentialRef,
         window: WindowKind,
@@ -78,6 +86,7 @@ struct Envelope {
 enum Reply {
     Report { report: Box<UsageReport> },
     Metrics { metrics: Box<Metrics> },
+    Extras { accounts: Vec<AccountExtras> },
     Done,
     Rejected { code: String },
 }
@@ -88,6 +97,7 @@ fn read_kind(action: &Action) -> Option<&'static str> {
     match action {
         Action::Report { .. } => Some("usage.report"),
         Action::Metrics { .. } => Some("usage.metrics"),
+        Action::Extras { .. } => Some("usage.extras"),
         _ => None,
     }
 }
@@ -131,6 +141,17 @@ impl OwnerClient {
             .await?
         {
             Reply::Metrics { metrics } => Ok(*metrics),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Reads every saved account's free resets, credits and spend as the usage store holds
+    /// them (DEC-154). Pools passes `detail` on each reread so the usage service reads the
+    /// detail rows while it is open; every other caller passes false and never makes the
+    /// engine ask a provider. Input: whether Pools is open. Output: one entry per account.
+    pub async fn usage_extras(&self, detail: bool) -> Result<Vec<AccountExtras>, EngineError> {
+        match self.usage_exchange(Action::Extras { detail }).await? {
+            Reply::Extras { accounts } => Ok(accounts),
             _ => Err(unknown()),
         }
     }
@@ -254,7 +275,17 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 enum Prepared {
     Report(Box<UsageReport>),
     Metrics(Box<Metrics>),
+    Extras(Vec<AccountExtras>, Option<PathBuf>),
     Change(PathBuf, Change),
+}
+
+/// One account's limits contract on the wire: the account id the app gave it and what its
+/// adapter reports. Never a provider's reset, grant, account or org id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountExtras {
+    pub account: CredentialRef,
+    pub extras: LimitExtras,
 }
 
 /// A change a usage request makes to the usage store.
@@ -353,6 +384,29 @@ async fn prepare(
             .await
             .map_err(|_| failure("usage_unavailable"))??,
         )),
+        Action::Extras { detail } => {
+            let connections = saved_connections(engine, admission).await?;
+            let read = root.clone();
+            let accounts = tokio::task::spawn_blocking(move || {
+                let mut db = usage::open(&read)?;
+                let snapshot = db.transaction().map_err(|_| failure("usage_unavailable"))?;
+                let now = crate::team::now_ms();
+                connections
+                    .iter()
+                    .map(|connection| {
+                        let stored = usage::extras::extras_of(&snapshot, &connection.id, now)?;
+                        Ok(AccountExtras {
+                            account: connection.id.clone(),
+                            extras: usage::extras::limit_extras(connection, &stored),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, EngineError>>()
+            })
+            .await
+            .map_err(|_| failure("usage_unavailable"))??;
+            assert!(accounts.len() <= EXTRAS_ACCOUNTS_MAX);
+            Prepared::Extras(accounts, detail.then_some(root))
+        }
         Action::Refresh => Prepared::Change(root, Change::Refresh),
         Action::SetReset {
             account,
@@ -388,6 +442,39 @@ async fn held_accounts(
     }
 }
 
+/// Every saved account's connection, in the order Settings > Accounts lists them, at most
+/// `EXTRAS_ACCOUNTS_MAX`, so the extras read covers key, URL and local accounts as well as
+/// sign-ins. Inputs: the engine and the owner admission. Output: the connections, or
+/// storage's refusal.
+async fn saved_connections(
+    engine: &Engine,
+    admission: &Admission,
+) -> Result<Vec<crate::config::ModelConnection>, EngineError> {
+    let mut found = Vec::new();
+    let mut after = None;
+    loop {
+        let wanted = (EXTRAS_ACCOUNTS_MAX - found.len()).min(crate::accounts::ACCOUNTS_PAGE_MAX);
+        let page = engine
+            .native_auth_job(|reply| {
+                Job::Accounts(
+                    admission.clone(),
+                    crate::storage::accounts::Command::List(after.clone(), wanted),
+                    reply,
+                )
+            })
+            .await?;
+        let crate::storage::accounts::ResultValue::Page(items, next) = page else {
+            return Err(unknown());
+        };
+        assert!(items.len() <= wanted);
+        found.extend(items.into_iter().map(|item| item.connection));
+        if next.is_none() || found.len() >= EXTRAS_ACCOUNTS_MAX {
+            return Ok(found);
+        }
+        after = next;
+    }
+}
+
 /// Answers a prepared request under the owner barrier its caller holds: checks the grant
 /// again, then makes any change. Inputs: the authority, packet, admission and the prepared
 /// request. Output: the reply, or the refusal.
@@ -404,6 +491,15 @@ async fn finish(
     let (root, change) = match prepared {
         Prepared::Report(report) => return Ok(Reply::Report { report }),
         Prepared::Metrics(metrics) => return Ok(Reply::Metrics { metrics }),
+        Prepared::Extras(accounts, None) => return Ok(Reply::Extras { accounts }),
+        Prepared::Extras(accounts, Some(root)) => {
+            tokio::task::spawn_blocking(move || {
+                usage::extras::request_detail(&usage::open(&root)?, crate::team::now_ms())
+            })
+            .await
+            .map_err(|_| failure("usage_unavailable"))??;
+            return Ok(Reply::Extras { accounts });
+        }
         Prepared::Change(root, change) => (root, change),
     };
     tokio::task::spawn_blocking(move || {
@@ -424,4 +520,62 @@ async fn finish(
     .await
     .map_err(|_| failure("usage_unavailable"))??;
     Ok(Reply::Done)
+}
+
+#[cfg(test)]
+mod extras_request_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn an_extras_request_reads_detail_off_by_default_and_refuses_an_unknown_field() {
+        let unknown = json!({ "usage": { "kind": "extras", "detail": false, "account": "x" } });
+        assert!(serde_json::from_value::<Envelope>(unknown).is_err());
+        let plain = json!({ "usage": { "kind": "extras" } });
+        let Envelope { usage: action } = serde_json::from_value(plain).unwrap();
+        assert!(matches!(action, Action::Extras { detail: false }));
+        assert_eq!(read_kind(&action), Some("usage.extras"));
+        let pools = json!({ "usage": { "kind": "extras", "detail": true } });
+        let Envelope { usage: action } = serde_json::from_value(pools).unwrap();
+        assert!(matches!(action, Action::Extras { detail: true }));
+    }
+
+    #[test]
+    fn a_full_extras_reply_of_the_longest_entries_fits_one_frame() {
+        use crate::usage::extras::{Adapter, CREDITS_BYTES_MAX, ResetKind, Resets, Spend};
+        let harness = "h".repeat(64);
+        let entry = |index: usize| AccountExtras {
+            account: CredentialRef::new(format!("{index:03}{}", "a".repeat(125))).unwrap(),
+            extras: LimitExtras {
+                harness: harness.clone(),
+                adapter: Adapter::OpenRouter,
+                may_break: true,
+                resets: Some(Resets {
+                    count: crate::usage::extras::RESETS_MAX,
+                    kinds: vec![
+                        ResetKind::FiveHour,
+                        ResetKind::Weekly,
+                        ResetKind::Model,
+                        ResetKind::AllLimits,
+                    ],
+                    next_expiry_ms: Some(i64::MAX),
+                }),
+                credits: Some("c".repeat(CREDITS_BYTES_MAX)),
+                spend: Spend::Elsewhere {
+                    place: "p".repeat(253),
+                },
+                not_reported: format!("not reported by {harness}"),
+                resets_checked_ms: Some(i64::MAX),
+                credits_checked_ms: Some(i64::MAX),
+                resets_gained_ms: Some(i64::MAX),
+            },
+        };
+        let accounts = (0..EXTRAS_ACCOUNTS_MAX).map(entry).collect::<Vec<_>>();
+        let frame = encode_frame(&Reply::Extras { accounts }).unwrap();
+        assert!(
+            frame.len() <= crate::protocol::FRAME_BYTES_MAX,
+            "{}",
+            frame.len()
+        );
+    }
 }

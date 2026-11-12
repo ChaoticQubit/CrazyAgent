@@ -630,13 +630,28 @@ fn a_window_a_good_poll_left_out_names_its_provider_and_a_failed_read_keeps_its_
     }
 }
 
+/// Takes the next usage read the page sent, past any stored extras read an earlier read left
+/// queued, and the extras read every usage read sends with it. Input: the context. Output:
+/// the range start the usage read asked for.
 fn asked_since(ctx: &mut Ctx) -> Option<i64> {
-    match ctx.next_request() {
-        Some(Request::Settings(job)) => match *job {
-            SettingsJob::Usage { since_ms, .. } => since_ms,
+    loop {
+        match ctx.next_request() {
+            Some(Request::Settings(job)) => match *job {
+                SettingsJob::Extras { detail } => {
+                    assert!(!detail, "the usage screen never asks for the detail rows");
+                }
+                SettingsJob::Usage { since_ms, .. } => {
+                    let next = ctx.next_request();
+                    assert!(
+                        matches!(&next, Some(Request::Settings(job)) if matches!(**job, SettingsJob::Extras { detail: false })),
+                        "each usage read also reads the stored extras"
+                    );
+                    return since_ms;
+                }
+                other => panic!("a usage read expected, got {other:?}"),
+            },
             other => panic!("a usage read expected, got {other:?}"),
-        },
-        other => panic!("a usage read expected, got {other:?}"),
+        }
     }
 }
 
@@ -696,6 +711,10 @@ fn the_page_asks_for_its_range_and_shows_answers_failures_and_not_ready() {
         panic!("the page asks for usage");
     };
     assert_eq!(format!("{job:?}"), "Usage");
+    let Some(Request::Settings(job)) = ctx.next_request() else {
+        panic!("the page reads the stored extras with it");
+    };
+    assert_eq!(format!("{job:?}"), "Extras");
     assert!(page.busy(&ctx));
     assert!(
         text(&page.body(96, NOW, 0, &ctx))
@@ -1371,5 +1390,138 @@ fn a_second_recount_choice_says_it_was_already_decided() {
             "Could not apply that choice.",
             "This recount was already decided. Press r to read again."
         )
+    );
+}
+
+fn extras_of(
+    account: &str,
+    extras: crate::usage::extras::LimitExtras,
+) -> crate::engine::owner::AccountExtras {
+    crate::engine::owner::AccountExtras {
+        account: CredentialRef::new(account).unwrap(),
+        extras,
+    }
+}
+
+fn not_reported(harness: &str) -> crate::usage::extras::LimitExtras {
+    crate::usage::extras::LimitExtras {
+        harness: harness.into(),
+        adapter: crate::usage::extras::Adapter::NotReported,
+        may_break: false,
+        resets: None,
+        credits: None,
+        spend: crate::usage::extras::Spend::NotReported,
+        not_reported: format!("not reported by {harness}"),
+        resets_checked_ms: None,
+        credits_checked_ms: None,
+        resets_gained_ms: None,
+    }
+}
+
+fn extras_arrival(rows: Vec<crate::engine::owner::AccountExtras>) -> Arrival {
+    Arrival::Owner(Box::new(crate::tui::client::OwnerEvent::Settings(
+        Box::new(SettingsEvent::Extras(Ok(rows))),
+    )))
+}
+
+/// DEC-154: the TUI usage screen reads what the engine stored beside each read of usage,
+/// never the detail rows, and shows each account's free resets and credits line under its
+/// limits, a key, URL or local account too, word for word the desktop's.
+#[test]
+fn each_account_s_limits_end_with_its_free_resets_and_credits_line() {
+    let mut ctx = ctx(120, 40);
+    let mut page = UsagePage::new();
+    page.shown(&mut ctx);
+    let mut asked = Vec::new();
+    while let Some(request) = ctx.next_request() {
+        if let Request::Settings(job) = request {
+            asked.push(format!("{job:?}"));
+            if let SettingsJob::Extras { detail } = *job {
+                assert!(!detail, "the usage screen never asks for the detail rows");
+            }
+        }
+    }
+    assert!(asked.iter().any(|job| job == "Extras"), "{asked:?}");
+
+    let mut report = report();
+    report.since_ms = page.asked.and_then(|(_, since)| since);
+    report.limits = vec![limits(None)];
+    page.apply(&Ok(Box::new(report)), &mut ctx);
+    let mut claude = not_reported("Claude Code");
+    claude.adapter = crate::usage::extras::Adapter::Claude;
+    claude.may_break = true;
+    claude.resets = Some(crate::usage::extras::Resets {
+        count: 2,
+        kinds: vec![crate::usage::extras::ResetKind::FiveHour],
+        next_expiry_ms: None,
+    });
+    let mut key = not_reported("OpenRouter");
+    key.credits = Some("$3.10 left".into());
+    page.arrive(
+        &extras_arrival(vec![
+            extras_of("acct-claude", claude),
+            extras_of("acct-key", key),
+        ]),
+        &mut ctx,
+    );
+    ctx.store.accounts = Load::Ready(Vec::new());
+    let shown = text(&page.body(116, NOW, 0, &ctx)).join("\n");
+    assert!(
+        shown.contains(
+            "2 free resets (5-hour) (may break) \u{b7} Credits: not reported by Claude Code"
+        ),
+        "{shown}"
+    );
+    let at = shown.find("Weekly").unwrap();
+    assert!(
+        shown.find("2 free resets").unwrap() > at,
+        "the line comes under the bars: {shown}"
+    );
+}
+
+#[test]
+fn a_key_or_local_card_also_ends_with_its_line_and_no_extras_read_adds_nothing() {
+    let ctx = ctx(120, 40);
+    let mut keyed = names();
+    keyed.accounts.insert("acct-key".into(), "Team key".into());
+    keyed.no_window = vec![("acct-key".into(), crate::usage::NO_WINDOW_KEY)];
+    let none = UsageReport {
+        limits: Vec::new(),
+        ..report()
+    };
+    let bare = text(&summary(
+        &none,
+        UsageRange::Today,
+        &keyed,
+        NOW,
+        0,
+        200,
+        &ctx,
+    ))
+    .join("\n");
+    assert!(
+        !bare.contains("free reset") && !bare.contains("Credits:"),
+        "{bare}"
+    );
+
+    let mut key = not_reported("OpenRouter");
+    key.credits = Some("$3.10 left".into());
+    key.spend = crate::usage::extras::Spend::Elsewhere {
+        place: "openrouter.ai".into(),
+    };
+    keyed.extras.insert("acct-key".into(), key);
+    let shown = text(&summary(
+        &none,
+        UsageRange::Today,
+        &keyed,
+        NOW,
+        0,
+        200,
+        &ctx,
+    ))
+    .join("\n");
+    assert!(
+        shown.contains("    Free resets: not reported by OpenRouter \u{b7} Credits: $3.10 left \u{b7} Spend at openrouter.ai"),
+        "{shown}"
     );
 }

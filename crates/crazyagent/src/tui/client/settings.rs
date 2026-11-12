@@ -63,6 +63,9 @@ pub(in crate::tui) enum SettingsJob {
         offset_minutes: i32,
     },
     RefreshUsage,
+    Extras {
+        detail: bool,
+    },
     SetMoney(MoneySettings),
     SetSpend(SpendSettings),
     Spend(CredentialRef),
@@ -235,6 +238,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::HarnessUpdateSettings => "HarnessUpdateSettings",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
+            Self::Extras { .. } => "Extras",
             Self::SetMoney(_) => "SetMoney",
             Self::SetSpend(_) => "SetSpend",
             Self::Spend(_) => "Spend",
@@ -363,6 +367,7 @@ pub(in crate::tui) enum SettingsEvent {
     HarnessUpdateSettings(Result<UpdateSettings, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
+    Extras(Result<Vec<crate::engine::owner::AccountExtras>, String>),
     MoneySet(Result<(), String>),
     SpendSet(Result<(), String>),
     Spent(Result<(), String>),
@@ -428,6 +433,7 @@ impl SettingsEvent {
             SettingsJob::HarnessUpdateSettings => Self::HarnessUpdateSettings(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
+            SettingsJob::Extras { .. } => Self::Extras(Err(problem)),
             SettingsJob::SetMoney(_) => Self::MoneySet(Err(problem)),
             SettingsJob::SetSpend(_) => Self::SpendSet(Err(problem)),
             SettingsJob::Spend(_) => Self::Spent(Err(problem)),
@@ -660,6 +666,15 @@ impl NativeOwner {
                 SettingsEvent::UsageRefreshed(match self.settings_controller() {
                     Ok(controller) => controller
                         .usage_refresh()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::Extras { detail } => {
+                SettingsEvent::Extras(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .usage_extras(detail)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

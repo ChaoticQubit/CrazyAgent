@@ -1,6 +1,6 @@
 use super::*;
 use crazyagent::engine::EngineError;
-use crazyagent::engine::owner::{OwnerClient, USAGE_CODES};
+use crazyagent::engine::owner::{AccountExtras, OwnerClient, USAGE_CODES};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::usage::WindowKind;
 use crazyagent::usage::metrics::Metrics;
@@ -77,6 +77,16 @@ impl NativeBridge {
                 .usage_metrics(project, since_ms)
                 .await
                 .map_err(usage_error)
+        }))
+    }
+
+    /// Reads every saved account's free resets, credits and spend as stored, run without the
+    /// bridge lock; `detail` only while Pools is open. Input: whether Pools is open. Output:
+    /// one entry per account.
+    pub fn usage_extras(&self, detail: bool) -> Result<Unlocked<Vec<AccountExtras>>, BridgeError> {
+        let client = self.usage_client()?;
+        Ok(Box::pin(async move {
+            client.usage_extras(detail).await.map_err(usage_error)
         }))
     }
 

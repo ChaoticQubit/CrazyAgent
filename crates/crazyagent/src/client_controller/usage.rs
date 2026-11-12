@@ -26,6 +26,15 @@ impl OwnerController {
             .await
     }
 
+    /// Reads every saved account's free resets, credits and spend as stored; `detail` only
+    /// while Pools is open. Input: whether Pools is open. Output: one entry per account.
+    pub async fn usage_extras(
+        &self,
+        detail: bool,
+    ) -> Result<Vec<crate::engine::owner::AccountExtras>, EngineError> {
+        self.usage_client()?.usage_extras(detail).await
+    }
+
     /// Asks the engine to check every signed-in account's limits now.
     pub async fn usage_refresh(&self) -> Result<(), EngineError> {
         self.usage_client()?.usage_refresh().await
