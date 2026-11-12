@@ -1507,7 +1507,8 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "claude_host_protocol_unsupported" => MasterReason::ProtocolFault,
         "codex_host_protocol_frame_too_large"
         | "claude_host_protocol_frame_too_large"
-        | "codex_host_input_limit" => MasterReason::FrameLimit,
+        | "codex_host_input_limit"
+        | "claude_host_input_limit" => MasterReason::FrameLimit,
         "master_session_scope_conflict"
         | "master_project_scope_conflict"
         | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
