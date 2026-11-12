@@ -1120,7 +1120,8 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
         "start" if answering => println!("The engine is already running"),
         "start" => {
             let since = crazyagent::service::log_length(&layout);
-            if service.runs_another_program() {
+            let another = service.runs_another_program();
+            if another && service.may_replace() {
                 let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
                 crazyagent::service::Service {
                     executable: crazyagent::service::persistable(
@@ -1133,6 +1134,13 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
                 }
                 .install()
             } else {
+                if another {
+                    eprintln!(
+                        "{} runs another engine; it starts as it is. To run this one at login: {} service install",
+                        service.definition.display(),
+                        service.executable.display()
+                    );
+                }
                 service.start()
             }
             .map_err(|e| e.to_string())?;

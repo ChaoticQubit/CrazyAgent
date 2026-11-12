@@ -965,6 +965,85 @@ fn an_executable_path_with_escaped_characters_is_still_found_in_its_definition()
     }
 }
 
+/// rv-secreview UE-L1: `service start` replaces a definition that runs another program only
+/// with an installed app's engine outside any cargo target folder, and never under a newer
+/// engine: the last one that ran at the data root or the app bundle the installed plist runs.
+#[cfg(unix)]
+#[test]
+fn only_an_installed_app_engine_that_is_not_older_may_replace_another_program() {
+    let temp = tempfile::tempdir().unwrap();
+    let bundled = temp
+        .path()
+        .join("Applications")
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
+    std::fs::write(&bundled, b"engine").unwrap();
+    let mut own = service(Platform::MacOs);
+    own.root = temp.path().join("engine");
+    std::fs::create_dir_all(&own.root).unwrap();
+    own.executable = bundled.clone();
+    own.definition = temp.path().join("dev.crazyagent.engine.plist");
+    assert!(own.may_replace());
+    let mut plain = own.clone();
+    plain.executable = temp.path().join("bin").join("crazyagent");
+    assert!(!plain.may_replace());
+    let target = temp.path().join("worktree").join("target");
+    let built = target
+        .join("release")
+        .join("bundle")
+        .join("macos")
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("crazyagent");
+    std::fs::create_dir_all(built.parent().unwrap()).unwrap();
+    std::fs::write(&built, b"engine").unwrap();
+    std::fs::write(
+        target.join("CACHEDIR.TAG"),
+        b"Signature: 8a477f597d28d172789f06886806bc55\n",
+    )
+    .unwrap();
+    let mut dev = own.clone();
+    dev.executable = built;
+    assert!(!dev.may_replace());
+    let old = temp.path().join("Old.app");
+    std::fs::create_dir_all(old.join("Contents").join("MacOS")).unwrap();
+    let mut installed = own.clone();
+    installed.executable = old.join("Contents").join("MacOS").join("crazyagent");
+    write_definition(
+        &own.definition,
+        &installed.definition_text().unwrap(),
+        Platform::MacOs,
+    )
+    .unwrap();
+    let info = |version: &str| {
+        std::fs::write(
+            old.join("Contents").join("Info.plist"),
+            format!("<plist version=\"1.0\">\n<dict>\n\t<key>CFBundleShortVersionString</key>\n\t<string>{version}</string>\n</dict>\n</plist>\n"),
+        )
+        .unwrap();
+    };
+    info("99.0.0");
+    assert!(!own.may_replace());
+    info("0.0.1");
+    assert!(own.may_replace());
+    std::fs::write(
+        own.root.join("owner-current"),
+        br#"{"engine_version":"99.0.0"}"#,
+    )
+    .unwrap();
+    assert!(!own.may_replace());
+    std::fs::write(
+        own.root.join("owner-current"),
+        br#"{"engine_version":"0.0.1"}"#,
+    )
+    .unwrap();
+    assert!(own.may_replace());
+}
+
 #[test]
 fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     let temp = tempfile::tempdir().unwrap();

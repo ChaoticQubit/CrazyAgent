@@ -585,6 +585,51 @@ WantedBy=default.target\n",
             .is_ok_and(|installed| !installed.lines().any(|line| Some(line) == own))
     }
 
+    /// Whether `service start` may replace an installed definition that runs another program
+    /// with this service's engine: the engine is an installed desktop app's (an app bundle, a
+    /// mounted AppImage or a Windows install folder) outside any cargo target folder, and no
+    /// engine known at this data root is newer, neither the last one that ran here nor the app
+    /// bundle the installed plist runs. Output: the answer; false for a dev or worktree build.
+    pub fn may_replace(&self) -> bool {
+        let own = canonical(&self.executable);
+        let built = own
+            .ancestors()
+            .any(|folder| folder.join("CACHEDIR.TAG").is_file());
+        if built || !crate::update::inside_app_bundle(&own) {
+            return false;
+        }
+        [
+            crate::engine::bootstrap::reported_engine_version(&self.root),
+            self.installed_bundle_version(),
+        ]
+        .into_iter()
+        .flatten()
+        .all(|known| {
+            crate::update::is_newer(&known, crate::version::VERSION).is_ok_and(|newer| !newer)
+        })
+    }
+
+    /// The version of the app bundle the installed plist runs, from that bundle's Info.plist
+    /// read as text. Output: none when either file is not plain text, is larger than its cap,
+    /// or the plist names no app bundle.
+    fn installed_bundle_version(&self) -> Option<String> {
+        let installed = bounded_text(&self.definition)?;
+        let program = installed
+            .lines()
+            .skip_while(|line| !line.contains("<key>ProgramArguments</key>"))
+            .find_map(plist_string)?;
+        let bundle = Path::new(&program).ancestors().find(|folder| {
+            folder
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("app"))
+        })?;
+        let info = bounded_text(&bundle.join("Contents").join("Info.plist"))?;
+        info.lines()
+            .skip_while(|line| !line.contains("<key>CFBundleShortVersionString</key>"))
+            .nth(1)
+            .and_then(plist_string)
+    }
+
     fn loaded(&self) -> Result<bool, ServiceError> {
         Ok(run_quiet(&self.status_command(current_uid()))?.0)
     }
@@ -850,6 +895,39 @@ fn xml(text: &str) -> String {
 
 fn systemd_specifiers(text: &str) -> String {
     text.replace('%', "%%")
+}
+
+/// The largest definition or Info.plist read when telling installed versions apart.
+const PLIST_BYTES_MAX: u64 = 64 << 10;
+
+/// Reads a small file as UTF-8 text. Input: the path. Output: the text, or none when it is
+/// missing, not UTF-8 or larger than [`PLIST_BYTES_MAX`].
+fn bounded_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(PLIST_BYTES_MAX + 1)
+        .read_to_string(&mut text)
+        .ok()?;
+    (text.len() as u64 <= PLIST_BYTES_MAX).then_some(text)
+}
+
+/// The text of a one-line plist `<string>` element, with XML's five escapes undone. Input:
+/// the line. Output: the text, or none for a line that holds no such element.
+fn plist_string(line: &str) -> Option<String> {
+    let inner = line
+        .trim()
+        .strip_prefix("<string>")?
+        .strip_suffix("</string>")?;
+    Some(
+        inner
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&amp;", "&"),
+    )
 }
 
 fn systemd_quoted(text: &str) -> String {
