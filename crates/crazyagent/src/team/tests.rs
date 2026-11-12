@@ -4858,7 +4858,10 @@ fn add_late_columns_upgrades_an_old_database_once() {
             "pane_pid".to_owned()
         ]
     );
-    assert_eq!(tasks.last().map(String::as_str), Some("mode"));
+    assert_eq!(
+        tasks[tasks.len() - 3..],
+        ["mode".to_owned(), "cancel_by".to_owned(), "wait".to_owned()]
+    );
     let kept: (String, Option<String>, Option<String>, bool, Option<i64>) = connection
         .query_row(
             "SELECT harness,pane,mode,hookless,pane_pid FROM team_agents WHERE project='team-old'",
@@ -4875,10 +4878,33 @@ fn add_late_columns_upgrades_an_old_database_once() {
         )
         .unwrap();
     assert_eq!(kept, ("claude-code".to_owned(), None, None, false, None));
-    let task_mode: Option<String> = connection
-        .query_row("SELECT mode FROM team_tasks", [], |row| row.get(0))
+    type OldTask = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let old_task: OldTask = connection
+        .query_row(
+            "SELECT status,error,mode,cancel_by,wait FROM team_tasks WHERE project='team-old'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
         .unwrap();
-    assert_eq!(task_mode, None);
+    assert_eq!(
+        old_task,
+        ("done".to_owned(), None, None, None, None),
+        "the old task keeps its status and error, with no cancel request or wait reason"
+    );
 
     initialize(&connection).unwrap();
     assert_eq!(columns("team_agents"), agents, "a second open adds nothing");

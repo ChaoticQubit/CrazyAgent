@@ -3850,7 +3850,8 @@ pub(crate) const ENDED_TEAMMATE: &str = "a.status IN ('stopped','failed')
 /// Gives team tables made before later columns those columns, older rows taking the
 /// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
-/// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
+/// for a lead's task), `team_tasks.cancel_by` (which owner request cancelled it, F17),
+/// `team_tasks.wait` (why it waits to start, F11), `team_agents.hookless` (1 when the agent's launch fires no hooks,
 /// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
 /// first named by, PLC (b)), `team_task_pins.held` (1 when a hold pinned the task, not
 /// its own purpose), `team_owner_stops.stopped_by` (who made the stop; one from before
