@@ -20,6 +20,7 @@ export interface EngineWatch {
 }
 
 export const NOTIFY_PER_READ_MAX = 3;
+export const BANNER_WINDOWS_PER_READ_MAX = 4;
 
 export const UNAVAILABLE_LINE = "System notifications are unavailable on this system.";
 export const AVAILABLE_LINE = "While CrazyAgent is in the background, macOS shows a notification for each item Settings, Notifications sends there. If none appear, macOS is blocking them: allow CrazyAgent in System Settings, Notifications.";
@@ -38,35 +39,66 @@ export function systemNotificationsLine(state: Result<SystemNotifications> | und
   return state.value === "available" ? AVAILABLE_LINE : UNAVAILABLE_LINE;
 }
 
-/** The store read one look of the watch takes: unfolded items in every filter newer than
- * the cursor, or on the first look only the store's newest id. Input: the cursor, null
- * before the first look. Output: the query. */
+/** The store read one window of the watch takes: unfolded items in every filter whose ids
+ * are the next `PAGE_MAX` past the cursor, so the window always fits one page and the walk
+ * goes oldest first, or on the first look only the store's newest id. Input: the cursor,
+ * null before the first look. Output: the query. */
 export function bannerQuery(kept: number | null): NoticeQuery {
   assert(kept === null || (Number.isSafeInteger(kept) && kept >= 0), "the cursor is a store id");
-  return { filter: "all", project_id: null, kind: null, fold: false, before: null, after: kept, limit: kept === null ? 1 : PAGE_MAX };
+  if (kept === null) return { filter: "all", project_id: null, kind: null, fold: false, before: null, after: null, limit: 1 };
+  const query: NoticeQuery = { filter: "all", project_id: null, kind: null, fold: false, before: kept + PAGE_MAX + 1, after: kept, limit: PAGE_MAX };
+  assert(query.before !== null && Number.isSafeInteger(query.before), "the window end is a store id");
+  return query;
 }
 
-/** Picks the store items to send as banners now, oldest first, at most
- * `NOTIFY_PER_READ_MAX` while notifying: only items the engine marks for a banner that are
- * neither read nor resolved. The cursor stops at the last item sent while more wait, so a
- * burst goes out spread over reads; once every listed item is handled it moves to the
- * store's newest id. The first look and a store whose newest id fell below the cursor only
- * remember, so nothing old is sent. Inputs: the cursor or null, the page read with
- * `bannerQuery`, whether this read notifies. Output: the cursor now and the ids to send. */
-export function freshNotices(kept: number | null, page: NoticePage, notifying: boolean): { kept: number; send: number[] } {
+/** Picks the items of one window to send as banners now, oldest first, at most `room`
+ * while notifying: only items the engine marks for a banner that are neither read nor
+ * resolved. The cursor stops at the last item sent while more wait, so a burst goes out
+ * spread over reads; once every listed item is handled it moves to the window's end or the
+ * store's newest id, whichever is lower. The first look and a store whose newest id fell
+ * below the cursor only remember, so nothing old is sent. Inputs: the cursor or null, the
+ * window read with `bannerQuery`, whether this read notifies, how many it may still send.
+ * Output: the cursor now and the ids to send. */
+export function freshNotices(kept: number | null, page: NoticePage, notifying: boolean, room: number): { kept: number; send: number[] } {
+  assert(Number.isSafeInteger(room) && room >= 1 && room <= NOTIFY_PER_READ_MAX, "a window may send at least one and at most a read's worth");
   if (kept === null || page.newest < kept) return { kept: page.newest, send: [] };
   if (!notifying) return { kept: Math.max(kept, page.newest), send: [] };
-  const fresh = page.items.filter((item) => item.id > kept).sort((a, b) => a.id - b.id);
+  const end = kept + PAGE_MAX;
+  assert(page.items.every((item) => item.id > kept && item.id <= end), "a window lists only ids past the cursor, at most one page of them");
+  assert(!page.more, "a window of one page of ids has no more rows");
+  const fresh = [...page.items].sort((a, b) => a.id - b.id);
   const send: number[] = [];
   let next = kept;
   for (const item of fresh) {
-    if (send.length === NOTIFY_PER_READ_MAX) return { kept: next, send };
+    if (send.length === room) return { kept: next, send };
     next = item.id;
     if (item.banner && item.read_ms === null && item.resolved_ms === null) send.push(item.id);
   }
-  const moved = Math.max(next, page.newest);
-  assert(moved >= kept && send.length <= NOTIFY_PER_READ_MAX, "the cursor only moves forward");
+  const moved = Math.max(next, Math.min(end, page.newest));
+  assert(moved >= kept && send.length <= room, "the cursor only moves forward");
   return { kept: moved, send };
+}
+
+/** One look of the watch: reads windows of the store oldest first from the cursor, at most
+ * `BANNER_WINDOWS_PER_READ_MAX`, until it has `NOTIFY_PER_READ_MAX` items to send or reaches
+ * the store's newest id, so a backlog past one page goes out in id order and none is
+ * skipped. Inputs: the cursor or null, whether this look notifies and the store read.
+ * Output: the cursor now and the ids to send; a failed read keeps what came before it. */
+export async function pickBanners(kept: number | null, notifying: boolean, load: (query: NoticeQuery) => Promise<Result<NoticePage>>): Promise<{ kept: number | null; send: number[] }> {
+  let cursor = kept;
+  const send: number[] = [];
+  for (let read = 0; read < BANNER_WINDOWS_PER_READ_MAX; read += 1) {
+    const result = await load(bannerQuery(cursor));
+    if (result.kind !== "ok") break;
+    const first = cursor === null;
+    const picked = freshNotices(cursor, result.value, notifying, NOTIFY_PER_READ_MAX - send.length);
+    cursor = picked.kept;
+    send.push(...picked.send);
+    if (first || !notifying || send.length === NOTIFY_PER_READ_MAX || cursor >= result.value.newest) break;
+  }
+  assert(send.length <= NOTIFY_PER_READ_MAX, "a look sends at most a read's worth");
+  assert(kept === null || cursor !== null, "a cursor once set stays set");
+  return { kept: cursor, send };
 }
 
 /** Opens the page of a clicked notification and marks only its item read, never the fold
@@ -161,10 +193,9 @@ export function noticeWatch(showToast: (message: string) => void) {
   window.addEventListener("focus", onFocus);
   return {
     async look() {
-      const result = await loadNotifications(bannerQuery(kept));
-      if (!live || result.kind !== "ok") return;
       const notifying = shouldNotify(inBackground(), await system);
-      const picked = freshNotices(kept, result.value, notifying);
+      const picked = await pickBanners(kept, notifying, loadNotifications);
+      if (!live) return;
       kept = picked.kept;
       for (const id of picked.send) {
         const line = failureLine(await notifyNotice(id));
