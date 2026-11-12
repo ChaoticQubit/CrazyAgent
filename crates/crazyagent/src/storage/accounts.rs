@@ -51,7 +51,6 @@ struct Record {
 
 /// The folder beside the engine database that holds account keys, one 0600 file per key
 /// named by its credential reference.
-#[cfg(unix)]
 pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
@@ -361,6 +360,23 @@ fn registered(db: &Connection, id: &CredentialRef) -> Result<Option<(i64, Record
     .map_err(error)?
     .map(|(seq, body)| decode(id.as_str(), &body).map(|record| (seq, record)))
     .transpose()
+}
+
+/// The display name and API-key reference of one saved account, for an app plugin secret
+/// bound to that account's key (DEC-156 addendum 1). Inputs: the engine connection and the
+/// account id. Output: none for an unknown account; the key reference is none for an account
+/// that does not sign in with an API key.
+pub(crate) fn api_key_account(
+    db: &Connection,
+    id: &CredentialRef,
+) -> Result<Option<(String, Option<CredentialRef>)>, EngineError> {
+    Ok(registered(db, id)?.map(|(_, record)| {
+        let key = match record.connection.auth {
+            ModelAuthentication::ApiKey { credential_ref } => Some(credential_ref),
+            _ => None,
+        };
+        (record.details.name, key)
+    }))
 }
 
 /// Lists saved accounts that a pool edit names but the config does not hold yet, so the

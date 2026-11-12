@@ -103,7 +103,7 @@ fn bundled_plugins_list_first_with_only_the_local_one_on() {
 #[test]
 fn a_preview_shows_the_trust_screen_and_saves_nothing() {
     let case = case();
-    let Preview::Ready { trust } = preview(&case.db, &case.root, ACME).unwrap() else {
+    let Preview::Ready { trust } = preview(&case.root, ACME).unwrap() else {
         panic!("ready");
     };
     assert_eq!(trust.name, "acme");
@@ -111,12 +111,12 @@ fn a_preview_shows_the_trust_screen_and_saves_nothing() {
     assert_eq!(trust.secrets, ["api_key"]);
     assert!(!trust.replaces);
     assert!(!case.root.join(crate::app_plugins::FOLDER).exists());
-    let Preview::Refused { problem } = preview(&case.db, &case.root, "a: 1\n\tb: 2\n").unwrap() else {
+    let Preview::Refused { problem } = preview(&case.root, "a: 1\n\tb: 2\n").unwrap() else {
         panic!("refused");
     };
     assert_eq!((problem.code.as_str(), problem.line), ("app_plugin_yaml_tab", Some(2)));
     let bundled_name = ACME.replace("name: acme", "name: local");
-    let Preview::Refused { problem } = preview(&case.db, &case.root, &bundled_name).unwrap() else {
+    let Preview::Refused { problem } = preview(&case.root, &bundled_name).unwrap() else {
         panic!("refused");
     };
     assert_eq!(problem.code, "app_plugin_name_taken");
@@ -153,7 +153,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
         "app_plugin_name_taken"
     );
     let newer = ACME.replace("version: 1.0.0", "version: 1.1.0");
-    let Preview::Ready { trust } = preview(&case.db, &case.root, &newer).unwrap() else {
+    let Preview::Ready { trust } = preview(&case.root, &newer).unwrap() else {
         panic!("ready");
     };
     assert!(trust.replaces);
@@ -182,7 +182,7 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
         code(set_enabled(&case.db, &case.root, "near", true)),
         "app_plugin_needs_review"
     );
-    let Preview::Ready { trust } = review(&case.db, &case.root, "near").unwrap() else {
+    let Preview::Ready { trust } = review(&case.root, "near").unwrap() else {
         panic!("ready");
     };
     assert_eq!(trust.sha256, sha(NEAR));

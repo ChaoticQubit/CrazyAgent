@@ -343,13 +343,21 @@ const PLAIN: &[(&str, &str)] = &[
         "review this plugin's trust screen before turning it on.",
     ),
     ("app_plugin_refused", "this plugin's file is refused; fix it first."),
+    ("app_plugin_off", "this plugin is turned off."),
+    (
+        "app_plugin_needs_key",
+        "this plugin needs a key: pick an account or enter a key for it.",
+    ),
     ("app_plugin_secret_not_declared", "this plugin does not declare that secret."),
     ("app_plugin_account_not_found", "that account no longer exists."),
     (
         "app_plugin_account_has_no_key",
         "that account has no saved API key to use.",
     ),
-    ("app_plugin_key_invalid", "enter the key on one line, up to 8192 characters."),
+    (
+        "app_plugin_key_invalid",
+        "enter the key on one line with no spaces, up to 1024 characters.",
+    ),
     (
         "app_plugin_key_store_unavailable",
         "the key could not be saved; nothing was changed.",
