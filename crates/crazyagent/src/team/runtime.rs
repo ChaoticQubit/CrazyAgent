@@ -3504,28 +3504,7 @@ impl TeamRuntime {
                 })
                 .count()
         };
-        let Some(launch) = launch_harness(harness) else {
-            return Err(format!("{harness} cannot run team agents yet"));
-        };
-        let accounts = eligible_accounts(access, project, launch);
-        if accounts != Accounts::NoPool && self.harness(launch).is_none() {
-            return Err(format!("{harness} is not installed"));
-        }
-        let Accounts::Usable(mut fitting) = accounts else {
-            return Err("Needs a pool".into());
-        };
-        if fitting.is_empty() {
-            return Err(format!(
-                "No account in this project's pool can run {harness}"
-            ));
-        }
-        fitting.retain(|account| super::model_pick::can_run(&account.reach, model));
-        if fitting.is_empty() {
-            return Err(format!(
-                "No account in this project's pool can run {harness} on {}",
-                model.unwrap_or_default()
-            ));
-        }
+        let fitting = self.able(access, project, harness, model)?;
         let mut refused = Vec::new();
         let accounts: Vec<TeamAccount> = fitting
             .into_iter()
@@ -3599,6 +3578,43 @@ impl TeamRuntime {
         Err("Every account in this project's pool is resting after a rate limit".into())
     }
 
+    /// The accounts of a project's pool that can run a harness on a model, busy, resting or
+    /// signed out ones included (DEC-150 H1): the one test of whether any can, shared by the
+    /// pick and the owner's Stop fallback rule. Takes the live access, the project, the
+    /// harness and the model, none for any account's own. Returns them, or the plain reason
+    /// none can.
+    fn able(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        model: Option<&str>,
+    ) -> Result<Vec<TeamAccount>, String> {
+        let Some(launch) = launch_harness(harness) else {
+            return Err(format!("{harness} cannot run team agents yet"));
+        };
+        let accounts = eligible_accounts(access, project, launch);
+        if accounts != Accounts::NoPool && self.harness(launch).is_none() {
+            return Err(format!("{harness} is not installed"));
+        }
+        let Accounts::Usable(mut fitting) = accounts else {
+            return Err("Needs a pool".into());
+        };
+        if fitting.is_empty() {
+            return Err(format!(
+                "No account in this project's pool can run {harness}"
+            ));
+        }
+        fitting.retain(|account| super::model_pick::can_run(&account.reach, model));
+        if fitting.is_empty() {
+            return Err(format!(
+                "No account in this project's pool can run {harness} on {}",
+                model.unwrap_or_default()
+            ));
+        }
+        Ok(fitting)
+    }
+
     /// Picks the account an agent starts on and the model it runs (DEC-150): one that can
     /// run the model wanted, else what the owner's fallback rule allows (`fallback_allowed`).
     /// Takes the live access, the project, the harness, the paused accounts, the model wanted,
@@ -3628,7 +3644,10 @@ impl TeamRuntime {
                 Ok(Placed::Run(account, Some(wanted)))
             }
             Ok(None) => Ok(Placed::Wait(None)),
-            Err(_) => {
+            Err(reason) => {
+                if self.stops(access, project, harness, &wanted)? == Some(false) {
+                    return Ok(Placed::Wait(Some(reason)));
+                }
                 let account = match self.account_for(access, project, harness, paused, None) {
                     Ok(Some(account)) => account,
                     Ok(None) => return Ok(Placed::Wait(None)),
@@ -3638,12 +3657,33 @@ impl TeamRuntime {
                 let who = task.map_or(Fallen::Agent, Fallen::Task);
                 if !self.fallback_allowed(project, harness, &wanted, who)? {
                     return Ok(Placed::Stop(format!(
-                        "No account in this project's pool can run {wanted} for {shown} agents, and the owner's fallback setting stops the task instead of running another model. Pick another model or leave model out."
+                        "No account in this project's pool can run {wanted} for {shown} agents, and the owner's fallback setting stops the task instead of running another model. Pick another model, or ask the owner to change the agent default or the fallback rule in the Models settings."
                     )));
                 }
                 Ok(Placed::Run(account, None))
             }
         }
+    }
+
+    /// Tells, under the owner's Stop fallback rule, whether a start whose model found no
+    /// free account stops (DEC-150 H1): only when no pool account can run the model at all
+    /// (`able`); while one that can is busy, resting or at a limit, the start waits for it.
+    /// Takes the live access, the project, the harness and the model. Returns none under
+    /// any other rule, else whether it stops, or a store failure.
+    fn stops(
+        &self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        model: &str,
+    ) -> Result<Option<bool>, EngineError> {
+        let rule = crate::model_choice::rules::rules(&self.connection)?.fallback;
+        if rule != crate::model_choice::rules::FallbackRule::Stop {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.able(access, project, harness, Some(model)).is_err(),
+        ))
     }
 
     /// Applies the owner's fallback rule once no pool account can run a chosen model
@@ -3699,12 +3739,18 @@ impl TeamRuntime {
         let Some(wanted) = wanted else {
             return Ok(self.account_for(access, project, harness, paused, None));
         };
-        if let Ok(found) = self.account_for(access, project, harness, paused, Some(&wanted)) {
-            if let Some(account) = &found {
-                assert!(super::model_pick::can_run(&account.reach, Some(&wanted)));
-                super::model_pick::ran(&self.connection, project, harness, &wanted)?;
+        match self.account_for(access, project, harness, paused, Some(&wanted)) {
+            Ok(found) => {
+                if let Some(account) = &found {
+                    assert!(super::model_pick::can_run(&account.reach, Some(&wanted)));
+                    super::model_pick::ran(&self.connection, project, harness, &wanted)?;
+                }
+                return Ok(Ok(found));
             }
-            return Ok(Ok(found));
+            Err(reason) if self.stops(access, project, harness, &wanted)? == Some(false) => {
+                return Ok(Err(reason));
+            }
+            Err(_) => {}
         }
         let picked = self.account_for(access, project, harness, paused, None);
         if let Ok(Some(_)) = &picked
