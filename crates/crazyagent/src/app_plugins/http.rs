@@ -25,6 +25,10 @@ const CONFIG_BYTES: usize = 64 * 1024;
 #[cfg(unix)]
 const CONFIG_MARGIN: usize = 128;
 
+/// The engine-root folder that holds each request body for its one call, an engine secret
+/// no agent sandbox reaches (the owner's temp folder can be an agent's TMPDIR).
+pub(crate) const SCRATCH: &str = "plugin-scratch";
+
 fn failed() -> EngineError {
     EngineError("app_plugin_call_failed".into())
 }
@@ -59,7 +63,7 @@ pub fn embed(
         secrets.push(super::store::secret_value(root, bound)?);
     }
     let body = serde_json::to_vec(&spec.body(inputs, purpose)).map_err(|_| failed())?;
-    let scratch = Scratch::new()?;
+    let scratch = Scratch::new(root)?;
     let path = scratch.write(&body)?;
     let mut config = config(spec, &secrets, &path)?;
     drop(secrets);
@@ -273,19 +277,29 @@ fn vectors(reply: &[u8], spec: &HttpSpec, count: usize) -> Result<Vec<Vec<f32>>,
     Ok(vectors)
 }
 
-/// A private folder for one request body, readable only by the engine user and removed
-/// when dropped.
+/// A private folder for one request body inside the engine root's guarded `SCRATCH`
+/// folder, readable only by the engine user and removed when dropped.
 #[cfg(unix)]
 struct Scratch(PathBuf);
 
 #[cfg(unix)]
 impl Scratch {
-    fn new() -> Result<Self, EngineError> {
-        use std::os::unix::fs::DirBuilderExt;
-        let path = std::env::temp_dir().join(format!(
-            "crazyagent-plugin-{}",
-            crate::engine::owner::random_id()?
-        ));
+    fn new(root: &Path) -> Result<Self, EngineError> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let folder = root.join(SCRATCH);
+        match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(failed()),
+        }
+        let metadata = std::fs::symlink_metadata(&folder).map_err(|_| failed())?;
+        if !metadata.is_dir()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o7777 != 0o700
+        {
+            return Err(failed());
+        }
+        let path = folder.join(crate::engine::owner::random_id()?);
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)

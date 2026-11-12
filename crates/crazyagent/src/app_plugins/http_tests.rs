@@ -248,7 +248,11 @@ fn embed_posts_the_inputs_to_a_loopback_plugin_and_reads_its_vectors() {
     let scratch = root.path().join(SCRATCH);
     assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
     assert_eq!(
-        std::fs::symlink_metadata(&scratch).unwrap().permissions().mode() & 0o7777,
+        std::fs::symlink_metadata(&scratch)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
         0o700
     );
     assert_eq!(served.request_line, "POST /embed HTTP/1.1");
