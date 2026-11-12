@@ -911,3 +911,25 @@ fn the_models_section_says_whether_the_installed_version_was_checked_and_still_s
         Some(ids[0].clone())
     );
 }
+
+#[test]
+fn only_an_owner_id_waiting_for_its_test_launch_is_pending() {
+    let (_tmp, db) = engine();
+    let ids = crate::model_choice::catalog("codex");
+    assert!(!store::custom_pending(&db, "codex", "my-model").unwrap());
+    assert_eq!(
+        store::custom_begin(&db, "codex", &ids, "my-model").unwrap(),
+        Begun::Pending
+    );
+    assert!(store::custom_pending(&db, "codex", "my-model").unwrap());
+    assert!(!store::custom_pending(&db, "claude-code", "my-model").unwrap());
+    assert!(!store::custom_pending(&db, "codex", &ids[0]).unwrap());
+    store::custom_checked(&db, "codex", "my-model", false).unwrap();
+    assert!(!store::custom_pending(&db, "codex", "my-model").unwrap());
+    assert_eq!(
+        store::custom_pending(&db, "no-such-harness", "my-model")
+            .unwrap_err()
+            .0,
+        "model_choice_harness_unknown"
+    );
+}

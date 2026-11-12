@@ -275,6 +275,8 @@ test("a configured master stopped by a harness protocol fault, the frame size li
     "The master stopped: one message was larger than the master frame size limit. Raise it in Settings, Master, or at 1 MiB shorten the message or the instructions, then send again. (codex_host_protocol_frame_too_large)");
   assert.equal(research.turnLine(turn("worktree_uncertain", "master_bootstrap_uncertain")),
     "The master stopped: its copy of the project could not be checked. End the conversation, then send again. (master_bootstrap_uncertain)");
+  assert.equal(research.turnLine(turn("model_refused", "master_model_refused")),
+    "The master stopped: the harness refused the master model on this account. Send again to fall back as your model fallback setting says, or pick another master model in Settings, Harnesses. (master_model_refused)");
 });
 
 test("a team agent or task that closed on a launch code shows the engine line with its code", () => {

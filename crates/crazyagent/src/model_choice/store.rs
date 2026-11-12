@@ -354,6 +354,24 @@ pub fn custom_checked(
     tx.commit().map_err(unavailable)
 }
 
+/// Tells whether one owner id waits for its test launch, so a test never spends a run on
+/// an id that is listed, verified, failed or gone. Inputs: the engine database, the
+/// harness name and the id. Output: true when it is pending, or
+/// `model_choice_harness_unknown` or `model_choice_unavailable`.
+pub fn custom_pending(db: &Connection, harness: &str, model: &str) -> Result<bool, EngineError> {
+    let harness = known(harness)?;
+    if !exists(db)? {
+        return Ok(false);
+    }
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_custom
+         WHERE harness = ?1 AND model = ?2 AND state = 'pending')",
+        params![harness, model],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
 /// Removes one owner id from a harness. A slot that names it passes it over from then on
 /// and shows it with its reset open. Inputs: the engine database, the harness name and
 /// the id. Output: true when it was there, or `model_choice_harness_unknown` or

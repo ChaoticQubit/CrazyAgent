@@ -629,6 +629,7 @@ const STOPPED_WHY = new Map<string, string>([
   ["protocol_fault", "it sent a message out of order. Send again to start a fresh turn"],
   ["frame_limit", "one message was larger than the master frame size limit. Raise it in Settings, Master, or at 1 MiB shorten the message or the instructions, then send again"],
   ["worktree_uncertain", "its copy of the project could not be checked. End the conversation, then send again"],
+  ["model_refused", "the harness refused the master model on this account. Send again to fall back as your model fallback setting says, or pick another master model in Settings, Harnesses"],
   ["cancelled", "you stopped this turn"],
 ]);
 

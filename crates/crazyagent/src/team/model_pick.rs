@@ -390,16 +390,18 @@ pub(crate) fn agent_model(db: &Connection, agent: i64) -> Result<Option<String>,
 }
 
 /// Who runs on the default model after a fallback (DEC-150): a task's agent, an agent
-/// that starts again with no task, or the master.
+/// that starts again with no task, the master, or an owner-host master whose own account
+/// refused the model (M-10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fallen {
     Task(i64),
     Agent,
     Master,
+    HostMaster,
 }
 
-/// Tells the owner and the master once that no pool account could run a model chosen for
-/// a harness's agents or master, so a start runs on the default (DEC-150): one owner Pool
+/// Tells the owner and the master once that no pool account, or the owner-host master's
+/// own, could run a model chosen for a harness's agents or master, so a start runs on the default (DEC-150): one owner Pool
 /// failover notification (DEC-136a) and one engine message to the master, then nothing
 /// more for that project, harness and model until it runs again (`ran`). Takes the
 /// transaction, the project, the harness, the model, who falls back and the time. Returns
@@ -428,16 +430,24 @@ pub(crate) fn fell_back(
         return Ok(false);
     }
     let harness = super::bound_text(harness, 64);
+    let host = who == Fallen::HostMaster;
     let (whom, who) = match who {
         Fallen::Task(task) => (format!("{harness} agents"), format!("task {task}")),
         Fallen::Agent => (
             format!("{harness} agents"),
             "an agent starting again".to_owned(),
         ),
-        Fallen::Master => (format!("the {harness} master"), "the master".to_owned()),
+        Fallen::Master | Fallen::HostMaster => {
+            (format!("the {harness} master"), "the master".to_owned())
+        }
+    };
+    let lead = if host {
+        format!("The account {whom} runs on refused {model}")
+    } else {
+        format!("No account in this project's pool can run {model} for {whom} now")
     };
     let text = format!(
-        "No account in this project's pool can run {model} for {whom} now, so {who} runs on the default model. You are told again only after {model} runs once more."
+        "{lead}, so {who} runs on the default model. You are told again only after {model} runs once more."
     );
     let prefix = format!("model_fallback:{}:{harness}:{now}:", project.as_str());
     let room = crate::notifications::SUBJECT_BYTES_MAX.saturating_sub(prefix.len());
