@@ -574,7 +574,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
   const chooseAskMerge = (choice: "off" | "on") => change(() => setAskBeforeMerge(projectId, choice === "on"), "the merge approval setting", () => holdAskMerge(choice));
   const chooseCatchUp = (choice: "off" | "on") => change(() => setCatchUpMain(projectId, choice), "the catch up with main setting", () => holdCatchUp(choice));
   const chooseReuseIdle = (choice: "off" | "on") => change(() => setReuseIdle(projectId, choice), "the reuse idle agents setting", () => holdReuseIdle(choice));
-  const chooseLanding = (choice: LandingMode) => change(() => setLandingMode(projectId, choice), "the landing setting", () => holdLanding(choice));
+  const chooseLandingMode = (choice: LandingMode) => change(() => setLandingMode(projectId, choice), "the landing setting", () => holdLanding(choice));
   const chooseNewFolder = (files: number) => change(() => setNewFolderLimit(projectId, files), "the new folder limit", () => holdNewFolder(files));
 
   async function saveBackground(choice: BackgroundAtEnd) {
@@ -714,7 +714,7 @@ export function TeamControls({ projectId, status, reload, data, group }: {
           </SettingRow>
           <SettingRow label="Landing">
             <span className="set-label" aria-hidden="true">Landing</span>
-            <Segmented label="Landing" value={landing} onValue={(choice) => { if (!busy) void chooseLanding(choice); }}
+            <Segmented label="Landing" value={landing} onValue={(choice) => { if (!busy) void chooseLandingMode(choice); }}
               options={[{ value: "squash", label: "Squash" }, { value: "merge", label: "Merge commit" }]} />
             <span className="tg-terminal-note">Squash lands each accepted change set as one commit. Merge commit keeps every agent commit in your history, so an agent's own git merge crazyagent/main stops conflicting. After each accept, an agent with no unlanded work moves onto the landed main, or is told to when it works in its own copy.</span>
           </SettingRow>
