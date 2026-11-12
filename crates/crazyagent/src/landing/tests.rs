@@ -5969,7 +5969,7 @@ fn engine_git_refuses_fsmonitor_hookspath_and_include_from_repository_config() {
         case.edit("a.txt", "plain text\n");
         let id = case.turn(TurnOutcome::Succeeded).unwrap();
         case.owner(&["config", key, value]);
-        diff(&case.db, &id, 0).unwrap();
+        diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
         crate::trust::save(
             &case.db,
             case.workspace.project.as_str(),
@@ -5979,7 +5979,7 @@ fn engine_git_refuses_fsmonitor_hookspath_and_include_from_repository_config() {
         .unwrap();
         let tip = case.tip();
         let before = case.checkout();
-        let refused_code = refused(diff(&case.db, &id, 0));
+        let refused_code = refused(diff(&case.db, &id, &case.view(&id).head, 0));
         assert_eq!(
             refused_code,
             format!("{}{rule}", crate::worktrees::CONFIG_REFUSED),

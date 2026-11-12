@@ -1523,12 +1523,20 @@ pub(crate) fn accept_between(
     expected_head: &str,
     between: &dyn Fn(),
 ) -> Result<AcceptOutcome, EngineError> {
-    owner::accept(db, owner_home, id, expected_head, None, &|step| {
-        if step == owner::Step::FilesWritten {
-            between();
-        }
-        false
-    })
+    owner::accept(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        None,
+        crate::activity::AcceptPlace::Changes,
+        &|step| {
+            if step == owner::Step::FilesWritten {
+                between();
+            }
+            false
+        },
+    )
 }
 
 /// Lands a change set as one squash commit on a chosen local branch: the owner's

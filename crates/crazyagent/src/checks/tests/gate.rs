@@ -249,12 +249,29 @@ impl Case {
     /// Accepts a change set at the head the owner reviewed onto the owner's branch.
     fn accept(&self, id: &ChangeSetId) -> Result<AcceptOutcome, String> {
         let head = self.head(id);
-        landing::accept(&self.db, &self.home, id, &head, None).map_err(|error| error.0)
+        landing::accept(
+            &self.db,
+            &self.home,
+            id,
+            &head,
+            None,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .map_err(|error| error.0)
     }
 
     fn accept_into(&self, id: &ChangeSetId, branch: &str) -> Result<AcceptOutcome, String> {
         let head = self.head(id);
-        landing::accept_into(&self.db, &self.home, id, &head, None, branch).map_err(|error| error.0)
+        landing::accept_into(
+            &self.db,
+            &self.home,
+            id,
+            &head,
+            None,
+            branch,
+            crate::activity::AcceptPlace::Changes,
+        )
+        .map_err(|error| error.0)
     }
 
     /// An owner ticket in `CA` linked to a change set. Input: the change set. Output: the
