@@ -65,7 +65,8 @@ function ModelLine({ model, busy, actions }: { model: ModelState; busy: boolean;
 function SearchDialogs({ dialog, model, busy, failure, actions }: { dialog: SearchDialog; model: ModelState; busy: boolean; failure: string; actions: SearchActions }) {
   const problem = failure ? <Notice tone="danger" alert>{failure}</Notice> : null;
   if (dialog.kind === "http") {
-    const host = hostOf(dialog.option.runs.kind === "http" ? dialog.option.runs.url : "") ?? "";
+    const runs = dialog.option.runs;
+    const host = hostOf(runs !== null && runs.kind === "http" ? runs.url : "") ?? "";
     return <Dialog open title={`Send search text to ${host}?`} onClose={actions.onClose} busy={busy}
       footer={<><Button disabled={busy} onClick={actions.onClose}>Cancel</Button>
         <Button variant="primary" pending={busy} pendingLabel="Saving..." onClick={actions.onConfirmHttp}>{`Send to ${host}`}</Button></>}>
@@ -119,13 +120,14 @@ export function SearchSettingsView({ search, dialog, busy, failure, actions }: {
       <SettingSection title="Rank search with">
         <SettingLine wide label="Rank search with" changed={chosen !== "plugin:local"}>
           {dialog.kind === "none" && failure && <Notice tone="danger" alert>{failure}</Notice>}
+          {page.note !== null && <Notice tone="info">{page.note}</Notice>}
           <fieldset className="field" disabled={busy}>
             <legend className="visually-hidden">Rank search with</legend>
             <RadioCard name={CHOICE} value="full_text" checked={chosen === "full_text"} onChecked={pick} title="Full text only"
               details={["Exact words only. Nothing is downloaded or sent."]} />
             {page.options.map((option) => <RadioCard key={option.name} name={CHOICE} value={`plugin:${option.name}`} checked={chosen === `plugin:${option.name}`}
               disabled={!option.usable} onChecked={pick} title={option.title}
-              details={[runsLine(option.runs), ...(option.usable || option.reason === null ? [] : [option.reason])]} />)}
+              details={[...(option.runs === null ? [] : [runsLine(option.runs)]), ...(option.usable || option.reason === null ? [] : [option.reason])]} />)}
           </fieldset>
           {page.choice.kind === "plugin" && <p className="muted small">{`Embedded ${page.progress.embedded} of ${page.progress.total} sessions and memories.`}</p>}
         </SettingLine>
@@ -184,8 +186,9 @@ export function SearchSettings() {
     if (dialog.kind !== "http" || search.kind !== "ok" || busy) return;
     const option = dialog.option;
     const version = search.value.version;
-    if (option.runs.kind !== "http") return;
-    void save(() => saveSearch({ kind: "plugin", name: option.name }, hostOf(option.runs.url), version));
+    if (option.runs === null || option.runs.kind !== "http") return;
+    const host = hostOf(option.runs.url);
+    void save(() => saveSearch({ kind: "plugin", name: option.name }, host, version));
   }
 
   const actions: SearchActions = {

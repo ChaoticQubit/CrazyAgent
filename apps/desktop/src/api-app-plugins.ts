@@ -37,14 +37,14 @@ export interface TrustView {
 }
 export type Preview = { kind: "ready"; trust: TrustView } | { kind: "refused"; problem: Problem };
 export type SearchChoice = { kind: "full_text" } | { kind: "plugin"; name: string };
-export interface SearchOption { name: string; title: string; runs: RunsView; usable: boolean; reason: string | null; sends: string[] }
+export interface SearchOption { name: string; title: string; runs: RunsView | null; usable: boolean; reason: string | null; sends: string[] }
 export type ModelState =
   | { state: "not_downloaded"; size_bytes: number }
   | { state: "downloading"; done_bytes: number; size_bytes: number }
   | { state: "ready"; size_bytes: number }
   | { state: "failed"; problem: Problem; size_bytes: number };
 export interface Progress { embedded: number; total: number }
-export interface SearchView { version: number; choice: SearchChoice; options: SearchOption[]; model: ModelState; progress: Progress }
+export interface SearchView { version: number; choice: SearchChoice; options: SearchOption[]; note: string | null; model: ModelState; progress: Progress }
 export type SearchSave = { kind: "saved"; search: SearchView } | { kind: "stale"; current: number };
 const MB = 1_000_000;
 
@@ -132,7 +132,7 @@ export function hostOf(url: string): string | null {
 /** Tells whether choosing a Search option sends text off to an HTTP host and so needs the
  * confirm. Input: the option. Output: true for an HTTP plugin. */
 export function httpOption(option: SearchOption): boolean {
-  return option.runs.kind === "http";
+  return option.runs !== null && option.runs.kind === "http";
 }
 
 /** How often, in milliseconds, Search reads again while something on it moves. */
