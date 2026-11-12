@@ -322,6 +322,57 @@ fn add_memory_saves_a_note_for_the_chosen_projects() {
 }
 
 #[test]
+fn a_memory_review_notice_opens_the_first_suggestion_once_the_suggestions_arrive() {
+    let review = crate::tui::screens::Spot::MemoryReview;
+    let tidepool = ProjectId::new("tidepool").unwrap();
+    let mut ctx = memory_ctx(120, 36);
+    let mut screen = Memory::for_project(tidepool.clone(), "Tidepool".into());
+    screen.open_at(&review, &mut ctx);
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(
+        &settings(SettingsEvent::Memories(
+            screen.scoped.clone(),
+            Ok(Vec::new()),
+        )),
+        &mut ctx,
+    );
+    assert!(
+        screen.modal(&ctx).is_none(),
+        "nothing to review before the suggestions arrive"
+    );
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(vec![suggestion(
+            "tidepool",
+            "Labs want hourly exports.",
+        )]))),
+        &mut ctx,
+    );
+    let (modal, _) = screen
+        .modal(&ctx)
+        .expect("the first suggestion opens for review");
+    assert_eq!(modal.title, "Suggested memory");
+    assert!(
+        texts(&modal.body)
+            .iter()
+            .any(|line| line.contains("From research in Tidepool."))
+    );
+
+    let mut screen = Memory::for_project(tidepool, "Tidepool".into());
+    screen.open_at(&review, &mut ctx);
+    screen.shown(&mut ctx);
+    while ctx.next_request().is_some() {}
+    screen.arrive(
+        &settings(SettingsEvent::Suggestions(Ok(Vec::new()))),
+        &mut ctx,
+    );
+    assert!(
+        screen.modal(&ctx).is_none(),
+        "with nothing left to review the list opens as before"
+    );
+}
+
+#[test]
 fn research_suggestions_come_first_and_save_for_every_project() {
     let mut ctx = memory_ctx(120, 36);
     let mut screen = Memory::new();

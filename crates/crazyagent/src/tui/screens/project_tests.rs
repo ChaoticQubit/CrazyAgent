@@ -507,8 +507,8 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     settle(&mut screen, &mut controller, start + 9_000).await;
     assert_eq!(screen.suggested().len(), 1);
     assert!(
-        screen.asking(),
-        "n dismisses the suggestion under the Overview cursor"
+        !screen.asking(),
+        "the Overview has no memory card, so n opens the notifications (DEC-136a decision 4)"
     );
     assert_eq!(
         memory_source(screen.suggested()[0]),
@@ -516,47 +516,9 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     );
     let drawn = project_screen(&mut screen, 120, 36, &look);
     let shown = text(&drawn.rows);
-    assert!(shown.contains("Needs you  1"), "{shown}");
-    assert!(shown.contains("Save to memory?"));
-    assert!(
-        shown.contains("\"BuoyWatch charges per seat. red\""),
-        "{shown}"
-    );
-    assert!(shown.contains("From Competitor research"), "{shown}");
-    assert!(drawn.help.contains(&("y", "Save to memory")));
-    assert_eq!(
-        screen.key(key(KeyCode::Char('y'))),
-        ProjectReply::Handled,
-        "y must show the whole memory before it saves"
-    );
-    let drawn = project_screen(&mut screen, 120, 36, &look);
-    let shown = text(&drawn.rows);
-    assert!(shown.contains("# Competitors"), "{shown}");
+    assert!(!shown.contains("Save to memory?"), "{shown}");
     assert!(!drawn.help.contains(&("y", "Save to memory")));
-    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
-    for _ in 0..40 {
-        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
-    }
-    let drawn = project_screen(&mut screen, 120, 36, &look);
-    assert!(text(&drawn.rows).contains("word word"));
-    assert!(drawn.help.contains(&("y", "Save to memory")));
-    let kept = screen.key(key(KeyCode::Char('y')));
-    assert!(
-        matches!(
-            kept,
-            ProjectReply::Review {
-                decision: ReviewDecision::Keep,
-                ..
-            }
-        ),
-        "{kept:?}"
-    );
-    let drawn = project_screen(&mut screen, 120, 36, &look);
-    assert!(!text(&drawn.rows).contains("# Competitors"));
-    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
-    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
-    let drawn = project_screen(&mut screen, 120, 36, &look);
-    assert!(!text(&drawn.rows).contains("# Competitors"));
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Ignored);
 
     screen.width = 80;
     screen.read(&research);
@@ -571,35 +533,41 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert!(shown.contains("Suggested memory"), "{shown}");
     assert!(shown.contains("y Save to memory   n Dismiss   e Edit first"));
     assert_eq!(drawn.help.first(), Some(&("y", "Save to memory")));
-    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('y'))),
+        ProjectReply::Handled,
+        "y must show the whole memory before it saves"
+    );
     let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(text(&drawn.rows).contains("# Competitors"));
     assert!(drawn.rows.iter().all(|row| row.width() == 80));
-    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('y'))), ProjectReply::Handled);
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("word word"));
+    assert!(drawn.help.contains(&("y", "Save to memory")));
+    let kept = screen.key(key(KeyCode::Char('y')));
+    assert!(
+        matches!(
+            kept,
+            ProjectReply::Review {
+                decision: ReviewDecision::Keep,
+                ..
+            }
+        ),
+        "{kept:?}"
+    );
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(!text(&drawn.rows).contains("# Competitors"));
     assert!(screen.reading);
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(
         screen.edit.is_none() && screen.review.is_some(),
         "e must show the whole memory before its editor opens"
     );
-    for _ in 0..40 {
-        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
-    }
-    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
-    assert!(screen.edit.is_some());
-    screen.edit = None;
-    screen.preview = None;
-    screen.reading = false;
-    screen.open(Tab::Overview);
-    screen.width = 120;
-
-    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
-    assert!(
-        screen.edit.is_none(),
-        "e must show the whole memory before its editor opens"
-    );
-    let drawn = project_screen(&mut screen, 120, 36, &look);
-    assert!(text(&drawn.rows).contains("# Competitors"));
+    let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(
         !drawn.help.contains(&("e", "Edit first")),
         "{:?}",
@@ -613,7 +581,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     for _ in 0..40 {
         assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
     }
-    let drawn = project_screen(&mut screen, 120, 36, &look);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(
         drawn.help.contains(&("e", "Edit first")),
         "{:?}",
@@ -622,7 +590,7 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
     assert!(screen.review.is_none());
-    let drawn = project_screen(&mut screen, 120, 36, &look);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
     assert!(text(&drawn.rows).contains("Save to memory"));
     assert!(drawn.cursor.is_some());
     assert_eq!(screen.paste(" Seen."), ProjectReply::Handled);
@@ -654,6 +622,9 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
         },
     )
     .await;
+    screen.preview = None;
+    screen.reading = false;
+    screen.width = 120;
     settle(&mut screen, &mut controller, start + 12_000).await;
     assert!(screen.suggested().is_empty());
 
