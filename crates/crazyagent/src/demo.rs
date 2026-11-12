@@ -27,6 +27,7 @@ const SEED_COMMIT: &str = "Add the demo web page";
 #[cfg(unix)]
 const SEED_FAILED: &str = "demo_seed_failed";
 const GOAL_SENT: &str = "SELECT EXISTS(SELECT 1 FROM master_turns AS t JOIN master_sessions AS s ON s.id=t.session WHERE s.project=?1 AND t.input>(SELECT turn_floor FROM demo_projects WHERE project_id=?1))";
+const OWNER_SPOKE: &str = "SELECT EXISTS(SELECT 1 FROM session_messages WHERE project=?1 AND speaker='owner' AND at_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
 const AGENT_STARTED: &str = "SELECT EXISTS(SELECT 1 FROM team_agents WHERE project=?1 AND role<>'master' AND created_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
 const QUESTION_ANSWERED: &str = "SELECT EXISTS(SELECT 1 FROM questions_log WHERE project=?1 AND status IN ('answered','answered_in_terminal'))";
 const CHANGE_SET_ACCEPTED: &str = "SELECT EXISTS(SELECT 1 FROM landing_change_sets WHERE project=?1 AND state='accepted' AND created_ms>=(SELECT created_ms FROM demo_projects WHERE project_id=?1))";
@@ -278,11 +279,27 @@ fn any(tx: &Transaction<'_>, query: &str) -> Result<bool, EngineError> {
         .map_err(error)
 }
 
-/// Reads the demo: the demo project while both its mark and its project exist, each step
-/// from whether its row exists (a master turn, a team agent that is not the master, an
-/// answered question, an accepted change set), counting only rows made since this demo was
-/// marked, since Delete everything keeps some of them; the goal; every saved pool with why
-/// a demo cannot run on it. Inputs: a transaction and the configuration. Output: the view.
+/// Tells whether the owner said anything to the demo's master since the demo was marked, in
+/// either master mode: a goal typed into the live terminal is kept only as the session's owner
+/// message, never as a master turn. Engine words, such as a relayed answer, are not the
+/// owner's. The store's table comes with its first message, so a database without it has
+/// none. Input: a transaction. Output: the answer.
+fn owner_spoke(tx: &Transaction<'_>) -> Result<bool, EngineError> {
+    let stored: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_messages')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(stored && any(tx, OWNER_SPOKE)?)
+}
+
+/// Reads the demo while its mark and project both exist: each step from whether its row
+/// exists since this demo was marked (a master turn or the owner's words to the master, a
+/// team agent that is not the master, an answered question, an accepted change set), as
+/// Delete everything keeps some; the goal; each saved pool with why a demo cannot run on it.
+/// Inputs: a transaction and the configuration. Output: the view.
 pub(crate) fn view(
     tx: &Transaction<'_>,
     config: &EffectiveConfig,
@@ -300,7 +317,7 @@ pub(crate) fn view(
         None => DemoSteps::default(),
         Some(_) => DemoSteps {
             created: true,
-            goal_sent: any(tx, GOAL_SENT)?,
+            goal_sent: any(tx, GOAL_SENT)? || owner_spoke(tx)?,
             agent_started: any(tx, AGENT_STARTED)?,
             question_answered: any(tx, QUESTION_ANSWERED)?,
             change_set_accepted: any(tx, CHANGE_SET_ACCEPTED)?,
