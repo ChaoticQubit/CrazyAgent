@@ -1776,6 +1776,23 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
 }
 
 #[test]
+fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
+    let machine = Machine::new();
+    machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
+    assert_eq!(
+        install_command("codex", &machine.roots()).unwrap_err(),
+        NO_INSTALLER
+    );
+    let other = Machine::new();
+    other.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o777);
+    assert_eq!(
+        install_command("codex", &other.roots()).unwrap_err(),
+        NEEDS_NODE,
+        "a node anyone can change is not one the resolver uses"
+    );
+}
+
+#[test]
 fn an_npm_harness_on_a_mac_with_no_npm_needs_node_and_a_harness_with_no_package_has_no_installer() {
     let machine = Machine::new();
     for id in ["codex", "claude-code", "gemini-cli"] {
