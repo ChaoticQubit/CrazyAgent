@@ -957,7 +957,12 @@ mod tests {
         );
         let saved = serde_json::to_string(&own).unwrap();
         assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(
+            folder.path(),
+            &ToolHomes::at(folder.path()),
+            1,
+            crate::trust::Trust::Reviewed,
+        );
         assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
         let listed: Vec<(&str, &str)> = view
             .tool_caches
@@ -997,7 +1002,12 @@ mod tests {
         assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
         assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
         assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-        let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1);
+        let view = own.view(
+            folder.path(),
+            &ToolHomes::at(folder.path()),
+            1,
+            crate::trust::Trust::Reviewed,
+        );
         let listed: Vec<(&str, &str)> = view
             .apply_choices
             .iter()
@@ -1415,7 +1425,7 @@ mod tests {
             assert_eq!(read.ide_agent_files, choice);
             assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
             assert_eq!(
-                read.view(nowhere, &ToolHomes::at(nowhere), 0)
+                read.view(nowhere, &ToolHomes::at(nowhere), 0, crate::trust::Trust::Reviewed)
                     .ide_agent_files,
                 choice
             );
