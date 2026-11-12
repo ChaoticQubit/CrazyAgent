@@ -646,6 +646,15 @@ fn an_answer_in_the_team_inbox_settles_the_linked_question() {
             .unwrap()
             .is_empty()
     );
+    let chat: i64 = engine
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM team_messages WHERE project=?1",
+            [engine.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(chat, 0, "the inbox reply already told the asker");
 }
 
 /// F12: dismissing a linked question tells its asker once through the team, and a master
