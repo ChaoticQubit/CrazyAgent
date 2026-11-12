@@ -162,13 +162,17 @@ pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
 
 /// Makes the engine npm prefix private and ready for `npm install -g`: the prefix with its
 /// `bin` and `lib/node_modules` folders, each this user's alone, kept as they are when
-/// already so. Input: the prefix folder. Output: Ok, or `setup_store_unavailable`.
-pub fn make_prefix(prefix: &Path, _node: &Path) -> Result<(), InstallError> {
+/// already so, and `bin/node` linked to the node the install runs with, so a Node script
+/// harness installed there finds it ([`crate::harnesses::node_prefix`]). Inputs: the prefix
+/// folder and the absolute node. Output: Ok, or `setup_store_unavailable`.
+pub fn make_prefix(prefix: &Path, node: &Path) -> Result<(), InstallError> {
+    assert!(node.is_absolute());
     for made in [prefix.join("bin"), prefix.join("lib").join("node_modules")] {
         private_folder(&made)?;
     }
     private_folder(prefix)?;
-    private_folder(&prefix.join("lib"))
+    private_folder(&prefix.join("lib"))?;
+    super::pinned::link(node, &prefix.join("bin").join("node"))
 }
 
 /// Installs this target's pinned Node into the engine root, as `install_pin` does. Input:
