@@ -291,6 +291,8 @@ test("a project's flag counts its pending questions once, with its other unseen 
   assert.deepEqual(Object.fromEntries(flags), { "p-1": 3, "p-2": 1, "p-3": 4 });
   assert.deepEqual([...client.withPendingQuestions(new Map([["p-1", 1]]), new Map([["p-1", 5]]), new Map())], [], "a seen-out count never goes below zero");
   assert.deepEqual([...client.withPendingQuestions(new Map(), new Map(), new Map([["p-9", 1]]))], [["p-9", 1]], "an answered-later question stays counted while pending");
+  const linked = client.unseenQuestionAlerts([{ project_id: "p-7", unseen: 1, questions: 1 }]);
+  assert.deepEqual([...client.withPendingQuestions(new Map([["p-7", 1]]), linked, new Map([["p-7", 1]]))], [["p-7", 1]], "a team question linked into the questions log, its alert unseen, counts once (F12)");
 });
 
 test("the Questions tab sits after Changes and the commands go through the bridge with only ids, version and the choice", async () => {
