@@ -1024,8 +1024,11 @@ impl TeamRuntime {
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(error)?;
+        if let Some(mode) = crate::storage::wal_refused(&connection).map_err(error)? {
+            return Err(EngineError(format!("database_wal_refused: {mode}")));
+        }
         connection
-            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+            .execute_batch("PRAGMA synchronous=FULL;")
             .map_err(error)?;
         super::initialize(&connection)?;
         crate::project_setup::initialize(&connection)?;

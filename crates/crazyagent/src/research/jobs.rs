@@ -139,9 +139,11 @@ impl ResearchJobs {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         connection.busy_timeout(Duration::from_secs(5))?;
+        if crate::storage::wal_refused(&connection)?.is_some() {
+            return Err(JobError::Invalid("database_wal_refused"));
+        }
         connection.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=FULL;
+            "PRAGMA synchronous=FULL;
              CREATE TABLE IF NOT EXISTS research_jobs (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  project TEXT NOT NULL,

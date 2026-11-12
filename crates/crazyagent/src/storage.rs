@@ -1368,10 +1368,24 @@ fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
         .map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
+/// Asks SQLite for write-ahead logging and reads the mode back, since a store that cannot take
+/// WAL answers with the journal it kept, not an error. An anonymous in-memory store, which no
+/// other connection can open, may keep `memory` (DEC-147 addendum). Takes the connection.
+/// Returns the kept mode when the store is not in WAL, none when it is, or the SQLite failure.
+pub fn wal_refused(connection: &Connection) -> rusqlite::Result<Option<String>> {
+    let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    let anonymous = connection.path().is_none_or(str::is_empty);
+    let kept = mode != "wal" && !(anonymous && mode == "memory");
+    Ok(kept.then_some(mode))
+}
+
 #[cfg(unix)]
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
-    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+    if let Some(mode) = wal_refused(connection).map_err(error)? {
+        return Err(error(format!("database_wal_refused: {mode}")));
+    }
+    connection.execute_batch("PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
             INSERT OR IGNORE INTO state VALUES (1,0);
             CREATE TABLE IF NOT EXISTS operations (client TEXT NOT NULL, id TEXT NOT NULL,
