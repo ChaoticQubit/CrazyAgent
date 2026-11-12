@@ -66,7 +66,7 @@ fn platform_installer(root: &Path) -> Arc<dyn Installer> {
 
 /// Finishes one owner request that touches setup, after the engine answered it: a setup
 /// status read gets each dependency's state from the last background version check, an
-/// applied setup run starts installing in the background, and every removal, applied or
+/// applied setup run or one-dependency install starts in the background, and every removal, applied or
 /// not, sweeps the folders and secrets it moved aside or left, an applied agent policy
 /// reaches the project's open IDE, and a Reconcile answered Committed with an applied result
 /// reaches every open IDE, since a Save's lost reply leaves that the only call after its
@@ -110,6 +110,14 @@ pub(super) async fn after_owner(
             OwnerResponse::Applied { operation },
         ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
             start_run(engine.storage.sender.clone(), engine_root(authority)?, pack)?;
+        }
+        (
+            OwnerOperation::Apply {
+                mutation: OwnerMutation::InstallDependency { name },
+            },
+            OwnerResponse::Applied { operation },
+        ) if !operation.historical_replay && matches!(operation.result, OwnerResult::Applied) => {
+            start_install(engine_root(authority)?, *name)?;
         }
         (
             OwnerOperation::Apply {
@@ -238,16 +246,38 @@ fn start_run(
     Ok(())
 }
 
-/// Installs one missing dependency alone in the background. Inputs: the engine root and the
-/// dependency. Output: Ok once the install runs, or `setup_busy`.
+/// Installs one missing dependency alone in the background, as the setup row's Install and
+/// the harness picker ask: found first and left as it is when present, then installed from
+/// its pin. Only that row changes, and the next status read checks every tool again.
+/// Inputs: the engine root and the dependency. Output: Ok once it runs, or `setup_busy`.
 pub(super) fn start_install(root: PathBuf, dep: Dependency) -> Result<(), EngineError> {
-    let _guard = begin_install(root, dep)?;
+    let guard = begin_install(root, dep)?;
+    tokio::spawn(async move {
+        let root = guard.0.clone();
+        install_dependency(platform_installer(&root), &root, dep).await;
+        progress::with(&root, |state| state.checked = None);
+        drop(guard);
+    });
     Ok(())
 }
 
+/// Marks a one-dependency install as the running setup: refused while any run goes on,
+/// else running with only that dependency's earlier row cleared. Inputs: the engine root
+/// and the dependency. Output: the guard that ends the run, or `setup_busy`.
 fn begin_install(root: PathBuf, dep: Dependency) -> Result<RunGuard, EngineError> {
-    let _ = dep;
-    Err(failure("setup_busy")).or_else(|_: EngineError| Ok::<RunGuard, EngineError>(RunGuard(root)))
+    let begun = progress::with(&root, |state| {
+        if state.running {
+            return false;
+        }
+        state.running = true;
+        state.dependencies.remove(&dep);
+        true
+    });
+    if !begun {
+        return Err(failure("setup_busy"));
+    }
+    assert!(progress::snapshot(&root).running);
+    Ok(RunGuard(root))
 }
 
 async fn install_dependency(installer: Arc<dyn Installer>, root: &Path, dep: Dependency) {
