@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { saveProfile, type OwnerProfile } from "../../api";
+import { saveProfile, type OwnerProfile, type Result } from "../../api";
 import { BrandMark, Button, Checkbox, ChipInput, Notice, Segmented, SettingLine, TextArea, TextField, navigate, type Route } from "../../ui";
 import { HomeFolderPicker } from "../intake/home-folder";
 import { ToolsSetup } from "../intake/setup-step";
@@ -137,6 +137,14 @@ export const LEARN_OFFER = {
   text: "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.",
   tick: "Show the guide on Home",
 };
+
+/** What the first run says after it tried to skip the guide. Input: the engine's answer to the
+ * skip. Output: nothing when it saved, else one plain sentence saying the guide stays on Home. */
+export function skipGuideNote(result: Result<void>): string | undefined {
+  if (result.kind === "ok") return undefined;
+  if (result.kind === "not_ready") return "Skipping the guide isn't ready in this build, so it stays on Home.";
+  return `Couldn't skip the guide, so it stays on Home. ${result.message}`;
+}
 
 /** The first-run flow with no sidebar, in the order profile, projects folder, tools, accounts:
  * the brand, the step list and a short intro on the left, the step on the right. Finishing goes
