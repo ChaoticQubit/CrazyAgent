@@ -2023,7 +2023,12 @@ impl Screen for AppSetup {
         let mut hints = Vec::new();
         match &self.setup {
             Load::Ready(_) if self.first_run => {
-                hints.push(hint("Enter", "Install and continue"));
+                let enter = if self.finished_with_problems && self.quiet() {
+                    "Try again"
+                } else {
+                    "Install and continue"
+                };
+                hints.push(hint("Enter", enter));
                 if self.quiet() {
                     let skip = if self.finished_with_problems {
                         "Continue without it"
