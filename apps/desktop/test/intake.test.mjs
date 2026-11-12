@@ -341,6 +341,12 @@ test("setup lists each tool's state in plain words", () => {
   assert.deepEqual(intake.dependencyView(dep("tmux", { state: "checking" })),
     { title: "tmux", about: "Runs each agent in a live terminal.", word: "Checking", tone: "info", line: null });
   assert.deepEqual(intake.dependencyView(dep("tmux", { state: "missing" })).line, "Setup installs it.");
+});
+
+test("a tmux that comes with the app says Bundled with CrazyAgent, and a missing bundle shows its reason", () => {
+  assert.deepEqual(intake.dependencyView(dep("tmux", { state: "bundled", version: "3.5a" })),
+    { title: "tmux", about: "Runs each agent in a live terminal.", word: "Bundled", tone: "ok", line: "Bundled with CrazyAgent, version 3.5a." });
+  assert.equal(intake.dependencyView(dep("tmux", { state: "failed", reason: "Reinstall CrazyAgent." })).line, "Reinstall CrazyAgent.");
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "uv (Python tools)")).title, "uv (Python tools)");
   assert.equal(intake.dependencyView(dep("uv", { state: "missing" }, "  ")).title, "uv");
 });
