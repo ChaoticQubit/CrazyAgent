@@ -989,15 +989,16 @@ fn handed(lines: std::sync::mpsc::Receiver<super::Line>) -> Vec<String> {
 #[cfg(unix)]
 #[test]
 fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
-    let mut child = std::process::Command::new("/bin/sh")
-        .arg("-c")
-        .arg(format!(
-            "head -c {} /dev/zero | tr '\\0' x; printf '\\nnext\\n'",
-            2 * super::LINE_BYTES_MAX + 1
-        ))
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "head -c {} /dev/zero | tr '\\0' x; printf '\\nnext\\n'",
+                2 * super::LINE_BYTES_MAX + 1
+            ))
+            .stdout(std::process::Stdio::piped()),
+    )
+    .unwrap();
     let stdout = child.stdout.take().unwrap();
     let (sender, lines) = std::sync::mpsc::sync_channel(super::LINES_AHEAD_MAX);
     let reader = std::thread::spawn(move || super::forward(stdout, sender));
