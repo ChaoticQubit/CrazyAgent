@@ -830,3 +830,70 @@ fn removing_a_project_clears_its_model_choices_so_a_reused_id_inherits_nothing()
         assert_eq!(left, 0, "{table}");
     }
 }
+
+/// A shipped catalog names the harness versions it was checked on, and an installed
+/// version it does not name, or one the engine could not read, shows why on the Models
+/// section without taking the catalog ids away (DEC-150 G1).
+#[test]
+fn a_shipped_catalog_names_the_versions_it_was_checked_on_and_an_unchecked_install_shows_why() {
+    for harness in ["claude-code", "codex"] {
+        let shipped = shipped(harness).unwrap();
+        let name = crate::harnesses::spec(harness).unwrap().name;
+        let listed = shipped.qualified_versions.join(", ");
+        for version in &shipped.qualified_versions {
+            assert_eq!(unqualified(harness, Some(version)), None, "{harness}");
+        }
+        assert_eq!(
+            unqualified(harness, Some("999.0.0")),
+            Some(format!(
+                "listed for {name} {listed}; installed 999.0.0 not yet checked"
+            ))
+        );
+        assert_eq!(
+            unqualified(harness, None),
+            Some(format!(
+                "listed for {name} {listed}; installed version unknown"
+            ))
+        );
+    }
+}
+
+/// The Models section says whether the installed version was checked, and a catalog id
+/// still saves and stays usable on a version the catalog does not name: qualification is
+/// recorded, not enforced (DEC-150 G1).
+#[test]
+fn the_models_section_says_whether_the_installed_version_was_checked_and_still_saves_a_listed_id() {
+    let (_tmp, db) = engine();
+    let shipped = shipped("codex").unwrap();
+    let ids = shipped.models.clone();
+    let checked = shipped.qualified_versions[0].as_str();
+    let models = store::values(&db, "codex", &ids, &Scope::App, Some(checked)).unwrap();
+    assert!(models.qualified && models.reason.is_none(), "{models:?}");
+
+    let models = store::values(&db, "codex", &ids, &Scope::App, Some("999.0.0")).unwrap();
+    assert!(!models.qualified, "{models:?}");
+    assert_eq!(models.reason, unqualified("codex", Some("999.0.0")));
+    assert!(
+        models
+            .candidates
+            .iter()
+            .all(|candidate| candidate.origin == Origin::Catalog),
+        "{models:?}"
+    );
+    let version = row(&models, Slot::Agent).version;
+    let written = store::set(
+        &db,
+        "codex",
+        &ids,
+        &Scope::App,
+        Slot::Agent,
+        &json!(ids[0]),
+        version,
+    )
+    .unwrap();
+    assert_eq!(saved(written).effective, json!(ids[0]));
+    assert_eq!(
+        store::launch_model(&db, "codex", &ids, None, Slot::Agent).unwrap(),
+        Some(ids[0].clone())
+    );
+}
