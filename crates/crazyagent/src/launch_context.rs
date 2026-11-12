@@ -2343,48 +2343,112 @@ fn clear(parked: &Path) {
     }
 }
 
-/// Clears the immutable and append only flags, then every ACL entry, then adds the owner's
-/// read, write and folder search, on one path or on everything under it, with the system's
-/// `find`, `chflags` and `chmod`, never following a link and keeping every other flag and mode
-/// bit. In a tree, a file with a second link keeps its flags: it may be the owner's file an
-/// agent linked in (rv-code L1), whose ACL and mode the agent could change itself. A failure
-/// leaves the path as it was; the caller checks what is still there. Inputs: the absolute
-/// path and whether to walk the tree under it.
+/// The `find -P` expressions [`release`] runs in order on a tree. First, folders one at a
+/// time, so a folder with no search or a list-denying ACL opens before `find` reads it. Then
+/// one-link entries that are not folders: their flags, the ACL of each that is not a link by
+/// path, and the ACL of each link on the link itself. A file with a second link is never matched.
+#[cfg(target_os = "macos")]
+const RELEASED_TREE: [&[&str]; 4] = [
+    &[
+        "-type",
+        "d",
+        "(",
+        "-exec",
+        "/usr/bin/chflags",
+        "-h",
+        "nouchg,nouappnd",
+        "{}",
+        ";",
+        "-o",
+        "-true",
+        ")",
+        "(",
+        "-exec",
+        "/bin/chmod",
+        "-N",
+        "{}",
+        ";",
+        "-o",
+        "-true",
+        ")",
+        "-exec",
+        "/bin/chmod",
+        "-h",
+        "u+rwx",
+        "{}",
+        ";",
+    ],
+    &[
+        "!",
+        "-type",
+        "d",
+        "-links",
+        "1",
+        "-exec",
+        "/usr/bin/chflags",
+        "-h",
+        "nouchg,nouappnd",
+        "{}",
+        "+",
+    ],
+    &[
+        "!",
+        "-type",
+        "d",
+        "!",
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-N",
+        "{}",
+        "+",
+    ],
+    &[
+        "-type",
+        "l",
+        "-links",
+        "1",
+        "-exec",
+        "/bin/chmod",
+        "-h",
+        "-N",
+        "{}",
+        "+",
+    ],
+];
+
+/// Clears the immutable and append only flags and every ACL entry of one path and adds the
+/// owner's read, write and folder search, or releases a tree with [`RELEASED_TREE`], never
+/// following a link and never changing a file with a second link, which may be the owner's
+/// file an agent linked in (V231-ACL). A failure leaves the path as it was; the caller checks
+/// what is still there. Inputs: the absolute path and whether to walk the tree under it.
 #[cfg(target_os = "macos")]
 fn release(path: &Path, tree: bool) {
     use std::process::{Command, Stdio};
     assert!(path.is_absolute());
-    let mut flags = Command::new(if tree {
-        "/usr/bin/find"
+    let commands: Vec<Command> = if tree {
+        RELEASED_TREE
+            .iter()
+            .map(|expression| {
+                let mut command = Command::new("/usr/bin/find");
+                command.arg("-P").arg(path).args(*expression);
+                command
+            })
+            .collect()
     } else {
-        "/usr/bin/chflags"
-    });
-    if tree {
-        flags.arg("-P").arg(path).args([
-            "(",
-            "-type",
-            "d",
-            "-o",
-            "-links",
-            "1",
-            ")",
-            "-exec",
-            "/usr/bin/chflags",
-            "-h",
-            "nouchg,nouappnd",
-            "{}",
-            "+",
-        ]);
-    } else {
+        let mut flags = Command::new("/usr/bin/chflags");
         flags.args(["-h", "nouchg,nouappnd"]).arg(path);
-    }
-    let walk: &[&str] = if tree { &["-R", "-P"] } else { &["-h"] };
-    let modes = ["-N", "u+rwX"].map(|change| {
-        let mut command = Command::new("/bin/chmod");
-        command.args(walk).arg(change).arg(path);
-        command
-    });
-    for mut command in std::iter::once(flags).chain(modes) {
+        let modes = ["-N", "u+rwX"].map(|change| {
+            let mut command = Command::new("/bin/chmod");
+            command.args(["-h", change]).arg(path);
+            command
+        });
+        std::iter::once(flags).chain(modes).collect()
+    };
+    for mut command in commands {
         let _ = crate::spawn_gate::status(
             command
                 .stdin(Stdio::null())
