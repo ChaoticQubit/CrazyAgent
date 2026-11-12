@@ -21,6 +21,7 @@ mod harness_settings;
 mod ide;
 mod intake;
 mod memory;
+mod model_choice;
 mod owner_setup;
 mod plugins;
 mod process;

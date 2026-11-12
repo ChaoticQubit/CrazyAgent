@@ -51,6 +51,7 @@ pub(crate) mod harness_settings;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
+pub(crate) mod model_choice;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod plugins;
@@ -2046,6 +2047,7 @@ enum Protocol {
     AccountProfile,
     HarnessCatalog,
     HarnessSettings,
+    ModelChoice,
     Plugins,
     Agents,
     Changes,
@@ -2082,6 +2084,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("account_profile", Protocol::AccountProfile),
         ("harness_catalog", Protocol::HarnessCatalog),
         ("harness_settings", Protocol::HarnessSettings),
+        ("model_choice", Protocol::ModelChoice),
         ("plugins", Protocol::Plugins),
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
@@ -2166,6 +2169,7 @@ async fn serve_admitted(
             Protocol::Checks => return Ok(Some(Deferred::Checks(a))),
             Protocol::Tracker => return Ok(Some(Deferred::Tracker(a))),
             Protocol::HarnessSettings => return Ok(Some(Deferred::HarnessSettings(a))),
+            Protocol::ModelChoice => return Ok(Some(Deferred::ModelChoice(a))),
             Protocol::Scorecard => return Ok(Some(Deferred::Scorecard(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
@@ -2368,6 +2372,10 @@ async fn serve_admitted(
             let served = harness_settings::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(harness_settings::HARNESS_SETTINGS_TIMEOUT, served).await;
         }
+        Deferred::ModelChoice(a) => {
+            let served = model_choice::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(model_choice::MODEL_CHOICE_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2443,6 +2451,7 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessSettings(Admission),
+    ModelChoice(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2477,6 +2486,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::AccountProfile => account_profile::refusal(body, code)?,
         Protocol::HarnessCatalog => harness_catalog::refusal(code)?,
         Protocol::HarnessSettings => harness_settings::refusal(code)?,
+        Protocol::ModelChoice => model_choice::refusal(code)?,
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,
