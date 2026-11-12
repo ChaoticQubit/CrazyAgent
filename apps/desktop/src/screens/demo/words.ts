@@ -37,6 +37,9 @@ export const DEMO_POOL_REASONS: Readonly<Record<string, string>> = {
   demo_pool_missing: "This pool is gone.",
 };
 
+/** A pool's reason for a code this app has no sentence for; the code follows it. */
+export const DEMO_POOL_UNKNOWN = "The demo can't run on this pool.";
+
 /** What a refused Create the demo says, by the engine's code. */
 export const DEMO_REFUSALS: Readonly<Record<string, string>> = {
   demo_exists: "Your demo project already exists. Open it, or delete it before making a new one.",

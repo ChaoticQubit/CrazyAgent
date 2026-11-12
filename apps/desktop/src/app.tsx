@@ -7,6 +7,7 @@ import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPending
 import { questionWatch } from "./notify";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
+import { DemoPage } from "./screens/demo/offer";
 import { Welcome } from "./screens/first-run";
 import { AddFolder } from "./screens/intake/add-folder";
 import { CloneFromGitHub } from "./screens/intake/clone";
@@ -133,6 +134,7 @@ export function Screen({ route, session, alerts }: { route: Route; session: Sess
     case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
+    case "demo": return <DemoPage />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;
     case "metrics": return <AppMetrics projects={projects ?? []} />;
     case "project": return <ProjectPage key={route.id} id={route.id} tab={route.tab} name={projects?.find((project) => project.id === route.id)?.name} />;

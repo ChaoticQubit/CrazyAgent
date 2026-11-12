@@ -165,7 +165,9 @@ test("the guide panel shows the engine's goal with a copy action, the current st
   assert.ok(text(html).includes(words.DEMO_GUIDE_TITLE));
   assert.ok(text(html).includes(view.goal));
   assert.match(html, /Copy goal/);
-  assert.match(html, /aria-current="step"[^>]*>[\s\S]*Watch the agents work/);
+  assert.match(html, /<li[^>]*aria-current="step"[^>]*>(?:(?!<\/li>)[\s\S])*Watch the agents work/);
+  assert.equal((html.match(/aria-current="step"/g) ?? []).length, 1);
+  assert.match(html, /<li[^>]*aria-current="step"[^>]*>(?:(?!<\/li>)[\s\S])*href="#\/projects\/crazyagent-demo\/agents"[^>]*>Open Agents/);
   assert.equal((html.match(/data-done="true"/g) ?? []).length, 1);
   for (const step of words.DEMO_STEPS) assert.ok(text(html).includes(step.title), step.id);
 });
