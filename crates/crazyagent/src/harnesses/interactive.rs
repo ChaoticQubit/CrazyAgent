@@ -98,7 +98,7 @@ pub struct InteractiveCommand {
 }
 
 /// Where a harness writes its own session record, which the engine reads for status,
-/// replies and DELEGATE lines instead of reading the screen.
+/// replies and task blocks instead of reading the screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Transcript {
     CodexRollouts { sessions: PathBuf },

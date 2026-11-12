@@ -138,7 +138,8 @@ fn the_drop_file_server_records_checked_questions_that_the_engine_takes_once() {
             super::super::TOOL_NAME,
             ASK_TOOL,
             RECORD_TOOL,
-            WITHDRAW_TOOL
+            WITHDRAW_TOOL,
+            super::super::WAKE_TOOL
         ]
     );
     assert_eq!(answered[0]["result"]["tools"][1], super::super::ask_tool());

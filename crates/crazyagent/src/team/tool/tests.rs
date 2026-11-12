@@ -34,6 +34,192 @@ fn by_id(answers: &[Value]) -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// The configured master's `wake` tool records a wake in the same drop file as `delegate`,
+/// through the same schema and bounds, and the engine takes both once, in call order (L6).
+#[test]
+fn the_wake_tool_records_a_wake_beside_the_delegations_and_the_engine_takes_both_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let drop = directory.path().join(DROP_FILE);
+    let wake = |id: u64, arguments: Value| {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": WAKE_TOOL, "arguments": arguments}})
+    };
+    let answers = by_id(&served(
+        requests(&[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+            call_line(2, json!({"task": "Write apple.txt"})),
+            wake(
+                3,
+                json!({"agent": " @page-writer ", "task": " Add the footer "}),
+            ),
+            wake(4, json!({"agent": "", "task": "Add the footer"})),
+            wake(
+                5,
+                json!({"agent": "a".repeat(WAKE_NAME_BYTES_MAX + 1), "task": "x"}),
+            ),
+            wake(6, json!({"agent": "Ada", "task": "   "})),
+            wake(
+                7,
+                json!({"agent": "Ada", "task": "x".repeat(TASK_PROMPT_BYTES_MAX + 1)}),
+            ),
+        ]),
+        &drop,
+    ));
+    let listed = answers["1"]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == WAKE_TOOL)
+        .unwrap();
+    assert_eq!(listed["inputSchema"]["required"], json!(["agent", "task"]));
+    assert_eq!(listed["inputSchema"]["additionalProperties"], false);
+    assert_eq!(answers["3"]["result"]["isError"], false);
+    assert_eq!(answers["3"]["result"]["content"][0]["text"], WAKE_RECORDED);
+    for id in ["4", "5", "6", "7"] {
+        assert_eq!(answers[id]["result"]["isError"], true, "{id}");
+        assert_eq!(
+            answers[id]["result"]["content"][0]["text"], WAKE_INVALID,
+            "{id}"
+        );
+    }
+    assert_eq!(
+        take_proposals(&drop),
+        [
+            Proposal::Delegate(Delegation {
+                harness: None,
+                prompt: "Write apple.txt".into(),
+                role: None,
+            }),
+            Proposal::Wake(WakeLine {
+                agent: "@page-writer".into(),
+                text: "Add the footer".into(),
+            }),
+        ]
+    );
+    assert!(take_proposals(&drop).is_empty(), "taken once");
+}
+
+/// A reply opens a block only on a line that is exactly the fence, as `reply_blocks` reads
+/// it, so a quoted or indented fence is never taken for one (L6 review).
+#[test]
+fn only_a_whole_fence_line_opens_a_task_block() {
+    assert!(opens_block(&format!(
+        "Done.\n{BLOCK_FENCE}\n{{\"task\": \"a\"}}\n```"
+    )));
+    assert!(opens_block(&format!("{BLOCK_FENCE}  ")));
+    for reply in [
+        "Done.".to_owned(),
+        format!("> {BLOCK_FENCE}"),
+        format!("  {BLOCK_FENCE}"),
+        format!("{BLOCK_FENCE}-extra"),
+    ] {
+        assert!(!opens_block(&reply), "{reply}");
+    }
+}
+
+/// A conversation master's server leaves `wake` out, as `MasterTools::server_args` asks: it
+/// is not listed, a call to it is an unknown tool and nothing reaches the drop file, so no
+/// wake is recorded that the conversation master would never act on (L6).
+#[test]
+fn a_server_told_to_leave_wake_out_neither_lists_nor_records_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let drop = directory.path().join(DROP_FILE);
+    let input = requests(&[
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": WAKE_TOOL, "arguments": {"agent": "Ada", "task": "Add the footer"}}}),
+    ]);
+    let mut output = Vec::new();
+    serve(input, &mut output, &drop, None, &[WAKE_TOOL.to_owned()]).unwrap();
+    let answers: Vec<Value> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let answers = by_id(&answers);
+    let listed: Vec<&str> = answers["1"]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, [TOOL_NAME, ASK_TOOL, RECORD_TOOL, WITHDRAW_TOOL]);
+    assert_eq!(answers["2"]["error"]["code"], -32602, "{}", answers["2"]);
+    assert!(!drop.exists());
+    assert!(take_proposals(&drop).is_empty());
+}
+
+/// A master without team tools hands out work only through `crazyagent-task` blocks (L6,
+/// F16): a fence line exactly at the start of a line, one JSON object with no unknown
+/// field, every text within its bound, at most eight. Free lines, quoted or indented
+/// blocks are not read, and each unread block's reason is reported once.
+#[test]
+fn only_strict_task_blocks_are_read_from_a_reply_and_each_refusal_is_reported() {
+    let block = |object: &str| format!("{BLOCK_FENCE}\n{object}\n```");
+    let reply = [
+        "Two of them now.".to_owned(),
+        "DELEGATE: Write pear.txt".to_owned(),
+        "WAKE Ada: Check the title".to_owned(),
+        block(r#"{"task": " Write apple.txt ", "harness": "Claude-Code", "role": "Apple Writer"}"#),
+        format!("> {BLOCK_FENCE}\n> {{\"task\": \"Quoted\"}}\n> ```"),
+        format!("  {BLOCK_FENCE}\n{{\"task\": \"Indented\"}}\n```"),
+        format!("{BLOCK_FENCE}  \r\n{{\"wake\": \"@page-writer\", \"task\": \"Add the footer\"}}\r\n```\r"),
+    ]
+    .join("\n");
+    let (found, unread) = reply_blocks(&reply);
+    assert_eq!(
+        found,
+        [
+            Proposal::Delegate(Delegation {
+                harness: Some("claude-code".into()),
+                prompt: "Write apple.txt".into(),
+                role: Some("apple-writer".into()),
+            }),
+            Proposal::Wake(WakeLine {
+                agent: "@page-writer".into(),
+                text: "Add the footer".into(),
+            }),
+        ]
+    );
+    assert!(unread.is_empty(), "{unread:?}");
+    for (object, reason) in [
+        (r#"{"task": "a", "extra": 1}"#, BLOCK_INVALID),
+        (r#"{"task": "a"} {"task": "b"}"#, BLOCK_INVALID),
+        (r#"{"task": "a", "task": "b"}"#, BLOCK_INVALID),
+        ("DELEGATE: not json", BLOCK_INVALID),
+        (r#"{"harness": "codex"}"#, BLOCK_INVALID),
+        (r#"{"task": "   "}"#, BLOCK_BOUNDS),
+        (r#"{"task": "a", "role": "???"}"#, BLOCK_BOUNDS),
+        (
+            r#"{"task": "a", "wake": "Ada", "harness": "codex"}"#,
+            BLOCK_BOUNDS,
+        ),
+        (r#"{"task": "a", "wake": ""}"#, BLOCK_BOUNDS),
+    ] {
+        let (found, unread) = reply_blocks(&block(object));
+        assert!(found.is_empty(), "{object}");
+        assert_eq!(unread, [reason], "{object}");
+    }
+    let role = format!(
+        r#"{{"task": "a", "role": "{}"}}"#,
+        "a".repeat(ROLE_BYTES_MAX + 1)
+    );
+    assert_eq!(reply_blocks(&block(&role)).1, [BLOCK_BOUNDS]);
+    let long = format!(r#"{{"task": "{}"}}"#, "x".repeat(BLOCK_BYTES_MAX));
+    assert_eq!(reply_blocks(&block(&long)), (vec![], vec![BLOCK_TOO_LONG]));
+    assert_eq!(
+        reply_blocks(&format!("{BLOCK_FENCE}\n{{\"task\": \"a\"}}")),
+        (vec![], vec![BLOCK_UNCLOSED])
+    );
+    let many: Vec<String> = (0..DELEGATIONS_PER_REPLY_MAX + 2)
+        .map(|at| block(&format!(r#"{{"task": "Write file {at}"}}"#)))
+        .collect();
+    let (found, unread) = reply_blocks(&many.join("\n"));
+    assert_eq!(found.len(), DELEGATIONS_PER_REPLY_MAX);
+    assert_eq!(unread, [BLOCKS_FULL], "two blocks over, one reason");
+    assert_eq!(reply_blocks(""), (vec![], vec![]));
+}
+
 #[test]
 fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     let directory = tempfile::tempdir().unwrap();
@@ -68,11 +254,13 @@ fn the_delegate_tool_records_proposals_that_the_engine_takes_once() {
     assert_eq!(answers["1"]["result"]["serverInfo"]["name"], SERVER_NAME);
     assert!(answers["1"]["result"]["capabilities"]["tools"].is_object());
     let tools = answers["2"]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 5);
     assert_eq!(tools[0]["name"], TOOL_NAME);
     assert_eq!(tools[0]["inputSchema"]["required"], json!(["task"]));
     assert_eq!(tools[1], ask_tool());
     assert_eq!(tools[2], record_tool());
+    assert_eq!(tools[3], withdraw_tool());
+    assert_eq!(tools[4]["name"], WAKE_TOOL);
     for id in ["3", "4"] {
         assert_eq!(answers[id]["result"]["isError"], false, "{id}");
         assert_eq!(answers[id]["result"]["content"][0]["text"], RECORDED);
@@ -1232,8 +1420,10 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
     assert!(known_tools(&names(&QUESTION_TOOLS)));
-    assert!(known_tools(&names(&[STOP_TOOL; 16])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 17])));
+    assert!(known_tools(&names(&[WAKE_TOOL])));
+    assert!(!known_tools(&names(&["Wake"])));
+    assert!(known_tools(&names(&[STOP_TOOL; 18])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 19])));
 }
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.

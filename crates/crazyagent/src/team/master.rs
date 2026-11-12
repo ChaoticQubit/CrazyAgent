@@ -2331,6 +2331,14 @@ pub(super) fn wake_in(
         None => super::events::resolve(tx, project, agent)?,
     };
     let Some(id) = found else {
+        if let Some(task) = super::names::waiting_task(tx, project, agent)? {
+            return Ok((
+                format!(
+                    "Not woken: {shown} is the handle of task {task}, which has not started yet, so it needs no wake."
+                ),
+                true,
+            ));
+        }
         return Ok((unknown, true));
     };
     let label = super::events::label(tx, id)?;
@@ -2369,8 +2377,7 @@ pub(super) fn wake_in(
             tool::SPAWN_TOOL
         ),
         Err("team_agent_no_worktree") => format!(
-            "the worktree of {label} was cleaned up. Hand the work out with a {} line instead.",
-            super::DELEGATE_MARKER
+            "the worktree of {label} was cleaned up. Hand the work out as a new task instead."
         ),
         Err(code) => format!("{}.", super::runtime::refusal(code)),
     };

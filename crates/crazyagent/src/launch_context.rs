@@ -56,7 +56,7 @@ const _: () = assert!(TOOLS_SECTION_BYTES_MAX <= TEAM_INDEX_BYTES_MAX);
 /// The most bytes of the team tools section a live master or sub-agent with tools reads.
 pub const TOOLS_SECTION_BYTES_MAX: usize = 3 * 1024;
 /// The most bytes of a live master's own instructions: its role, its team tools or the
-/// DELEGATE line, and how the team's work lands.
+/// crazyagent-task block, and how the team's work lands.
 pub const LIVE_RULES_BYTES_MAX: usize = 4 * 1024;
 /// The most bytes a live master adds to what its harness reads at launch: its own
 /// instructions and the seed of a fresh conversation for a session with earlier turns.

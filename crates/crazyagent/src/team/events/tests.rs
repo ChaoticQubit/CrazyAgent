@@ -556,6 +556,20 @@ fn choice_prompts_of_claude_code_and_codex_are_questions_and_plain_lists_are_not
 }
 
 #[test]
+fn a_typed_message_quoted_with_a_numbered_list_is_no_question_on_the_agent_screen() {
+    let typed = "\u{276f} [crazyagent msg 530] from the master: Your Claude fix is ready\r\n  > ready, quizzes of 6, 5 and 6 items) is enough. Do only this, and quickly:\r\n  > 1. Merge your worker @jobs-retry into your branch\r\n  > 2. Run uv run pytest -q -m \"not integration\"\r\n  > 3. Report the root causes in 5 lines, then end your turn\r\n\r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n\u{276f} \r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n  ? for shortcuts";
+    assert_eq!(question(typed.as_bytes()), None);
+    assert_eq!(choice(typed.as_bytes()), None);
+    let two_cursors = "Pick one?\r\n\u{276f} 1. Yes\r\n\u{276f} 2. No";
+    assert_eq!(question(two_cursors.as_bytes()), None);
+    let one_cursor = "Pick one?\r\n> 1. Yes\r\n  2. No";
+    assert_eq!(
+        question(one_cursor.as_bytes()).as_deref(),
+        Some("Pick one? | 1. Yes | 2. No")
+    );
+}
+
+#[test]
 fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
     let fixture = Fixture::new();
     let host = fixture.host();
