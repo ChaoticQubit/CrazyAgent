@@ -660,6 +660,8 @@ pub enum TeamAction {
         project_id: ProjectId,
         harness: Option<String>,
         prompt: String,
+        #[serde(default)]
+        model: Option<String>,
     },
     Cancel {
         project_id: ProjectId,

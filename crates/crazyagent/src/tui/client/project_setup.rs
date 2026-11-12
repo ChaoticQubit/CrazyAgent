@@ -1354,6 +1354,7 @@ pools = []
                         project_id: project.clone(),
                         harness: Some(harness.into()),
                         prompt: prompt.clone(),
+                        model: None,
                     },
                     1,
                 )

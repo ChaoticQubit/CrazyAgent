@@ -1290,6 +1290,7 @@ async fn team_agents_pass_over_an_account_whose_sign_in_was_rejected_to_the_next
             project_id: project.clone(),
             harness: None,
             prompt: "Write page.md".into(),
+            model: None,
         });
         team.tick().unwrap();
         let database = rusqlite::Connection::open(restart.root.path().join("engine.db")).unwrap();
@@ -1964,6 +1965,7 @@ async fn queued_task_stays_queued_while_checking() {
             project_id: project.clone(),
             harness: None,
             prompt: "Write page.md".into(),
+            model: None,
         });
         for _ in 0..3 {
             team.tick().unwrap();
@@ -2029,6 +2031,7 @@ async fn rejected_account_not_waited() {
             project_id: project.clone(),
             harness: None,
             prompt: "Write page.md".into(),
+            model: None,
         });
         team.tick().unwrap();
         assert_eq!(restart.tasks(&setup), [TaskStatus::NeedsPool]);
