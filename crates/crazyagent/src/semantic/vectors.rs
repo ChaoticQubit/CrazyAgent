@@ -142,7 +142,11 @@ pub(crate) fn embed_queries(
 
 /// The stored vector of a masked query, once the indexer embedded it. Inputs: the
 /// connection, the plugin and the query. Output: the vector, or none.
-pub(crate) fn cached_query(connection: &Connection, plugin: &Plugin, query: &str) -> Option<Vec<f32>> {
+pub(crate) fn cached_query(
+    connection: &Connection,
+    plugin: &Plugin,
+    query: &str,
+) -> Option<Vec<f32>> {
     let _ = (connection, plugin, query);
     unimplemented!("v3 hybrid part 2")
 }
@@ -159,7 +163,9 @@ pub(crate) fn rank(
     full_text: &[i64],
     bounds: &Bounds,
 ) -> Hybrid {
-    let _ = (connection, project, source, plugin, query, full_text, bounds);
+    let _ = (
+        connection, project, source, plugin, query, full_text, bounds,
+    );
     unimplemented!("v3 hybrid part 3")
 }
 

@@ -43,7 +43,9 @@ fn axis_of(text: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn by_axis(seen: &mut Vec<String>) -> impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, EngineError> + '_ {
+fn by_axis(
+    seen: &mut Vec<String>,
+) -> impl FnMut(&[&str]) -> Result<Vec<Vec<f32>>, EngineError> + '_ {
     move |texts: &[&str]| {
         seen.extend(texts.iter().map(|text| (*text).to_owned()));
         Ok(texts.iter().map(|text| unit(axis_of(text))).collect())
@@ -59,7 +61,12 @@ fn wide() -> Bounds {
     }
 }
 
-fn round(db: &mut Connection, name: &str, plugin: &Plugin, bounds: &Bounds) -> (usize, Vec<String>) {
+fn round(
+    db: &mut Connection,
+    name: &str,
+    plugin: &Plugin,
+    bounds: &Bounds,
+) -> (usize, Vec<String>) {
     let mut seen = Vec::new();
     let embedded = embed_round(db, &project(name), plugin, bounds, &mut by_axis(&mut seen));
     (embedded, seen)
@@ -86,9 +93,15 @@ fn a_plugin_key_is_its_name_and_manifest_hash_and_the_tables_are_additive() {
     let first = chunk(&db, Some("alpha"), Source::Session, "hello axis1", 10);
     assert_eq!(round(&mut db, "alpha", &acme, &wide()).0, 1);
     initialize(&db).unwrap();
-    assert_eq!(stored(&db, &acme.key), [first], "a second start keeps every vector");
+    assert_eq!(
+        stored(&db, &acme.key),
+        [first],
+        "a second start keeps every vector"
+    );
     let bytes: i64 = db
-        .query_row("SELECT length(vector) FROM search_vectors", [], |row| row.get(0))
+        .query_row("SELECT length(vector) FROM search_vectors", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(bytes as u64, ONE, "f32 little endian, one per dimension");
 }
@@ -100,13 +113,21 @@ fn a_changed_plugin_key_re_embeds_and_drops_the_old_vectors() {
     let two = chunk(&db, Some("alpha"), Source::Session, "two", 20);
     let (old, new) = (plugin('a'), plugin('b'));
     assert_eq!(round(&mut db, "alpha", &old, &wide()).0, 2);
-    assert_eq!(round(&mut db, "alpha", &old, &wide()).0, 0, "nothing left for the same key");
+    assert_eq!(
+        round(&mut db, "alpha", &old, &wide()).0,
+        0,
+        "nothing left for the same key"
+    );
     let (embedded, seen) = round(&mut db, "alpha", &new, &wide());
     assert_eq!(embedded, 2, "an edited manifest re-embeds every chunk");
     assert_eq!(seen, ["two", "one"]);
     assert_eq!(stored(&db, &new.key), [one, two]);
     assert!(stored(&db, &old.key).is_empty(), "the old key's vectors go");
-    assert_eq!(round(&mut db, "alpha", &old, &wide()).0, 2, "switching back re-embeds");
+    assert_eq!(
+        round(&mut db, "alpha", &old, &wide()).0,
+        2,
+        "switching back re-embeds"
+    );
 }
 
 #[test]
@@ -118,16 +139,28 @@ fn deleting_or_rewriting_a_chunk_drops_its_vector_in_the_same_transaction() {
     round(&mut db, "alpha", &acme, &wide());
     {
         let tx = db.transaction().unwrap();
-        tx.execute("DELETE FROM search_chunks WHERE id=?1", [one]).unwrap();
+        tx.execute("DELETE FROM search_chunks WHERE id=?1", [one])
+            .unwrap();
         let left: i64 = tx
             .query_row("SELECT COUNT(*) FROM search_vectors", [], |row| row.get(0))
             .unwrap();
         assert_eq!(left, 1, "the delete took its vector inside the transaction");
     }
-    assert_eq!(stored(&db, &acme.key), [one, two], "a rolled back delete keeps it");
-    db.execute("UPDATE search_chunks SET text='two again' WHERE id=?1", [two])
-        .unwrap();
-    assert_eq!(stored(&db, &acme.key), [one], "a rewritten chunk loses its stale vector");
+    assert_eq!(
+        stored(&db, &acme.key),
+        [one, two],
+        "a rolled back delete keeps it"
+    );
+    db.execute(
+        "UPDATE search_chunks SET text='two again' WHERE id=?1",
+        [two],
+    )
+    .unwrap();
+    assert_eq!(
+        stored(&db, &acme.key),
+        [one],
+        "a rewritten chunk loses its stale vector"
+    );
     let (embedded, seen) = round(&mut db, "alpha", &acme, &wide());
     assert_eq!((embedded, seen), (1, vec!["two again".to_owned()]));
 }
@@ -139,8 +172,10 @@ fn vectors_left_by_chunks_deleted_before_the_triggers_are_swept_at_start() {
     let gone = chunk(&db, Some("alpha"), Source::Session, "gone", 10);
     let kept = chunk(&db, Some("alpha"), Source::Session, "kept", 20);
     round(&mut db, "alpha", &acme, &wide());
-    db.execute_batch("DROP TRIGGER search_vectors_gone;").unwrap();
-    db.execute("DELETE FROM search_chunks WHERE id=?1", [gone]).unwrap();
+    db.execute_batch("DROP TRIGGER search_vectors_gone;")
+        .unwrap();
+    db.execute("DELETE FROM search_chunks WHERE id=?1", [gone])
+        .unwrap();
     assert_eq!(stored(&db, &acme.key), [gone, kept]);
     initialize(&db).unwrap();
     assert_eq!(stored(&db, &acme.key), [kept]);
@@ -159,7 +194,13 @@ fn a_round_embeds_the_newest_project_chunks_then_app_wide_memories_within_its_bo
     let mut db = db();
     let acme = plugin('a');
     for at in 1..=5 {
-        chunk(&db, Some("alpha"), Source::Session, &format!("alpha {at}"), at);
+        chunk(
+            &db,
+            Some("alpha"),
+            Source::Session,
+            &format!("alpha {at}"),
+            at,
+        );
     }
     let other = chunk(&db, Some("beta"), Source::Session, "beta", 9);
     let memory = chunk(&db, None, Source::Memory, "everyone", 3);
@@ -169,12 +210,19 @@ fn a_round_embeds_the_newest_project_chunks_then_app_wide_memories_within_its_bo
     };
     let (embedded, seen) = round(&mut db, "alpha", &acme, &bounds);
     assert_eq!(embedded, 3);
-    assert_eq!(seen, ["alpha 5", "alpha 4", "alpha 3"], "newest first, project first");
+    assert_eq!(
+        seen,
+        ["alpha 5", "alpha 4", "alpha 3"],
+        "newest first, project first"
+    );
     let (embedded, seen) = round(&mut db, "alpha", &acme, &bounds);
     assert_eq!(embedded, 3);
     assert_eq!(seen, ["alpha 2", "alpha 1", "everyone"]);
     assert_eq!(round(&mut db, "alpha", &acme, &bounds).0, 0);
-    assert!(!stored(&db, &acme.key).contains(&other), "another project's chunk waits for its round");
+    assert!(
+        !stored(&db, &acme.key).contains(&other),
+        "another project's chunk waits for its round"
+    );
     assert!(stored(&db, &acme.key).contains(&memory));
 }
 
@@ -193,20 +241,39 @@ fn a_full_project_evicts_its_oldest_only_for_newer_chunks_and_a_second_round_sen
     assert_eq!(round(&mut db, "alpha", &acme, &bounds).0, 3);
     let forty = chunk(&db, Some("alpha"), Source::Session, "forty", 40);
     assert_eq!(round(&mut db, "alpha", &acme, &bounds).0, 1);
-    assert_eq!(stored(&db, &acme.key), [twenty, thirty, forty], "the oldest made room");
+    assert_eq!(
+        stored(&db, &acme.key),
+        [twenty, thirty, forty],
+        "the oldest made room"
+    );
     chunk(&db, Some("alpha"), Source::Session, "five", 5);
     let (embedded, seen) = round(&mut db, "alpha", &acme, &bounds);
-    assert_eq!((embedded, seen.len()), (0, 0), "an older chunk never displaces a newer one");
+    assert_eq!(
+        (embedded, seen.len()),
+        (0, 0),
+        "an older chunk never displaces a newer one"
+    );
     let (embedded, seen) = round(&mut db, "alpha", &acme, &bounds);
-    assert_eq!((embedded, seen.len()), (0, 0), "nor is anything sent again, ten included");
+    assert_eq!(
+        (embedded, seen.len()),
+        (0, 0),
+        "nor is anything sent again, ten included"
+    );
     assert!(!stored(&db, &acme.key).contains(&ten));
 
     let old = chunk(&db, None, Source::Memory, "old memory", 1);
     let new = chunk(&db, None, Source::Memory, "new memory", 2);
-    assert_eq!(round(&mut db, "alpha", &acme, &bounds).0, 1, "memories have their own cap");
+    assert_eq!(
+        round(&mut db, "alpha", &acme, &bounds).0,
+        1,
+        "memories have their own cap"
+    );
     let kept = stored(&db, &acme.key);
     assert!(kept.contains(&new) && !kept.contains(&old));
-    assert!(kept.contains(&forty), "a memory never evicts a project's vector");
+    assert!(
+        kept.contains(&forty),
+        "a memory never evicts a project's vector"
+    );
 }
 
 #[test]
@@ -222,15 +289,25 @@ fn vectors_of_the_wrong_length_or_not_finite_are_refused_and_the_round_stops() {
     ];
     for reply in replies {
         let mut embed = |texts: &[&str]| reply(texts.len());
-        assert_eq!(embed_round(&mut db, &project("alpha"), &acme, &wide(), &mut embed), 0);
+        assert_eq!(
+            embed_round(&mut db, &project("alpha"), &acme, &wide(), &mut embed),
+            0
+        );
         assert!(stored(&db, &acme.key).is_empty());
     }
-    assert_eq!(round(&mut db, "alpha", &acme, &wide()).0, 1, "a refused batch is tried again");
+    assert_eq!(
+        round(&mut db, "alpha", &acme, &wide()).0,
+        1,
+        "a refused batch is tried again"
+    );
 }
 
 #[test]
 fn a_query_is_masked_trimmed_and_cut_before_it_is_stored_or_sent() {
-    assert_eq!(query_text("  find the login flow \n").as_deref(), Some("find the login flow"));
+    assert_eq!(
+        query_text("  find the login flow \n").as_deref(),
+        Some("find the login flow")
+    );
     assert_eq!(query_text("   "), None);
     let masked = query_text("password=hunter2 login").unwrap();
     assert!(!masked.contains("hunter2"), "{masked}");
@@ -248,7 +325,9 @@ fn an_http_query_is_asked_once_embedded_by_the_indexer_then_read_back_with_its_t
     ask_query(&db, &acme.key, &query, 100).unwrap();
     ask_query(&db, &acme.key, &query, 200).unwrap();
     let rows: i64 = db
-        .query_row("SELECT COUNT(*) FROM search_query_vectors", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM search_query_vectors", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(rows, 1);
     let mut seen = Vec::new();
@@ -256,10 +335,16 @@ fn an_http_query_is_asked_once_embedded_by_the_indexer_then_read_back_with_its_t
     assert_eq!(seen, [query.clone()]);
     assert_eq!(cached_query(&db, &acme, &query), Some(unit(7)));
     let text: Option<String> = db
-        .query_row("SELECT query FROM search_query_vectors", [], |row| row.get(0))
+        .query_row("SELECT query FROM search_query_vectors", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(text, None, "the query text is not kept once embedded");
-    assert_eq!(cached_query(&db, &plugin('b'), &query), None, "keyed by plugin");
+    assert_eq!(
+        cached_query(&db, &plugin('b'), &query),
+        None,
+        "keyed by plugin"
+    );
 }
 
 #[test]
@@ -270,18 +355,31 @@ fn queries_are_bounded_per_plugin_and_per_round_and_a_failed_send_is_dropped() {
         ask_query(&db, &acme.key, &format!("query {index}"), index).unwrap();
     }
     let rows: i64 = db
-        .query_row("SELECT COUNT(*) FROM search_query_vectors", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM search_query_vectors", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(rows as usize, QUERY_ROWS_MAX);
     let mut seen = Vec::new();
-    assert_eq!(embed_queries(&mut db, &acme, &mut by_axis(&mut seen)), QUERY_ROUND_MAX);
-    assert_eq!(seen.first().map(String::as_str), Some("query 299"), "newest first");
+    assert_eq!(
+        embed_queries(&mut db, &acme, &mut by_axis(&mut seen)),
+        QUERY_ROUND_MAX
+    );
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("query 299"),
+        "newest first"
+    );
     let mut failing = |_: &[&str]| -> Result<Vec<Vec<f32>>, EngineError> {
         Err(EngineError("app_plugin_unreachable".into()))
     };
     assert_eq!(embed_queries(&mut db, &acme, &mut failing), 0);
     let waiting: i64 = db
-        .query_row("SELECT COUNT(*) FROM search_query_vectors WHERE vector IS NULL", [], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM search_query_vectors WHERE vector IS NULL",
+            [],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(
         waiting as usize,
@@ -327,7 +425,15 @@ fn rank_puts_the_nearest_first_and_fuses_at_most_50_vector_hits() {
     }
     let near = chunk(&db, Some("alpha"), Source::Session, "axis9 the one", 100);
     round(&mut db, "alpha", &acme, &wide());
-    let ranked = rank(&db, &project("alpha"), Source::Session, &acme, &unit(9), &[], &wide());
+    let ranked = rank(
+        &db,
+        &project("alpha"),
+        Source::Session,
+        &acme,
+        &unit(9),
+        &[],
+        &wide(),
+    );
     assert_eq!(ranked.ids.first(), Some(&near));
     assert_eq!(ranked.ids.len(), NEAREST_MAX);
 }
@@ -344,9 +450,20 @@ fn rank_scores_at_most_the_newest_scan_bytes_and_says_older_parts_rank_by_words(
         scan_bytes: 2 * ONE,
         ..wide()
     };
-    let ranked = rank(&db, &project("alpha"), Source::Session, &acme, &unit(5), &[oldest], &bounds);
+    let ranked = rank(
+        &db,
+        &project("alpha"),
+        Source::Session,
+        &acme,
+        &unit(5),
+        &[oldest],
+        &bounds,
+    );
     assert_eq!(ranked.note, Some(NOTE_NEWEST));
-    assert_eq!(ranked.ids[0], oldest, "full text still finds the older chunk");
+    assert_eq!(
+        ranked.ids[0], oldest,
+        "full text still finds the older chunk"
+    );
     let mut vector_part = ranked.ids.clone();
     vector_part.sort_unstable();
     assert_eq!(vector_part, [oldest, middle, newest]);
@@ -359,17 +476,41 @@ fn rank_says_when_none_or_only_part_of_the_history_has_vectors() {
     let one = chunk(&db, Some("alpha"), Source::Session, "axis2 one", 10);
     chunk(&db, Some("alpha"), Source::Session, "axis2 two", 20);
     let alpha = project("alpha");
-    let none = rank(&db, &alpha, Source::Session, &acme, &unit(2), &[one], &wide());
+    let none = rank(
+        &db,
+        &alpha,
+        Source::Session,
+        &acme,
+        &unit(2),
+        &[one],
+        &wide(),
+    );
     assert_eq!((none.ids, none.note), (vec![one], Some(NOTE_NO_VECTORS)));
     let bounds = Bounds {
         round_chunks: 1,
         ..wide()
     };
     round(&mut db, "alpha", &acme, &bounds);
-    let part = rank(&db, &alpha, Source::Session, &acme, &unit(2), &[one], &wide());
+    let part = rank(
+        &db,
+        &alpha,
+        Source::Session,
+        &acme,
+        &unit(2),
+        &[one],
+        &wide(),
+    );
     assert_eq!(part.note, Some(NOTE_PARTLY));
     round(&mut db, "alpha", &acme, &bounds);
-    let whole = rank(&db, &alpha, Source::Session, &acme, &unit(2), &[one], &wide());
+    let whole = rank(
+        &db,
+        &alpha,
+        Source::Session,
+        &acme,
+        &unit(2),
+        &[one],
+        &wide(),
+    );
     assert_eq!(whole.note, None);
 }
 
@@ -385,7 +526,15 @@ fn a_stored_vector_of_the_wrong_length_is_skipped_when_ranking() {
         params![vec![0u8; 300], bad],
     )
     .unwrap();
-    let ranked = rank(&db, &project("alpha"), Source::Session, &acme, &unit(3), &[], &wide());
+    let ranked = rank(
+        &db,
+        &project("alpha"),
+        Source::Session,
+        &acme,
+        &unit(3),
+        &[],
+        &wide(),
+    );
     assert_eq!(ranked.ids, [good]);
 }
 
@@ -397,6 +546,18 @@ fn progress_counts_the_plugins_vectors_against_every_chunk() {
     chunk(&db, Some("alpha"), Source::Session, "two", 20);
     chunk(&db, Some("beta"), Source::Session, "three", 30);
     round(&mut db, "alpha", &acme, &wide());
-    assert_eq!(progress(&db, &acme.key), Progress { embedded: 2, total: 3 });
-    assert_eq!(progress(&db, &plugin('b').key), Progress { embedded: 0, total: 3 });
+    assert_eq!(
+        progress(&db, &acme.key),
+        Progress {
+            embedded: 2,
+            total: 3
+        }
+    );
+    assert_eq!(
+        progress(&db, &plugin('b').key),
+        Progress {
+            embedded: 0,
+            total: 3
+        }
+    );
 }
