@@ -11,6 +11,7 @@ import { crc32, deflateSync } from "node:zlib";
 import { assertMasked, main, mask, printPdf, readLivePass, readRetro, readTrial, renderReport } from "./report.mjs";
 
 const REPORT = join(dirname(fileURLToPath(import.meta.url)), "report.mjs");
+const NO_TEST_CHROME = (process.env.CRAZYAGENT_PDF_CHROME || process.env.CRAZYAGENT_CHROME) ? false : "no test Chrome: set CRAZYAGENT_PDF_CHROME to chrome-headless-shell, or CRAZYAGENT_CHROME; these rows never print with /Applications/Google Chrome.app";
 const GIF = Buffer.from("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b", "hex");
 
 const SECRETS = {
@@ -180,6 +181,19 @@ async function hangingChrome(root) {
   const chrome = join(root, "hanging-chrome");
   await writeFile(chrome, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argv}'\n/bin/sleep 300 &\necho "$$ $!" > '${pids}'\nwait\n`, { mode: 0o700 });
   return { chrome, argv, pids };
+}
+
+/**
+ * Writes a stand-in Chrome that records its arguments and writes a small PDF where --print-to-pdf
+ * points, so which Chrome the report command picked shows without a real browser.
+ * Input: the folder it goes in and its name. Output: the stand-in path and its argument file.
+ */
+async function printingChrome(root, name) {
+  assert.ok(!root.includes("'"), "the folder path is quoted as is");
+  const argv = join(root, `${name}-argv.txt`);
+  const chrome = join(root, name);
+  await writeFile(chrome, `#!/bin/sh\nprintf '%s\\n' "$@" > '${argv}'\nfor arg in "$@"; do\n  case "$arg" in --print-to-pdf=*) printf '%%PDF-1.4 stand-in\\n' > "\${arg#--print-to-pdf=}" ;; esac\ndone\n`, { mode: 0o700 });
+  return { chrome, argv };
 }
 
 /**
@@ -742,7 +756,7 @@ test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, 
   }
 });
 
-test("the command writes report.html and a real report.pdf printed by Google Chrome headless", { timeout: 120_000 }, async () => {
+test("the command writes report.html and a real report.pdf printed by Google Chrome headless", { timeout: 120_000, skip: NO_TEST_CHROME }, async () => {
   const root = await trialFolder();
   const engine = await engineRoot([]);
   try {
@@ -811,7 +825,7 @@ test("PDF-2: secrets wrapped across frame lines, encoded in logs or held in SVG 
   }
 });
 
-test("PDF-3: Chrome prints with every network request refused, loopback included", { timeout: 120_000 }, async () => {
+test("PDF-3: Chrome prints with every network request refused, loopback included", { timeout: 120_000, skip: NO_TEST_CHROME }, async () => {
   const root = await folder("trial-report-network-");
   const asked = [];
   const server = createServer((request, response) => {
@@ -872,6 +886,30 @@ test("PDF-7: a report command stopped by SIGTERM while Chrome prints ends Chrome
     assert.deepEqual(await stillRunning(pids), [], "no process of the print's group outlives the command");
   } finally {
     for (const pid of await stillRunning(pids)) process.kill(pid, "SIGKILL");
+    for (const path of [root, engine, tools]) await rm(path, { recursive: true });
+  }
+});
+
+test("PDF-8: the report prints with CRAZYAGENT_PDF_CHROME first, and with CRAZYAGENT_CHROME only while that is unset", { timeout: 60_000 }, async () => {
+  const root = await trialFolder();
+  const engine = await engineRoot([]);
+  const tools = await folder("trial-report-stand-");
+  const pdfChrome = await printingChrome(tools, "pdf-chrome");
+  const testChrome = await printingChrome(tools, "test-chrome");
+  const report = (env) => new Promise((done, failed) => {
+    execFile(process.execPath, [REPORT, "trial", root, "--engine", engine], { timeout: 30_000, env: { PATH: "/usr/bin:/bin", HOME: tools, TMPDIR: tmpdir(), ...env } }, (error, stdout, stderr) => (error ? failed(new Error(`${error.message}\n${stderr}`)) : done(stdout.trim())));
+  });
+  const used = async (stand) => (await readFile(stand.argv, "utf8").catch(() => "")).split("\n");
+  try {
+    assert.equal(await report({ CRAZYAGENT_PDF_CHROME: pdfChrome.chrome, CRAZYAGENT_CHROME: testChrome.chrome }), join(root, "report.pdf"));
+    const first = await used(pdfChrome);
+    assert.ok(first.includes("--use-mock-keychain") && first.includes("--password-store=basic"), "CRAZYAGENT_PDF_CHROME printed, with both keychain flags");
+    assert.deepEqual(await used(testChrome), [""], "CRAZYAGENT_CHROME is not started while CRAZYAGENT_PDF_CHROME is set");
+    assert.equal(await report({ CRAZYAGENT_CHROME: testChrome.chrome }), join(root, "report.pdf"));
+    const second = await used(testChrome);
+    assert.ok(second.includes("--use-mock-keychain") && second.includes("--password-store=basic"), "CRAZYAGENT_CHROME printed once CRAZYAGENT_PDF_CHROME is unset");
+    assert.equal((await readFile(join(root, "report.pdf"), "latin1")).slice(0, 5), "%PDF-");
+  } finally {
     for (const path of [root, engine, tools]) await rm(path, { recursive: true });
   }
 });
