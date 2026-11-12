@@ -1,7 +1,11 @@
 use super::{Flow, Place, Screen, open};
+use crate::learning::MarkStep;
+use crate::tui::client::OwnerEvent;
+use crate::tui::client::learning::LearningQuery;
 use crate::tui::ctx::Ctx;
-use crate::tui::frame::{Hint, draw_lines, hint};
+use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
+use crate::tui::seam::{Arrival, Request};
 use crate::tui::text::{join, styled, wrap};
 use crate::tui::theme::Role;
 use crate::tui::widgets::{buttons, checkbox};
@@ -17,6 +21,8 @@ const SKIP: &str = "Skip for now";
 const LEARN_TITLE: &str = "Learn CrazyAgent";
 const LEARN: &str = "A short guide on Home walks you through accounts, projects, the master and its agents, questions and change sets. Its first step is an optional demo project.";
 const LEARN_TICK: &str = "Show the guide on Home";
+const SKIPPING: &str = "Skipping the guide";
+const SKIP_FAILED: &str = "Couldn't skip the guide, so it stays on Home.";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Choice {
@@ -41,14 +47,15 @@ impl Choice {
     }
 }
 
-/// The first-run Accounts step, after Setup: Add account or Skip for now, the
-/// same words as the desktop first run, and under them the Learn CrazyAgent
-/// offer with its ticked "Show the guide on Home" box. Add account ends first
-/// run with Home under Add account; Skip for now ends it on Home. Esc does
-/// nothing here. Input: keys. Output: the step, the focused button marked.
+/// The first-run Accounts step after Setup, in the desktop words: Add account (Home under
+/// Add account) or Skip for now (Home), and the Learn CrazyAgent offer with its ticked box.
+/// Unticked, either button first writes the skipped mark and leaves on the engine's answer,
+/// saying the guide stays on Home when it refused. Esc does nothing here.
+/// Input: keys and the mark reply. Output: the step, the focused button marked.
 pub struct FirstRunAccounts {
     choice: Choice,
     guide: bool,
+    sent: Option<(Choice, LearningQuery)>,
 }
 
 impl Default for FirstRunAccounts {
@@ -56,6 +63,7 @@ impl Default for FirstRunAccounts {
         Self {
             choice: Choice::Add,
             guide: true,
+            sent: None,
         }
     }
 }
@@ -66,6 +74,27 @@ impl FirstRunAccounts {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn leave(choice: Choice, ctx: &mut Ctx) -> Flow {
+        match choice {
+            Choice::Add => Flow::Go(Place::AddAccount),
+            Choice::Skip => Flow::Replace(open(&Place::Home, ctx)),
+        }
+    }
+
+    fn pick(&mut self, ctx: &mut Ctx) -> Flow {
+        if self.guide {
+            return Self::leave(self.choice, ctx);
+        }
+        let query = LearningQuery::Mark {
+            step: MarkStep::Skipped,
+            on: true,
+            generation: ctx.next_generation(),
+        };
+        ctx.request(Request::Learning(Box::new(query.clone())));
+        self.sent = Some((self.choice, query));
+        Flow::Handled
+    }
 }
 
 impl Screen for FirstRunAccounts {
@@ -74,6 +103,9 @@ impl Screen for FirstRunAccounts {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if self.sent.is_some() {
+            return vec![hint("Ctrl-Q", "Quit")];
+        }
         let arrows = format!("{}{}", ctx.glyphs.left, ctx.glyphs.right);
         vec![
             hint("Enter", self.choice.label()),
@@ -84,15 +116,15 @@ impl Screen for FirstRunAccounts {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.sent.is_some() {
+            return Flow::Handled;
+        }
         match key {
             Key::Left | Key::Right | Key::Tab | Key::BackTab => {
                 self.choice = self.choice.other();
                 Flow::Handled
             }
-            Key::Enter => match self.choice {
-                Choice::Add => Flow::Go(Place::AddAccount),
-                Choice::Skip => Flow::Replace(open(&Place::Home, ctx)),
-            },
+            Key::Enter => self.pick(ctx),
             Key::Char(' ') => {
                 self.guide = !self.guide;
                 Flow::Handled
@@ -112,7 +144,11 @@ impl Screen for FirstRunAccounts {
             Choice::Add => 0,
             Choice::Skip => 1,
         };
-        lines.push(buttons(&[ADD, SKIP], Some(focused), theme));
+        if self.sent.is_some() {
+            lines.push(ctx.loading(SKIPPING));
+        } else {
+            lines.push(buttons(&[ADD, SKIP], Some(focused), theme));
+        }
         lines.push(Line::default());
         lines.push(styled(LEARN_TITLE, Role::Heading, theme));
         lines.extend(wrap(LEARN, limit).into_iter().map(Line::raw));
@@ -123,6 +159,31 @@ impl Screen for FirstRunAccounts {
             .collect();
         draw_lines(frame.buffer_mut(), area, &lines);
         None
+    }
+
+    fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
+        let Arrival::Owner(event) = arrival else {
+            return Flow::Handled;
+        };
+        let OwnerEvent::Learning(event) = &**event else {
+            return Flow::Handled;
+        };
+        match self.sent.take() {
+            Some((choice, query)) if query == event.query => {
+                if event.result.is_err() {
+                    ctx.say(Message::warning(SKIP_FAILED, ""));
+                }
+                Self::leave(choice, ctx)
+            }
+            other => {
+                self.sent = other;
+                Flow::Handled
+            }
+        }
+    }
+
+    fn busy(&self, _ctx: &Ctx) -> bool {
+        self.sent.is_some()
     }
 
     fn place(&self) -> Option<Place> {
