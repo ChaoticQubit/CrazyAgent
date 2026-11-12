@@ -112,6 +112,10 @@ fn needs_node(id: &str) -> HarnessVersions {
 }
 
 fn node(state: DependencyState) -> Arrival {
+    setup(state, false)
+}
+
+fn setup(state: DependencyState, running: bool) -> Arrival {
     arrival(SettingsEvent::AppSetup(AppSetupEvent::Status(Ok(
         SetupStatus {
             dependencies: vec![DependencyStatus {
@@ -120,7 +124,7 @@ fn node(state: DependencyState) -> Arrival {
                 state,
             }],
             pack: Vec::new(),
-            running: false,
+            running,
             notes: Vec::new(),
             version: 1,
         },
@@ -633,39 +637,81 @@ fn a_found_codex_the_resolver_cannot_run_reads_needs_node_and_never_installed() 
 #[test]
 fn the_node_offer_follows_the_node_setup_row_while_a_harness_needs_node() {
     let version = || Version::parse("26.13.1").unwrap();
-    assert_eq!(
-        node_offer(false, Some(&DependencyState::Missing)),
-        NodeOffer::None
-    );
-    assert_eq!(
-        node_offer(true, Some(&DependencyState::Missing)),
-        NodeOffer::Offer
-    );
-    assert_eq!(node_offer(true, None), NodeOffer::Offer);
-    assert_eq!(
-        node_offer(true, Some(&DependencyState::Installing)),
-        NodeOffer::Installing
-    );
-    assert_eq!(
-        node_offer(
-            true,
-            Some(&DependencyState::Failed {
-                reason: NODE_FAILED.into()
-            })
-        ),
-        NodeOffer::Failed {
-            reason: NODE_FAILED.into()
-        }
-    );
-    for settled in [
-        DependencyState::Checking,
-        DependencyState::Found { version: version() },
-        DependencyState::Installed { version: version() },
-    ] {
-        assert_eq!(
-            node_offer(true, Some(&settled)),
+    let failed = || DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    };
+    let cases = [
+        (
+            false,
+            Some(DependencyState::Missing),
+            false,
             NodeOffer::None,
-            "{settled:?}"
+        ),
+        (
+            true,
+            Some(DependencyState::Missing),
+            false,
+            NodeOffer::Offer,
+        ),
+        (true, None, false, NodeOffer::Offer),
+        (
+            true,
+            Some(DependencyState::Installing),
+            false,
+            NodeOffer::Installing,
+        ),
+        (
+            true,
+            Some(failed()),
+            false,
+            NodeOffer::Failed {
+                reason: NODE_FAILED.into(),
+            },
+        ),
+        (
+            true,
+            Some(DependencyState::Checking),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Found { version: version() }),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Installed { version: version() }),
+            false,
+            NodeOffer::None,
+        ),
+        (
+            true,
+            Some(DependencyState::Missing),
+            true,
+            NodeOffer::Installing,
+        ),
+        (
+            true,
+            Some(DependencyState::Checking),
+            true,
+            NodeOffer::Installing,
+        ),
+        (true, None, true, NodeOffer::Installing),
+        (
+            true,
+            Some(DependencyState::Found { version: version() }),
+            true,
+            NodeOffer::None,
+        ),
+        (false, Some(DependencyState::Missing), true, NodeOffer::None),
+    ];
+    for (needed, node, busy, offer) in cases {
+        assert_eq!(
+            node_offer(needed, node.as_ref(), busy),
+            offer,
+            "needed {needed}, {node:?}, setup running {busy}"
         );
     }
 }
@@ -751,5 +797,58 @@ fn a_sent_pick_that_ends_unable_to_run_counts_as_ended_and_failed() {
             failed: 1,
             running: false
         }
+    );
+}
+
+#[test]
+fn a_running_setup_keeps_the_node_install_shown_and_read_until_its_row_settles() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert_eq!(sent(&mut shell), reads());
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.arrive(setup(DependencyState::Missing, true));
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
+    assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");
+    shell.refresh();
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "the row reads missing until the install begins"
+    );
+}
+
+#[test]
+fn a_node_install_begun_while_reads_are_out_reads_again_once_they_land() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = || versions("claude-code", None, Some(NEEDS_NODE));
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    shell.key(Key::Down);
+    shell.key(Key::Char('r'));
+    assert_eq!(sent(&mut shell), reads());
+    shell.key(Key::Char('n'));
+    assert_eq!(sent(&mut shell), vec![Sent::InstallNode]);
+    shell.arrive(arrival(SettingsEvent::AppSetup(AppSetupEvent::Installed(
+        Ok(()),
+    ))));
+    assert!(
+        sent(&mut shell).is_empty(),
+        "the earlier reads are still out"
+    );
+    answer(&mut shell, &found, needs_node("codex"), claude(), &[]);
+    assert_eq!(
+        sent(&mut shell),
+        reads(),
+        "reads from before the install began are read again"
     );
 }

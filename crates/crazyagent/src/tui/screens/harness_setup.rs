@@ -150,9 +150,9 @@ enum NodeOffer {
 }
 
 /// What the step offers for Node.js, from whether an offered harness needs it and the Node
-/// row of setup. Inputs: the need and the Node row's state, none while unread.
-/// Output: the offer.
-fn node_offer(needed: bool, node: Option<&DependencyState>) -> NodeOffer {
+/// row of setup. Inputs: the need, the Node row's state, none while unread, and whether a
+/// setup run goes on. Output: the offer.
+fn node_offer(needed: bool, node: Option<&DependencyState>, _busy: bool) -> NodeOffer {
     if !needed {
         return NodeOffer::None;
     }
@@ -346,7 +346,7 @@ impl HarnessSetup {
             .versions
             .values()
             .any(|read| read.as_ref().is_ok_and(node_needed));
-        node_offer(needed, self.node.as_ref())
+        node_offer(needed, self.node.as_ref(), false)
     }
 
     fn pending(&self) -> bool {

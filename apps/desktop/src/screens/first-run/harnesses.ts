@@ -160,8 +160,9 @@ export function nodeNeeded(reads: readonly (HarnessVersions | null)[]): boolean 
 }
 
 /** What the step offers for Node.js, from whether a harness needs it and setup's Node row.
- * Inputs: the need and the Node row's state, null while unread. Output: the offer. */
-export function nodeOffer(needed: boolean, node: DependencyState | null): NodeOffer {
+ * Inputs: the need, the Node row's state, null while unread, and whether a setup run goes on.
+ * Output: the offer. */
+export function nodeOffer(needed: boolean, node: DependencyState | null, _busy: boolean): NodeOffer {
   if (!needed) return { kind: "none" };
   switch (node?.state) {
     case "installing": return { kind: "installing" };

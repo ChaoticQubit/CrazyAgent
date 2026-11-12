@@ -86,7 +86,7 @@ async function readRows(): Promise<{ rows: Record<string, HarnessRow>; node: Nod
   const problem = catalog.kind !== "ok" ? failure(catalog) : queued.kind !== "ok" ? failure(queued) : "";
   const found = setup.kind === "ok" ? setup.value.dependencies.find((item) => item.name === "node") : undefined;
   const needed = nodeNeeded(reads.map((read) => read.kind === "ok" ? read.value : null));
-  return { rows, node: nodeOffer(needed, found?.state ?? null), problem };
+  return { rows, node: nodeOffer(needed, found?.state ?? null, setup.kind === "ok" && setup.value.running), problem };
 }
 
 function failure(result: Exclude<Result<unknown>, { kind: "ok" }>): string {

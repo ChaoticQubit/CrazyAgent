@@ -113,14 +113,23 @@ test("the Node offer follows setup's Node row while an offered harness needs Nod
   assert.equal(model.nodeNeeded([versions("codex", { needs }), null]), true);
   assert.equal(model.nodeNeeded([versions("claude-code", { refusal: "harness_install_needs_node" })]), true);
   assert.equal(model.nodeNeeded([versions("codex", { install: LINE }), null]), false);
-  assert.deepEqual(model.nodeOffer(false, { state: "missing" }), { kind: "none" });
-  assert.deepEqual(model.nodeOffer(true, { state: "missing" }), { kind: "offer" });
-  assert.deepEqual(model.nodeOffer(true, null), { kind: "offer" });
-  assert.deepEqual(model.nodeOffer(true, { state: "installing" }), { kind: "installing" });
-  assert.deepEqual(model.nodeOffer(true, { state: "failed", reason: NODE_FAILED }), { kind: "failed", reason: NODE_FAILED });
+  assert.deepEqual(model.nodeOffer(false, { state: "missing" }, false), { kind: "none" });
+  assert.deepEqual(model.nodeOffer(true, { state: "missing" }, false), { kind: "offer" });
+  assert.deepEqual(model.nodeOffer(true, null, false), { kind: "offer" });
+  assert.deepEqual(model.nodeOffer(true, { state: "installing" }, false), { kind: "installing" });
+  assert.deepEqual(model.nodeOffer(true, { state: "failed", reason: NODE_FAILED }, false), { kind: "failed", reason: NODE_FAILED });
   for (const state of [{ state: "checking" }, { state: "found", version: "26.13.1" }, { state: "installed", version: "26.13.1" }]) {
-    assert.deepEqual(model.nodeOffer(true, state), { kind: "none" }, state.state);
+    assert.deepEqual(model.nodeOffer(true, state, false), { kind: "none" }, state.state);
   }
+});
+
+test("while a setup run goes on, a Node row not yet settled reads installing, so the offer hides and the step reads again", () => {
+  for (const state of [{ state: "missing" }, { state: "checking" }, null]) {
+    assert.deepEqual(model.nodeOffer(true, state, true), { kind: "installing" }, JSON.stringify(state));
+  }
+  assert.deepEqual(model.nodeOffer(true, { state: "found", version: "26.13.1" }, true), { kind: "none" });
+  assert.deepEqual(model.nodeOffer(true, { state: "failed", reason: NODE_FAILED }, true), { kind: "failed", reason: NODE_FAILED });
+  assert.deepEqual(model.nodeOffer(false, { state: "missing" }, true), { kind: "none" });
 });
 
 test("the view offers Install Node.js, shows it installing, and a failure's reason with the button again", () => {
