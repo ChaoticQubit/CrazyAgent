@@ -1,6 +1,7 @@
 use super::new_project::harness_name;
 use super::new_project_page::{hints_of, key_event, look, paint, pool_choices_from};
 use super::new_project_view::{Row, Screen as View};
+use super::notifications::open_notice;
 use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
     plain_problem, project_pool,
@@ -18,6 +19,7 @@ use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
+use crate::notifications::NoticeFilter;
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
@@ -135,6 +137,33 @@ fn backend_name(backend: MasterBackend) -> String {
         MasterBackend::Codex => harness_name("codex", None),
         MasterBackend::Claude => harness_name("claude", None),
     }
+}
+
+/// The accounts of the pool the project uses, whose sign-ins its Needs you lists. Inputs:
+/// the project and the context's projects and pools. Output: the account ids, none while
+/// either read is missing or the project has no pool.
+fn pool_accounts(project: &ProjectId, ctx: &Ctx) -> Vec<CredentialRef> {
+    let pool = ctx
+        .store
+        .projects
+        .ready()
+        .and_then(|cards| cards.iter().find(|card| card.id == *project))
+        .and_then(|card| card.pool_id.as_ref());
+    let Some(pool) = pool else {
+        return Vec::new();
+    };
+    ctx.store
+        .pools
+        .ready()
+        .and_then(|pools| pools.iter().find(|summary| summary.id == *pool))
+        .map(|summary| {
+            summary
+                .members
+                .iter()
+                .map(|member| member.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn tab_of(tab: ProjectTab) -> Tab {
@@ -1249,6 +1278,13 @@ impl ProjectPage {
         if let Some(query) = self.screen.recovery.next_query(now_ms()) {
             ctx.request(Request::Recovery(Box::new(query)));
         }
+        if self.screen.tab == Tab::Overview {
+            let accounts = pool_accounts(&self.screen.project, ctx);
+            self.screen.needs.set_accounts(accounts);
+            for query in self.screen.needs.due(now_ms()) {
+                ctx.request(Request::Notices(Box::new(query)));
+            }
+        }
         if matches!(self.screen.tab, Tab::Overview | Tab::Settings)
             && let Some(query) = self.screen.roadmap.next_query(now_ms())
         {
@@ -1471,6 +1507,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::Notice(row) => {
+                self.screen.needs.refresh();
+                open_notice(&row, NoticeFilter::Pending, ctx)
+            }
             ProjectReply::Memory => Flow::Open(Place::ProjectMemory {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
@@ -1681,7 +1721,7 @@ impl Screen for ProjectPage {
         match spot {
             super::Spot::Question(id) => self.screen.questions.want(*id),
             super::Spot::ChangeSet(id) => self.screen.changes.want(id.clone()),
-            super::Spot::Agent(_) => {}
+            super::Spot::Agent(_) | super::Spot::MemoryReview => {}
         }
     }
 
@@ -1831,6 +1871,7 @@ impl Screen for ProjectPage {
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
                 OwnerEvent::Questions(event) => self.screen.questions.apply(event),
+                OwnerEvent::Notices(event) => self.screen.needs.arrive(event),
                 OwnerEvent::Recovery(event) if event.query.project() == &self.screen.project => {
                     self.screen.recovery.apply(event);
                 }

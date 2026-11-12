@@ -179,18 +179,6 @@ impl Notifications {
         }
     }
 
-    /// The fold one row stands for under the filter it was listed in, which reaches every
-    /// item the row holds at or below its newest id, past the ids the row names. Input:
-    /// the row. Output: the fold.
-    fn fold_of(&self, row: &Notice) -> NoticeFold {
-        NoticeFold {
-            kind: row.kind,
-            project_id: row.project_id.clone(),
-            filter: self.filter,
-            newest: row.id,
-        }
-    }
-
     /// Sends one change to every item of the marked rows, or of the row under the cursor
     /// when none is marked, as folds in pieces of at most `PAGE_MAX`; the marks stay until
     /// every piece stands. Inputs: the change and the context. Output: none.
@@ -198,12 +186,12 @@ impl Notifications {
         let rows = self.rows();
         let folds: Vec<NoticeFold> = if self.marked.is_empty() {
             rows.get(self.cursor)
-                .map(|row| vec![self.fold_of(row)])
+                .map(|row| vec![fold_of(row, self.filter)])
                 .unwrap_or_default()
         } else {
             rows.iter()
                 .filter(|row| self.marked.contains(&row.id))
-                .map(|row| self.fold_of(row))
+                .map(|row| fold_of(row, self.filter))
                 .collect()
         };
         self.changing.clear();
@@ -220,27 +208,7 @@ impl Notifications {
         let Some(row) = self.rows().get(self.cursor).cloned() else {
             return Flow::Handled;
         };
-        if row.unread > 0 {
-            let action = if row.folded == 1 {
-                NoticeAction::Read { ids: vec![row.id] }
-            } else {
-                let folds = vec![self.fold_of(&row)];
-                NoticeAction::Folds {
-                    folds,
-                    change: FoldChange::Read,
-                }
-            };
-            send(action, ctx);
-        }
-        match place_of(&row.target, ctx) {
-            Ok((Place::Home, _)) => Flow::Go(Place::Home),
-            Ok((place, Some(spot))) => Flow::OpenAt(place, spot),
-            Ok((place, None)) => Flow::Open(place),
-            Err(text) => {
-                ctx.say(Message::warning(text, ""));
-                Flow::Handled
-            }
-        }
+        open_notice(&row, self.filter, ctx)
     }
 
     fn walk_project(&mut self, forward: bool, ctx: &mut Ctx) {
@@ -341,6 +309,45 @@ impl Notifications {
     }
 }
 
+/// The fold one row stands for under the filter it was listed in, which reaches every item
+/// the row holds at or below its newest id, past the ids the row names. Inputs: the row and
+/// the filter. Output: the fold.
+fn fold_of(row: &Notice, filter: NoticeFilter) -> NoticeFold {
+    NoticeFold {
+        kind: row.kind,
+        project_id: row.project_id.clone(),
+        filter,
+        newest: row.id,
+    }
+}
+
+/// Opens one row's page on the item it names and marks what the row holds read: one item
+/// by its id, a fold through Folds under the filter it was listed in. Shared by the list and
+/// a project's Needs you. Inputs: the row, the filter and the context. Output: the flow,
+/// or Handled with a message when the TUI has no such page.
+pub(in crate::tui) fn open_notice(row: &Notice, filter: NoticeFilter, ctx: &mut Ctx) -> Flow {
+    if row.unread > 0 {
+        let action = if row.folded == 1 {
+            NoticeAction::Read { ids: vec![row.id] }
+        } else {
+            NoticeAction::Folds {
+                folds: vec![fold_of(row, filter)],
+                change: FoldChange::Read,
+            }
+        };
+        send(action, ctx);
+    }
+    match place_of(&row.target, ctx) {
+        Ok((Place::Home, _)) => Flow::Go(Place::Home),
+        Ok((place, Some(spot))) => Flow::OpenAt(place, spot),
+        Ok((place, None)) => Flow::Open(place),
+        Err(text) => {
+            ctx.say(Message::warning(text, ""));
+            Flow::Handled
+        }
+    }
+}
+
 /// Queues one change to the store with a fresh generation. Inputs: the change and the
 /// context. Output: the generation its reply carries; a full queue answers it as the
 /// owner being busy.
@@ -364,8 +371,8 @@ fn project_name(id: &ProjectId, ctx: &Ctx) -> String {
 }
 
 /// The TUI page that fixes or shows one item's target and the item to pick there: the
-/// notified question or change set, or an agent's question or wait in its Team screen's
-/// Questions box. Inputs: the target and the context, whose project list names the
+/// notified question or change set, an agent's question or wait in its Team screen's
+/// Questions box, or the first suggested memory. Inputs: the target and the context, whose project list names the
 /// project. Output: the place and the item, or the sentence the message line shows when
 /// the TUI has no such page or the project is not listed.
 fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &'static str> {
@@ -394,6 +401,7 @@ fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &
             change_set: Some(change_set),
             ..
         } => Some(Spot::ChangeSet(change_set.clone())),
+        NoticeTarget::Memories { .. } => Some(Spot::MemoryReview),
         _ => None,
     };
     let place = match target {
@@ -418,7 +426,13 @@ fn place_of(target: &NoticeTarget, ctx: &Ctx) -> Result<(Place, Option<Spot>), &
         NoticeTarget::Home => Ok(Place::Home),
         NoticeTarget::Updates => Err(UPDATES),
     }?;
-    assert!(spot.is_none() || matches!(place, Place::Project { .. } | Place::Team { .. }));
+    assert!(
+        spot.is_none()
+            || matches!(
+                place,
+                Place::Project { .. } | Place::Team { .. } | Place::ProjectMemory { .. }
+            )
+    );
     Ok((place, spot))
 }
 

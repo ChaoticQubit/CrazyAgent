@@ -23,6 +23,7 @@ pub(in crate::tui) mod project_access;
 pub(in crate::tui) mod project_activity;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
+pub(in crate::tui) mod project_needs;
 pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
 pub(in crate::tui) mod project_team;
@@ -257,14 +258,15 @@ pub enum Place {
 }
 
 /// One item a screen picks when a notification opens it (DEC-136a): a logged question on
-/// the Questions tab, a change set on the Changes tab, or an agent in the Team screen's
-/// Questions box. The screen picks it on its first read and keeps its usual first pick
+/// the Questions tab, a change set on the Changes tab, an agent in the Team screen's
+/// Questions box, or the first suggested memory in Memory. The screen picks it on its first read and keeps its usual first pick
 /// when the item is no longer listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Spot {
     Question(u64),
     ChangeSet(crate::landing::ChangeSetId),
     Agent(i64),
+    MemoryReview,
 }
 
 /// What the shell does after a screen handled a key or an arrival.

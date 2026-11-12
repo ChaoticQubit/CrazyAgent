@@ -216,6 +216,7 @@ pub struct Memory {
     filtering: bool,
     mode: Mode,
     project: Option<(ProjectId, String)>,
+    review: bool,
 }
 
 impl Default for Memory {
@@ -251,6 +252,7 @@ impl Memory {
             filtering: false,
             mode: Mode::List,
             project: None,
+            review: false,
         }
     }
 
@@ -1227,6 +1229,10 @@ impl Screen for Memory {
         matches!(self.mode, Mode::Suggestion { .. })
     }
 
+    fn open_at(&mut self, spot: &super::Spot, _ctx: &mut Ctx) {
+        self.review = *spot == super::Spot::MemoryReview;
+    }
+
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match self.mode {
             Mode::Delete { .. } => return self.delete_key(key, ctx),
@@ -1457,10 +1463,15 @@ impl Screen for Memory {
             }
             Some(SettingsEvent::Suggestions(result)) if self.suggesting => {
                 self.suggesting = false;
+                let review = std::mem::take(&mut self.review);
                 match result {
                     Ok(found) => {
                         self.suggestions = found.clone();
                         self.clamp(ctx);
+                        if review && !self.suggested(ctx).is_empty() {
+                            self.selected = 0;
+                            self.mode = Mode::Suggestion { save_focused: true };
+                        }
                     }
                     Err(code) if code == NOT_READY => {}
                     Err(code) => ctx.say(Message::warning(

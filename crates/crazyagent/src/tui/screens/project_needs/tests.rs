@@ -112,7 +112,11 @@ fn the_reads_are_the_projects_pending_items_folded_and_every_pending_sign_in() {
 
     let mut needs = NeedsYou::new(project());
     let (own, signs) = both(&mut needs, NOW);
-    assert_eq!(needs.due(NOW + POLL_MS), Vec::new(), "one read of each at a time");
+    assert_eq!(
+        needs.due(NOW + POLL_MS),
+        Vec::new(),
+        "one read of each at a time"
+    );
     needs.arrive(&event(own, page(Vec::new())));
     needs.arrive(&event(signs, page(Vec::new())));
     assert_eq!(needs.due(NOW + 1), Vec::new(), "read again after POLL_MS");
@@ -270,7 +274,10 @@ fn the_overview_lists_what_needs_you_from_the_store_and_enter_opens_the_picked_i
     let shown = render(&mut shell, 120, 36).join("\n");
     assert!(shown.contains("Needs you  2"), "{shown}");
     assert!(shown.contains("Which page ships first?"), "{shown}");
-    assert!(shown.contains("acct-1 needs you to sign in again."), "{shown}");
+    assert!(
+        shown.contains("acct-1 needs you to sign in again."),
+        "{shown}"
+    );
     assert!(!shown.contains("acct-9"), "{shown}");
     assert!(
         !shown.contains("Save to memory?"),
@@ -280,7 +287,10 @@ fn the_overview_lists_what_needs_you_from_the_store_and_enter_opens_the_picked_i
         .lines()
         .find(|line| line.contains("Which page ships first?"))
         .unwrap();
-    assert!(line.contains("> "), "the newest item is picked first: {line}");
+    assert!(
+        line.contains("> "),
+        "the newest item is picked first: {line}"
+    );
 
     shell.key(Key::Enter);
     assert_eq!(

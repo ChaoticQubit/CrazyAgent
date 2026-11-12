@@ -6,6 +6,7 @@ use super::new_project_view::wrap_words;
 use super::planning_line::{Planning, StatusLine, planning, planning_key, refreshes_status};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
+use super::project_needs::NeedsYou;
 use super::project_plugins::ProjectPlugins;
 use super::project_trust::{TrustEdit, TrustKey};
 use super::questions::ProjectQuestions;
@@ -672,6 +673,7 @@ pub(in crate::tui) enum ProjectReply {
     AccountOrder(Option<crate::scheduling::Strategy>),
     RefreshOverview,
     MoveHome(crate::projects_home::AddMode),
+    Notice(Box<crate::notifications::Notice>),
 }
 
 /// One project's screen: its tabs, engine data and what each tab has focused.
@@ -738,6 +740,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
     pub questions: ProjectQuestions,
+    pub needs: NeedsYou,
     pub tests: ProjectTests,
     pub tickets: ProjectTickets,
     pub recovery: ProjectRecovery,
@@ -773,13 +776,12 @@ impl ProjectScreen {
             return true;
         }
         match self.tab {
-            Tab::Overview => self.overview_cursor < self.suggested().len(),
             Tab::Context => self.reading && self.report_suggestion().is_some(),
             Tab::Conversation => !self.typing && self.sessions.asking(),
             Tab::Changes => self.changes.asking(),
             Tab::Questions => self.questions.asking(),
             Tab::Settings => self.plugins.asking(),
-            Tab::Agents | Tab::Tests | Tab::Tickets => false,
+            Tab::Overview | Tab::Agents | Tab::Tests | Tab::Tickets => false,
         }
     }
 
@@ -791,6 +793,7 @@ impl ProjectScreen {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
             questions: ProjectQuestions::new(project.clone()),
+            needs: NeedsYou::new(project.clone()),
             tests: ProjectTests::new(project.clone(), name.clone()),
             tickets: ProjectTickets::new(project.clone(), name.clone()),
             recovery: ProjectRecovery::new(project.clone()),
@@ -895,6 +898,9 @@ impl ProjectScreen {
         }
         if tab == Tab::Questions {
             self.questions.refresh();
+        }
+        if tab == Tab::Overview {
+            self.needs.refresh();
         }
     }
 
@@ -2170,14 +2176,9 @@ impl ProjectScreen {
     }
 
     fn overview_key(&mut self, key: KeyEvent) -> ProjectReply {
-        let suggested: Vec<(RequestId, u64, String)> = self
-            .suggested()
-            .iter()
-            .map(|m| (m.id.clone(), m.version, m.text.clone()))
-            .collect();
+        let needs = self.needs.shown();
         let work = self.work_kinds().len();
-        let rows = suggested.len() + work;
-        let focused = suggested.get(self.overview_cursor).cloned();
+        let rows = needs.len() + work;
         if let Some(reply) = self.planning_reply(key.code) {
             return reply;
         }
@@ -2205,7 +2206,6 @@ impl ProjectScreen {
             KeyCode::Down => {
                 self.overview_cursor = (self.overview_cursor + 1).min(rows.saturating_sub(1));
             }
-            KeyCode::Char('y' | 'n' | 'e') => return self.decide(focused, key.code),
             KeyCode::Char('o') => {
                 return self.setup.as_ref().map_or(ProjectReply::Handled, |s| {
                     ProjectReply::Open(OpenRequest::Folder(
@@ -2214,12 +2214,15 @@ impl ProjectScreen {
                 });
             }
             KeyCode::Enter
-                if !self.pool.as_ref().is_some_and(|p| p.assigned) && suggested.is_empty() =>
+                if !self.pool.as_ref().is_some_and(|p| p.assigned) && needs.is_empty() =>
             {
                 return self.pool_reply();
             }
             KeyCode::Enter => {
-                let index = self.overview_cursor.checked_sub(suggested.len());
+                if let Some(row) = needs.get(self.overview_cursor) {
+                    return ProjectReply::Notice(Box::new(row.clone()));
+                }
+                let index = self.overview_cursor.checked_sub(needs.len());
                 let kind = index.and_then(|i| self.work_kinds().get(i).copied());
                 if let Some(kind) = kind {
                     self.read(&kind.report_path());

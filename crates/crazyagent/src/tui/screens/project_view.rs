@@ -7,14 +7,15 @@ use super::new_project_view::{
 use super::planning_line::{planning, planning_value};
 use super::project::{
     Field, GENERAL_FIELDS, GeneralEdit, MasterStatus, OVERVIEW_TAB_LABELS, Picks, ProjectScreen,
-    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, memory_source, plain_problem,
-    research_kind,
+    REVIEW_ROWS, RemoveChoice, Speaker, Tab, Transcript, plain_problem, research_kind,
 };
 use super::project_activity::{TEAM_FROM, TEAM_GAP, TEAM_SIDE, activity_lines};
 use super::project_markdown::{MdLine, Role, render, sanitize};
 use super::project_master::{activity_rows, last_activity};
+use super::project_needs::SHOWN_MAX;
 use super::project_time::{clock, duration};
 use super::sessions::Sessions;
+use crate::notifications::NoticeKind;
 use crate::project_overview::{
     BLOCKED_BLANK, BLOCKED_NOT_A_FILE, BLOCKED_NOT_A_FOLDER, BLOCKED_NOT_UTF8, BLOCKED_TOO_LARGE,
     NEEDS_HOME, Overview, TAB_BYTES_MAX, Tab as OverviewTab,
@@ -1026,7 +1027,7 @@ fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> 
             look.muted,
         )];
     }
-    let suggested = screen.suggested().len();
+    let needs = screen.needs.shown().len();
     kinds
         .iter()
         .enumerate()
@@ -1049,8 +1050,7 @@ fn work_rows(screen: &ProjectScreen, look: &Look, paths: bool, width: usize) -> 
             {
                 row = row.push(path.trim_start_matches("context/"), look.muted);
             }
-            let selected =
-                screen.tab == Tab::Overview && screen.overview_cursor == suggested + index;
+            let selected = screen.tab == Tab::Overview && screen.overview_cursor == needs + index;
             if selected {
                 Row::of("> ", Style::new())
                     .cat(row)
@@ -1077,32 +1077,54 @@ pub(in crate::tui) fn memory_quote(text: &str) -> String {
         .to_owned()
 }
 
-fn needs_you(screen: &ProjectScreen, look: &Look) -> Vec<Row> {
-    let suggested = screen.suggested();
-    if suggested.is_empty() {
+/// The Overview's Needs you (DEC-136a decision 4): the store's pending items of the project
+/// with its pool accounts' sign-ins, newest first, at most `SHOWN_MAX` with the rest
+/// counted; the refusal while no read landed; nothing while it loads or nothing waits.
+/// Inputs: the screen, the row width and the look. Output: the rows.
+fn needs_you(screen: &ProjectScreen, width: usize, look: &Look) -> Vec<Row> {
+    if let Some(code) = screen.needs.problem() {
+        return vec![
+            Row::of("Needs you", look.accent),
+            Row::of(
+                format!("Couldn't load what needs you. {}", plain_problem(code)),
+                look.warning,
+            )
+            .pad(width),
+            Row::default(),
+        ];
+    }
+    let rows = screen.needs.rows();
+    if rows.is_empty() {
         return Vec::new();
     }
-    let index = screen.overview_cursor.min(suggested.len() - 1);
-    let memory = suggested[index];
-    let bar = Row::of(look.glyph("\u{258c}"), look.accent).push(" ", Style::new());
-    let from = memory_source(memory).map_or("From research".to_owned(), |kind| {
-        format!("From {}", kind.label())
-    });
-    vec![
-        Row::of("Needs you", look.accent).push(format!("  {}", suggested.len()), look.muted),
-        bar.clone().push("Save to memory?", look.heading),
-        bar.clone()
-            .cat(Row::of(format!("\"{}\"", memory_quote(&memory.text)), look.fg).pad(70)),
-        bar.push(from, look.muted)
-            .push("   ", Style::new())
-            .push("y", look.heading)
-            .push(" Save   ", look.fg)
-            .push("n", look.heading)
-            .push(" Dismiss   ", look.fg)
-            .push("e", look.heading)
-            .push(" Edit first", look.fg),
-        Row::default(),
-    ]
+    let label = NoticeKind::ALL
+        .iter()
+        .map(|kind| kind.label().chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines =
+        vec![Row::of("Needs you", look.accent).push(format!("  {}", rows.len()), look.muted)];
+    for (index, row) in rows.iter().take(SHOWN_MAX).enumerate() {
+        let fold = if row.folded > 1 {
+            format!("  {} items", row.folded)
+        } else {
+            String::new()
+        };
+        let item = Row::of(row.kind.label(), look.heading)
+            .pad(label + 2)
+            .push(row.text.clone(), look.fg)
+            .push(fold, look.muted);
+        let picked = screen.tab == Tab::Overview && screen.overview_cursor == index;
+        lines.push(list_row(item, width, picked, true, look));
+    }
+    if rows.len() > SHOWN_MAX {
+        lines.push(Row::of(
+            format!("  {} more, n opens Notifications", rows.len() - SHOWN_MAX),
+            look.muted,
+        ));
+    }
+    lines.push(Row::default());
+    lines
 }
 
 fn pool_line(screen: &ProjectScreen, look: &Look) -> Row {
@@ -1158,7 +1180,7 @@ fn overview(
         ];
         return (lines, None, vec![TABS, ("Esc", "Home")]);
     }
-    if !assigned && screen.pool_ready && screen.suggested().is_empty() {
+    if !assigned && screen.pool_ready && screen.needs.rows().is_empty() {
         let picked = screen
             .pool
             .as_ref()
@@ -1217,13 +1239,6 @@ fn overview(
         help.extend([TABS, ("Esc", "Home")]);
         return (lines, None, help);
     }
-    if !screen.suggested().is_empty() {
-        help.extend([
-            ("y", "Save to memory"),
-            ("n", "Dismiss"),
-            ("e", "Edit first"),
-        ]);
-    }
     help.extend([("Enter", "Open"), ("o", "Open folder")]);
     if screen.overview_tabs.is_some() {
         help.extend(OVERVIEW_TAB_KEYS);
@@ -1240,7 +1255,7 @@ fn overview(
                 .push("o Open folder", look.muted),
             Row::default(),
         ];
-        left.extend(needs_you(screen, look));
+        left.extend(needs_you(screen, left_width, look));
         left.push(Row::of("Work", look.heading));
         left.extend(work_rows(screen, look, true, left_width));
         left.extend(roadmap_row(screen, look));
@@ -1317,7 +1332,7 @@ fn overview(
         Row::of(about_line(screen), look.fg).pad(content),
         Row::default(),
     ];
-    lines.extend(needs_you(screen, look));
+    lines.extend(needs_you(screen, content, look));
     lines.push(Row::of("Work", look.heading));
     lines.extend(work_rows(screen, look, false, content));
     lines.extend(roadmap_row(screen, look));
