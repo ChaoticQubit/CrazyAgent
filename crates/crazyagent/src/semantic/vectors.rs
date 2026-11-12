@@ -4,6 +4,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::search_index::{CHUNK_BYTES_MAX, Source};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::{HashMap, HashSet};
 
 #[cfg(test)]
 mod tests;
@@ -739,7 +740,8 @@ pub(crate) fn cached_query(
     decode(&bytes, plugin.dimensions)
 }
 
-/// Fuses the full-text order with the nearest vectors of a project's source. Inputs: the
+/// Fuses the full-text order with the nearest vectors of a project's source, the note
+/// saying when part of the history ranks by words only (leader QA, DEC-141). Inputs: the
 /// connection, the project, the source, the plugin, the query vector, the full-text ids best
 /// first and the bounds. Output: the fused ids and the note.
 pub(crate) fn rank(
@@ -751,22 +753,273 @@ pub(crate) fn rank(
     full_text: &[i64],
     bounds: &Bounds,
 ) -> Hybrid {
-    let _ = (
-        connection, project, source, plugin, query, full_text, bounds,
-    );
-    unimplemented!("v3 hybrid part 3")
+    assert_eq!(query.len(), plugin.dimensions);
+    let full_text = &full_text[..full_text.len().min(NEAREST_MAX)];
+    let words_only = |note| Hybrid {
+        ids: full_text.to_vec(),
+        note: Some(note),
+    };
+    let scopes = scopes(project, source);
+    let Ok(scan) = nearest(
+        connection,
+        &scopes,
+        source,
+        plugin,
+        query,
+        bounds.scan_bytes,
+    ) else {
+        return words_only(NOTE_UNAVAILABLE);
+    };
+    let Ok(left) = left_out(connection, &scopes, source, &plugin.key) else {
+        return words_only(NOTE_UNAVAILABLE);
+    };
+    if scan.nearest.is_empty() {
+        if full_text.is_empty() && !left.unread && !left.dropped {
+            return Hybrid {
+                ids: Vec::new(),
+                note: None,
+            };
+        }
+        return words_only(NOTE_NO_VECTORS);
+    }
+    let note = match (left.unread, scan.cut || left.dropped) {
+        (false, false) => None,
+        (true, false) => Some(NOTE_PARTLY),
+        (false, true) => Some(NOTE_NEWEST),
+        (true, true) => Some(NOTE_PARTLY_NEWEST),
+    };
+    Hybrid {
+        ids: fuse(full_text, &scan.nearest),
+        note,
+    }
 }
 
-/// Reciprocal rank fusion of two orders, k [`FUSION_K`]. Inputs: the full-text ids and the
-/// vector ids, best first. Output: the fused ids.
+/// The places a source's chunks live for a project: its conversations, or its memories
+/// and the app-wide memories. Inputs: the project and the source. Output: each place's
+/// project, none for app-wide.
+fn scopes(project: &ProjectId, source: Source) -> Vec<Option<&str>> {
+    match source {
+        Source::Session => vec![Some(project.as_str())],
+        Source::Memory => vec![Some(project.as_str()), None],
+    }
+}
+
+/// What one vector scan found: the nearest chunks best first, and whether vectors past the
+/// scan bound were left unscored.
+struct Scan {
+    nearest: Vec<i64>,
+    cut: bool,
+}
+
+/// Scores the newest vectors of the places by the dot product with the query, reading each
+/// place newest first and merging, until [`Bounds::scan_bytes`] worth of vectors; a stored
+/// vector of another length or not finite is skipped. Inputs: the connection, the places,
+/// the source, the plugin, the query and the scan bound. Output: the scan.
+fn nearest(
+    connection: &Connection,
+    scopes: &[Option<&str>],
+    source: Source,
+    plugin: &Plugin,
+    query: &[f32],
+    scan_bytes: u64,
+) -> Result<Scan, EngineError> {
+    assert!(!scopes.is_empty() && scopes.len() <= 2);
+    let rows_max = scan_bytes / plugin.vector_bytes();
+    let mut statements = Vec::with_capacity(scopes.len());
+    for _ in scopes {
+        statements.push(
+            connection
+                .prepare(
+                    "SELECT chunk, at_ms, vector FROM search_vectors
+                     WHERE plugin_key = ?1 AND project IS ?2 AND source = ?3
+                     ORDER BY at_ms DESC, chunk DESC",
+                )
+                .map_err(storage)?,
+        );
+    }
+    let mut cursors = Vec::with_capacity(scopes.len());
+    for (statement, scope) in statements.iter_mut().zip(scopes) {
+        cursors.push(
+            statement
+                .query_map(params![plugin.key, scope, source.as_str()], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                })
+                .map_err(storage)?,
+        );
+    }
+    let mut heads = Vec::with_capacity(cursors.len());
+    for cursor in &mut cursors {
+        heads.push(cursor.next().transpose().map_err(storage)?);
+    }
+    let mut scored: Vec<(f32, i64, i64)> = Vec::new();
+    let mut read: u64 = 0;
+    let mut cut = false;
+    loop {
+        let newest = heads
+            .iter()
+            .enumerate()
+            .filter_map(|(index, head)| {
+                head.as_ref()
+                    .map(|(chunk, at_ms, _)| ((*at_ms, *chunk), index))
+            })
+            .max();
+        let Some((_, index)) = newest else {
+            break;
+        };
+        if read == rows_max {
+            cut = true;
+            break;
+        }
+        let Some((chunk, at_ms, bytes)) = heads[index].take() else {
+            break;
+        };
+        heads[index] = cursors[index].next().transpose().map_err(storage)?;
+        read += 1;
+        if let Some(vector) = decode(&bytes, plugin.dimensions) {
+            let score: f32 = vector.iter().zip(query).map(|(a, b)| a * b).sum();
+            if score.is_finite() {
+                scored.push((score, at_ms, chunk));
+            }
+        }
+    }
+    assert!(read <= rows_max && scored.len() as u64 <= read);
+    scored.sort_unstable_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then(right.1.cmp(&left.1))
+            .then(right.2.cmp(&left.2))
+    });
+    scored.truncate(NEAREST_MAX);
+    Ok(Scan {
+        nearest: scored.into_iter().map(|(_, _, chunk)| chunk).collect(),
+        cut,
+    })
+}
+
+/// What of the places has no vector of the plugin: chunks still to embed, and chunks the
+/// caps left out that rank by words only.
+struct LeftOut {
+    unread: bool,
+    dropped: bool,
+}
+
+/// Reads what of the places has no vector of the plugin. While the stored plugin key is
+/// another, every chunk of the places counts as still to embed. Inputs: the connection, the
+/// places, the source and the plugin key. Output: the answer.
+fn left_out(
+    connection: &Connection,
+    scopes: &[Option<&str>],
+    source: Source,
+    key: &str,
+) -> Result<LeftOut, EngineError> {
+    let state: Option<String> = connection
+        .query_row(
+            "SELECT plugin_key FROM search_vector_state WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    let current = state.as_deref() == Some(key);
+    let any = |sql: &str, scope: Option<&str>| -> Result<bool, EngineError> {
+        connection
+            .query_row(sql, params![scope, source.as_str()], |row| row.get(0))
+            .map_err(storage)
+    };
+    let mut left = LeftOut {
+        unread: false,
+        dropped: false,
+    };
+    for scope in scopes {
+        left.unread |= if current {
+            any(
+                "SELECT EXISTS (SELECT 1 FROM search_vector_pending
+                 WHERE project IS ?1 AND source = ?2 AND dropped = 0)",
+                *scope,
+            )?
+        } else {
+            any(
+                "SELECT EXISTS (SELECT 1 FROM search_chunks WHERE project IS ?1 AND source = ?2)",
+                *scope,
+            )?
+        };
+        left.dropped |= current
+            && any(
+                "SELECT EXISTS (SELECT 1 FROM search_vector_pending
+                 WHERE project IS ?1 AND source = ?2 AND dropped = 1)",
+                *scope,
+            )?;
+    }
+    Ok(left)
+}
+
+/// Reciprocal rank fusion of two orders, k [`FUSION_K`]: each id scores the sum of
+/// 1 / (k + rank) over the orders it is in, ranks from one, a repeated id counted at its
+/// first place; ties keep the full-text order, then the vector order. Inputs: the full-text
+/// ids and the vector ids, best first. Output: the fused ids, each once.
 pub(crate) fn fuse(full_text: &[i64], nearest: &[i64]) -> Vec<i64> {
-    let _ = (full_text, nearest);
-    unimplemented!("v3 hybrid part 3")
+    let mut fused: Vec<(i64, f64, usize, usize)> = Vec::new();
+    let mut places: HashMap<i64, usize> = HashMap::new();
+    for (side, order) in [full_text, nearest].into_iter().enumerate() {
+        let mut seen = HashSet::new();
+        for (position, id) in order.iter().enumerate() {
+            if !seen.insert(*id) {
+                continue;
+            }
+            let score = 1.0 / (FUSION_K + position as f64 + 1.0);
+            let place = *places.entry(*id).or_insert_with(|| {
+                fused.push((*id, 0.0, usize::MAX, usize::MAX));
+                fused.len() - 1
+            });
+            fused[place].1 += score;
+            if side == 0 {
+                fused[place].2 = position;
+            } else {
+                fused[place].3 = position;
+            }
+        }
+    }
+    fused.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then(left.2.cmp(&right.2))
+            .then(left.3.cmp(&right.3))
+    });
+    let ids: Vec<i64> = fused.into_iter().map(|(id, ..)| id).collect();
+    assert!(ids.len() <= full_text.len() + nearest.len());
+    ids
 }
 
-/// How many chunks have a vector of the plugin, against every chunk. Inputs: the connection
-/// and the plugin key. Output: the progress.
+/// One query's vector from a reply of one: checked and normalized like a chunk's. Inputs:
+/// the reply and the dimensions. Output: the vector, or none when refused.
+pub(crate) fn one_vector(reply: Vec<Vec<f32>>, dimensions: usize) -> Option<Vec<f32>> {
+    let mut vectors = checked(reply, 1, dimensions)?;
+    assert_eq!(vectors.len(), 1);
+    vectors.pop()
+}
+
+/// How many chunks have a vector of the plugin, against every indexed chunk, including the
+/// ones the caps left out. Inputs: the connection and the plugin key. Output: the progress,
+/// none of none when the tables cannot be read.
 pub(crate) fn progress(connection: &Connection, key: &str) -> Progress {
-    let _ = (connection, key);
-    unimplemented!("v3 hybrid part 3")
+    let count = |sql: &str, values: &[&dyn rusqlite::ToSql]| -> u64 {
+        connection
+            .query_row(sql, values, |row| row.get::<_, i64>(0))
+            .map_or(0, |found| u64::try_from(found).unwrap_or(0))
+    };
+    let embedded = count(
+        "SELECT COUNT(*) FROM search_vectors WHERE plugin_key = ?1",
+        &[&key],
+    );
+    let total = count("SELECT COUNT(*) FROM search_chunks", &[]);
+    Progress {
+        embedded: embedded.min(total),
+        total,
+    }
 }

@@ -97,14 +97,16 @@ pub const SENDS: [&str; 4] = [
 ];
 
 /// How far the chosen plugin has embedded the indexed sessions and memories, for the
-/// Search settings page. Inputs: the connection and the engine root. Output: the counts;
-/// this stub reports none until the L3 vectors (feat/v3-hybrid) land.
+/// Search settings page. Inputs: the connection and the engine root. Output: the counts,
+/// none of none for full text.
 pub fn progress(connection: &Connection, root: &Path) -> Progress {
-    let _ = (connection, root);
-    Progress {
-        embedded: 0,
-        total: 0,
-    }
+    settings::chosen(connection, root).map_or(
+        Progress {
+            embedded: 0,
+            total: 0,
+        },
+        |loaded| vectors::progress(connection, &plugin_of(&loaded.manifest).key),
+    )
 }
 
 /// The search order after fusing full text with vectors: chunk ids best first, and a note
@@ -257,9 +259,11 @@ pub fn embed_pending(connection: &mut Connection, root: &Path, project: &Project
 }
 
 /// Fuses the full-text order with the chosen plugin's vector order, on the tick and with
-/// no network. Inputs: the connection, the engine root, the project, the source, the query
-/// and the full-text chunk ids best first. Output: the fused ids and an optional note; this
-/// stub keeps the full-text order.
+/// no network: the local runtime embeds the query only once the indexer opened it, and an
+/// HTTP plugin's query vector comes from the indexer's cache, asked for on a miss. Without
+/// a query vector the answer is the full-text order with a note (addendum 1b). Inputs: the
+/// connection, the engine root, the project, the source, the untrusted query and the
+/// full-text chunk ids best first. Output: the fused ids and the note.
 pub fn hybrid(
     connection: &Connection,
     root: &Path,
@@ -268,9 +272,46 @@ pub fn hybrid(
     query: &str,
     full_text: &[i64],
 ) -> Hybrid {
-    let _ = (connection, root, project, source, query);
-    Hybrid {
+    let words_only = |note| Hybrid {
         ids: full_text.to_vec(),
-        note: None,
+        note,
+    };
+    let Some(loaded) = settings::chosen(connection, root) else {
+        return words_only(None);
+    };
+    let Some(text) = vectors::query_text(query) else {
+        return words_only(None);
+    };
+    let plugin = plugin_of(&loaded.manifest);
+    let vector = match &loaded.manifest.runs {
+        Runs::Local { .. } => {
+            let Some(model) = opened_local(root) else {
+                return words_only(Some(vectors::NOTE_LOADING));
+            };
+            let reply = model.embed(&[text.as_str()]).ok();
+            match reply.and_then(|reply| vectors::one_vector(reply, plugin.dimensions)) {
+                Some(vector) => vector,
+                None => return words_only(Some(vectors::NOTE_UNAVAILABLE)),
+            }
+        }
+        Runs::Http(_) => match vectors::cached_query(connection, &plugin, &text) {
+            Some(vector) => vector,
+            None => {
+                let _ = vectors::ask_query(connection, &plugin.key, &text, now_ms());
+                return words_only(Some(vectors::NOTE_QUERY_PENDING));
+            }
+        },
+    };
+    if vector.iter().all(|value| *value == 0.0) {
+        return words_only(None);
     }
+    vectors::rank(
+        connection,
+        project,
+        source,
+        &plugin,
+        &vector,
+        full_text,
+        &vectors::BOUNDS,
+    )
 }
