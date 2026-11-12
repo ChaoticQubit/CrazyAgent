@@ -825,13 +825,15 @@ mod tests {
             "a host in a .crazyagent folder is never used"
         );
         for folder in layouts {
-            program(&folder.join(RCLI_EXECUTABLE), 0o755);
+            let host = folder.join(RCLI_EXECUTABLE);
+            program(&host, 0o755);
             assert_eq!(
                 rcli_entry(None, &places, Some(&app)),
-                Some(folder.join(RCLI_EXECUTABLE)),
+                Some(host.clone()),
                 "{}",
                 folder.display()
             );
+            std::fs::remove_file(&host).unwrap();
         }
         let given = PathBuf::from("/explicit/crazyagent-rcli");
         assert_eq!(
