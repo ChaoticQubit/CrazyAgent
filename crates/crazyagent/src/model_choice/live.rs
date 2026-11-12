@@ -285,7 +285,7 @@ pub fn merged(harness: &str, shipped: &[String], live: &[String]) -> Vec<String>
 #[cfg(unix)]
 pub(crate) fn read(harness: &str, executable: &Path, root: &Path) -> Option<Vec<String>> {
     reader(harness)?;
-    let places = crate::tools::Places::from_environment(Some(root));
+    let places = crate::tools::Places::from_environment(None);
     let tool = crate::harnesses::interactive::launch_tool(executable, &places).ok()?;
     read_with(harness, &tool, root, LIMIT)
 }

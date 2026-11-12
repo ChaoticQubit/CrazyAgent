@@ -137,7 +137,7 @@ pub fn live_record(
             let held: Vec<String> = earlier
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|id| saved.contains(id) && !read.contains(id) && !shipped.contains(id))
+                .filter(|id| saved.contains(id) && !shipped.contains(id))
                 .collect();
             let room = CATALOG_MODELS_MAX.saturating_sub(shipped.len() + held.len());
             let mut seen = std::collections::BTreeSet::new();

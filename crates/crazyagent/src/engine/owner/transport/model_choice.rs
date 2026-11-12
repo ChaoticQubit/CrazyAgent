@@ -374,7 +374,8 @@ async fn handle(
             let read = executable
                 .as_deref()
                 .and_then(|path| crate::model_choice::live::read(harness, path, &root));
-            store::live_record(&versioned::open(&root)?, harness, read.as_deref())?;
+            let _ = versioned::open(&root)
+                .and_then(|db| store::live_record(&db, harness, read.as_deref()));
         }
         let installed = executable
             .as_deref()

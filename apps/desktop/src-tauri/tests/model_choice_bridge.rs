@@ -92,7 +92,7 @@ fn the_window_passes_only_the_harness_project_slot_value_model_rule_and_version(
     let model = ["harness: String,", "model: String,"];
     assert_eq!(
         parameters("desktop_model_choice"),
-        [&window[..], &page[..]].concat()
+        [&window[..], &page[..], &["fresh: bool,"]].concat()
     );
     assert_eq!(
         parameters("desktop_set_model_choice"),
