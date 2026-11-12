@@ -432,9 +432,9 @@ impl Missing {
 }
 
 /// Finds a tool by its program name wherever the places look, passing over version-manager
-/// shims, files in a `.crazyagent` folder and files others can change, then reads how it
-/// runs; a miss asks the background probes to look again ([`probe::missed`]). Harness
-/// launches keep their pinned entry and call [`resolve_entry`] instead.
+/// shims, files agents can write and files others can change, then reads how it runs; a
+/// miss names the first file passed over, if any ([`Refused`]), and asks the background
+/// probes to look again ([`probe::missed`]). Harness launches call [`resolve_entry`].
 /// Inputs: the program name and the places. Output: the tool, or why it cannot run.
 pub fn resolve(name: &str, places: &Places) -> Result<Resolved, Missing> {
     resolve_at(name, places, 0)
@@ -460,14 +460,31 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     if !valid_name(name) {
         return Err(not_found());
     }
-    let Some(found) = places
-        .folders
-        .iter()
-        .map(|folder| folder.join(name))
-        .find(|candidate| usable_candidate(places, candidate))
-    else {
+    let mut refused = None;
+    let found =
+        places.folders.iter().map(|folder| folder.join(name)).find(
+            |candidate| match check_candidate(places, candidate) {
+                Some(Ok(())) => true,
+                Some(Err(why)) => {
+                    refused.get_or_insert_with(|| Refused {
+                        file: candidate.clone(),
+                        why,
+                    });
+                    false
+                }
+                None => false,
+            },
+        );
+    let Some(found) = found else {
         probe::missed();
-        return Err(not_found());
+        return Err(match refused {
+            Some(refused) => Missing {
+                reason: Reason::Refused,
+                refused: Some(refused),
+                ..not_found()
+            },
+            None => not_found(),
+        });
     };
     entry_at(&found, places, depth).map_err(|missing| Missing {
         tool: name.to_owned(),
@@ -481,17 +498,32 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         .and_then(OsStr::to_str)
         .unwrap_or("the program")
         .to_owned();
+    let not_there = || Missing {
+        tool: tool.clone(),
+        reason: Reason::NotFound,
+        needs: None,
+        looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
+        refused: None,
+    };
     let program = entry
         .canonicalize()
         .ok()
-        .filter(|_| entry.is_absolute() && usable_candidate(places, entry))
-        .ok_or_else(|| Missing {
-            tool: tool.clone(),
-            reason: Reason::NotFound,
-            needs: None,
-            looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
-            refused: None,
-        })?;
+        .filter(|_| entry.is_absolute())
+        .ok_or_else(not_there)?;
+    match check_candidate(places, entry) {
+        Some(Ok(())) => {}
+        Some(Err(why)) => {
+            return Err(Missing {
+                reason: Reason::Refused,
+                refused: Some(Refused {
+                    file: entry.to_path_buf(),
+                    why,
+                }),
+                ..not_there()
+            });
+        }
+        None => return Err(not_there()),
+    }
     let Some(shebang) = shebang(&program) else {
         return Ok(Resolved {
             entry: entry.to_path_buf(),
@@ -517,7 +549,13 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         None if through_shim => resolve_at(&interpreter_name, places, depth + 1),
         None => entry_at(&shebang.interpreter, places, depth + 1),
     }
-    .map_err(|_| needs(&interpreter_name))?;
+    .map_err(|missing| match missing.reason {
+        Reason::Refused => Missing {
+            tool: tool.clone(),
+            ..missing
+        },
+        _ => needs(&interpreter_name),
+    })?;
     Ok(Resolved {
         entry: entry.to_path_buf(),
         program,
@@ -730,15 +768,24 @@ fn install_hint(tool: &str) -> &'static str {
     }
 }
 
-/// Whether a found file can be used: an executable file that is not a version-manager shim,
-/// that agents cannot write, as found or through its links ([`Places::agent_writable`]),
-/// and that no other user can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the file. Output: the answer.
-fn usable_candidate(places: &Places, candidate: &Path) -> bool {
-    executable_file(candidate)
-        && candidate.canonicalize().is_ok()
-        && !crate::harnesses::is_shim(places.home(), candidate)
-        && !places.agent_writable(candidate)
-        && crate::service::changeable_past_sticky(candidate).is_none()
+/// Checks a found file: none when it is not an executable file whose links resolve, else
+/// passed, or passed over as a version-manager shim, as a file agents can write, as found or
+/// through its links ([`Places::agent_writable`]), or with the part another user or group
+/// can change ([`crate::service::changeable_past_sticky`]). Inputs: the places and the
+/// file. Output: the check.
+fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
+    if !executable_file(candidate) || candidate.canonicalize().is_err() {
+        return None;
+    }
+    Some(if crate::harnesses::is_shim(places.home(), candidate) {
+        Err(Refusal::Shim)
+    } else if places.agent_writable(candidate) {
+        Err(Refusal::AgentsCanWrite)
+    } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
+        Err(Refusal::OthersCanChange(part))
+    } else {
+        Ok(())
+    })
 }
 
 fn valid_name(name: &str) -> bool {

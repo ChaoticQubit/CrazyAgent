@@ -379,7 +379,7 @@ fn a_link_into_a_project_is_refused() {
     std::os::unix::fs::symlink(&planted, home.join(".local/bin/tmux")).unwrap();
     assert_eq!(
         resolve("tmux", &home_only(&home)).unwrap_err().reason,
-        Reason::NotFound
+        Reason::Refused
     );
 }
 
@@ -461,7 +461,7 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     );
     assert_eq!(
         resolve("node", &home_only(&home)).unwrap_err().reason,
-        Reason::NotFound
+        Reason::Refused
     );
     #[cfg(target_os = "macos")]
     if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
@@ -571,10 +571,7 @@ fn linuxbrew_and_nixos_profile_tools_are_found_and_a_link_into_a_project_is_refu
     std::fs::create_dir_all(&twin).unwrap();
     std::os::unix::fs::symlink(&planted, twin.join("uv")).unwrap();
     let refused = Places::new(vec![twin], Some(home));
-    assert_eq!(
-        resolve("uv", &refused).unwrap_err().reason,
-        Reason::NotFound
-    );
+    assert_eq!(resolve("uv", &refused).unwrap_err().reason, Reason::Refused);
 }
 
 /// The macOS group every local user is in and the resolver does not trust for writes.
