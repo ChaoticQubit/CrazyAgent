@@ -1783,6 +1783,13 @@ fn node_the_tool_resolver_finds_outside_homebrew_is_not_called_missing() {
         install_command("codex", &machine.roots()).unwrap_err(),
         NO_INSTALLER
     );
+    let volta = Machine::new();
+    volta.program("home/.volta/tools/image/node/22.11.0/bin/node", 0o755);
+    assert_eq!(
+        install_command("codex", &volta.roots()).unwrap_err(),
+        NO_INSTALLER,
+        "a volta Node is found through its real install, not its shim"
+    );
     let other = Machine::new();
     other.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o777);
     assert_eq!(
@@ -1903,7 +1910,16 @@ fn a_queued_list_installs_in_order_one_at_a_time_and_a_failure_does_not_stop_the
         !case.updates.idle()
     });
     assert!(running);
-    assert_eq!(case.updates.queued(), listed(&["goose", "codex"]));
+    let rest = listed(&["goose", "codex"]);
+    let waiting = (0..WAIT_STEPS).any(|_| {
+        let now = case.updates.queued();
+        assert!(now.ends_with(&rest), "{now:?}");
+        now == rest || {
+            std::thread::sleep(WAIT_STEP);
+            false
+        }
+    });
+    assert!(waiting, "aider leaves the queue once its install started");
     case.finish();
     drain.join().unwrap();
     assert_eq!(
