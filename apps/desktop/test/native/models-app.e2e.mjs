@@ -164,3 +164,46 @@ describe("Settings, Harnesses, Claude Code: the Models section on the real deskt
     await shot("models-app-not-supported");
   });
 });
+
+describe("Settings, Harnesses, RCLI: the master model on the real desktop app and engine (DEC-150 M-5)", () => {
+  const RCLI = "rcli";
+
+  /** Waits until the engine holds what an RCLI row expects. Inputs: the check on the engine
+   * read and the label. Output: the read. */
+  async function rcliHolds(check, label) {
+    let read = null;
+    await until(async () => { read = await observeModelChoice(RCLI); return check(read); }, UI_MS, label);
+    return read;
+  }
+
+  it("shows the RCLI model list, the master on each account's own model, and no agent slots", async () => {
+    await browser.execute((hash) => { location.hash = hash; }, `#/settings/harnesses?harness=${RCLI}`);
+    await until(async () => (await text("main")).includes("Model list checked against RCLI 3.0.4."), 30000, "the RCLI Models section did not open");
+    assert.equal(await (await $("#models-master")).getValue(), "", "the RCLI master starts on each account's own model");
+    assert.equal(await $("#models-agent").isExisting(), false, "RCLI starts no agents");
+    assert((((await text("main")).match(/Not supported by this harness/g)) ?? []).length >= 2, "the agent default and allowed list give the reason");
+    const read = await observeModelChoice(RCLI);
+    assert.deepEqual([read.rows.master.here, read.rows.master.access.kind], [null, "editable"]);
+    assert.deepEqual([read.rows.agent.access.kind, read.rows.allowed.access.kind], ["read_only", "read_only"]);
+    await shot("models-rcli-open");
+  });
+
+  for (const [provider, model] of [["Anthropic", "claude-opus-5-5"], ["OpenAI", "gpt-6.1-sol"], ["OpenRouter", "anthropic/claude-opus-5.5"]]) {
+    it(`an ${provider} model saves as the RCLI master model app-wide`, async () => {
+      await choose("#models-master", model);
+      await click('button[aria-label="Save Master model"]');
+      const read = await rcliHolds((read) => read.rows.master.here === model, `the engine did not hold ${model}`);
+      assert.deepEqual([read.rows.master.effective, read.rows.master.source], [model, "app"]);
+      await until(async () => (await text("main")).includes("Set here for every project."), UI_MS, "the page did not say where the value comes from");
+    });
+  }
+
+  it("Use the account's own model clears the RCLI master model", async () => {
+    const before = (await observeModelChoice(RCLI)).rows.master.version;
+    await click(`button[aria-label="Use the account's own model, Master model"]`);
+    const read = await rcliHolds((read) => read.rows.master.here === null, "the engine still held an RCLI master model");
+    assert(read.rows.master.version > before, "the reset is a new version");
+    assert.equal(await (await $("#models-master")).getValue(), "");
+    await shot("models-rcli-own");
+  });
+});
