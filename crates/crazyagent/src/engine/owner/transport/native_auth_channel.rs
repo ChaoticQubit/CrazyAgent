@@ -3027,6 +3027,7 @@ fallback_allowed = false
                 &prepared,
                 &profile,
                 crate::harness_settings::apply::Applied::default(),
+                None,
             ) {
                 assert_ne!(error.0, "master_runtime_binding");
             }
@@ -3070,6 +3071,7 @@ fallback_allowed = false
                     &prepared,
                     &profile,
                     crate::harness_settings::apply::Applied::default(),
+                    None,
                 )
                 .map(|_| ());
             drop(profile);

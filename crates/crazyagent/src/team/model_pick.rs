@@ -132,6 +132,32 @@ pub(crate) fn wanted(
     )
 }
 
+/// Reads the model one agent starts on before its account's own (DEC-150): a master the
+/// owner's master model for its harness in this project, read at every start so a changed
+/// setting reaches the next one, any other agent the model recorded for it. Takes the
+/// database, the project, the agent, its harness and whether it is the master. Returns the
+/// model, none for the account's own, or a store or SQLite failure.
+pub(crate) fn start_model(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    harness: &str,
+    master: bool,
+) -> Result<Option<String>, EngineError> {
+    assert!(agent > 0);
+    if !master {
+        return agent_model(db, agent);
+    }
+    let catalog = crate::model_choice::catalog(harness);
+    store::launch_model(
+        db,
+        harness,
+        &catalog,
+        Some(project),
+        crate::model_choice::Slot::Master,
+    )
+}
+
 /// Tells whether a pool account can run a model: any account runs its own, a keyless
 /// endpoint runs only the one model it serves, a managed profile any model its harness
 /// takes. Takes the account's reach and the model, none for the account's own. Returns
@@ -188,18 +214,20 @@ pub(crate) fn agent_model(db: &Connection, agent: i64) -> Result<Option<String>,
 }
 
 /// Tells the owner and the master once that no pool account could run a model chosen for
-/// a harness's agents, so a task runs on the default (DEC-150): one owner notification and
-/// one engine message to the master, then nothing more for that project, harness and
-/// model until it runs again (`ran`). Takes the transaction, the project, the harness, the
-/// model, the task and the time. Returns whether this call told them, or a SQLite failure.
+/// a harness's agents or master, so a task or the master runs on the default (DEC-150):
+/// one owner notification and one engine message to the master, then nothing more for
+/// that project, harness and model until it runs again (`ran`). Takes the transaction, the
+/// project, the harness, the model, the task, none for the master, and the time. Returns
+/// whether this call told them, or a SQLite failure.
 pub(crate) fn fell_back(
     tx: &Transaction<'_>,
     project: &ProjectId,
     harness: &str,
     model: &str,
-    task: i64,
+    task: Option<i64>,
     now: i64,
 ) -> Result<bool, EngineError> {
+    assert!(task.is_none_or(|task| task > 0));
     tx.execute_batch(RUN_SCHEMA).map_err(super::error)?;
     let inserted = tx
         .execute(
@@ -213,8 +241,12 @@ pub(crate) fn fell_back(
         return Ok(false);
     }
     let harness = super::bound_text(harness, 64);
+    let (whom, who) = match task {
+        Some(task) => (format!("{harness} agents"), format!("task {task}")),
+        None => (format!("the {harness} master"), "the master".to_owned()),
+    };
     let text = format!(
-        "No account in this project's pool can run {model} for {harness} agents now, so task {task} runs on the default model. You are told again only after {model} runs once more."
+        "No account in this project's pool can run {model} for {whom} now, so {who} runs on the default model. You are told again only after {model} runs once more."
     );
     super::events::notify(
         tx,

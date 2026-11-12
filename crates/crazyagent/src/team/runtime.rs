@@ -2508,11 +2508,55 @@ impl TeamRuntime {
                     .connection
                     .transaction_with_behavior(TransactionBehavior::Immediate)
                     .map_err(error)?;
-                super::model_pick::fell_back(&tx, project, harness, &wanted, task, now_ms())?;
+                super::model_pick::fell_back(&tx, project, harness, &wanted, Some(task), now_ms())?;
                 tx.commit().map_err(error)?;
                 Ok(Some((account, None)))
             }
         }
+    }
+
+    /// Picks the account a project's master starts on (DEC-150): with a master model set
+    /// for its harness, an account that can run it; when none can, the account any start
+    /// would get, on its own model, telling the owner and the master once. The model itself
+    /// is read again at launch (`model_pick::start_model`). Takes the live access, the
+    /// project, the master harness and the paused accounts. Returns the account, none while
+    /// no account can take it yet, the plain reason no account can, or a store or SQLite
+    /// failure.
+    fn master_account(
+        &mut self,
+        access: &ModelAccess,
+        project: &ProjectId,
+        harness: &str,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<Result<Option<TeamAccount>, String>, EngineError> {
+        let catalog = crate::model_choice::catalog(harness);
+        let wanted = crate::model_choice::store::launch_model(
+            &self.connection,
+            harness,
+            &catalog,
+            Some(project),
+            crate::model_choice::Slot::Master,
+        )?;
+        let Some(wanted) = wanted else {
+            return Ok(self.account_for(access, project, harness, paused, None));
+        };
+        if let Ok(found) = self.account_for(access, project, harness, paused, Some(&wanted)) {
+            if let Some(account) = &found {
+                assert!(super::model_pick::can_run(&account.reach, Some(&wanted)));
+                super::model_pick::ran(&self.connection, project, harness, &wanted)?;
+            }
+            return Ok(Ok(found));
+        }
+        let picked = self.account_for(access, project, harness, paused, None);
+        if let Ok(Some(_)) = &picked {
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            super::model_pick::fell_back(&tx, project, harness, &wanted, None, now_ms())?;
+            tx.commit().map_err(error)?;
+        }
+        Ok(picked)
     }
 
     /// Tells why an account cannot take agent work now: endpoints always can, managed
@@ -2782,7 +2826,7 @@ impl TeamRuntime {
             None if self.panes(project) >= PANES_PER_PROJECT_MAX => return Ok(()),
             None => {
                 let harness = stored.team.master.clone();
-                let started = match self.account_for(access, project, &harness, paused, None) {
+                let started = match self.master_account(access, project, &harness, paused)? {
                     Ok(None) => return Ok(()),
                     Ok(Some(account)) => self.spawn(
                         stored,
@@ -2996,7 +3040,7 @@ impl TeamRuntime {
                 ),
             );
         }
-        let account = match self.account_for(access, project, &harness, paused, None) {
+        let account = match self.master_account(access, project, &harness, paused)? {
             Ok(Some(account)) => account,
             Ok(None) => {
                 if planned {
@@ -5511,8 +5555,14 @@ impl TeamRuntime {
                 (own_home, remote, Some(model.clone()))
             }
             TeamReach::Managed { model, .. } => {
-                let chosen = super::model_pick::agent_model(&self.connection, id)
-                    .map_err(|e| with_code("the agent's model could not be read", Some(&e.0)))?;
+                let chosen = super::model_pick::start_model(
+                    &self.connection,
+                    &stored.project_id,
+                    id,
+                    launch,
+                    role == AgentRole::Master,
+                )
+                .map_err(|e| with_code("the agent's model could not be read", Some(&e.0)))?;
                 (
                     own_home,
                     SandboxRemote::AnyHost(443),
