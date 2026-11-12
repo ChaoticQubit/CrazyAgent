@@ -64,9 +64,8 @@ fn lane_in(folder: Option<&Path>, scratch: &Path, arguments: &[&str]) -> Child {
         .env("TMPDIR", scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    crazyagent::spawn_gate::spawn(&mut command).unwrap()
 }
 
 fn now_ms() -> i64 {
