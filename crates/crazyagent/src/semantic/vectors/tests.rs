@@ -303,6 +303,39 @@ fn vectors_of_the_wrong_length_or_not_finite_are_refused_and_the_round_stops() {
 }
 
 #[test]
+fn a_chunk_rewritten_or_deleted_while_its_batch_is_out_is_not_stored_and_a_rewrite_stays_queued() {
+    let folder = tempfile::tempdir().unwrap();
+    let path = folder.path().join("engine.db");
+    let mut db = Connection::open(&path).unwrap();
+    crate::search_index::initialize(&db).unwrap();
+    initialize(&db).unwrap();
+    let acme = plugin('a');
+    let rewritten = chunk(&db, Some("alpha"), Source::Session, "before", 10);
+    let deleted = chunk(&db, Some("alpha"), Source::Session, "gone", 20);
+    let kept = chunk(&db, Some("alpha"), Source::Session, "kept", 30);
+    let other = Connection::open(&path).unwrap();
+    let mut embed = |texts: &[&str]| -> Result<Vec<Vec<f32>>, EngineError> {
+        other
+            .execute(
+                "UPDATE search_chunks SET text='after' WHERE id=?1",
+                [rewritten],
+            )
+            .expect("the batch is sent outside any transaction");
+        other
+            .execute("DELETE FROM search_chunks WHERE id=?1", [deleted])
+            .unwrap();
+        Ok(texts.iter().map(|_| unit(0)).collect())
+    };
+    assert_eq!(
+        embed_round(&mut db, &project("alpha"), &acme, &wide(), &mut embed),
+        1
+    );
+    assert_eq!(stored(&db, &acme.key), [kept]);
+    let (embedded, seen) = round(&mut db, "alpha", &acme, &wide());
+    assert_eq!((embedded, seen), (1, vec!["after".to_owned()]));
+}
+
+#[test]
 fn a_query_is_masked_trimmed_and_cut_before_it_is_stored_or_sent() {
     assert_eq!(
         query_text("  find the login flow \n").as_deref(),
