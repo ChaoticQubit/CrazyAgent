@@ -542,18 +542,23 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     let search = crazyagent::harnesses::Search::from_environment();
     let chosen = crazyagent::harnesses::finding::at_start(layout.root(), search.home());
     let path = std::env::var_os("PATH");
-    let found = |id: &str| match crazyagent::harnesses::finding::pick(
-        id,
-        &search,
-        path.as_deref(),
-        layout.root(),
-    ) {
-        Some(Ok(entry)) => Some(entry),
-        Some(Err((_, error))) => {
-            eprintln!("the found {id} file is not used ({})", error.0);
-            None
+    let space = crazyagent::harnesses::finding::AgentSpace::open(layout.root());
+    let found = |id: &str| {
+        let space = match &space {
+            Ok(space) => space,
+            Err(error) => {
+                eprintln!("no found {id} file is used ({})", error.0);
+                return None;
+            }
+        };
+        match crazyagent::harnesses::finding::pick(id, &search, path.as_deref(), space) {
+            Some(Ok(entry)) => Some(entry),
+            Some(Err((_, error))) => {
+                eprintln!("the found {id} file is not used ({})", error.0);
+                None
+            }
+            None => None,
         }
-        None => None,
     };
     let harnesses = crazyagent::paths::Harnesses {
         codex: explicit.codex.or(chosen.codex).or_else(|| found("codex")),

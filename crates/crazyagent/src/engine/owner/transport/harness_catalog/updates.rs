@@ -404,7 +404,8 @@ fn choose(root: &Path, id: &str, path: Option<&str>) -> Result<WireReply, Engine
         return Ok(WireReply::Started);
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let checked = finding::check(id, Path::new(text), root, home.as_deref())?;
+    let space = finding::AgentSpace::read(root, &db)?;
+    let checked = finding::check(id, Path::new(text), &space, home.as_deref())?;
     let host = crate::engine::RegisteredNativeAuthHost::capture_entry(&checked)?;
     host.verified_path()?;
     drop(host);

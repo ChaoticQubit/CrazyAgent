@@ -38,7 +38,8 @@ impl Case {
     }
 
     fn check(&self, id: &str, path: &Path) -> Result<PathBuf, String> {
-        finding::check(id, path, &self.engine, Some(&self.home)).map_err(|error| error.0)
+        let space = finding::AgentSpace::open(&self.engine).unwrap();
+        finding::check(id, path, &space, Some(&self.home)).map_err(|error| error.0)
     }
 }
 
@@ -274,6 +275,124 @@ fn the_node_folder_of_a_node_script_harness_is_its_npm_prefix_bin_holding_node()
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_chosen_or_found_codex_where_agents_write_is_refused_as_agent_space() {
+    let case = Case::new();
+    let worktree = case.file(
+        "projects/harbor/.crazyagent/worktrees/agent-3/bin/codex",
+        0o755,
+    );
+    assert_eq!(case.check("codex", &worktree), Err(PATH_AGENT_SPACE.into()));
+    let link = case.root.join("tools/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&worktree, &link).unwrap();
+    assert_eq!(case.check("codex", &link), Err(PATH_AGENT_SPACE.into()));
+    let found = Search::new(
+        vec![worktree.parent().unwrap().to_path_buf()],
+        Some(case.home.clone()),
+        Vec::new(),
+    );
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
+    assert_eq!(
+        finding::pick("codex", &found, None, &space)
+            .map(|picked| picked.map_err(|(path, error)| (path, error.0))),
+        Some(Err((worktree.clone(), PATH_AGENT_SPACE.into())))
+    );
+    let project = case.file("projects/harbor/bin/codex", 0o755);
+    let repository = case.file("repos/api/tools/codex", 0o755);
+    let legacy = case.file("legacy/worktrees/agent-1/codex", 0o755);
+    let leased = case.file("leases/task-9/codex", 0o755);
+    let good = case.file("apps/codex", 0o755);
+    let named = [&project, &repository, &legacy, &leased];
+    for path in named.iter().copied().chain([&good]) {
+        assert_eq!(case.check("codex", path), Ok(path.clone()));
+    }
+    let db = rusqlite::Connection::open(case.engine.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    let setup =
+        serde_json::json!({ "folder": text(&case.root.join("projects/harbor/.crazyagent")) });
+    let declared = serde_json::json!({
+        "project_id": "api",
+        "spec": { "name": "Api", "repositories": [text(&case.root.join("repos/api"))] },
+    });
+    db.execute(
+        "INSERT INTO project_setups(project, body) VALUES('harbor', ?1)",
+        [setup.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES('api', ?1)",
+        [declared.to_string()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES(1,'old',?1,?2,'git')",
+        [text(&case.root.join("legacy")), text(legacy.parent().unwrap())],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO worktree_leases VALUES('task-9','repo',?1,'{}')",
+        [text(leased.parent().unwrap())],
+    )
+    .unwrap();
+    for path in named {
+        assert_eq!(
+            case.check("codex", path),
+            Err(PATH_AGENT_SPACE.into()),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(case.check("codex", &good), Ok(good.clone()));
+    finding::initialize(&db).unwrap();
+    finding::set_chosen(&db, "codex", Some(&good)).unwrap();
+    assert_eq!(
+        finding::at_start(&case.engine, Some(&case.home)).codex,
+        Some(good.clone())
+    );
+    db.execute(
+        "INSERT INTO projects(id, body) VALUES('broken', 'not json')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        finding::AgentSpace::open(&case.engine).map_err(|error| error.0),
+        Err(finding::PATH_UNREADABLE.into())
+    );
+    assert_eq!(
+        finding::at_start(&case.engine, Some(&case.home)).codex,
+        None
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_node_prefix_in_an_agent_worktree_or_a_node_linked_into_one_gives_no_node_folder() {
+    let case = Case::new();
+    let agents = "projects/harbor/.crazyagent/worktrees/agent-3/nvm/versions/node/v22.11.0";
+    let script = case.file(
+        &format!("{agents}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    case.file(&format!("{agents}/bin/node"), 0o755);
+    assert_eq!(super::node_prefix(&script), None);
+    let owned = "nvm/versions/node/v22.11.0";
+    let script = case.file(
+        &format!("{owned}/lib/node_modules/@openai/codex/bin/codex.js"),
+        0o755,
+    );
+    let planted = case.file("projects/harbor/.crazyagent/worktrees/agent-3/node", 0o755);
+    let node = case.root.join(owned).join("bin/node");
+    std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&planted, &node).unwrap();
+    assert_eq!(super::node_prefix(&script), None);
+    std::fs::remove_file(&node).unwrap();
+    case.file(&format!("{owned}/bin/node"), 0o755);
+    assert_eq!(super::node_prefix(&script), Some(case.root.join(owned)));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_pin_takes_the_first_found_file_that_passes_the_chosen_file_checks_and_else_the_first_refusal()
 {
     let case = Case::new();
@@ -293,8 +412,9 @@ fn a_pin_takes_the_first_found_file_that_passes_the_chosen_file_checks_and_else_
             .collect();
         Search::new(folders, Some(case.home.clone()), Vec::new())
     };
+    let space = finding::AgentSpace::open(&case.engine).unwrap();
     let pick = |folders: &[&PathBuf]| {
-        finding::pick("codex", &search(folders), None, &case.engine)
+        finding::pick("codex", &search(folders), None, &space)
             .map(|picked| picked.map_err(|(path, error)| (path, error.0)))
     };
     assert_eq!(
@@ -320,7 +440,7 @@ fn a_pin_takes_the_first_found_file_that_passes_the_chosen_file_checks_and_else_
     );
     assert_eq!(pick(&[]), None);
     assert_eq!(
-        finding::pick("aider", &search(&[&good]), None, &case.engine),
+        finding::pick("aider", &search(&[&good]), None, &space),
         None
     );
 }

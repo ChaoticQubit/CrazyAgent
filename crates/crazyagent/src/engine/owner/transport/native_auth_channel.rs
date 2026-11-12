@@ -588,12 +588,16 @@ impl OwnerRuntimeHandle {
             );
         }
         let root = super::changes::engine_root(&self.authority)?;
+        let space = {
+            let db = crate::landing::open(&root)?;
+            crate::harnesses::finding::AgentSpace::read(&root, &db)?
+        };
         let picked = match chosen {
             Some(chosen) => Some(
-                crate::harnesses::finding::check(harness, chosen, &root, search.home())
+                crate::harnesses::finding::check(harness, chosen, &space, search.home())
                     .map_err(|error| (chosen.to_path_buf(), error)),
             ),
-            None => crate::harnesses::finding::pick(harness, search, path, &root),
+            None => crate::harnesses::finding::pick(harness, search, path, &space),
         };
         let entry = match picked {
             Some(Ok(entry)) => entry,
@@ -697,9 +701,10 @@ impl OwnerRuntimeHandle {
         let db = crate::landing::open(&root)?;
         finding::initialize(&db)?;
         let stored = finding::chosen(&db, harness)?;
+        let space = finding::AgentSpace::read(&root, &db)?;
         drop(db);
         let (chosen, refused) = match stored {
-            Some(stored) => match finding::check(harness, &stored, &root, search.home()) {
+            Some(stored) => match finding::check(harness, &stored, &space, search.home()) {
                 Ok(checked) => (Some(checked), None),
                 Err(error) => (None, Some((stored, error.0))),
             },

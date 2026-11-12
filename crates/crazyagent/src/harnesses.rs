@@ -456,8 +456,8 @@ fn below(base: &Path, relative: &str) -> PathBuf {
 /// The npm prefix a Node script harness sits in, so a sign-in or an agent launch can put the
 /// `node` beside it on PATH: for a real file under `<prefix>/lib/node_modules/`, the prefix
 /// whose `bin` is an absolute folder of at most 1024 bytes with no `:`, holding a `node` file
-/// that, like every folder to it and to its real file, only the owner and the system can
-/// change. Input: the harness's real file. Output: the prefix, or none.
+/// only the owner and the system can change, and none of them in a `.crazyagent` folder
+/// ([`in_crazyagent_folder`]). Input: the harness's real file. Output: the prefix, or none.
 pub fn node_prefix(program: &Path) -> Option<PathBuf> {
     let prefix = program
         .ancestors()
@@ -471,8 +471,18 @@ pub fn node_prefix(program: &Path) -> Option<PathBuf> {
             .to_str()
             .is_some_and(|text| !text.contains(':') && text.len() <= NODE_PREFIX_BYTES_MAX)
         && node.is_file()
+        && !in_crazyagent_folder(program)
+        && std::fs::canonicalize(&node).is_ok_and(|real| !in_crazyagent_folder(&real))
         && crate::service::changeable_by_others(&node).is_none();
     usable.then(|| prefix.to_path_buf())
+}
+
+/// Whether a path runs through a `.crazyagent` folder, where every project keeps the
+/// worktrees its agents write, so no harness file or `node` may come from there.
+/// Input: the path. Output: the answer.
+pub fn in_crazyagent_folder(path: &Path) -> bool {
+    path.components()
+        .any(|part| part.as_os_str() == crate::projects_home::CRAZYAGENT_DIRECTORY)
 }
 
 fn usable_path(path: &Path) -> bool {

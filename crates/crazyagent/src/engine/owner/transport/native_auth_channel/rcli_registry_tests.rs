@@ -796,3 +796,68 @@ async fn check_again_passes_over_a_shim_a_changeable_folder_and_an_agent_folder_
     })
     .await;
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn check_again_refuses_a_codex_in_an_agent_worktree_or_a_registered_project_folder() {
+    registry_case(|host, tools| async move {
+        let worktree = tools
+            .join("projects")
+            .join("harbor")
+            .join(".crazyagent")
+            .join("worktrees")
+            .join("agent-4")
+            .join("bin");
+        let repository = tools.join("api");
+        let declared = repository.join("bin");
+        let good = tools.join("good");
+        for folder in [&worktree, &declared, &good] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let planted = physical_file(&worktree, "codex", b"worktree-codex");
+        let in_project = physical_file(&declared, "codex", b"project-codex");
+        let safe = physical_file(&good, "codex", b"safe-codex");
+        let search = |folders: Vec<PathBuf>| Search::new(folders, None, Vec::new());
+        let refused = |path: &Path| Found::Refused {
+            path: path.to_path_buf(),
+            code: "harness_path_agent_space".into(),
+        };
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![worktree.clone()]), None)
+                .unwrap(),
+            refused(&planted)
+        );
+        assert_eq!(
+            host.find_harness("codex", Some(&planted), &nowhere(), None)
+                .unwrap(),
+            refused(&planted)
+        );
+        let engine = host.authority.root.path.parent().unwrap().to_path_buf();
+        let project = crate::protocol::StoredProject {
+            project_id: crate::protocol::ProjectId::new("api").unwrap(),
+            spec: crate::protocol::ProjectSpec {
+                name: "Api".into(),
+                repositories: vec![repository.to_str().unwrap().into()],
+            },
+        };
+        let stored = crate::landing::open(&engine)
+            .unwrap()
+            .execute(
+                "INSERT INTO projects(id, body) VALUES('api', ?1)",
+                [serde_json::to_string(&project).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(stored, 1);
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![declared.clone()]), None)
+                .unwrap(),
+            refused(&in_project)
+        );
+        assert_eq!(
+            host.find_harness("codex", None, &search(vec![worktree, declared, good]), None)
+                .unwrap(),
+            Found::Registered { path: safe }
+        );
+    })
+    .await;
+}

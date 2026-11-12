@@ -1,5 +1,6 @@
-use super::{Search, is_shim, is_shim_folder};
+use super::{Search, in_crazyagent_folder, is_shim, is_shim_folder};
 use crate::engine::EngineError;
+use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
@@ -24,6 +25,210 @@ const SHIM_SKIPPED: &str = " (shim, skipped)";
 const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]
 const AGENT_TMP: &str = "/tmp/ca-";
+/// The most rows read from one table that names folders agents can write, and the most
+/// repositories one project may declare; more is refused as unreadable, so no folder is
+/// ever left out of an [`AgentSpace`].
+pub const AGENT_ROWS_MAX: usize = 1024;
+pub const PROJECT_REPOSITORIES_MAX: usize = 64;
+const AGENT_FOLDERS_MAX: usize = 2 * (AGENT_ROWS_MAX * (PROJECT_REPOSITORIES_MAX + 3) + 1);
+const AGENT_TABLES: [(&str, Names, &str); 4] = [
+    (
+        "project_setups",
+        Names::Setup,
+        "SELECT body FROM project_setups LIMIT ?1",
+    ),
+    (
+        "projects",
+        Names::Project,
+        "SELECT body FROM projects LIMIT ?1",
+    ),
+    (
+        "team_worktrees",
+        Names::Path,
+        "SELECT repository FROM team_worktrees UNION SELECT worktree FROM team_worktrees LIMIT ?1",
+    ),
+    (
+        "worktree_leases",
+        Names::Path,
+        "SELECT repository FROM worktree_leases UNION SELECT path FROM worktree_leases LIMIT ?1",
+    ),
+];
+
+/// How one engine table names a folder agents can write: a setup body with the project
+/// folder, a project body with the repositories it declares, or a stored path.
+#[derive(Debug, Clone, Copy)]
+enum Names {
+    Setup,
+    Project,
+    Path,
+}
+
+/// The folders agents can write, where no harness file may come from: the engine folder
+/// with every agent home, the agents' temp folders, any `.crazyagent` folder with its agent
+/// worktrees, and each project folder, declared repository and agent worktree the engine
+/// database names, each kept as stored and as its real path. A folder holding the owner's
+/// home is left out, as no project may be one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSpace {
+    folders: Vec<PathBuf>,
+}
+
+impl AgentSpace {
+    /// Reads the agent space of an engine folder whose database may not exist yet: none
+    /// means no project yet. Input: the engine folder. Output: the space, or
+    /// `harness_path_unreadable` when the database is there but cannot be read.
+    pub fn open(root: &Path) -> Result<Self, EngineError> {
+        match std::fs::symlink_metadata(root.join("engine.db")) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::of(root, Vec::new()));
+            }
+            Err(_) => return Err(failure(PATH_UNREADABLE)),
+            Ok(_) => {}
+        }
+        let db = engine_db(root).ok_or_else(|| failure(PATH_UNREADABLE))?;
+        Self::read(root, &db)
+    }
+
+    /// Reads the agent space from the engine database; a table not made yet names nothing.
+    /// Inputs: the engine folder and its database. Output: the space, or
+    /// `harness_path_unreadable` for a failed read, a body that is not JSON, or more rows
+    /// than [`AGENT_ROWS_MAX`], so a read that falls short never lets a file through.
+    pub fn read(root: &Path, db: &Connection) -> Result<Self, EngineError> {
+        let unreadable = |_: rusqlite::Error| failure(PATH_UNREADABLE);
+        let mut named = Vec::new();
+        for (table, names, query) in AGENT_TABLES {
+            let present: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],
+                    |row| row.get(0),
+                )
+                .map_err(unreadable)?;
+            if !present {
+                continue;
+            }
+            let mut statement = db.prepare(query).map_err(unreadable)?;
+            let rows: Vec<String> = statement
+                .query_map([AGENT_ROWS_MAX as i64 + 1], |row| row.get(0))
+                .map_err(unreadable)?
+                .collect::<Result<_, _>>()
+                .map_err(unreadable)?;
+            if rows.len() > AGENT_ROWS_MAX {
+                return Err(failure(PATH_UNREADABLE));
+            }
+            for text in rows {
+                named.extend(folders_in(names, &text)?);
+            }
+        }
+        Ok(Self::of(root, named))
+    }
+
+    /// Builds the space from the engine folder and the folders the database names.
+    /// Inputs: the engine folder and the named folders. Output: the space, each absolute
+    /// folder kept as named and as its real path, none that holds the owner's home.
+    fn of(root: &Path, named: Vec<PathBuf>) -> Self {
+        let owner = crate::projects_home::owner_home().ok();
+        let mut folders = Vec::new();
+        for folder in std::iter::once(root.to_path_buf()).chain(named) {
+            if !folder.is_absolute() || folder.parent().is_none() {
+                continue;
+            }
+            let real = std::fs::canonicalize(&folder).ok();
+            for kept in std::iter::once(folder).chain(real) {
+                if owner
+                    .as_deref()
+                    .is_some_and(|owner| owner.starts_with(&kept))
+                {
+                    continue;
+                }
+                folders.push(kept);
+            }
+        }
+        folders.sort();
+        folders.dedup();
+        assert!(folders.len() <= AGENT_FOLDERS_MAX);
+        Self { folders }
+    }
+
+    /// Whether agents could write a harness file or the link to it: the path as given, the
+    /// link in its real folder, or its real file lies in the space. Input: an absolute path.
+    /// Output: the answer.
+    pub fn holds(&self, path: &Path) -> bool {
+        let placed = path
+            .parent()
+            .and_then(|folder| std::fs::canonicalize(folder).ok())
+            .zip(path.file_name())
+            .map(|(folder, name)| folder.join(name));
+        let real = std::fs::canonicalize(path).ok();
+        [Some(path.to_path_buf()), placed, real]
+            .into_iter()
+            .flatten()
+            .any(|at| {
+                in_crazyagent_folder(&at)
+                    || at.to_str().is_some_and(|text| text.starts_with(AGENT_TMP))
+                    || self.folders.iter().any(|folder| at.starts_with(folder))
+            })
+    }
+}
+
+/// The folders one engine row names. Inputs: how the table names them and the row text.
+/// Output: a setup's project folder, the repositories a project declares, or the stored
+/// path; `harness_path_unreadable` for a body that is not JSON or declares more than
+/// [`PROJECT_REPOSITORIES_MAX`] repositories.
+fn folders_in(names: Names, text: &str) -> Result<Vec<PathBuf>, EngineError> {
+    let body = || -> Result<serde_json::Value, EngineError> {
+        serde_json::from_str(text).map_err(|_| failure(PATH_UNREADABLE))
+    };
+    let folders: Vec<PathBuf> = match names {
+        Names::Path => vec![PathBuf::from(text)],
+        Names::Setup => body()?
+            .get("folder")
+            .and_then(serde_json::Value::as_str)
+            .map(|folder| {
+                let folder = Path::new(folder);
+                match folder.parent() {
+                    Some(project) if folder.ends_with(CRAZYAGENT_DIRECTORY) => {
+                        project.to_path_buf()
+                    }
+                    _ => folder.to_path_buf(),
+                }
+            })
+            .into_iter()
+            .collect(),
+        Names::Project => {
+            let body = body()?;
+            let repositories = body
+                .pointer("/spec/repositories")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if repositories.len() > PROJECT_REPOSITORIES_MAX {
+                return Err(failure(PATH_UNREADABLE));
+            }
+            repositories
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .collect()
+        }
+    };
+    assert!(folders.len() <= PROJECT_REPOSITORIES_MAX);
+    Ok(folders)
+}
+
+/// Opens the engine database without making it, as engine start reads it before the
+/// engine opens it. Input: the engine folder. Output: the connection, or none when there
+/// is no database or it cannot be opened.
+fn engine_db(root: &Path) -> Option<Connection> {
+    let db = Connection::open_with_flags(
+        root.join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    db.busy_timeout(std::time::Duration::from_millis(500))
+        .ok()?;
+    Some(db)
+}
 
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS harness_chosen_paths (
     id TEXT PRIMARY KEY CHECK(id IN ('codex', 'claude-code')),
@@ -97,26 +302,23 @@ pub fn set_chosen(db: &Connection, id: &str, path: Option<&Path>) -> Result<(), 
 
 /// The files the owner chose, read once at engine start before the engine opens its
 /// database: an engine folder with no database or no table has none, and a chosen file
-/// that no longer passes [`check`] is left out with a line in the engine log, so the
-/// search runs instead. Inputs: the engine folder and HOME. Output: the codex and claude
-/// paths; rcli is never chosen.
+/// that no longer passes [`check`], or whose [`AgentSpace`] cannot be read, is left out
+/// with a line in the engine log, so the search runs instead. Inputs: the engine folder
+/// and HOME. Output: the codex and claude paths; rcli is never chosen.
 pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
-    let read = || -> Option<Connection> {
-        let db = Connection::open_with_flags(
-            root.join("engine.db"),
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok()?;
-        db.busy_timeout(std::time::Duration::from_millis(500))
-            .ok()?;
-        Some(db)
-    };
-    let Some(db) = read() else {
+    let Some(db) = engine_db(root) else {
         return crate::paths::Harnesses::default();
+    };
+    let space = match AgentSpace::read(root, &db) {
+        Ok(space) => space,
+        Err(error) => {
+            eprintln!("the chosen harness files are not used ({})", error.0);
+            return crate::paths::Harnesses::default();
+        }
     };
     let mut kept = CHOOSABLE.map(|id| {
         let path = chosen(&db, id).ok().flatten()?;
-        match check(id, &path, root, home) {
+        match check(id, &path, &space, home) {
             Ok(path) => Some(path),
             Err(error) => {
                 eprintln!("the chosen {id} file is not used ({})", error.0);
@@ -133,13 +335,13 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
 
 /// Checks a harness file, chosen or found, before it is pinned or stored: an absolute path
 /// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
-/// file, no version-manager shim, outside the engine folder that holds every agent home and
-/// the agents' temp folders, and in folders no other user can change.
-/// Inputs: the id, the path, the engine folder and HOME. Output: the path, links kept.
+/// file, no version-manager shim, outside every folder agents can write ([`AgentSpace`]),
+/// and in folders no other user can change.
+/// Inputs: the id, the path, the agent space and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
     path: &Path,
-    root: &Path,
+    space: &AgentSpace,
     home: Option<&Path>,
 ) -> Result<PathBuf, EngineError> {
     if !CHOOSABLE.contains(&id) {
@@ -161,13 +363,7 @@ pub fn check(
     if is_shim(home, path) {
         return Err(failure(PATH_SHIM));
     }
-    let engine = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let in_agent_tmp = [path, real.as_path()].iter().any(|candidate| {
-        candidate
-            .to_str()
-            .is_some_and(|text| text.starts_with(AGENT_TMP))
-    });
-    if path.starts_with(root) || real.starts_with(&engine) || in_agent_tmp {
+    if space.holds(path) {
         return Err(failure(PATH_AGENT_SPACE));
     }
     if crate::service::changeable_by_others(path).is_some() {
@@ -180,17 +376,17 @@ pub fn check(
 /// Picks the file a pin may use from what a search finds: the first candidate, in search
 /// order and then on PATH, that passes [`check`], so a shim or a file in a folder another
 /// user can change never hides a good install after it. Inputs: the id, the search, the PATH
-/// value and the engine folder. Output: the entry, the first refusal when every candidate
+/// value and the agent space. Output: the entry, the first refusal when every candidate
 /// failed, or none when nothing was found.
 pub fn pick(
     id: &str,
     search: &Search,
     path: Option<&OsStr>,
-    root: &Path,
+    space: &AgentSpace,
 ) -> Option<Result<PathBuf, (PathBuf, EngineError)>> {
     let mut refused = None;
     for candidate in crate::paths::harness_candidates(id, search, path) {
-        match check(id, &candidate, root, search.home()) {
+        match check(id, &candidate, space, search.home()) {
             Ok(entry) => return Some(Ok(entry)),
             Err(error) => {
                 refused.get_or_insert((candidate, error));
